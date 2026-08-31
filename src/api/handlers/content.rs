@@ -1,0 +1,545 @@
+//! Streaming content, multipart, delivery, version, and storage handlers.
+
+use axum::{
+    Json,
+    body::Body,
+    extract::{
+        Multipart, Path, State,
+        multipart::{Field, MultipartRejection},
+        rejection::{JsonRejection, PathRejection},
+    },
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Response},
+};
+use uuid::Uuid;
+
+use crate::{
+    application::{
+        content::{
+            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand,
+            InitiateMultipartCommand, RestoreVersionCommand, SmallUploadCommand, StagedContent,
+        },
+        context::ExecutionContext,
+        idempotency::upload_fingerprint,
+        service::{ListVersionsQuery, PageRequest},
+    },
+    domain::{
+        entry::EntryName,
+        multipart::{MULTIPART_MAX_PART_BYTES, SINGLE_UPLOAD_MAX_BYTES},
+        storage::EncryptionMode,
+    },
+    error::AppError,
+};
+
+use super::super::{
+    auth::{self, CredentialMode, IamAction},
+    dto::{
+        BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
+        EncryptionModeDto, EntryDto, FileVersionPageDto, MultipartCompleteDto,
+        MultipartUploadCreateDto, MultipartUploadDto, TemporaryUrlDto,
+    },
+    extract,
+    mapping::metadata_error,
+    state::AppState,
+    upload::{self, StagedUpload},
+    validation,
+};
+
+const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+
+pub(crate) async fn temporary_download_url(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<(StatusCode, Json<TemporaryUrlDto>), AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::CreateTemporaryUrl, &resource).await?;
+    let download = extract::scoped(
+        &context,
+        state.content.temporary_download_url(&context, entry_id),
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(TemporaryUrlDto {
+            url: download.url,
+            expires_at: download.expires_at,
+        }),
+    ))
+}
+
+pub(crate) async fn upload_small(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<(StatusCode, Json<EntryDto>), AppError> {
+    let credential_mode = auth::credential_mode(&headers)?;
+    let idempotency_key = extract::required_idempotency_key(&headers)?;
+    let initial_context = match credential_mode {
+        CredentialMode::Bearer => {
+            let organization = extract::organization_resource(&headers)?;
+            Some(
+                extract::authenticate(&state, &headers, IamAction::UploadFile, &organization)
+                    .await?,
+            )
+        }
+        CredentialMode::OnBehalfOf => None,
+    };
+    let (parts, context) = parse_small_upload(
+        extract::multipart(multipart)?,
+        state.temporary_directory.clone(),
+        &state,
+        &headers,
+        initial_context,
+    )
+    .await?;
+    validate_body_application(&headers, parts.application_id.as_deref())?;
+    let resource = parts.parent_id.to_string();
+    let request_hash = upload_fingerprint(
+        "upload_file",
+        &resource,
+        parts.name.as_str(),
+        &parts.content_type,
+        parts.file.size(),
+        parts.file.sha256(),
+    );
+    let command = SmallUploadCommand {
+        parent_id: parts.parent_id,
+        name: parts.name,
+        content_type: parts.content_type,
+        idempotency_key,
+        request_hash,
+    };
+    let staged = StagedContent {
+        path: parts.file.path(),
+        size: parts.file.size(),
+        sha256: *parts.file.sha256(),
+    };
+    let entry_id = extract::scoped(
+        &context,
+        state.content.upload_small(&context, &command, staged),
+    )
+    .await?;
+    let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
+        .await
+        .map_err(metadata_error)?;
+    Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
+}
+
+pub(crate) async fn initiate_multipart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<MultipartUploadCreateDto>, JsonRejection>,
+) -> Result<(StatusCode, Json<MultipartUploadDto>), AppError> {
+    let body = extract::json(body)?;
+    extract::validation(validation::create_multipart(&body))?;
+    let parent_id = extract::entry_id(body.parent_id)?;
+    let resource = parent_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::InitiateMultipart, &resource).await?;
+    let idempotency_key = extract::required_idempotency_key(&headers)?;
+    let request_hash = extract::request_fingerprint("initiate_multipart_upload", &resource, &body)?;
+    let content_type = body.content_type.trim().to_owned();
+    let command = InitiateMultipartCommand {
+        parent_id,
+        name: EntryName::new(&body.name).map_err(|_| AppError::validation("invalid_name"))?,
+        size: body.size,
+        content_type,
+        idempotency_key,
+        request_hash,
+    };
+    let receipt = extract::scoped(
+        &context,
+        state.content.initiate_multipart(&context, &command),
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MultipartUploadDto {
+            upload_id: receipt.upload_id.as_uuid(),
+            part_size: receipt.part_size,
+            part_count: receipt.part_count,
+            expires_at: receipt.expires_at,
+        }),
+    ))
+}
+
+pub(crate) async fn upload_part(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<(String, u32)>, PathRejection>,
+    body: Body,
+) -> Result<Response, AppError> {
+    require_octet_stream(&headers)?;
+    reject_oversized_content_length(&headers, MULTIPART_MAX_PART_BYTES)?;
+    let (upload_id_text, part_number) = extract::path(path)?;
+    if !(1..=10_000).contains(&part_number) {
+        return Err(AppError::validation("invalid_part_number"));
+    }
+    let upload_id = extract::multipart_upload_id(&upload_id_text)?;
+    let resource = upload_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::UploadMultipartPart, &resource).await?;
+    let file = upload::stage_body(
+        body,
+        state.temporary_directory.clone(),
+        MULTIPART_MAX_PART_BYTES,
+    )
+    .await
+    .map_err(extract::map_staging_error)?;
+    let staged = StagedContent {
+        path: file.path(),
+        size: file.size(),
+        sha256: *file.sha256(),
+    };
+    let etag = extract::scoped(
+        &context,
+        state
+            .content
+            .upload_part(&context, upload_id, part_number, staged),
+    )
+    .await?;
+    let etag = HeaderValue::from_str(&etag).map_err(|_| AppError::Internal {
+        category: "object_storage_etag",
+    })?;
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert(http::header::ETAG, etag);
+    Ok(response)
+}
+
+pub(crate) async fn complete_multipart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<MultipartCompleteDto>, JsonRejection>,
+) -> Result<(StatusCode, Json<EntryDto>), AppError> {
+    let upload_id = extract::multipart_upload_id(&extract::path(path)?)?;
+    let body = extract::json(body)?;
+    extract::validation(validation::complete_multipart(&body))?;
+    let resource = upload_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::CompleteMultipart, &resource).await?;
+    let command = CompleteMultipartCommand {
+        upload_id,
+        parts: body
+            .parts
+            .iter()
+            .map(|part| ClientCompletedPart {
+                part_number: part.part_number,
+                etag: part.etag.clone(),
+            })
+            .collect(),
+        idempotency_key: extract::required_idempotency_key(&headers)?,
+        request_hash: extract::request_fingerprint("complete_multipart_upload", &resource, &body)?,
+    };
+    let entry_id = extract::scoped(
+        &context,
+        state.content.complete_multipart(&context, &command),
+    )
+    .await?;
+    let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
+        .await
+        .map_err(metadata_error)?;
+    Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
+}
+
+pub(crate) async fn abort_multipart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<StatusCode, AppError> {
+    let upload_id = extract::multipart_upload_id(&extract::path(path)?)?;
+    let resource = upload_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::AbortMultipart, &resource).await?;
+    extract::scoped(&context, state.content.abort_multipart(&context, upload_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn list_versions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<FileVersionPageDto>, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::ListVersions, &resource).await?;
+    let page = extract::scoped(
+        &context,
+        state.metadata.list_versions(
+            &context,
+            &ListVersionsQuery {
+                entry_id,
+                page: PageRequest::new(None, 50).map_err(|_| AppError::Internal {
+                    category: "version_page_limit",
+                })?,
+            },
+        ),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(FileVersionPageDto {
+        items: super::super::mapping::ResponseMapper::versions(page.items)?,
+    }))
+}
+
+pub(crate) async fn restore_version(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, String)>, PathRejection>,
+) -> Result<Json<EntryDto>, AppError> {
+    let (entry_uuid, version_text) = extract::path(path)?;
+    let entry_id = extract::entry_id(entry_uuid)?;
+    let version_id = extract::version_id(&version_text)?;
+    let resource = version_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::RestoreVersion, &resource).await?;
+    let idempotency_key = extract::required_idempotency_key(&headers)?;
+    let request_hash =
+        extract::request_fingerprint("restore_version", &resource, &(entry_uuid, &version_text))?;
+    let restored_entry_id = extract::scoped(
+        &context,
+        state.content.restore_version(
+            &context,
+            &RestoreVersionCommand {
+                entry_id,
+                version_id,
+                idempotency_key,
+                request_hash,
+            },
+        ),
+    )
+    .await?;
+    let entry = extract::scoped(
+        &context,
+        state.metadata.get_entry(&context, restored_entry_id),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry(entry)?))
+}
+
+pub(crate) async fn configure_storage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<BucketConfigurationDto>, JsonRejection>,
+) -> Result<Json<BucketConfigurationStatusDto>, AppError> {
+    let body = extract::json(body)?;
+    extract::validation(validation::bucket_configuration(&body))?;
+    let context =
+        extract::authenticate_bearer(&state, &headers, IamAction::ConfigureStorage).await?;
+    let resource = context.authorization().organization_id().as_str();
+    let idempotency = extract::idempotency_key(&headers)?
+        .map(|key| {
+            extract::request_fingerprint("configure_storage", resource, &body)
+                .map(|fingerprint| (key, fingerprint))
+        })
+        .transpose()?;
+    let command = ConfigureStorageCommand {
+        bucket_name: body.bucket_name,
+        region: body.region,
+        role_arn: body.role_arn,
+        prefix: body.prefix,
+        aws_account_id: body.aws_account_id,
+        encryption: match body.encryption_mode {
+            EncryptionModeDto::SseS3 => EncryptionMode::SseS3,
+            EncryptionModeDto::SseKms => EncryptionMode::SseKms,
+        },
+        kms_key_arn: body.kms_key_arn,
+        idempotency,
+    };
+    let result = extract::scoped(
+        &context,
+        state.content.configure_storage(&context, &command),
+    )
+    .await?;
+    Ok(Json(BucketConfigurationStatusDto {
+        status: if result.configured {
+            BucketConfigurationStateDto::Configured
+        } else {
+            BucketConfigurationStateDto::Failed
+        },
+        tested_at: result.tested_at,
+        failure_reason: result.failure_reason,
+    }))
+}
+
+struct SmallUploadParts {
+    parent_id: crate::domain::ids::EntryId,
+    application_id: Option<String>,
+    name: EntryName,
+    content_type: String,
+    file: StagedUpload,
+}
+
+async fn parse_small_upload(
+    mut multipart: Multipart,
+    temporary_directory: std::path::PathBuf,
+    state: &AppState,
+    headers: &HeaderMap,
+    mut context: Option<ExecutionContext>,
+) -> Result<(SmallUploadParts, ExecutionContext), AppError> {
+    let mut parent_id = None;
+    let mut application_id = None;
+    let mut file = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| extract::map_multipart_error(&error))?
+    {
+        let field_name = field
+            .name()
+            .ok_or_else(|| AppError::bad_request("unnamed_multipart_field"))?
+            .to_owned();
+        match field_name.as_str() {
+            "parent_id" => {
+                if parent_id.is_some() {
+                    return Err(AppError::bad_request("duplicate_parent_id"));
+                }
+                let value = read_text_field(field, 64).await?;
+                let value = Uuid::parse_str(value.trim())
+                    .map_err(|_| AppError::bad_request("invalid_parent_id"))?;
+                parent_id = Some(extract::entry_id(value)?);
+            }
+            "app_id" => {
+                if application_id.is_some() {
+                    return Err(AppError::bad_request("duplicate_app_id"));
+                }
+                let value = read_text_field(field, 255).await?;
+                application_id = Some(value);
+            }
+            "file" => {
+                if file.is_some() {
+                    return Err(AppError::bad_request("duplicate_file"));
+                }
+                let name = field
+                    .file_name()
+                    .ok_or_else(|| AppError::bad_request("missing_filename"))?
+                    .to_owned();
+                let content_type = field
+                    .content_type()
+                    .map_or_else(|| DEFAULT_CONTENT_TYPE.to_owned(), ToString::to_string);
+                if content_type.len() > 255 || content_type.parse::<mime::Mime>().is_err() {
+                    return Err(AppError::validation("invalid_content_type"));
+                }
+                let name =
+                    EntryName::new(name).map_err(|_| AppError::validation("invalid_name"))?;
+                if context.is_none() {
+                    let parent_id = parent_id.as_ref().ok_or_else(|| {
+                        AppError::bad_request("parent_id_must_precede_file_for_obo")
+                    })?;
+                    context = Some(
+                        extract::authenticate(
+                            state,
+                            headers,
+                            IamAction::UploadFile,
+                            &parent_id.to_string(),
+                        )
+                        .await?,
+                    );
+                }
+                let staged = upload::stage_multipart_field(
+                    field,
+                    temporary_directory.clone(),
+                    SINGLE_UPLOAD_MAX_BYTES,
+                )
+                .await
+                .map_err(extract::map_staging_error)?;
+                file = Some((name, content_type, staged));
+            }
+            _ => return Err(AppError::bad_request("unknown_multipart_field")),
+        }
+    }
+
+    let parent_id = parent_id.ok_or_else(|| AppError::bad_request("missing_parent_id"))?;
+    let (name, content_type, file) = file.ok_or_else(|| AppError::bad_request("missing_file"))?;
+    let context = context.ok_or(AppError::Internal {
+        category: "upload_authentication_order",
+    })?;
+    Ok((
+        SmallUploadParts {
+            parent_id,
+            application_id,
+            name,
+            content_type,
+            file,
+        },
+        context,
+    ))
+}
+
+async fn read_text_field(mut field: Field<'_>, maximum_bytes: usize) -> Result<String, AppError> {
+    let mut value = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| extract::map_multipart_error(&error))?
+    {
+        let new_length = value
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(AppError::PayloadTooLarge)?;
+        if new_length > maximum_bytes {
+            return Err(AppError::PayloadTooLarge);
+        }
+        value.extend_from_slice(&chunk);
+    }
+    String::from_utf8(value).map_err(|_| AppError::bad_request("invalid_multipart_text"))
+}
+
+fn validate_body_application(
+    headers: &HeaderMap,
+    application_id: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(application_id) = application_id else {
+        return Ok(());
+    };
+    let presented = headers
+        .get_all("x-app-id")
+        .iter()
+        .next()
+        .and_then(|value| value.to_str().ok());
+    if presented != Some(application_id) {
+        return Err(AppError::bad_request("app_id_mismatch"));
+    }
+    Ok(())
+}
+
+fn require_octet_stream(headers: &HeaderMap) -> Result<(), AppError> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::bad_request("missing_content_type"))?;
+    let media_type = content_type
+        .parse::<mime::Mime>()
+        .map_err(|_| AppError::bad_request("invalid_content_type"))?;
+    if media_type.essence_str() != DEFAULT_CONTENT_TYPE {
+        return Err(AppError::bad_request("invalid_content_type"));
+    }
+    Ok(())
+}
+
+fn reject_oversized_content_length(
+    headers: &HeaderMap,
+    maximum_bytes: u64,
+) -> Result<(), AppError> {
+    let Some(value) = headers.get(CONTENT_LENGTH) else {
+        return Ok(());
+    };
+    let length = value
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| AppError::bad_request("invalid_content_length"))?;
+    if length > maximum_bytes {
+        return Err(AppError::PayloadTooLarge);
+    }
+    Ok(())
+}

@@ -1,0 +1,282 @@
+//! Entry browsing, folder mutations, and recoverable-bin handlers.
+
+use axum::{
+    Json,
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
+    },
+    http::{HeaderMap, StatusCode},
+};
+use uuid::Uuid;
+
+use crate::{
+    application::service::{
+        CreateFolderCommand, EntryListItem, InitialPermission, ListBinQuery,
+        ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
+        SearchQuery, UpdateEntryCommand,
+    },
+    domain::{
+        actor::{ActorId, ActorKind, ActorRef, TagName},
+        entry::{EntryBoundary, EntryName},
+        permission::AccessLevel,
+    },
+    error::AppError,
+};
+
+use super::super::{
+    auth::IamAction,
+    cursor,
+    dto::{
+        ActorRefDto, ActorTypeDto, EntryDto, EntryPageDto, EntryPatchDto, FolderCreateDto,
+        GrantAccessDto, ListEntriesQuery, PermissionGrantCreateDto, RootTypeDto, SearchPageDto,
+        SearchQueryDto,
+    },
+    extract,
+    mapping::metadata_error,
+    state::AppState,
+    validation,
+};
+
+pub(crate) async fn list_entries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: Result<Query<ListEntriesQuery>, QueryRejection>,
+) -> Result<Json<EntryPageDto>, AppError> {
+    let query = extract::query(query)?;
+    extract::validation(validation::list_entries(&query))?;
+    if let Some(cursor) = query.cursor.as_deref() {
+        cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
+    }
+    let resource = extract::organization_resource(&headers)?;
+    let context =
+        extract::authenticate(&state, &headers, IamAction::ListEntries, &resource).await?;
+    let parent_id = query.parent_id.map(extract::entry_id).transpose()?;
+    let page = PageRequest::new(query.cursor, query.limit.unwrap_or(50))
+        .map_err(|_| AppError::validation("invalid_pagination"))?;
+    let result = extract::scoped(
+        &context,
+        state
+            .metadata
+            .list_entries(&context, &ServiceListEntriesQuery { parent_id, page }),
+    )
+    .await
+    .map_err(metadata_error)?;
+
+    // OpenAPI v1 has no structurally redacted traversal representation. Until
+    // one is added, exposing a fabricated full Entry would leak protected
+    // metadata, so traversal-only ancestors are intentionally omitted.
+    let items = result
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            EntryListItem::Full(entry) => Some(*entry),
+            EntryListItem::Traversal(_) => None,
+        })
+        .map(|entry| state.mapper.entry(entry))
+        .collect::<Result<_, _>>()?;
+    Ok(Json(EntryPageDto {
+        items,
+        next_cursor: result.next_cursor,
+    }))
+}
+
+pub(crate) async fn create_folder(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<FolderCreateDto>, JsonRejection>,
+) -> Result<(StatusCode, Json<EntryDto>), AppError> {
+    let body = extract::json(body)?;
+    extract::validation(validation::create_folder(&body))?;
+    let organization = extract::organization_resource(&headers)?;
+    let resource = body
+        .parent_id
+        .map_or_else(|| organization.clone(), |id| id.to_string());
+    let context =
+        extract::authenticate(&state, &headers, IamAction::CreateFolder, &resource).await?;
+    let metadata = extract::mutation(&headers, "create_folder", &resource, &body, true)?;
+    let command = folder_command(body)?;
+    let created = extract::scoped(
+        &context,
+        state.metadata.create_folder(&context, command, &metadata),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok((StatusCode::CREATED, Json(state.mapper.entry(created)?)))
+}
+
+pub(crate) async fn get_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<EntryDto>, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context = extract::authenticate(&state, &headers, IamAction::ReadEntry, &resource).await?;
+    let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
+        .await
+        .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry(entry)?))
+}
+
+pub(crate) async fn update_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<EntryPatchDto>, JsonRejection>,
+) -> Result<Json<EntryDto>, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let body = extract::json(body)?;
+    extract::validation(validation::patch_entry(&body))?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::UpdateEntry, &resource).await?;
+    let metadata = extract::mutation(&headers, "update_entry", &resource, &body, true)?;
+    let command = UpdateEntryCommand::new(
+        entry_id,
+        body.name
+            .as_deref()
+            .map(EntryName::new)
+            .transpose()
+            .map_err(|_| AppError::validation("invalid_name"))?,
+        body.parent_id.map(extract::entry_id).transpose()?,
+    )
+    .map_err(|_| AppError::validation("invalid_entry_patch"))?;
+    let updated = extract::scoped(
+        &context,
+        state.metadata.update_entry(&context, &command, &metadata),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry(updated)?))
+}
+
+pub(crate) async fn delete_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<StatusCode, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::DeleteEntry, &resource).await?;
+    let metadata = extract::mutation(&headers, "delete_entry", &resource, &(), false)?;
+    extract::scoped(
+        &context,
+        state
+            .metadata
+            .soft_delete_entry(&context, entry_id, &metadata),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn list_bin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EntryPageDto>, AppError> {
+    let resource = extract::organization_resource(&headers)?;
+    let context = extract::authenticate(&state, &headers, IamAction::ListBin, &resource).await?;
+    let result = extract::scoped(
+        &context,
+        state.metadata.list_bin(
+            &context,
+            &ListBinQuery {
+                page: PageRequest::default(),
+            },
+        ),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry_page(result)?))
+}
+
+pub(crate) async fn search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: Result<Query<SearchQueryDto>, QueryRejection>,
+) -> Result<Json<SearchPageDto>, AppError> {
+    let query = extract::query(query)?;
+    extract::validation(validation::search(&query))?;
+    let resource = extract::organization_resource(&headers)?;
+    let context = extract::authenticate(&state, &headers, IamAction::Search, &resource).await?;
+    let query = SearchQuery::new(query.q, query.limit.unwrap_or(20))
+        .map_err(|_| AppError::validation("invalid_search"))?;
+    let results = extract::scoped(&context, state.metadata.search(&context, &query))
+        .await
+        .map_err(metadata_error)?;
+    Ok(Json(state.mapper.search(results)?))
+}
+
+pub(crate) async fn restore_bin_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<EntryDto>, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::RestoreBinEntry, &resource).await?;
+    let metadata = extract::mutation(&headers, "restore_bin_entry", &resource, &(), false)?;
+    let restored = extract::scoped(
+        &context,
+        state
+            .metadata
+            .restore_bin_entry(&context, RestoreBinEntryCommand { entry_id }, &metadata),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry(restored)?))
+}
+
+fn folder_command(body: FolderCreateDto) -> Result<CreateFolderCommand, AppError> {
+    let name = EntryName::new(&body.name).map_err(|_| AppError::validation("invalid_name"))?;
+    let parent_id = body.parent_id.map(extract::entry_id).transpose()?;
+    let root_boundary = match body.root_type {
+        Some(RootTypeDto::Public) => Some(EntryBoundary::Public),
+        Some(RootTypeDto::Private) => Some(EntryBoundary::Private),
+        Some(RootTypeDto::Tag) => Some(EntryBoundary::Tag {
+            tag: TagName::new(body.tag.unwrap_or_default())
+                .map_err(|_| AppError::validation("invalid_tag"))?,
+        }),
+        None => None,
+    };
+    let invitees = body
+        .invitees
+        .into_iter()
+        .map(initial_permission)
+        .collect::<Result<_, _>>()?;
+    CreateFolderCommand::new(name, parent_id, root_boundary, invitees)
+        .map_err(|_| AppError::validation("invalid_folder"))
+}
+
+fn initial_permission(value: PermissionGrantCreateDto) -> Result<InitialPermission, AppError> {
+    Ok(InitialPermission {
+        principal: actor(value.principal)?,
+        access: access_level(&value.access)?,
+        inherits_to_descendants: value.inherit,
+    })
+}
+
+pub(crate) fn actor(value: ActorRefDto) -> Result<ActorRef, AppError> {
+    let kind = match value.actor_type {
+        ActorTypeDto::Carbon => ActorKind::Carbon,
+        ActorTypeDto::Silicon => ActorKind::Silicon,
+        ActorTypeDto::Application => {
+            return Err(AppError::validation("invalid_principal_type"));
+        }
+    };
+    let id = ActorId::new(value.id).map_err(|_| AppError::validation("invalid_principal_id"))?;
+    Ok(ActorRef::new(kind, id))
+}
+
+pub(crate) fn access_level(values: &[GrantAccessDto]) -> Result<AccessLevel, AppError> {
+    if values.contains(&GrantAccessDto::Write) {
+        Ok(AccessLevel::Write)
+    } else if values.contains(&GrantAccessDto::Read) {
+        Ok(AccessLevel::Read)
+    } else {
+        Err(AppError::validation("invalid_access"))
+    }
+}

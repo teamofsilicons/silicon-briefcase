@@ -1,0 +1,88 @@
+//! Access-request decision state.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use super::permission::AccessLevel;
+
+/// Durable state of a request for explicit access.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessRequestStatus {
+    /// Waiting for an owner or authorized administrator.
+    Pending,
+    /// Approved and paired with an explicit grant.
+    Approved,
+    /// Denied without creating a grant.
+    Denied,
+}
+
+impl AccessRequestStatus {
+    /// Applies a single terminal decision to a pending request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccessRequestTransitionError`] when this request is no longer
+    /// pending.
+    pub const fn decide(
+        self,
+        decision: AccessDecision,
+    ) -> Result<Self, AccessRequestTransitionError> {
+        if !matches!(self, Self::Pending) {
+            return Err(AccessRequestTransitionError::AlreadyDecided { status: self });
+        }
+        match decision {
+            AccessDecision::Approve { .. } => Ok(Self::Approved),
+            AccessDecision::Deny => Ok(Self::Denied),
+        }
+    }
+
+    /// Returns whether a decision has already been recorded.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Approved | Self::Denied)
+    }
+}
+
+/// An owner or administrator's decision on an access request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum AccessDecision {
+    /// Approve and create a grant at the selected level.
+    Approve {
+        /// Access level to grant; it may be no broader than policy permits.
+        access: AccessLevel,
+    },
+    /// Deny without creating a grant.
+    Deny,
+}
+
+/// An invalid access-request state transition.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AccessRequestTransitionError {
+    /// A terminal request cannot be decided again.
+    #[error("access request already has terminal status {status:?}")]
+    AlreadyDecided {
+        /// Existing terminal status.
+        status: AccessRequestStatus,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccessDecision, AccessRequestStatus};
+    use crate::domain::permission::AccessLevel;
+
+    #[test]
+    fn pending_requests_receive_one_terminal_decision() {
+        let approved = AccessRequestStatus::Pending.decide(AccessDecision::Approve {
+            access: AccessLevel::Read,
+        });
+        assert_eq!(approved, Ok(AccessRequestStatus::Approved));
+        assert!(
+            AccessRequestStatus::Approved
+                .decide(AccessDecision::Deny)
+                .is_err()
+        );
+    }
+}

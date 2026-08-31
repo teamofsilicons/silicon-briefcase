@@ -1,0 +1,1693 @@
+//! Concrete tenant-safe implementation of metadata application ports.
+
+pub(super) mod common;
+
+use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sqlx::{Postgres, Transaction};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{
+    application::{
+        context::ExecutionContext,
+        service::{
+            AccessRequestView, AuthorizableAccessRequest, AuthorizableEntry, CreateFolderMutation,
+            DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand, ListBinQuery,
+            ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MetadataRepository,
+            MetadataRepositoryError, MutationMetadata, Page, RequestAccessCommand,
+            RevokePermissionCommand, SearchCandidate, SearchQuery, UpdateEntryCommand,
+        },
+    },
+    domain::{
+        access::{AccessDecision, AccessRequestStatus},
+        actor::ActorRef,
+        entry::EntryKind,
+        ids::{AccessRequestId, EntryId, GrantId, VersionId},
+        permission::{AccessLevel, Capability, PermissionGrant},
+        version::{VersionNumber, VersionSource},
+    },
+};
+
+use super::{AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, roots};
+use common::{
+    IdempotencyClaim, Result, access_level, actor_kind, actor_ref, begin, boundary_columns,
+    build_authorizable, claim_idempotency, complete_idempotency, current_member, encode_access,
+    internal, load_entry, map_sql, permission_grant, record_change, resolve_tag_id,
+    retention_deadline,
+};
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct UuidCursor {
+    id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct NumberCursor {
+    number: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct BinCursor {
+    deleted_at: OffsetDateTime,
+    id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct SubtreeRow {
+    entry_id: Uuid,
+    depth: i32,
+}
+
+#[allow(clippy::too_many_lines)]
+#[async_trait]
+impl MetadataRepository for PostgresRepository {
+    async fn find_active_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Option<AuthorizableEntry>> {
+        let mut request = begin(self, context).await?;
+        let entry = load_entry(&mut request.transaction, context, entry_id, false, false).await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(entry)
+    }
+
+    async fn list_active_children(
+        &self,
+        context: &ExecutionContext,
+        query: &ListEntriesQuery,
+    ) -> Result<Page<AuthorizableEntry>> {
+        let cursor = decode_optional::<UuidCursor>(query.page.cursor.as_deref())?;
+        let after = cursor.map_or(Uuid::nil(), |value| value.id);
+        let limit = i64::from(query.page.limit) + 1;
+        let mut request = begin(self, context).await?;
+        let rows = sqlx::query_as::<_, EntryRow>(
+            "SELECT org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, \
+                    system_kind, owner_type, owner_id, origin_app_id, content_type, size_bytes, \
+                    current_version_id, created_by_type, created_by_id, updated_by_type, \
+                    updated_by_id, deletion_batch_id, deleted_at, purge_after, created_at, updated_at \
+               FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() \
+                AND parent_id IS NOT DISTINCT FROM $1 \
+                AND deleted_at IS NULL AND entry_id > $2 \
+              ORDER BY entry_id LIMIT $3",
+        )
+        .bind(query.parent_id.map(EntryId::as_uuid))
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let has_more = rows.len() > usize::from(query.page.limit);
+        let rows = rows.into_iter().take(usize::from(query.page.limit));
+        let mut items = Vec::with_capacity(usize::from(query.page.limit));
+        for row in rows {
+            items.push(build_authorizable(&mut request.transaction, context, row).await?);
+        }
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|entry| {
+                    encode_cursor(&UuidCursor {
+                        id: entry.entry.id.as_uuid(),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(Page { items, next_cursor })
+    }
+
+    async fn create_folder(
+        &self,
+        context: &ExecutionContext,
+        mutation: &CreateFolderMutation,
+        metadata: &MutationMetadata,
+        required_parent_capability: Option<Capability>,
+    ) -> Result<AuthorizableEntry> {
+        const OPERATION: &str = "create_folder";
+        let mut request = begin(self, context).await?;
+        if mutation.command.parent_id.is_none() {
+            roots::lock_organization_reconciliation(&mut request.transaction)
+                .await
+                .map_err(map_sql)?;
+        }
+        let entry_id = match claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(mutation.entry_id.as_uuid()),
+        )
+        .await?
+        {
+            IdempotencyClaim::Replay(Some(resource_id)) => {
+                let id = EntryId::from_uuid(resource_id).map_err(internal_data)?;
+                let entry = load_entry(&mut request.transaction, context, id, false, false)
+                    .await?
+                    .ok_or(MetadataRepositoryError::Conflict)?;
+                request.transaction.commit().await.map_err(map_sql)?;
+                return Ok(entry);
+            }
+            IdempotencyClaim::Replay(None) | IdempotencyClaim::Acquired(None) => {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+            IdempotencyClaim::Acquired(Some(resource_id)) => {
+                EntryId::from_uuid(resource_id).map_err(internal_data)?
+            }
+        };
+
+        let actor = context.authorization().actor();
+        if &mutation.owner != actor {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        if let Some(parent_id) = mutation.command.parent_id {
+            let parent = load_entry(&mut request.transaction, context, parent_id, false, true)
+                .await?
+                .ok_or(MetadataRepositoryError::NotFound)?;
+            if parent.entry.kind != EntryKind::Folder || parent.entry.boundary != mutation.boundary
+            {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+            let capability = required_parent_capability.ok_or(MetadataRepositoryError::Conflict)?;
+            require_capability(&parent, context, capability)?;
+        } else if required_parent_capability.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+
+        let (root_type, tag_name) = boundary_columns(&mutation.boundary);
+        let tag_id = resolve_tag_id(&mut request.transaction, tag_name).await?;
+        sqlx::query(
+            "INSERT INTO briefcase.entries ( \
+                    org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, \
+                    owner_type, owner_id, origin_app_id, created_by_type, created_by_id, \
+                    updated_by_type, updated_by_id \
+             ) VALUES (briefcase.current_org_id(), $1, $2, 'folder', $3, $4, $5, \
+                       $6, $7, $8, $6, $7, $6, $7)",
+        )
+        .bind(entry_id.as_uuid())
+        .bind(mutation.command.parent_id.map(EntryId::as_uuid))
+        .bind(mutation.command.name.as_str())
+        .bind(root_type)
+        .bind(tag_id.as_deref())
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .bind(
+            mutation
+                .origin_application_id
+                .as_ref()
+                .map(crate::domain::actor::ApplicationId::as_str),
+        )
+        .execute(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+
+        for invitee in &mutation.command.invitees {
+            if !current_member(&mut request.transaction, &invitee.principal).await? {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+            sqlx::query(
+                "INSERT INTO briefcase.permission_grants ( \
+                        org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                        inherits_to_descendants, granted_by_type, granted_by_id \
+                 ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(entry_id.as_uuid())
+            .bind(Uuid::now_v7())
+            .bind(actor_kind(invitee.principal.kind()))
+            .bind(invitee.principal.id().as_str())
+            .bind(encode_access(invitee.access))
+            .bind(invitee.inherits_to_descendants)
+            .bind(actor_kind(actor.kind()))
+            .bind(actor.id().as_str())
+            .execute(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
+        }
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(entry_id.as_uuid()),
+            "entry.folder_created.v1",
+            "entry",
+            &entry_id.to_string(),
+            json!({"parent_id": mutation.command.parent_id.map(|id| id.to_string())}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(entry_id.as_uuid()),
+        )
+        .await?;
+        let created = load_entry(&mut request.transaction, context, entry_id, false, false)
+            .await?
+            .ok_or_else(|| internal("created folder disappeared"))?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(created)
+    }
+
+    async fn update_entry(
+        &self,
+        context: &ExecutionContext,
+        command: &UpdateEntryCommand,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<AuthorizableEntry> {
+        const OPERATION: &str = "update_entry";
+        let mut request = begin(self, context).await?;
+        // A rename can target an organization-root entry. Serialize metadata
+        // mutations with system-root name reconciliation before taking row locks.
+        roots::lock_organization_reconciliation(&mut request.transaction)
+            .await
+            .map_err(map_sql)?;
+        let current = load_entry(
+            &mut request.transaction,
+            context,
+            command.entry_id,
+            false,
+            true,
+        )
+        .await?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        require_capability(&current, context, required_capability)?;
+        if current.system_kind.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        if let Some(parent_id) = command.parent_id {
+            let parent = load_entry(&mut request.transaction, context, parent_id, false, true)
+                .await?
+                .ok_or(MetadataRepositoryError::NotFound)?;
+            if parent.entry.kind != EntryKind::Folder
+                || parent.entry.boundary != current.entry.boundary
+            {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+            require_capability(&parent, context, Capability::CreateChild)?;
+        }
+        if command.parent_id.is_some() && current.entry.kind == EntryKind::Folder {
+            lock_and_require_subtree_capability(
+                &mut request.transaction,
+                context,
+                command.entry_id,
+                Capability::UpdateMetadata,
+            )
+            .await?;
+        }
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.entry_id.as_uuid()),
+        )
+        .await?
+        {
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(current);
+        }
+        let actor = context.authorization().actor();
+        sqlx::query(
+            "UPDATE briefcase.entries \
+                SET name = COALESCE($2, name), parent_id = COALESCE($3, parent_id), \
+                    updated_by_type = $4, updated_by_id = $5 \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(command.entry_id.as_uuid())
+        .bind(
+            command
+                .name
+                .as_ref()
+                .map(crate::domain::entry::EntryName::as_str),
+        )
+        .bind(command.parent_id.map(EntryId::as_uuid))
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .execute(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(command.entry_id.as_uuid()),
+            "entry.metadata_updated.v1",
+            "entry",
+            &command.entry_id.to_string(),
+            json!({
+                "renamed": command.name.is_some(),
+                "moved": command.parent_id.is_some(),
+            }),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.entry_id.as_uuid()),
+        )
+        .await?;
+        let updated = load_entry(
+            &mut request.transaction,
+            context,
+            command.entry_id,
+            false,
+            false,
+        )
+        .await?
+        .ok_or_else(|| internal("updated entry disappeared"))?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(updated)
+    }
+
+    async fn soft_delete_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<()> {
+        const OPERATION: &str = "soft_delete_entry";
+        let mut request = begin(self, context).await?;
+        roots::lock_organization_reconciliation(&mut request.transaction)
+            .await
+            .map_err(map_sql)?;
+        let entry = load_entry(&mut request.transaction, context, entry_id, false, true)
+            .await?
+            .ok_or(MetadataRepositoryError::NotFound)?;
+        require_capability(&entry, context, required_capability)?;
+        if entry.system_kind.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        lock_and_require_subtree_capability(
+            &mut request.transaction,
+            context,
+            entry_id,
+            Capability::Delete,
+        )
+        .await?;
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(entry_id.as_uuid()),
+        )
+        .await?
+        {
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(());
+        }
+        let batch_id = Uuid::now_v7();
+        let deleted_at = OffsetDateTime::now_utc();
+        let purge_after = retention_deadline();
+        let actor = context.authorization().actor();
+        sqlx::query(
+            "UPDATE briefcase.entries AS entry \
+                SET deletion_batch_id = $2, deleted_at = $3, purge_after = $4, \
+                    updated_by_type = $5, updated_by_id = $6 \
+              WHERE entry.org_id = briefcase.current_org_id() \
+                AND entry.deleted_at IS NULL \
+                AND EXISTS ( \
+                    SELECT 1 FROM briefcase.entry_closure AS subtree \
+                     WHERE subtree.org_id = entry.org_id \
+                       AND subtree.ancestor_id = $1 \
+                       AND subtree.descendant_id = entry.entry_id \
+                )",
+        )
+        .bind(entry_id.as_uuid())
+        .bind(batch_id)
+        .bind(deleted_at)
+        .bind(purge_after)
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .execute(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(entry_id.as_uuid()),
+            "entry.subtree_deleted.v1",
+            "entry",
+            &entry_id.to_string(),
+            json!({"deletion_batch_id": batch_id, "purge_after": purge_after}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(entry_id.as_uuid()),
+        )
+        .await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn list_permission_grants(
+        &self,
+        context: &ExecutionContext,
+        query: &ListPermissionsQuery,
+    ) -> Result<Page<PermissionGrant>> {
+        let cursor = decode_optional::<UuidCursor>(query.page.cursor.as_deref())?;
+        let after = cursor.map_or(Uuid::nil(), |value| value.id);
+        let mut request = begin(self, context).await?;
+        let rows = sqlx::query_as::<_, PermissionGrantRow>(
+            "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                    inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                    revoked_by_type, revoked_by_id, created_at \
+               FROM briefcase.permission_grants \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                AND revoked_at IS NULL AND grant_id > $2 \
+              ORDER BY grant_id LIMIT $3",
+        )
+        .bind(query.entry_id.as_uuid())
+        .bind(after)
+        .bind(i64::from(query.page.limit) + 1)
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let has_more = rows.len() > usize::from(query.page.limit);
+        let mut items = rows
+            .into_iter()
+            .take(usize::from(query.page.limit))
+            .map(permission_grant)
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|grant| {
+                    encode_cursor(&UuidCursor {
+                        id: grant.id().as_uuid(),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(Page {
+            items: std::mem::take(&mut items),
+            next_cursor,
+        })
+    }
+
+    async fn grant_permission(
+        &self,
+        context: &ExecutionContext,
+        command: &GrantPermissionCommand,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<PermissionGrant> {
+        const OPERATION: &str = "grant_permission";
+        let mut request = begin(self, context).await?;
+        let entry = load_entry(
+            &mut request.transaction,
+            context,
+            command.entry_id,
+            false,
+            true,
+        )
+        .await?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        require_capability(&entry, context, required_capability)?;
+        if entry.system_kind.is_some()
+            || !current_member(&mut request.transaction, &command.principal).await?
+        {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let proposed_grant_id = GrantId::new();
+        let grant_id = match claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(proposed_grant_id.as_uuid()),
+        )
+        .await?
+        {
+            IdempotencyClaim::Replay(Some(id)) => {
+                let row = find_grant(&mut request.transaction, id, false)
+                    .await?
+                    .ok_or(MetadataRepositoryError::Conflict)?;
+                let grant = permission_grant(row)?;
+                request.transaction.commit().await.map_err(map_sql)?;
+                return Ok(grant);
+            }
+            IdempotencyClaim::Acquired(Some(id)) => {
+                GrantId::from_uuid(id).map_err(internal_data)?
+            }
+            IdempotencyClaim::Replay(None) | IdempotencyClaim::Acquired(None) => {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+        };
+        let actor = context.authorization().actor();
+        let row = sqlx::query_as::<_, PermissionGrantRow>(
+            "INSERT INTO briefcase.permission_grants ( \
+                    org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                    inherits_to_descendants, granted_by_type, granted_by_id \
+             ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8) \
+             RETURNING org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                       inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                       revoked_by_type, revoked_by_id, created_at",
+        )
+        .bind(command.entry_id.as_uuid())
+        .bind(grant_id.as_uuid())
+        .bind(actor_kind(command.principal.kind()))
+        .bind(command.principal.id().as_str())
+        .bind(encode_access(command.access))
+        .bind(command.inherits_to_descendants)
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .fetch_one(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(command.entry_id.as_uuid()),
+            "permission.granted.v1",
+            "entry",
+            &command.entry_id.to_string(),
+            json!({"grant_id": grant_id, "access": encode_access(command.access)}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(grant_id.as_uuid()),
+        )
+        .await?;
+        let grant = permission_grant(row)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(grant)
+    }
+
+    async fn revoke_permission(
+        &self,
+        context: &ExecutionContext,
+        command: RevokePermissionCommand,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<()> {
+        const OPERATION: &str = "revoke_permission";
+        let mut request = begin(self, context).await?;
+        let entry = load_entry(
+            &mut request.transaction,
+            context,
+            command.entry_id,
+            false,
+            true,
+        )
+        .await?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        require_capability(&entry, context, required_capability)?;
+        if entry.system_kind.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let row = sqlx::query_as::<_, PermissionGrantRow>(
+            "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                    inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                    revoked_by_type, revoked_by_id, created_at \
+               FROM briefcase.permission_grants \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 AND grant_id = $2 \
+              FOR UPDATE",
+        )
+        .bind(command.entry_id.as_uuid())
+        .bind(command.grant_id.as_uuid())
+        .fetch_optional(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.grant_id.as_uuid()),
+        )
+        .await?
+        {
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(());
+        }
+        if row.revoked_at.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let actor = context.authorization().actor();
+        sqlx::query(
+            "UPDATE briefcase.permission_grants \
+                SET revoked_at = clock_timestamp(), revoked_by_type = $3, revoked_by_id = $4 \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 AND grant_id = $2 \
+                AND revoked_at IS NULL",
+        )
+        .bind(command.entry_id.as_uuid())
+        .bind(command.grant_id.as_uuid())
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .execute(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(command.entry_id.as_uuid()),
+            "permission.revoked.v1",
+            "entry",
+            &command.entry_id.to_string(),
+            json!({"grant_id": command.grant_id}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.grant_id.as_uuid()),
+        )
+        .await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn create_access_request(
+        &self,
+        context: &ExecutionContext,
+        command: &RequestAccessCommand,
+        metadata: &MutationMetadata,
+    ) -> Result<AccessRequestView> {
+        const OPERATION: &str = "create_access_request";
+        let mut request = begin(self, context).await?;
+        let entry = load_entry(
+            &mut request.transaction,
+            context,
+            command.entry_id,
+            false,
+            true,
+        )
+        .await?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        let authorization = entry.authorization(context.authorization());
+        let already_allowed = match command.access {
+            AccessLevel::Read => authorization.allows(Capability::Read),
+            AccessLevel::Write => authorization.allows(Capability::UpdateMetadata),
+        };
+        if already_allowed {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let proposed_request_id = AccessRequestId::new();
+        let request_id = match claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(proposed_request_id.as_uuid()),
+        )
+        .await?
+        {
+            IdempotencyClaim::Replay(Some(id)) => {
+                let row = find_access_request_row(&mut request.transaction, id, false)
+                    .await?
+                    .ok_or(MetadataRepositoryError::Conflict)?;
+                let result = access_request_view(row)?;
+                request.transaction.commit().await.map_err(map_sql)?;
+                return Ok(result);
+            }
+            IdempotencyClaim::Acquired(Some(id)) => {
+                AccessRequestId::from_uuid(id).map_err(internal_data)?
+            }
+            IdempotencyClaim::Replay(None) | IdempotencyClaim::Acquired(None) => {
+                return Err(MetadataRepositoryError::Conflict);
+            }
+        };
+        let actor = context.authorization().actor();
+        let row = sqlx::query_as::<_, AccessRequestRow>(
+            "INSERT INTO briefcase.access_requests ( \
+                    org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
+                    requested_access, reason \
+             ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6) \
+             RETURNING org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
+                       requested_access, reason, status, granted_access, decided_by_type, \
+                       decided_by_id, decided_at, permission_grant_id, created_at, updated_at",
+        )
+        .bind(request_id.as_uuid())
+        .bind(command.entry_id.as_uuid())
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .bind(encode_access(command.access))
+        .bind(command.reason.as_deref())
+        .fetch_one(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(command.entry_id.as_uuid()),
+            "access_request.created.v1",
+            "access_request",
+            &request_id.to_string(),
+            json!({"entry_id": command.entry_id, "requested_access": encode_access(command.access)}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(request_id.as_uuid()),
+        )
+        .await?;
+        let result = access_request_view(row)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(result)
+    }
+
+    async fn find_access_request(
+        &self,
+        context: &ExecutionContext,
+        request_id: AccessRequestId,
+    ) -> Result<Option<AuthorizableAccessRequest>> {
+        let mut request = begin(self, context).await?;
+        let row =
+            find_access_request_row(&mut request.transaction, request_id.as_uuid(), false).await?;
+        let result = if let Some(row) = row {
+            let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
+            let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
+                .await?
+                .ok_or(MetadataRepositoryError::NotFound)?;
+            Some(AuthorizableAccessRequest {
+                request: access_request_view(row)?,
+                entry,
+            })
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(result)
+    }
+
+    async fn decide_access_request(
+        &self,
+        context: &ExecutionContext,
+        command: DecideAccessRequestCommand,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<AccessRequestView> {
+        const OPERATION: &str = "decide_access_request";
+        let mut request = begin(self, context).await?;
+        let row =
+            find_access_request_row(&mut request.transaction, command.request_id.as_uuid(), true)
+                .await?
+                .ok_or(MetadataRepositoryError::NotFound)?;
+        let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
+        let entry = load_entry(&mut request.transaction, context, entry_id, false, true)
+            .await?
+            .ok_or(MetadataRepositoryError::NotFound)?;
+        require_capability(&entry, context, required_capability)?;
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.request_id.as_uuid()),
+        )
+        .await?
+        {
+            let result = access_request_view(row)?;
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(result);
+        }
+        if row.status != "pending" {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let actor = context.authorization().actor();
+        let (status, access, grant_id) = match command.decision {
+            AccessDecision::Deny => ("denied", None, None),
+            AccessDecision::Approve { access } => {
+                let requester = actor_ref(&row.requested_by_type, &row.requested_by_id)?;
+                if !current_member(&mut request.transaction, &requester).await? {
+                    return Err(MetadataRepositoryError::Conflict);
+                }
+                let grant_id = GrantId::new();
+                sqlx::query(
+                    "INSERT INTO briefcase.permission_grants ( \
+                            org_id, entry_id, grant_id, principal_type, principal_id, \
+                            access_level, inherits_to_descendants, granted_by_type, granted_by_id \
+                     ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, true, $6, $7)",
+                )
+                .bind(row.entry_id)
+                .bind(grant_id.as_uuid())
+                .bind(&row.requested_by_type)
+                .bind(&row.requested_by_id)
+                .bind(encode_access(access))
+                .bind(actor_kind(actor.kind()))
+                .bind(actor.id().as_str())
+                .execute(&mut *request.transaction)
+                .await
+                .map_err(map_sql)?;
+                ("approved", Some(access), Some(grant_id))
+            }
+        };
+        let updated = sqlx::query_as::<_, AccessRequestRow>(
+            "UPDATE briefcase.access_requests \
+                SET status = $2, granted_access = $3, decided_by_type = $4, \
+                    decided_by_id = $5, decided_at = clock_timestamp(), permission_grant_id = $6 \
+              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1 \
+                AND status = 'pending' \
+             RETURNING org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
+                       requested_access, reason, status, granted_access, decided_by_type, \
+                       decided_by_id, decided_at, permission_grant_id, created_at, updated_at",
+        )
+        .bind(command.request_id.as_uuid())
+        .bind(status)
+        .bind(access.map(encode_access))
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .bind(grant_id.map(GrantId::as_uuid))
+        .fetch_one(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(row.entry_id),
+            "access_request.decided.v1",
+            "access_request",
+            &command.request_id.to_string(),
+            json!({"status": status, "grant_id": grant_id}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(command.request_id.as_uuid()),
+        )
+        .await?;
+        let result = access_request_view(updated)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(result)
+    }
+
+    async fn search(
+        &self,
+        context: &ExecutionContext,
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchCandidate>> {
+        #[derive(sqlx::FromRow)]
+        struct SearchHit {
+            entry_id: Uuid,
+            score: f32,
+            filename_match: bool,
+            content_hits: i32,
+            snippet: Option<String>,
+        }
+
+        let mut request = begin(self, context).await?;
+        let authorization = context.authorization();
+        let actor = authorization.actor();
+        let tags: Vec<&str> = authorization
+            .tags()
+            .iter()
+            .map(crate::domain::actor::TagName::as_str)
+            .collect();
+        let rows = sqlx::query_as::<_, SearchHit>(
+            "WITH search_query AS (SELECT websearch_to_tsquery('simple'::regconfig, $1) AS value) \
+             SELECT document.entry_id, \
+                    (2.0 * ts_rank(document.filename_search, search_query.value) \
+                         + ts_rank(document.content_search, search_query.value))::real AS score, \
+                    document.filename_search @@ search_query.value AS filename_match, \
+                    CASE WHEN document.content_search @@ search_query.value THEN 1 ELSE 0 END AS content_hits, \
+                    CASE WHEN document.content_search @@ search_query.value \
+                         THEN ts_headline('simple'::regconfig, COALESCE(document.extracted_content, ''), \
+                                          search_query.value, 'MaxFragments=2,MaxWords=24,MinWords=8') \
+                         ELSE NULL END AS snippet \
+               FROM briefcase.search_documents AS document \
+               JOIN briefcase.entries AS entry \
+                 ON entry.org_id = document.org_id AND entry.entry_id = document.entry_id \
+               CROSS JOIN search_query \
+          LEFT JOIN briefcase.organization_tags AS tag \
+                 ON tag.org_id = entry.org_id AND tag.tag_id = entry.tag_id \
+              WHERE document.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
+                AND (document.filename_search @@ search_query.value \
+                     OR document.content_search @@ search_query.value) \
+                AND ( \
+                    $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
+                    OR entry.root_type = 'public' \
+                    OR (entry.root_type = 'tag' AND tag.name = ANY($5)) \
+                    OR EXISTS ( \
+                        SELECT 1 FROM briefcase.entry_closure AS path \
+                        JOIN briefcase.permission_grants AS grant \
+                          ON grant.org_id = path.org_id AND grant.entry_id = path.ancestor_id \
+                       WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
+                         AND grant.principal_type = $3 AND grant.principal_id = $4 \
+                         AND grant.revoked_at IS NULL \
+                         AND (path.depth = 0 OR grant.inherits_to_descendants) \
+                    ) \
+                ) \
+              ORDER BY score DESC, document.entry_id \
+              LIMIT $6",
+        )
+        .bind(&query.query)
+        .bind(authorization.role().has_administrative_access())
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .bind(tags)
+        .bind(i64::from(query.limit))
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
+            let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
+                .await?
+                .ok_or_else(|| internal("search projection references missing entry"))?;
+            results.push(SearchCandidate {
+                entry,
+                score: f64::from(row.score),
+                filename_match: row.filename_match,
+                content_hits: u32::try_from(row.content_hits).map_err(internal_data)?,
+                snippets: row.snippet.into_iter().collect(),
+            });
+        }
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(results)
+    }
+
+    async fn list_file_versions(
+        &self,
+        context: &ExecutionContext,
+        query: &ListVersionsQuery,
+    ) -> Result<Page<FileVersionView>> {
+        #[derive(sqlx::FromRow)]
+        struct VersionRow {
+            version_id: Uuid,
+            version_number: i64,
+            source: String,
+            restored_from_version_id: Option<Uuid>,
+            size_bytes: i64,
+            created_by_type: String,
+            created_by_id: String,
+            created_at: OffsetDateTime,
+        }
+
+        let cursor = decode_optional::<NumberCursor>(query.page.cursor.as_deref())?;
+        let before = cursor.map_or(i64::MAX, |value| value.number);
+        let mut request = begin(self, context).await?;
+        let rows = sqlx::query_as::<_, VersionRow>(
+            "SELECT version_id, version_number, source, restored_from_version_id, size_bytes, \
+                    created_by_type, created_by_id, created_at \
+               FROM briefcase.entry_versions \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                AND version_number < $2 \
+              ORDER BY version_number DESC LIMIT $3",
+        )
+        .bind(query.entry_id.as_uuid())
+        .bind(before)
+        .bind(i64::from(query.page.limit) + 1)
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let has_more = rows.len() > usize::from(query.page.limit);
+        let mut items = Vec::with_capacity(usize::from(query.page.limit));
+        for row in rows.into_iter().take(usize::from(query.page.limit)) {
+            let source = match row.source.as_str() {
+                "upload" => VersionSource::InitialUpload,
+                "restore" => VersionSource::Restore {
+                    source_version_id: VersionId::from_uuid(
+                        row.restored_from_version_id
+                            .ok_or_else(|| internal("restore version has no source"))?,
+                    )
+                    .map_err(internal_data)?,
+                },
+                _ => return Err(internal("invalid persisted version source")),
+            };
+            items.push(FileVersionView {
+                id: VersionId::from_uuid(row.version_id).map_err(internal_data)?,
+                number: VersionNumber::new(
+                    u64::try_from(row.version_number).map_err(internal_data)?,
+                )
+                .map_err(internal_data)?,
+                size: u64::try_from(row.size_bytes).map_err(internal_data)?,
+                created_by: actor_ref(&row.created_by_type, &row.created_by_id)?,
+                source,
+                created_at: row.created_at,
+            });
+        }
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|version| {
+                    i64::try_from(version.number.get())
+                        .map_err(internal_data)
+                        .and_then(|number| encode_cursor(&NumberCursor { number }))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(Page { items, next_cursor })
+    }
+
+    async fn list_bin_entries(
+        &self,
+        context: &ExecutionContext,
+        query: &ListBinQuery,
+    ) -> Result<Page<AuthorizableEntry>> {
+        let cursor = decode_optional::<BinCursor>(query.page.cursor.as_deref())?;
+        let mut request = begin(self, context).await?;
+        let authorization = context.authorization();
+        let actor = authorization.actor();
+        let origin = authorization
+            .originating_application()
+            .map_or("", |application| application.as_str());
+        let rows = sqlx::query_as::<_, EntryRow>(
+            "SELECT entry.org_id, entry.entry_id, entry.parent_id, entry.entry_type, \
+                    entry.name, entry.root_type, entry.tag_id, entry.system_kind, \
+                    entry.owner_type, entry.owner_id, entry.origin_app_id, entry.content_type, \
+                    entry.size_bytes, entry.current_version_id, entry.created_by_type, \
+                    entry.created_by_id, entry.updated_by_type, entry.updated_by_id, \
+                    entry.deletion_batch_id, entry.deleted_at, entry.purge_after, \
+                    entry.created_at, entry.updated_at \
+               FROM briefcase.entries AS entry \
+              WHERE entry.org_id = briefcase.current_org_id() \
+                AND entry.deleted_at IS NOT NULL AND entry.purge_after > clock_timestamp() \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM briefcase.entries AS parent \
+                     WHERE parent.org_id = entry.org_id AND parent.entry_id = entry.parent_id \
+                       AND parent.deletion_batch_id = entry.deletion_batch_id \
+                ) \
+                AND ($1 = '' OR entry.origin_app_id = $1) \
+                AND ( \
+                    $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
+                    OR EXISTS ( \
+                        SELECT 1 FROM briefcase.entry_closure AS path \
+                        JOIN briefcase.permission_grants AS grant \
+                          ON grant.org_id = path.org_id AND grant.entry_id = path.ancestor_id \
+                       WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
+                         AND grant.principal_type = $3 AND grant.principal_id = $4 \
+                         AND grant.access_level = 'write' AND grant.revoked_at IS NULL \
+                         AND (path.depth = 0 OR grant.inherits_to_descendants) \
+                    ) \
+                ) \
+                AND ($5::timestamptz IS NULL OR (entry.deleted_at, entry.entry_id) < ($5, $6)) \
+              ORDER BY entry.deleted_at DESC, entry.entry_id DESC LIMIT $7",
+        )
+        .bind(origin)
+        .bind(authorization.role().has_administrative_access())
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .bind(cursor.map(|value| value.deleted_at))
+        .bind(cursor.map_or(Uuid::max(), |value| value.id))
+        .bind(i64::from(query.page.limit) + 1)
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let has_more = rows.len() > usize::from(query.page.limit);
+        let mut items = Vec::with_capacity(usize::from(query.page.limit));
+        for row in rows.into_iter().take(usize::from(query.page.limit)) {
+            items.push(build_authorizable(&mut request.transaction, context, row).await?);
+        }
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|entry| {
+                    encode_cursor(&BinCursor {
+                        deleted_at: entry
+                            .entry
+                            .deleted_at
+                            .ok_or_else(|| internal("bin result is not deleted"))?,
+                        id: entry.entry.id.as_uuid(),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(Page { items, next_cursor })
+    }
+
+    async fn find_bin_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Option<AuthorizableEntry>> {
+        let mut request = begin(self, context).await?;
+        let is_root = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM briefcase.entries AS entry \
+                  WHERE entry.org_id = briefcase.current_org_id() AND entry.entry_id = $1 \
+                    AND entry.deleted_at IS NOT NULL AND entry.purge_after > clock_timestamp() \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM briefcase.entries AS parent \
+                         WHERE parent.org_id = entry.org_id AND parent.entry_id = entry.parent_id \
+                           AND parent.deletion_batch_id = entry.deletion_batch_id \
+                    ) \
+             )",
+        )
+        .bind(entry_id.as_uuid())
+        .fetch_one(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let entry = if is_root {
+            load_entry(&mut request.transaction, context, entry_id, true, false).await?
+        } else {
+            None
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(entry)
+    }
+
+    async fn restore_bin_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+        metadata: &MutationMetadata,
+        required_capability: Capability,
+    ) -> Result<AuthorizableEntry> {
+        const OPERATION: &str = "restore_bin_entry";
+        let mut request = begin(self, context).await?;
+        roots::lock_organization_reconciliation(&mut request.transaction)
+            .await
+            .map_err(map_sql)?;
+        let entry = load_entry(&mut request.transaction, context, entry_id, true, true)
+            .await?
+            .ok_or(MetadataRepositoryError::NotFound)?;
+        if entry.entry.deleted_at.is_none() {
+            if let IdempotencyClaim::Replay(_) = claim_idempotency(
+                &mut request.transaction,
+                &request.context,
+                OPERATION,
+                metadata,
+                Some(entry_id.as_uuid()),
+            )
+            .await?
+            {
+                request.transaction.commit().await.map_err(map_sql)?;
+                return Ok(entry);
+            }
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        require_capability(&entry, context, required_capability)?;
+        if entry.system_kind.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let batch_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT deletion_batch_id FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                AND deleted_at IS NOT NULL AND purge_after > clock_timestamp() \
+              FOR UPDATE",
+        )
+        .bind(entry_id.as_uuid())
+        .fetch_optional(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?
+        .ok_or(MetadataRepositoryError::NotFound)?;
+        lock_and_require_subtree_capability(
+            &mut request.transaction,
+            context,
+            entry_id,
+            Capability::UpdateMetadata,
+        )
+        .await?;
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(entry_id.as_uuid()),
+        )
+        .await?
+        {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let subtree = sqlx::query_as::<_, SubtreeRow>(
+            "SELECT child.entry_id, path.depth \
+               FROM briefcase.entry_closure AS path \
+               JOIN briefcase.entries AS child \
+                 ON child.org_id = path.org_id AND child.entry_id = path.descendant_id \
+              WHERE path.org_id = briefcase.current_org_id() AND path.ancestor_id = $1 \
+                AND child.deletion_batch_id = $2 \
+              ORDER BY path.depth, child.entry_id \
+              FOR UPDATE OF child",
+        )
+        .bind(entry_id.as_uuid())
+        .bind(batch_id)
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        if subtree.first().is_none_or(|row| row.depth != 0) {
+            return Err(MetadataRepositoryError::Conflict);
+        }
+        let destination = resolve_restore_parent(&mut request.transaction, context, &entry).await?;
+        let restored_name = available_restore_name(
+            &mut request.transaction,
+            destination,
+            &entry.entry.name,
+            entry_id,
+        )
+        .await?;
+        let actor = context.authorization().actor();
+        for child in subtree {
+            if child.depth == 0 {
+                sqlx::query(
+                    "UPDATE briefcase.entries SET parent_id = $2, name = $3, deletion_batch_id = NULL, \
+                            deleted_at = NULL, purge_after = NULL, updated_by_type = $4, updated_by_id = $5 \
+                      WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                        AND deletion_batch_id = $6",
+                )
+                .bind(child.entry_id)
+                .bind(destination.map(EntryId::as_uuid))
+                .bind(restored_name.as_str())
+                .bind(actor_kind(actor.kind()))
+                .bind(actor.id().as_str())
+                .bind(batch_id)
+                .execute(&mut *request.transaction)
+                .await
+                .map_err(map_sql)?;
+            } else {
+                sqlx::query(
+                    "UPDATE briefcase.entries SET deletion_batch_id = NULL, deleted_at = NULL, \
+                            purge_after = NULL, updated_by_type = $2, updated_by_id = $3 \
+                      WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                        AND deletion_batch_id = $4",
+                )
+                .bind(child.entry_id)
+                .bind(actor_kind(actor.kind()))
+                .bind(actor.id().as_str())
+                .bind(batch_id)
+                .execute(&mut *request.transaction)
+                .await
+                .map_err(map_sql)?;
+            }
+        }
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            Some(entry_id.as_uuid()),
+            "entry.subtree_restored.v1",
+            "entry",
+            &entry_id.to_string(),
+            json!({"deletion_batch_id": batch_id, "parent_id": destination}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            Some(entry_id.as_uuid()),
+        )
+        .await?;
+        let restored = load_entry(&mut request.transaction, context, entry_id, false, false)
+            .await?
+            .ok_or_else(|| internal("restored entry disappeared"))?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(restored)
+    }
+
+    async fn record_metadata_access(
+        &self,
+        context: &ExecutionContext,
+        entry_ids: &[EntryId],
+    ) -> Result<()> {
+        let mut request = begin(self, context).await?;
+        for entry_id in entry_ids {
+            PostgresRepository::insert_audit_event(
+                &mut request.transaction,
+                &request.context,
+                &super::NewAuditEvent {
+                    audit_id: Uuid::now_v7(),
+                    entry_id: Some(entry_id.as_uuid()),
+                    action: "entry.metadata_read.v1".to_owned(),
+                    metadata: json!({}),
+                },
+            )
+            .await
+            .map_err(map_sql)?;
+        }
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(())
+    }
+
+    async fn is_current_member(
+        &self,
+        context: &ExecutionContext,
+        principal: &ActorRef,
+    ) -> Result<bool> {
+        let mut request = begin(self, context).await?;
+        let exists = current_member(&mut request.transaction, principal).await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(exists)
+    }
+
+    async fn grant_exists(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+        grant_id: GrantId,
+    ) -> Result<bool> {
+        let mut request = begin(self, context).await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM briefcase.permission_grants \
+                  WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                    AND grant_id = $2 AND revoked_at IS NULL \
+             )",
+        )
+        .bind(entry_id.as_uuid())
+        .bind(grant_id.as_uuid())
+        .fetch_one(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(exists)
+    }
+}
+
+async fn find_grant(
+    transaction: &mut Transaction<'_, Postgres>,
+    grant_id: Uuid,
+    lock: bool,
+) -> Result<Option<PermissionGrantRow>> {
+    if lock {
+        sqlx::query_as::<_, PermissionGrantRow>(
+            "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                    inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                    revoked_by_type, revoked_by_id, created_at \
+               FROM briefcase.permission_grants \
+              WHERE org_id = briefcase.current_org_id() AND grant_id = $1 FOR UPDATE",
+        )
+        .bind(grant_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sql)
+    } else {
+        sqlx::query_as::<_, PermissionGrantRow>(
+            "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_level, \
+                    inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                    revoked_by_type, revoked_by_id, created_at \
+               FROM briefcase.permission_grants \
+              WHERE org_id = briefcase.current_org_id() AND grant_id = $1",
+        )
+        .bind(grant_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sql)
+    }
+}
+
+async fn find_access_request_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    lock: bool,
+) -> Result<Option<AccessRequestRow>> {
+    if lock {
+        sqlx::query_as::<_, AccessRequestRow>(
+            "SELECT org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
+                    requested_access, reason, status, granted_access, decided_by_type, \
+                    decided_by_id, decided_at, permission_grant_id, created_at, updated_at \
+               FROM briefcase.access_requests \
+              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1 FOR UPDATE",
+        )
+        .bind(request_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sql)
+    } else {
+        sqlx::query_as::<_, AccessRequestRow>(
+            "SELECT org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
+                    requested_access, reason, status, granted_access, decided_by_type, \
+                    decided_by_id, decided_at, permission_grant_id, created_at, updated_at \
+               FROM briefcase.access_requests \
+              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sql)
+    }
+}
+
+fn access_request_view(row: AccessRequestRow) -> Result<AccessRequestView> {
+    let status = match row.status.as_str() {
+        "pending" => AccessRequestStatus::Pending,
+        "approved" => AccessRequestStatus::Approved,
+        "denied" => AccessRequestStatus::Denied,
+        _ => return Err(internal("invalid persisted access-request status")),
+    };
+    let decided_by = match (row.decided_by_type.as_deref(), row.decided_by_id.as_deref()) {
+        (Some(kind), Some(id)) => Some(actor_ref(kind, id)?),
+        (None, None) => None,
+        _ => return Err(internal("incomplete access-request decision actor")),
+    };
+    Ok(AccessRequestView {
+        id: AccessRequestId::from_uuid(row.access_request_id).map_err(internal_data)?,
+        entry_id: EntryId::from_uuid(row.entry_id).map_err(internal_data)?,
+        requested_by: actor_ref(&row.requested_by_type, &row.requested_by_id)?,
+        requested_access: access_level(&row.requested_access)?,
+        reason: row.reason,
+        status,
+        granted_access: row
+            .granted_access
+            .as_deref()
+            .map(access_level)
+            .transpose()?,
+        decided_by,
+        decided_at: row.decided_at,
+        permission_grant_id: row
+            .permission_grant_id
+            .map(GrantId::from_uuid)
+            .transpose()
+            .map_err(internal_data)?,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn require_capability(
+    entry: &AuthorizableEntry,
+    context: &ExecutionContext,
+    capability: Capability,
+) -> Result<()> {
+    if entry
+        .authorization(context.authorization())
+        .allows(capability)
+    {
+        Ok(())
+    } else {
+        Err(MetadataRepositoryError::Conflict)
+    }
+}
+
+async fn lock_and_require_subtree_capability(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &ExecutionContext,
+    root_id: EntryId,
+    capability: Capability,
+) -> Result<()> {
+    let locked = sqlx::query_scalar::<_, Uuid>(
+        "SELECT entry.entry_id \
+           FROM briefcase.entry_closure AS path \
+           JOIN briefcase.entries AS entry \
+             ON entry.org_id = path.org_id AND entry.entry_id = path.descendant_id \
+          WHERE path.org_id = briefcase.current_org_id() AND path.ancestor_id = $1 \
+          ORDER BY path.depth, entry.entry_id FOR UPDATE OF entry",
+    )
+    .bind(root_id.as_uuid())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(map_sql)?;
+    if locked.is_empty() {
+        return Err(MetadataRepositoryError::NotFound);
+    }
+
+    if !matches!(capability, Capability::Delete | Capability::UpdateMetadata) {
+        return Err(internal("unsupported recursive capability"));
+    }
+    let authorization = context.authorization();
+    let actor = authorization.actor();
+    let origin = if capability == Capability::Delete {
+        authorization
+            .originating_application()
+            .map(crate::domain::actor::ApplicationId::as_str)
+    } else {
+        None
+    };
+    let allowed = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(bool_and( \
+                    entry.system_kind IS NULL \
+                    AND ($5::text IS NULL OR entry.origin_app_id = $5) \
+                    AND ( \
+                        $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
+                        OR EXISTS ( \
+                            SELECT 1 FROM briefcase.entry_closure AS grant_path \
+                            JOIN briefcase.permission_grants AS grant \
+                              ON grant.org_id = grant_path.org_id \
+                             AND grant.entry_id = grant_path.ancestor_id \
+                           WHERE grant_path.org_id = entry.org_id \
+                             AND grant_path.descendant_id = entry.entry_id \
+                             AND grant.principal_type = $3 AND grant.principal_id = $4 \
+                             AND grant.access_level = 'write' AND grant.revoked_at IS NULL \
+                             AND (grant_path.depth = 0 OR grant.inherits_to_descendants) \
+                        ) \
+                    ) \
+                ), false) \
+           FROM briefcase.entry_closure AS subtree \
+           JOIN briefcase.entries AS entry \
+             ON entry.org_id = subtree.org_id AND entry.entry_id = subtree.descendant_id \
+          WHERE subtree.org_id = briefcase.current_org_id() AND subtree.ancestor_id = $1",
+    )
+    .bind(root_id.as_uuid())
+    .bind(authorization.role().has_administrative_access())
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .bind(origin)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sql)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(MetadataRepositoryError::Conflict)
+    }
+}
+
+async fn resolve_restore_parent(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &ExecutionContext,
+    entry: &AuthorizableEntry,
+) -> Result<Option<EntryId>> {
+    if let Some(parent_id) = entry.entry.parent_id
+        && let Some(parent) = load_entry(transaction, context, parent_id, false, true).await?
+        && parent.entry.kind == EntryKind::Folder
+        && parent.entry.boundary == entry.entry.boundary
+        && parent
+            .authorization(context.authorization())
+            .allows(Capability::CreateChild)
+    {
+        return Ok(Some(parent_id));
+    }
+    if entry.entry.parent_id.is_none() {
+        return Ok(None);
+    }
+
+    let actor = context.authorization().actor();
+    let tag_name = entry
+        .entry
+        .boundary
+        .tag()
+        .map(crate::domain::actor::TagName::as_str);
+    let fallback = sqlx::query_scalar::<_, Uuid>(
+        "SELECT entry.entry_id \
+           FROM briefcase.entries AS entry \
+      LEFT JOIN briefcase.organization_tags AS tag \
+             ON tag.org_id = entry.org_id AND tag.tag_id = entry.tag_id \
+          WHERE entry.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
+            AND ( \
+                ($1 = 'public' AND entry.system_kind = 'public_root') \
+                OR ($1 = 'tag' AND entry.system_kind = 'tag_root' AND tag.name = $2) \
+                OR ($1 = 'private' AND ( \
+                    (entry.system_kind = 'actor_root' AND entry.owner_type = $3 AND entry.owner_id = $4) \
+                    OR entry.system_kind = 'private_root' \
+                )) \
+            ) \
+          ORDER BY CASE WHEN entry.system_kind = 'actor_root' THEN 0 ELSE 1 END \
+          LIMIT 1 FOR UPDATE OF entry",
+    )
+    .bind(match entry.entry.boundary.root_type() {
+        crate::domain::entry::RootType::Public => "public",
+        crate::domain::entry::RootType::Private => "private",
+        crate::domain::entry::RootType::Tag => "tag",
+    })
+    .bind(tag_name)
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sql)?
+    .ok_or(MetadataRepositoryError::Conflict)?;
+    let fallback_id = EntryId::from_uuid(fallback).map_err(internal_data)?;
+    let fallback_entry = load_entry(transaction, context, fallback_id, false, false)
+        .await?
+        .ok_or_else(|| internal("restore fallback disappeared"))?;
+    require_capability(&fallback_entry, context, Capability::CreateChild)?;
+    Ok(Some(fallback_id))
+}
+
+async fn available_restore_name(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_id: Option<EntryId>,
+    original: &crate::domain::entry::EntryName,
+    entry_id: EntryId,
+) -> Result<crate::domain::entry::EntryName> {
+    let occupied = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() \
+                AND parent_id IS NOT DISTINCT FROM $1 AND name = $2 \
+                AND deleted_at IS NULL AND entry_id <> $3 \
+         )",
+    )
+    .bind(parent_id.map(EntryId::as_uuid))
+    .bind(original.as_str())
+    .bind(entry_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sql)?;
+    if !occupied {
+        return Ok(original.clone());
+    }
+    let identifier = entry_id.to_string();
+    let suffix = format!(" (restored {})", &identifier[..8]);
+    let maximum_prefix_bytes = 255_usize.saturating_sub(suffix.len());
+    let mut prefix = original.as_str();
+    while prefix.len() > maximum_prefix_bytes {
+        let Some((index, _)) = prefix.char_indices().next_back() else {
+            break;
+        };
+        prefix = &prefix[..index];
+    }
+    crate::domain::entry::EntryName::new(format!("{prefix}{suffix}")).map_err(internal_data)
+}
+
+fn encode_cursor<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_vec(value)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(internal_data)
+}
+
+fn decode_optional<T>(value: Option<&str>) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    value
+        .map(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| MetadataRepositoryError::Conflict)
+                .and_then(|bytes| {
+                    serde_json::from_slice(&bytes).map_err(|_| MetadataRepositoryError::Conflict)
+                })
+        })
+        .transpose()
+}
+
+fn internal_data(error: impl std::error::Error + Send + Sync + 'static) -> MetadataRepositoryError {
+    MetadataRepositoryError::Internal(anyhow::Error::new(error))
+}
