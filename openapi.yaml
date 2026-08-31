@@ -1,0 +1,392 @@
+openapi: 3.1.0
+info:
+  title: Silicon Briefcase API
+  version: 0.1.0
+  description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
+servers:
+  - url: https://briefcase.teamofsilicons.com/api/v1
+security:
+  - bearerAuth: []
+  - oboAccess: []
+tags:
+  - name: Entries
+  - name: Uploads
+  - name: Permissions
+  - name: Search
+  - name: Versions
+  - name: Bin
+  - name: Storage
+paths:
+  /entries:
+    get:
+      tags: [Entries]
+      operationId: listEntries
+      summary: List visible children of a folder
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: parent_id, in: query, schema: { type: string, format: uuid }, description: Omit for the organization root }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Visible entries
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EntryPage' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Entries]
+      operationId: createFolder
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FolderCreate' }
+      responses:
+        '201': { description: Folder created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/EntryId'
+    get:
+      tags: [Entries]
+      operationId: getEntry
+      responses:
+        '200': { description: Entry metadata, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Entries]
+      operationId: updateEntry
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, minLength: 1, maxLength: 255 }
+                parent_id: { type: string, format: uuid }
+      responses:
+        '200': { description: Updated entry, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Entries]
+      operationId: moveEntryToBin
+      responses:
+        '204': { description: Entry moved to the 45-day bin }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/download-url:
+    post:
+      tags: [Entries]
+      operationId: createTemporaryDownloadUrl
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '201':
+          description: Twelve-hour CDN URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemporaryUrl' }
+        default: { $ref: '#/components/responses/Error' }
+  /uploads:
+    post:
+      tags: [Uploads]
+      operationId: uploadFile
+      summary: Upload a file up to and including 100 MiB
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [parent_id, file]
+              properties:
+                parent_id: { type: string, format: uuid }
+                file: { type: string, format: binary }
+                app_id: { type: string, description: Originating application when using OBO Access }
+      responses:
+        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: Use multipart upload for files larger than 100 MiB }
+        default: { $ref: '#/components/responses/Error' }
+  /multipart-uploads:
+    post:
+      tags: [Uploads]
+      operationId: initiateMultipartUpload
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent_id, name, size, content_type]
+              properties:
+                parent_id: { type: string, format: uuid }
+                name: { type: string }
+                size: { type: integer, minimum: 104857601, maximum: 5497558138880 }
+                content_type: { type: string }
+      responses:
+        '201':
+          description: Upload initialized with calculated part size
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MultipartUpload' }
+        default: { $ref: '#/components/responses/Error' }
+  /multipart-uploads/{upload_id}/parts/{part_number}:
+    put:
+      tags: [Uploads]
+      operationId: uploadPart
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: upload_id, in: path, required: true, schema: { type: string } }
+        - { name: part_number, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 10000 } }
+      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses:
+        '200': { description: Part accepted, headers: { ETag: { schema: { type: string } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /multipart-uploads/{upload_id}/complete:
+    post:
+      tags: [Uploads]
+      operationId: completeMultipartUpload
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: upload_id, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parts]
+              properties:
+                parts:
+                  type: array
+                  minItems: 1
+                  items: { type: object, required: [part_number, etag], properties: { part_number: { type: integer }, etag: { type: string } } }
+      responses:
+        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /multipart-uploads/{upload_id}:
+    delete:
+      tags: [Uploads]
+      operationId: abortMultipartUpload
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: upload_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Upload aborted }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/permissions:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/EntryId'
+    get:
+      tags: [Permissions]
+      operationId: listPermissions
+      responses:
+        '200': { description: Explicit permissions, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/PermissionGrant' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Permissions]
+      operationId: grantPermission
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionGrantCreate' } } } }
+      responses:
+        '201': { description: Permission granted, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionGrant' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/permissions/{grant_id}:
+    delete:
+      tags: [Permissions]
+      operationId: revokePermission
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+        - { name: grant_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Grant revoked }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/access-requests:
+    post:
+      tags: [Permissions]
+      operationId: requestAccess
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [access], properties: { access: { type: string, enum: [read, write] }, reason: { type: string, maxLength: 1000 } } } } } }
+      responses:
+        '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /access-requests/{request_id}/decision:
+    post:
+      tags: [Permissions]
+      operationId: decideAccessRequest
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: request_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { type: string, enum: [approve, deny] }, access: { type: string, enum: [read, write] } } } } } }
+      responses:
+        '200': { description: Decision recorded, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /search:
+    get:
+      tags: [Search]
+      operationId: searchFiles
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+      responses:
+        '200': { description: Permission-filtered results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/SearchResult' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/versions:
+    get:
+      tags: [Versions]
+      operationId: listVersions
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200': { description: Up to 50 versions, content: { application/json: { schema: { type: object, properties: { items: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/FileVersion' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/versions/{version_id}/restore:
+    post:
+      tags: [Versions]
+      operationId: restoreVersion
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+        - { name: version_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Version restored as a new current version, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bin:
+    get:
+      tags: [Bin]
+      operationId: listBin
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200': { description: Deleted entries visible to the actor, content: { application/json: { schema: { $ref: '#/components/schemas/EntryPage' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /bin/{entry_id}/restore:
+    post:
+      tags: [Bin]
+      operationId: restoreEntry
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200': { description: Restored entry, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /storage/configuration:
+    put:
+      tags: [Storage]
+      operationId: configureOrganizationBucket
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfiguration' } } } }
+      responses:
+        '200': { description: Configuration saved after CRUD validation, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfigurationStatus' } } } }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
+    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof; X-App-ID is also required }
+  parameters:
+    OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
+    EntryId: { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    ActorRef:
+      type: object
+      required: [type, id]
+      properties: { type: { type: string, enum: [carbon, silicon, application] }, id: { type: string } }
+    FolderCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        parent_id: { type: [string, 'null'], format: uuid }
+        root_type: { type: string, enum: [public, private, tag], description: Required only when creating at organization root }
+        tag: { type: string, description: Required for a tag root }
+        invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
+    Entry:
+      type: object
+      required: [id, org_id, type, name, permanent_url, owner, effective_access, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string }
+        type: { type: string, enum: [file, folder] }
+        name: { type: string }
+        parent_id: { type: [string, 'null'], format: uuid }
+        root_type: { type: string, enum: [public, private, tag] }
+        tag: { type: [string, 'null'] }
+        content_type: { type: [string, 'null'] }
+        size: { type: [integer, 'null'], minimum: 0 }
+        permanent_url: { type: string, format: uri }
+        owner: { $ref: '#/components/schemas/ActorRef' }
+        origin_app_id: { type: [string, 'null'] }
+        effective_access: { type: array, items: { type: string, enum: [read, write, delete, manage_permissions] } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at: { type: [string, 'null'], format: date-time }
+    EntryPage:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/Entry' } }, next_cursor: { type: [string, 'null'] } }
+    TemporaryUrl:
+      type: object
+      required: [url, expires_at]
+      properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } }
+    MultipartUpload:
+      type: object
+      required: [upload_id, part_size, part_count, expires_at]
+      properties: { upload_id: { type: string }, part_size: { type: integer, minimum: 8388608, maximum: 5368709120 }, part_count: { type: integer, minimum: 1, maximum: 10000 }, expires_at: { type: string, format: date-time } }
+    PermissionGrantCreate:
+      type: object
+      required: [principal, access]
+      properties: { principal: { $ref: '#/components/schemas/ActorRef' }, access: { type: array, uniqueItems: true, items: { type: string, enum: [read, write] } }, inherit: { type: boolean, default: true } }
+    PermissionGrant:
+      allOf:
+        - $ref: '#/components/schemas/PermissionGrantCreate'
+        - type: object
+          required: [id, granted_by, created_at]
+          properties: { id: { type: string, format: uuid }, granted_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    AccessRequest:
+      type: object
+      required: [id, entry_id, requested_by, access, status, created_at]
+      properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { type: string, enum: [read, write] }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
+    SearchResult:
+      type: object
+      required: [entry, score, filename_match, content_hits]
+      properties: { entry: { $ref: '#/components/schemas/Entry' }, score: { type: number }, filename_match: { type: boolean }, content_hits: { type: integer, minimum: 0 }, snippets: { type: array, items: { type: string } } }
+    FileVersion:
+      type: object
+      required: [id, number, size, created_by, created_at]
+      properties: { id: { type: string }, number: { type: integer, minimum: 1 }, size: { type: integer }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    BucketConfiguration:
+      type: object
+      required: [bucket_name, region, role_arn, prefix, aws_account_id, encryption_mode]
+      properties: { bucket_name: { type: string }, region: { type: string }, role_arn: { type: string }, prefix: { type: string }, aws_account_id: { type: string }, encryption_mode: { type: string, enum: [sse_s3, sse_kms] }, kms_key_arn: { type: string } }
+    BucketConfigurationStatus:
+      type: object
+      required: [status, tested_at]
+      properties: { status: { type: string, enum: [configured, failed] }, tested_at: { type: string, format: date-time }, failure_reason: { type: [string, 'null'] } }
+    Error:
+      type: object
+      required: [error]
+      properties: { error: { type: object, required: [code, message], properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } }
