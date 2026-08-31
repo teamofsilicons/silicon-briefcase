@@ -19,6 +19,42 @@ Briefcase is an organization-scoped filesystem for Carbons, Silicons, and applic
 - **Organization context:** Authenticated operations require `X-Org-ID`.
 - **Idempotency:** Creation and upload-finalization operations require `Idempotency-Key` so retries do not create duplicate resources.
 
+Briefcase verifies a bearer online in two fail-closed steps. It sends the token
+as form data to the configured IAM introspection endpoint using the Briefcase
+application's HTTP Basic credentials and `X-Org-ID`, then sends that same token
+to `/api/v1/oauth/userinfo` using Bearer authentication and the same
+`X-Org-ID`. The responses must agree on `principal_id`/`sub`, actor type,
+membership ID, and public organization handle. Introspection expiry is a Unix
+integer. A current `org_role` and `tags` array are also required from userinfo;
+missing authorization facts never fall back to webhook projections.
+
+For OBO, Briefcase sends IAM the published singular `action` request with HTTP
+Basic authentication, `X-Org-ID`, and a deterministic
+`Idempotency-Key: briefcase-obo-v1-<sha256(proof)>`. The proof itself is not
+placed in the key or logs. A successful response must bind the issuer,
+audience, official actor reference (`principal_id`, `type`, `public_id`), public
+organization handle, action, optional resource, and expiry. Because IAM's
+published OBO result does not contain authorization role or tags, Briefcase
+requires the coordinated top-level `org_role` and `tags` extension and denies
+the request when either is absent.
+
+### IAM webhook receiver
+
+`POST /webhook/` accepts IAM's published application-event envelope. It
+requires `X-Silicon-IAM-Event-ID`, `X-Silicon-IAM-Timestamp`,
+`X-Silicon-IAM-Key-Version`, and
+`X-Silicon-IAM-Signature: v1=<64 lowercase hex characters>`. The signature is
+HMAC-SHA-256 over `{timestamp}.{exact raw body bytes}`. Briefcase rejects an
+unexpected key version, a timestamp outside the configured five-minute window,
+duplicate header values, a signature mismatch, any envelope version other than
+`1.0`, or a body `event_id` that differs from the signed header.
+
+The published envelope has no top-level tenant handle and aggregate UUIDs are
+not public organization identifiers. Every event delivered to Briefcase must
+therefore include the public IAM organization handle as the string
+`data.org_id`; an event without it is rejected instead of being routed by an
+aggregate UUID.
+
 ### Entry model
 
 Files and folders are both entries. Every entry has an owner, permanent authenticated URL, parent, effective access, timestamps, and one of three inherited root types:
@@ -89,7 +125,7 @@ Deletion is recoverable for 45 days. OBO applications cannot delete files they d
 
 ### `POST /entries/{entry_id}/download-url`
 
-Creates a temporary CDN URL for a file.
+Creates a temporary provider-signed URL for a file.
 
 - **Authentication:** Bearer or OBO Access.
 - **Returns:** URL and expiry.
@@ -110,6 +146,10 @@ Uploads a file of at most 100 MiB in one request.
 - **Returns:** Created file entry.
 
 The caller requires write access to the destination. Files larger than 100 MiB receive `413` and must use multipart upload.
+An OBO client must serialize the `parent_id` part before the binary `file`
+part. Briefcase authenticates the proof against that exact destination before
+it accepts file bytes. When the optional multipart `app_id` is present, it must
+exactly match `X-App-ID`.
 
 ### `POST /multipart-uploads`
 
@@ -211,7 +251,9 @@ Searches visible filenames and supported document contents.
 - **Query:** `q` and optional limit from 1 to 20.
 - **Returns:** Ranked, permission-filtered results.
 
-Filename matches rank above content matches. Content results include match count and optional snippets. Search indexes must be updated when access is granted, revoked, or inherited differently so they never leak inaccessible content.
+Filename matches rank above content matches. Content results include match count
+and optional snippets. Authorization is applied again in the search query, so
+permission changes do not rely on duplicating content into ACL-specific indexes.
 
 ## File versions
 
@@ -222,16 +264,22 @@ Lists up to the last 50 versions of a file.
 - **Authentication:** Bearer or OBO Access.
 - **Returns:** Version ID, number, size, author, and time.
 
-The caller must be able to read the current file. Whether old versions can have stricter permissions than the current entry should be explicitly decided.
+The caller must be able to read the current file. Historical versions inherit
+the current entry's authorization boundary and do not carry independent ACLs.
 
 ### `POST /entries/{entry_id}/versions/{version_id}/restore`
 
 Restores an older version.
 
 - **Authentication:** Bearer or OBO Access.
+- **Required header:** `Idempotency-Key`.
 - **Returns:** Updated file entry.
 
 Restoration does not erase later history. It copies the selected content into a new current version and records the restoring actor.
+The v1 contract is synchronous. Deployments therefore give this route a
+separate, configurable deadline and concurrency budget; large cross-target
+restores stream one bounded multipart range at a time and may keep the request
+open substantially longer than an ordinary upload.
 
 ## Bin
 
@@ -251,7 +299,11 @@ Restores a deleted entry.
 - **Authentication:** Bearer or OBO Access.
 - **Returns:** Restored entry.
 
-If the original parent no longer exists or is inaccessible, Briefcase needs a defined fallback destination. Restoring a folder restores its retained descendants and permission structure.
+If the original parent no longer exists or cannot accept the entry, Briefcase
+uses the actor's Private folder and chooses a deterministic collision-safe name.
+A folder restore atomically restores its retained descendants and permission
+structure. Once the persisted 45-day `purge_after` deadline has elapsed, the
+entry is no longer restorable and is returned as not found.
 
 ## Organization storage
 
@@ -307,7 +359,14 @@ Open permanent URL without access
 - There is no endpoint to permanently erase a bin item before 45 days.
 - Automatic multipart-upload expiry and cleanup are not exposed.
 - Search indexing status and unsupported-document behavior are not represented.
-- OBO Access needs an explicit `X-App-ID` parameter in the machine-readable contract.
+- IAM must guarantee that the bearer accepted by the configured introspection
+  endpoint is also accepted by `/oauth/userinfo` with the same organization
+  context, including current `org_role` and `tags` claims.
+- IAM's OBO success schema must add current `org_role` and `tags`, or publish an
+  equivalent authorization endpoint; the published response alone cannot
+  authorize Briefcase resources.
+- IAM's webhook event schemas must require a public organization handle at
+  `data.org_id` for every event routed to Briefcase.
 - BYO-S3 configuration read, remove, rotate-role, and retest endpoints are missing.
 - File replacement, copy, bulk move, and bulk delete operations are missing.
 - Malware scanning, quarantine, legal hold, storage quotas, and content safety are not defined.

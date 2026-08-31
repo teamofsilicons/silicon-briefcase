@@ -8,6 +8,7 @@ servers:
 security:
   - bearerAuth: []
   - oboAccess: []
+    appId: []
 tags:
   - name: Entries
   - name: Uploads
@@ -90,7 +91,7 @@ paths:
         - $ref: '#/components/parameters/EntryId'
       responses:
         '201':
-          description: Twelve-hour CDN URL
+          description: Twelve-hour provider-signed URL
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TemporaryUrl' }
@@ -105,6 +106,7 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
+        description: For OBO Access, clients must serialize the `parent_id` part before the binary `file` part so IAM can verify the proof's exact destination binding before Briefcase accepts file bytes.
         content:
           multipart/form-data:
             schema:
@@ -268,6 +270,7 @@ paths:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/EntryId'
         - { name: version_id, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200': { description: Version restored as a new current version, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         default: { $ref: '#/components/responses/Error' }
@@ -293,6 +296,8 @@ paths:
     put:
       tags: [Storage]
       operationId: configureOrganizationBucket
+      security:
+        - bearerAuth: []
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfiguration' } } } }
       responses:
@@ -301,7 +306,8 @@ paths:
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
-    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof; X-App-ID is also required }
+    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof }
+    appId: { type: apiKey, in: header, name: X-App-ID, description: Originating application identifier required together with an OBO Access proof }
   parameters:
     OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
     EntryId: { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
