@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16.9-bookworm
+    environment:
+      POSTGRES_DB: briefcase
+      POSTGRES_USER: briefcase
+      POSTGRES_PASSWORD: briefcase-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U briefcase -d briefcase"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - briefcase-postgres:/var/lib/postgresql/data
+      - ./ops/postgres/init:/docker-entrypoint-initdb.d:ro
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: briefcase-local
+      MINIO_ROOT_PASSWORD: briefcase-local-secret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - briefcase-minio:/data
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - >-
+        mc alias set local http://minio:9000 briefcase-local briefcase-local-secret
+        && mc mb --ignore-existing local/briefcase-local
+
+volumes:
+  briefcase-postgres:
+  briefcase-minio:
