@@ -187,14 +187,22 @@ pub struct EntryPatchDto {
     pub parent_id: Option<Uuid>,
 }
 
-/// Temporary delivery URL response.
-#[derive(Clone, Debug, Serialize)]
-pub struct TemporaryUrlDto {
-    /// Signed delivery URL.
-    pub url: Url,
-    /// Absolute expiry.
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
+/// Whether a permanent URL should return bytes for rendering or downloading.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispositionDto {
+    /// Stream the bytes for in-place rendering.
+    Inline,
+    /// Stream the bytes as a local download.
+    Attachment,
+}
+
+/// Query parameters accepted by the clean permanent URL.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathContentQuery {
+    /// Omission returns entry metadata instead of content.
+    pub disposition: Option<DispositionDto>,
 }
 
 /// Multipart-upload initialization request.

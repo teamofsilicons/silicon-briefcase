@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         content::{
-            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand,
+            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand, ContentIntent,
             InitiateMultipartCommand, RestoreVersionCommand, SmallUploadCommand, StagedContent,
         },
         context::ExecutionContext,
@@ -28,6 +28,7 @@ use crate::{
     },
     domain::{
         entry::EntryName,
+        ids::EntryId,
         multipart::{MULTIPART_MAX_PART_BYTES, SINGLE_UPLOAD_MAX_BYTES},
         storage::EncryptionMode,
     },
@@ -36,10 +37,11 @@ use crate::{
 
 use super::super::{
     auth::{self, CredentialMode, IamAction},
+    delivery,
     dto::{
         BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
         EncryptionModeDto, EntryDto, FileVersionPageDto, MultipartCompleteDto,
-        MultipartUploadCreateDto, MultipartUploadDto, TemporaryUrlDto,
+        MultipartUploadCreateDto, MultipartUploadDto,
     },
     extract,
     mapping::metadata_error,
@@ -50,27 +52,56 @@ use super::super::{
 
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
-pub(crate) async fn temporary_download_url(
+/// Streams current file bytes for in-place rendering.
+pub(crate) async fn read_content(
     State(state): State<AppState>,
     headers: HeaderMap,
     path: Result<Path<Uuid>, PathRejection>,
-) -> Result<(StatusCode, Json<TemporaryUrlDto>), AppError> {
+) -> Result<Response, AppError> {
     let entry_id = extract::entry_id(extract::path(path)?)?;
+    serve_entry_content(&state, &headers, entry_id, ContentIntent::Render).await
+}
+
+/// Streams current file bytes as a local download.
+pub(crate) async fn download_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<Response, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    serve_entry_content(&state, &headers, entry_id, ContentIntent::Download).await
+}
+
+async fn serve_entry_content(
+    state: &AppState,
+    headers: &HeaderMap,
+    entry_id: EntryId,
+    intent: ContentIntent,
+) -> Result<Response, AppError> {
     let resource = entry_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::CreateTemporaryUrl, &resource).await?;
-    let download = extract::scoped(
-        &context,
-        state.content.temporary_download_url(&context, entry_id),
+    let action = match intent {
+        ContentIntent::Render => IamAction::ReadContent,
+        ContentIntent::Download => IamAction::DownloadFile,
+    };
+    let context = extract::authenticate(state, headers, action, &resource).await?;
+    serve(state, headers, &context, entry_id, intent).await
+}
+
+/// Streams already-authorized file bytes with the sandboxed response headers.
+pub(crate) async fn serve(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: &ExecutionContext,
+    entry_id: EntryId,
+    intent: ContentIntent,
+) -> Result<Response, AppError> {
+    let range = delivery::requested_range(headers)?;
+    let delivery = extract::scoped(
+        context,
+        state.content.open_content(context, entry_id, intent, range),
     )
     .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(TemporaryUrlDto {
-            url: download.url,
-            expires_at: download.expires_at,
-        }),
-    ))
+    delivery::response(delivery, intent)
 }
 
 pub(crate) async fn upload_small(

@@ -1,6 +1,6 @@
 //! AWS S3 object-storage adapter.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use aws_config::{SdkConfig, sts::AssumeRoleProvider};
@@ -8,7 +8,6 @@ use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
     Client as S3Client,
     config::Region,
-    presigning::PresigningConfig,
     types::{
         ChecksumAlgorithm, ChecksumMode, ChecksumType, CompletedMultipartUpload, CompletedPart,
         ServerSideEncryption,
@@ -20,6 +19,7 @@ use aws_smithy_types::{
     timeout::TimeoutConfig,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures::StreamExt as _;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -27,6 +27,7 @@ use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufWriter},
     sync::RwLock,
 };
+use tokio_util::io::ReaderStream;
 use tracing::warn;
 use url::Url;
 use uuid::Uuid;
@@ -34,8 +35,9 @@ use uuid::Uuid;
 use crate::{
     application::ports::{
         CopyObjectRequest, DownloadRangeRequest, ObjectChecksum, ObjectChecksumAlgorithm,
-        ObjectChecksumType, ObjectKey, ObjectMetadata, ObjectStore, ObjectStoreError,
-        StorageTarget, StorageValidation, StoredObject, StoredPart, UploadPartRequest,
+        ObjectChecksumType, ObjectKey, ObjectMetadata, ObjectStore, ObjectStoreError, OpenObject,
+        OpenObjectRequest, StorageTarget, StorageValidation, StoredObject, StoredPart,
+        UploadPartRequest,
     },
     config::{S3Encryption, S3Settings},
     domain::actor::OrganizationId,
@@ -736,6 +738,63 @@ impl ObjectStore for S3ObjectStore {
         })
     }
 
+    async fn open_object(
+        &self,
+        request: OpenObjectRequest<'_>,
+    ) -> Result<OpenObject, ObjectStoreError> {
+        let target = request.target;
+        let clients = self.clients(target).await?;
+        let output = clients
+            .s3
+            .get_object()
+            .bucket(&target.bucket)
+            .key(Self::full_key(target, request.key))
+            .set_version_id(request.provider_version_id.map(str::to_owned))
+            .set_range(
+                request
+                    .range
+                    .map(|range| format!("bytes={}-{}", range.start, range.end)),
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                if error
+                    .as_service_error()
+                    .is_some_and(aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key)
+                {
+                    ObjectStoreError::NotFound
+                } else {
+                    ObjectStoreError::Unavailable
+                }
+            })?;
+        let served_bytes = u64::try_from(output.content_length().unwrap_or_default())
+            .map_err(|error| ObjectStoreError::Internal(error.into()))?;
+        // A ranged read reports the complete size only in Content-Range; the
+        // provider must agree with the range Briefcase asked for.
+        let (total_size, range) = match request.range {
+            None => (served_bytes, None),
+            Some(range) => {
+                let total_size = output
+                    .content_range()
+                    .and_then(|value| value.rsplit_once('/'))
+                    .and_then(|(_, total)| total.trim().parse::<u64>().ok())
+                    .ok_or(ObjectStoreError::Conflict)?;
+                if served_bytes != range.length() {
+                    return Err(ObjectStoreError::Conflict);
+                }
+                (total_size, Some(range))
+            }
+        };
+        let etag = output.e_tag().map(str::to_owned);
+        let body = ReaderStream::new(output.body.into_async_read()).boxed();
+        Ok(OpenObject {
+            total_size,
+            range,
+            etag,
+            body,
+        })
+    }
+
     async fn get_to_file(
         &self,
         target: &StorageTarget,
@@ -1146,34 +1205,6 @@ impl ObjectStore for S3ObjectStore {
             }
             Err(_) => Err(ObjectStoreError::Unavailable),
         }
-    }
-
-    async fn presign_get(
-        &self,
-        target: &StorageTarget,
-        key: &ObjectKey,
-        provider_version_id: Option<&str>,
-        lifetime: Duration,
-        download_name: &str,
-    ) -> Result<Url, ObjectStoreError> {
-        let clients = self.clients(target).await?;
-        let disposition_name = download_name
-            .chars()
-            .filter(|character| !character.is_control() && !matches!(character, '"' | '\\'))
-            .collect::<String>();
-        let config = PresigningConfig::expires_in(lifetime)
-            .map_err(|error| ObjectStoreError::Internal(error.into()))?;
-        let request = clients
-            .s3
-            .get_object()
-            .bucket(&target.bucket)
-            .key(Self::full_key(target, key))
-            .set_version_id(provider_version_id.map(str::to_owned))
-            .response_content_disposition(format!("attachment; filename=\"{disposition_name}\""))
-            .presigned(config)
-            .await
-            .map_err(|_| ObjectStoreError::Unavailable)?;
-        Url::parse(request.uri()).map_err(|error| ObjectStoreError::Internal(error.into()))
     }
 
     async fn validate_configuration(

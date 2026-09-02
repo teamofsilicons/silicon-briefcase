@@ -32,6 +32,7 @@ use crate::{
 
 mod auth;
 pub mod cursor;
+mod delivery;
 pub mod dto;
 mod extract;
 mod handlers;
@@ -233,6 +234,14 @@ fn ordinary_routes() -> Router<AppState> {
             post(permissions::decide_access_request),
         )
         .route("/api/v1/search", get(entries::search))
+        .route(
+            "/api/v1/entries/{entry_id}/content",
+            get(content::read_content),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/download",
+            get(content::download_content),
+        )
         .route("/org/{org_id}/{*path}", get(entries::resolve_path))
         .route(
             "/api/v1/entries/{entry_id}/versions",
@@ -247,10 +256,6 @@ fn ordinary_routes() -> Router<AppState> {
 
 fn upload_control_routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/v1/entries/{entry_id}/download-url",
-            post(content::temporary_download_url),
-        )
         .route(
             "/api/v1/multipart-uploads",
             post(content::initiate_multipart),
@@ -326,13 +331,15 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 22] = [
+    const CONTRACT: [(&str, &str, &str); 24] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
         ("/entries/{entry_id}", "patch", "200"),
         ("/entries/{entry_id}", "delete", "204"),
-        ("/entries/{entry_id}/download-url", "post", "201"),
+        ("/entries/{entry_id}/content", "get", "200"),
+        ("/entries/{entry_id}/download", "get", "200"),
+        ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
         ("/multipart-uploads", "post", "201"),
         (
@@ -442,10 +449,11 @@ mod tests {
                 .replace("{upload_id}", &identifier)
                 .replace("{version_id}", &identifier)
                 .replace("{part_number}", "1");
-            let path = if path == "/search" {
-                format!("/api/v1{path}?q=registered")
-            } else {
-                format!("/api/v1{path}")
+            let path = match path.as_str() {
+                "/search" => format!("/api/v1{path}?q=registered"),
+                // The permanent URL is served outside the versioned API base.
+                "/org/{org_id}/{path}" => "/org/tos/private/cos:tos/notes.md".to_owned(),
+                _ => format!("/api/v1{path}"),
             };
             let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())?;
             let mut request = Request::builder()

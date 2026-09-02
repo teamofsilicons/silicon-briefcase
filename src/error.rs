@@ -41,6 +41,12 @@ pub enum AppError {
     /// The body exceeds the route-specific byte limit.
     #[error("request body is too large")]
     PayloadTooLarge,
+    /// The requested byte range lies outside the file.
+    #[error("requested range is not satisfiable")]
+    RangeNotSatisfiable {
+        /// Complete size of the addressed content.
+        total_size: u64,
+    },
     /// A caller exceeded an abuse or capacity limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -150,6 +156,11 @@ impl AppError {
                 Cow::Borrowed("payload_too_large"),
                 Cow::Borrowed("The request body exceeds the allowed size."),
             ),
+            Self::RangeNotSatisfiable { .. } => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Cow::Borrowed("range_not_satisfiable"),
+                Cow::Borrowed("The requested byte range is outside the content."),
+            ),
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Cow::Borrowed("rate_limited"),
@@ -215,6 +226,10 @@ impl IntoResponse for AppError {
             } => Some(*retry_after_seconds),
             _ => None,
         };
+        let unsatisfiable_total_size = match &self {
+            Self::RangeNotSatisfiable { total_size } => Some(*total_size),
+            _ => None,
+        };
         let (status, code, message) = self.public_parts();
         let mut response = (
             status,
@@ -234,6 +249,13 @@ impl IntoResponse for AppError {
             response
                 .headers_mut()
                 .insert(http::header::RETRY_AFTER, value);
+        }
+        if let Some(total_size) = unsatisfiable_total_size
+            && let Ok(value) = format!("bytes */{total_size}").parse()
+        {
+            response
+                .headers_mut()
+                .insert(http::header::CONTENT_RANGE, value);
         }
         response
     }

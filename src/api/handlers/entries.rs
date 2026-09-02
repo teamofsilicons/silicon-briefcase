@@ -7,35 +7,42 @@ use axum::{
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse as _, Response},
 };
 use uuid::Uuid;
 
 use crate::{
-    application::service::{
-        CreateFolderCommand, EntryListItem, InitialPermission, ListBinQuery,
-        ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
-        SearchQuery, UpdateEntryCommand,
+    application::{
+        content::ContentIntent,
+        service::{
+            CreateFolderCommand, EntryListItem, InitialPermission, ListBinQuery,
+            ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
+            SearchQuery, UpdateEntryCommand,
+        },
     },
     domain::{
         actor::{ActorId, ActorKind, ActorRef, TagName},
-        entry::{EntryBoundary, EntryName},
+        entry::{EntryBoundary, EntryKind, EntryName},
         permission::AccessLevel,
     },
     error::AppError,
 };
 
-use super::super::{
-    auth::IamAction,
-    cursor,
-    dto::{
-        ActorRefDto, ActorTypeDto, EntryDto, EntryPageDto, EntryPatchDto, FolderCreateDto,
-        GrantAccessDto, ListEntriesQuery, PermissionGrantCreateDto, RootTypeDto, SearchPageDto,
-        SearchQueryDto,
+use super::{
+    super::{
+        auth::IamAction,
+        cursor,
+        dto::{
+            ActorRefDto, ActorTypeDto, DispositionDto, EntryDto, EntryPageDto, EntryPatchDto,
+            FolderCreateDto, GrantAccessDto, ListEntriesQuery, PathContentQuery,
+            PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
+        },
+        extract,
+        mapping::metadata_error,
+        state::AppState,
+        validation,
     },
-    extract,
-    mapping::metadata_error,
-    state::AppState,
-    validation,
+    content,
 };
 
 pub(crate) async fn list_entries(
@@ -122,22 +129,44 @@ pub(crate) async fn get_entry(
 /// Serves the contracted clean permanent URL `/org/{org_id}/{path}`.
 ///
 /// The organization segment must match the authenticated tenant header, and an
-/// entry the caller cannot read is reported exactly like a missing one.
+/// entry the caller cannot read is reported exactly like a missing one. The
+/// same URL returns the entry with its effective access by default, and the
+/// sandboxed bytes when a disposition is requested.
 pub(crate) async fn resolve_path(
     State(state): State<AppState>,
     headers: HeaderMap,
     path: Result<Path<(String, String)>, PathRejection>,
-) -> Result<Json<EntryDto>, AppError> {
+    query: Result<Query<PathContentQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let query = extract::query(query)?;
     let (organization, entry_path) = extract::entry_location(extract::path(path)?, &headers)?;
     let resource = format!("{organization}/{entry_path}");
-    let context = extract::authenticate(&state, &headers, IamAction::ReadEntry, &resource).await?;
+    let intent = query.disposition.map(content_intent);
+    let action = intent.map_or(IamAction::ReadEntry, |intent| match intent {
+        ContentIntent::Render => IamAction::ReadContent,
+        ContentIntent::Download => IamAction::DownloadFile,
+    });
+    let context = extract::authenticate(&state, &headers, action, &resource).await?;
     let entry = extract::scoped(
         &context,
         state.metadata.get_entry_by_path(&context, &entry_path),
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(entry)?))
+    let Some(intent) = intent else {
+        return Ok(Json(state.mapper.entry(entry)?).into_response());
+    };
+    if entry.entry.kind != EntryKind::File {
+        return Err(AppError::NotFound);
+    }
+    content::serve(&state, &headers, &context, entry.entry.id, intent).await
+}
+
+const fn content_intent(value: DispositionDto) -> ContentIntent {
+    match value {
+        DispositionDto::Inline => ContentIntent::Render,
+        DispositionDto::Attachment => ContentIntent::Download,
+    }
 }
 
 pub(crate) async fn update_entry(

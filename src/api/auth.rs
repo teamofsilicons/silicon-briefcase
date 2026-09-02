@@ -41,8 +41,10 @@ pub enum IamAction {
     UpdateEntry,
     /// Move an entry to the bin.
     DeleteEntry,
-    /// Create a temporary file URL.
-    CreateTemporaryUrl,
+    /// Stream current file content for rendering.
+    ReadContent,
+    /// Download current file content.
+    DownloadFile,
     /// Upload a small file.
     UploadFile,
     /// Initialize multipart upload.
@@ -87,7 +89,8 @@ impl IamAction {
             Self::ReadEntry => "briefcase.entry.read",
             Self::UpdateEntry => "briefcase.entry.update",
             Self::DeleteEntry => "briefcase.entry.delete",
-            Self::CreateTemporaryUrl => "briefcase.file.temporary_url",
+            Self::ReadContent => "briefcase.file.read_content",
+            Self::DownloadFile => "briefcase.file.download",
             Self::UploadFile => "briefcase.file.upload",
             Self::InitiateMultipart => "briefcase.multipart.initiate",
             Self::UploadMultipartPart => "briefcase.multipart.upload_part",
@@ -326,10 +329,8 @@ mod tests {
             (IamAction::ReadEntry, "briefcase.entry.read"),
             (IamAction::UpdateEntry, "briefcase.entry.update"),
             (IamAction::DeleteEntry, "briefcase.entry.delete"),
-            (
-                IamAction::CreateTemporaryUrl,
-                "briefcase.file.temporary_url",
-            ),
+            (IamAction::ReadContent, "briefcase.file.read_content"),
+            (IamAction::DownloadFile, "briefcase.file.download"),
             (IamAction::UploadFile, "briefcase.file.upload"),
             (IamAction::InitiateMultipart, "briefcase.multipart.initiate"),
             (

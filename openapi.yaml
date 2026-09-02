@@ -82,19 +82,36 @@ paths:
       responses:
         '204': { description: Entry moved to the 45-day bin }
         default: { $ref: '#/components/responses/Error' }
-  /entries/{entry_id}/download-url:
-    post:
+  /entries/{entry_id}/content:
+    get:
       tags: [Entries]
-      operationId: createTemporaryDownloadUrl
+      operationId: readEntryContent
+      summary: Stream current file bytes for sandboxed in-place rendering
+      description: >-
+        Briefcase relays the bytes itself, so the response is always bound to a
+        current IAM identity and is never cacheable. Responses are sandboxed by
+        Content-Security-Policy and served with `X-Content-Type-Options:
+        nosniff`. Byte ranges are supported for media playback.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/EntryId'
+        - $ref: '#/components/parameters/Range'
       responses:
-        '201':
-          description: Twelve-hour provider-signed URL
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TemporaryUrl' }
+        '200': { $ref: '#/components/responses/FileContent' }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/download:
+    get:
+      tags: [Entries]
+      operationId: downloadEntry
+      summary: Download current file bytes as an attachment
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+        - $ref: '#/components/parameters/Range'
+      responses:
+        '200': { $ref: '#/components/responses/FileContent' }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
         default: { $ref: '#/components/responses/Error' }
   /uploads:
     post:
@@ -303,6 +320,35 @@ paths:
       responses:
         '200': { description: Configuration saved after CRUD validation, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfigurationStatus' } } } }
         default: { $ref: '#/components/responses/Error' }
+  /org/{org_id}/{path}:
+    servers:
+      - url: https://backend.briefcase.teamofsilicons.com
+    get:
+      tags: [Entries]
+      operationId: resolvePermanentUrl
+      summary: Resolve the clean permanent URL of an entry
+      description: >-
+        The path segment mirrors the folder structure exactly, for example
+        `/org/tos/private/cos:tos/top_secret/this_secret.md`. The organization
+        segment must match `X-Org-ID`. Without `disposition` the entry and its
+        effective access are returned; with `disposition` the file bytes are
+        streamed. Anything the caller cannot read answers `404`.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: org_id, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string, maxLength: 2048 }, description: Organization-relative entry path }
+        - { name: disposition, in: query, schema: { type: string, enum: [inline, attachment] }, description: Omit to receive entry metadata }
+        - $ref: '#/components/parameters/Range'
+      responses:
+        '200':
+          description: Entry metadata, or complete file bytes when a disposition is requested
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
@@ -314,8 +360,33 @@ components:
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
     Cursor: { name: cursor, in: query, schema: { type: string } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+    Range:
+      name: Range
+      in: header
+      description: Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned.
+      schema: { type: string, pattern: '^bytes=(\d+-\d*|-\d+)$' }
   responses:
     Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    FileContent:
+      description: Complete file bytes
+      headers:
+        Content-Disposition: { schema: { type: string }, description: '`inline` for content reads and `attachment` for downloads, with both the quoted and RFC 5987 file name' }
+        Content-Security-Policy: { schema: { const: "sandbox; default-src 'none'; frame-ancestors 'none'" } }
+        X-Content-Type-Options: { schema: { const: nosniff } }
+        Cache-Control: { schema: { const: private, no-store } }
+        Accept-Ranges: { schema: { const: bytes } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
+    PartialFileContent:
+      description: Requested byte range of the file
+      headers:
+        Content-Range: { schema: { type: string }, description: 'bytes {first}-{last}/{complete size}' }
+        Content-Disposition: { schema: { type: string } }
+        Accept-Ranges: { schema: { const: bytes } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
   schemas:
     ActorRef:
       type: object
@@ -332,18 +403,26 @@ components:
         invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
     Entry:
       type: object
-      required: [id, org_id, type, name, permanent_url, owner, effective_access, created_at, updated_at]
+      required: [id, org_id, type, name, path, permanent_url, owner, effective_access, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         org_id: { type: string }
         type: { type: string, enum: [file, folder] }
         name: { type: string }
+        path: { type: string, maxLength: 2048, description: Organization-relative path without a leading separator }
         parent_id: { type: [string, 'null'], format: uuid }
         root_type: { type: string, enum: [public, private, tag] }
         tag: { type: [string, 'null'] }
         content_type: { type: [string, 'null'] }
         size: { type: [integer, 'null'], minimum: 0 }
-        permanent_url: { type: string, format: uri }
+        render:
+          description: Renderer a client should open for a file; `unsupported` means metadata and CRUD only.
+          oneOf:
+            - type: 'null'
+            - { type: string, enum: [image, video, document, spreadsheet, presentation, audio, archive, code, unsupported] }
+        permanent_url: { type: string, format: uri, description: Clean permanent URL that shows the folder structure }
+        content_url: { type: [string, 'null'], format: uri, description: Authenticated sandboxed content URL for a file }
+        download_url: { type: [string, 'null'], format: uri, description: Authenticated attachment URL for a file }
         owner: { $ref: '#/components/schemas/ActorRef' }
         origin_app_id: { type: [string, 'null'] }
         effective_access: { type: array, items: { type: string, enum: [read, write, delete, manage_permissions] } }
@@ -354,10 +433,6 @@ components:
       type: object
       required: [items]
       properties: { items: { type: array, items: { $ref: '#/components/schemas/Entry' } }, next_cursor: { type: [string, 'null'] } }
-    TemporaryUrl:
-      type: object
-      required: [url, expires_at]
-      properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } }
     MultipartUpload:
       type: object
       required: [upload_id, part_size, part_count, expires_at]

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         content::{
-            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand,
+            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand, ContentIntent,
             ContentRepository, DownloadTarget, InitiateMultipartCommand, MultipartAbortTarget,
             MultipartCompletionPreparation, MultipartPartTarget, MultipartPreparation,
             MultipartReceipt, Prepared, RESTORE_LEASE_DURATION, RestorePreparation,
@@ -766,6 +766,8 @@ impl ContentRepository for PostgresContentRepository {
         let result = DownloadTarget {
             entry_id,
             filename: entry.entry.name.as_str().to_owned(),
+            content_type: version.content_type.clone(),
+            size: u64::try_from(version.size_bytes).map_err(|_| internal_integrity())?,
             target,
             key: object_key(version.object_key)?,
             provider_version_id: version.object_version_id,
@@ -774,11 +776,11 @@ impl ContentRepository for PostgresContentRepository {
         Ok(result)
     }
 
-    async fn record_download_url(
+    async fn record_content_access(
         &self,
         context: &ExecutionContext,
         entry_id: EntryId,
-        expires_at: OffsetDateTime,
+        intent: ContentIntent,
     ) -> std::result::Result<(), AppError> {
         let mut request = content_begin(&self.repository, context).await?;
         let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
@@ -792,8 +794,8 @@ impl ContentRepository for PostgresContentRepository {
             &super::NewAuditEvent {
                 audit_id: Uuid::now_v7(),
                 entry_id: Some(entry_id.as_uuid()),
-                action: "entry.download_url_issued.v1".to_owned(),
-                metadata: json!({"expires_at": expires_at}),
+                action: intent.audit_action().to_owned(),
+                metadata: json!({}),
             },
         )
         .await
