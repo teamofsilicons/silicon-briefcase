@@ -23,7 +23,7 @@ use crate::{
     domain::{
         actor::{ActorId, ActorKind, ActorRef, TagName},
         entry::{EntryBoundary, EntryKind, EntryName},
-        permission::AccessLevel,
+        permission::{AccessRight, GrantedAccess},
     },
     error::AppError,
 };
@@ -304,7 +304,7 @@ fn folder_command(body: FolderCreateDto) -> Result<CreateFolderCommand, AppError
 fn initial_permission(value: PermissionGrantCreateDto) -> Result<InitialPermission, AppError> {
     Ok(InitialPermission {
         principal: actor(value.principal)?,
-        access: access_level(&value.access)?,
+        access: granted_access(&value.access)?,
         inherits_to_descendants: value.inherit,
     })
 }
@@ -321,12 +321,18 @@ pub(crate) fn actor(value: ActorRefDto) -> Result<ActorRef, AppError> {
     Ok(ActorRef::new(kind, id))
 }
 
-pub(crate) fn access_level(values: &[GrantAccessDto]) -> Result<AccessLevel, AppError> {
-    if values.contains(&GrantAccessDto::Write) {
-        Ok(AccessLevel::Write)
-    } else if values.contains(&GrantAccessDto::Read) {
-        Ok(AccessLevel::Read)
-    } else {
-        Err(AppError::validation("invalid_access"))
+/// Converts the requested right names into a validated access set.
+///
+/// An empty set would convey nothing, so it is rejected rather than silently
+/// treated as read-only.
+pub(crate) fn granted_access(values: &[GrantAccessDto]) -> Result<GrantedAccess, AppError> {
+    if values.is_empty() {
+        return Err(AppError::validation("invalid_access"));
     }
+    Ok(GrantedAccess::new(values.iter().map(|value| match value {
+        GrantAccessDto::Read => AccessRight::Read,
+        GrantAccessDto::Write => AccessRight::Write,
+        GrantAccessDto::Update => AccessRight::Update,
+        GrantAccessDto::Delete => AccessRight::Delete,
+    })))
 }

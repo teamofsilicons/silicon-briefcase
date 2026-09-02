@@ -57,6 +57,8 @@ pub enum IamAction {
     AbortMultipart,
     /// List explicit permissions.
     ListPermissions,
+    /// Inspect the caller's own effective access on named targets.
+    InspectPermissions,
     /// Grant explicit permission.
     GrantPermission,
     /// Revoke explicit permission.
@@ -97,6 +99,7 @@ impl IamAction {
             Self::CompleteMultipart => "briefcase.multipart.complete",
             Self::AbortMultipart => "briefcase.multipart.abort",
             Self::ListPermissions => "briefcase.permissions.list",
+            Self::InspectPermissions => "briefcase.permissions.inspect",
             Self::GrantPermission => "briefcase.permissions.grant",
             Self::RevokePermission => "briefcase.permissions.revoke",
             Self::CreateAccessRequest => "briefcase.access_request.create",
@@ -340,6 +343,10 @@ mod tests {
             (IamAction::CompleteMultipart, "briefcase.multipart.complete"),
             (IamAction::AbortMultipart, "briefcase.multipart.abort"),
             (IamAction::ListPermissions, "briefcase.permissions.list"),
+            (
+                IamAction::InspectPermissions,
+                "briefcase.permissions.inspect",
+            ),
             (IamAction::GrantPermission, "briefcase.permissions.grant"),
             (IamAction::RevokePermission, "briefcase.permissions.revoke"),
             (

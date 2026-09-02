@@ -8,8 +8,8 @@ use serde_json::Value;
 use super::dto::{
     AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
     BucketConfigurationDto, CompletedPartDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
-    ListEntriesQuery, MultipartCompleteDto, MultipartUploadCreateDto, PermissionGrantCreateDto,
-    RootTypeDto, SearchQueryDto,
+    GrantAccessDto, ListEntriesQuery, MultipartCompleteDto, MultipartUploadCreateDto,
+    PermissionGrantCreateDto, PermissionInspectionDto, RootTypeDto, SearchQueryDto,
 };
 
 const MIB: u64 = 1_048_576;
@@ -18,6 +18,7 @@ const MAXIMUM_FILE_SIZE: u64 = 5 * 1_024 * 1_024 * 1_024 * 1_024;
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
 const MAXIMUM_SEARCH_LENGTH: usize = 512;
 const MAXIMUM_INVITEES: usize = 100;
+const MAXIMUM_INSPECTED_TARGETS: usize = 100;
 const MAXIMUM_EXTERNAL_IDENTIFIER_BYTES: usize = 255;
 const MAXIMUM_ARN_BYTES: usize = 2_048;
 
@@ -183,6 +184,26 @@ pub fn grant_permission(request: &PermissionGrantCreateDto) -> Result<(), Valida
     errors.finish()
 }
 
+/// Validates a batch permission inspection.
+///
+/// # Errors
+///
+/// Returns all invalid inspection fields.
+pub fn inspect_permissions(request: &PermissionInspectionDto) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    let total = request.entry_ids.len().saturating_add(request.paths.len());
+    if total == 0 {
+        errors.push("targets", "must name at least one entry or path");
+    }
+    if total > MAXIMUM_INSPECTED_TARGETS {
+        errors.push("targets", "must name at most 100 entries and paths");
+    }
+    if request.paths.iter().any(|path| path.trim().is_empty()) {
+        errors.push("paths", "must not contain a blank path");
+    }
+    errors.finish()
+}
+
 /// Validates an access request.
 ///
 /// # Errors
@@ -190,6 +211,7 @@ pub fn grant_permission(request: &PermissionGrantCreateDto) -> Result<(), Valida
 /// Returns all invalid access-request fields.
 pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
+    validate_access_rights(&request.access, "access", &mut errors);
     if let Some(reason) = request.reason.as_deref() {
         if reason.trim().is_empty() {
             errors.push("reason", "must not be blank when provided");
@@ -208,14 +230,17 @@ pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), Validation
 /// Returns all inconsistent access-decision fields.
 pub fn decide_access(request: &AccessRequestDecisionDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
-    match (request.decision, request.access) {
+    match (request.decision, request.access.as_deref()) {
         (AccessDecisionDto::Approve, None) => {
             errors.push("access", "is required when approving");
+        }
+        (AccessDecisionDto::Approve, Some(access)) => {
+            validate_access_rights(access, "access", &mut errors);
         }
         (AccessDecisionDto::Deny, Some(_)) => {
             errors.push("access", "must be omitted when denying");
         }
-        _ => {}
+        (AccessDecisionDto::Deny, None) => {}
     }
     errors.finish()
 }
@@ -314,15 +339,16 @@ fn validate_grant(request: &PermissionGrantCreateDto, prefix: &str, errors: &mut
             "must be carbon or silicon",
         );
     }
-    if request.access.is_empty() {
-        errors.push(format!("{prefix}.access"), "must not be empty");
+    validate_access_rights(&request.access, &format!("{prefix}.access"), errors);
+}
+
+fn validate_access_rights(access: &[GrantAccessDto], field: &str, errors: &mut ValidationErrors) {
+    if access.is_empty() {
+        errors.push(field.to_owned(), "must not be empty");
     }
-    let unique = request.access.iter().copied().collect::<BTreeSet<_>>();
-    if unique.len() != request.access.len() {
-        errors.push(
-            format!("{prefix}.access"),
-            "must not contain duplicate levels",
-        );
+    let unique = access.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != access.len() {
+        errors.push(field.to_owned(), "must not contain duplicate rights");
     }
 }
 

@@ -178,8 +178,8 @@ pub struct PermissionGrantRow {
     pub principal_type: String,
     /// Granted principal identifier.
     pub principal_id: String,
-    /// `read` or `write` base access.
-    pub access_level: String,
+    /// Bitmask of conveyed read/write/update/delete rights.
+    pub access_mask: i16,
     /// Whether the grant flows to descendants.
     pub inherits_to_descendants: bool,
     /// Granting actor kind.
@@ -209,14 +209,14 @@ pub struct AccessRequestRow {
     pub requested_by_type: String,
     /// Requesting actor identifier.
     pub requested_by_id: String,
-    /// Requested base access.
-    pub requested_access: String,
+    /// Bitmask of requested rights.
+    pub requested_access_mask: i16,
     /// Optional user-supplied reason.
     pub reason: Option<String>,
     /// Pending, approved, or denied state.
     pub status: String,
-    /// Access actually granted on approval.
-    pub granted_access: Option<String>,
+    /// Bitmask of rights actually granted on approval.
+    pub granted_access_mask: Option<i16>,
     /// Decision actor kind.
     pub decided_by_type: Option<String>,
     /// Decision actor identifier.

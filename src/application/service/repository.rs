@@ -63,6 +63,17 @@ pub trait MetadataRepository: Send + Sync {
         path: &EntryPath,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
+    /// Loads every active entry addressed by an identifier or a path.
+    ///
+    /// Resolving a batch in one transaction keeps a permission inspection of
+    /// many targets to a single consistent snapshot.
+    async fn find_active_entries(
+        &self,
+        context: &ExecutionContext,
+        entry_ids: &[EntryId],
+        paths: &[EntryPath],
+    ) -> Result<Vec<AuthorizableEntry>, MetadataRepositoryError>;
+
     /// Lists tenant-local active child candidates in stable cursor order.
     async fn list_active_children(
         &self,

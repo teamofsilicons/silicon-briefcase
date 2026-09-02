@@ -1,5 +1,7 @@
 //! Mapping between transport DTOs and application/domain models.
 
+use std::collections::BTreeSet;
+
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use url::Url;
 
@@ -12,16 +14,18 @@ use crate::{
         access::AccessRequestStatus,
         actor::{ActorKind, ActorRef},
         entry::{EntryKind, EntryPath, RootType},
+        ids::EntryId,
         media::RenderKind,
-        permission::{AccessLevel, EffectiveAccess, PermissionGrant},
+        permission::{AccessRight, EffectiveAccess, GrantedAccess, PermissionGrant},
     },
     error::AppError,
 };
 
 use super::dto::{
     AccessRequestDto, AccessRequestStatusDto, ActorRefDto, ActorTypeDto, EffectiveAccessDto,
-    EntryDto, EntryPageDto, EntryTypeDto, FileVersionDto, GrantAccessDto, PermissionGrantDto,
-    PermissionGrantPageDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
+    EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto, FileVersionDto, GrantAccessDto,
+    PermissionGrantDto, PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto,
+    RootTypeDto, SearchPageDto, SearchResultDto,
 };
 
 /// Characters that must not survive unencoded in a permanent-URL segment.
@@ -162,10 +166,54 @@ impl ResponseMapper {
         PermissionGrantDto {
             id: grant.id().as_uuid(),
             principal: actor(grant.principal()),
-            access: access_levels(grant.access()),
+            access: access_rights(grant.access()),
             inherit: grant.inheritance().inherit_flag(),
             granted_by: actor(grant.granted_by()),
             created_at: grant.created_at(),
+        }
+    }
+
+    /// Reports effective access per target and echoes what stayed unresolved.
+    ///
+    /// A requested target is unresolved when it does not exist or is hidden;
+    /// the answer deliberately cannot tell those apart.
+    pub(crate) fn inspection(
+        entry_ids: &[EntryId],
+        paths: &[EntryPath],
+        visible: Vec<AuthorizedEntryView>,
+    ) -> PermissionInspectionResultDto {
+        let resolved_ids: BTreeSet<EntryId> = visible.iter().map(|view| view.entry.id).collect();
+        let resolved_paths: BTreeSet<&str> = visible
+            .iter()
+            .map(|view| view.entry.path.as_str())
+            .collect();
+        let unresolved_entry_ids = entry_ids
+            .iter()
+            .filter(|id| !resolved_ids.contains(id))
+            .map(|id| id.as_uuid())
+            .collect();
+        let unresolved_paths = paths
+            .iter()
+            .filter(|path| !resolved_paths.contains(path.as_str()))
+            .map(|path| path.as_str().to_owned())
+            .collect();
+        let items = visible
+            .into_iter()
+            .map(|view| EffectivePermissionDto {
+                entry_id: view.entry.id.as_uuid(),
+                path: view.entry.path.into_inner(),
+                entry_type: entry_kind(view.entry.kind),
+                effective_access: view
+                    .effective_access
+                    .into_iter()
+                    .map(effective_access)
+                    .collect(),
+            })
+            .collect();
+        PermissionInspectionResultDto {
+            items,
+            unresolved_entry_ids,
+            unresolved_paths,
         }
     }
 
@@ -180,7 +228,7 @@ impl ResponseMapper {
             id: request.id.as_uuid(),
             entry_id: request.entry_id.as_uuid(),
             requested_by: actor(&request.requested_by),
-            access: requested_access(request.requested_access),
+            access: access_rights(request.requested_access),
             status: access_request_status(request.status),
             created_at: request.created_at,
         }
@@ -254,13 +302,6 @@ fn repository_error(error: &MetadataRepositoryError) -> AppError {
     }
 }
 
-const fn requested_access(access: AccessLevel) -> super::dto::RequestedAccessDto {
-    match access {
-        AccessLevel::Read => super::dto::RequestedAccessDto::Read,
-        AccessLevel::Write => super::dto::RequestedAccessDto::Write,
-    }
-}
-
 fn actor(value: &ActorRef) -> ActorRefDto {
     ActorRefDto {
         actor_type: match value.kind() {
@@ -304,16 +345,22 @@ const fn effective_access(value: EffectiveAccess) -> EffectiveAccessDto {
     match value {
         EffectiveAccess::Read => EffectiveAccessDto::Read,
         EffectiveAccess::Write => EffectiveAccessDto::Write,
+        EffectiveAccess::Update => EffectiveAccessDto::Update,
         EffectiveAccess::Delete => EffectiveAccessDto::Delete,
         EffectiveAccess::ManagePermissions => EffectiveAccessDto::ManagePermissions,
     }
 }
 
-fn access_levels(value: AccessLevel) -> Vec<GrantAccessDto> {
-    match value {
-        AccessLevel::Read => vec![GrantAccessDto::Read],
-        AccessLevel::Write => vec![GrantAccessDto::Read, GrantAccessDto::Write],
-    }
+fn access_rights(value: GrantedAccess) -> Vec<GrantAccessDto> {
+    value
+        .rights()
+        .map(|right| match right {
+            AccessRight::Read => GrantAccessDto::Read,
+            AccessRight::Write => GrantAccessDto::Write,
+            AccessRight::Update => GrantAccessDto::Update,
+            AccessRight::Delete => GrantAccessDto::Delete,
+        })
+        .collect()
 }
 
 const fn access_request_status(value: AccessRequestStatus) -> AccessRequestStatusDto {

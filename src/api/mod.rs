@@ -226,6 +226,10 @@ fn ordinary_routes() -> Router<AppState> {
             delete(permissions::revoke_permission),
         )
         .route(
+            "/api/v1/permissions/effective",
+            post(permissions::inspect_permissions),
+        )
+        .route(
             "/api/v1/entries/{entry_id}/access-requests",
             post(permissions::request_access),
         )
@@ -331,7 +335,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 24] = [
+    const CONTRACT: [(&str, &str, &str); 25] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -356,6 +360,7 @@ mod tests {
             "delete",
             "204",
         ),
+        ("/permissions/effective", "post", "200"),
         ("/entries/{entry_id}/access-requests", "post", "201"),
         ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),

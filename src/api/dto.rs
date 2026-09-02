@@ -58,8 +58,10 @@ pub enum RootTypeDto {
 pub enum EffectiveAccessDto {
     /// Read metadata and content.
     Read,
-    /// Modify the entry or create children where applicable.
+    /// Add content that does not exist yet.
     Write,
+    /// Change an entry that already exists.
+    Update,
     /// Move the entry to the recoverable bin.
     Delete,
     /// Grant and revoke explicit permissions.
@@ -251,14 +253,21 @@ pub struct MultipartCompleteDto {
     pub parts: Vec<CompletedPartDto>,
 }
 
-/// Public permission level.
+/// One right conveyed by an invitation or requested through the workflow.
+///
+/// The rights are independent: `update` does not imply `delete`, and `write`
+/// does not imply `update`. Every set implicitly includes `read`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantAccessDto {
     /// Metadata and content read access.
     Read,
-    /// Read plus entry mutation access.
+    /// Add children to a folder or content to a file.
     Write,
+    /// Rename, move, or replace what already exists.
+    Update,
+    /// Move the entry to the recoverable bin.
+    Delete,
 }
 
 /// Permission-grant creation request.
@@ -299,22 +308,49 @@ pub struct PermissionGrantPageDto {
     pub items: Vec<PermissionGrantDto>,
 }
 
-/// Access level requested through the approval workflow.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestedAccessDto {
-    /// Read access.
-    Read,
-    /// Write access.
-    Write,
+/// Batch request for the caller's own effective access.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionInspectionDto {
+    /// Targets addressed by identifier.
+    #[serde(default)]
+    pub entry_ids: Vec<Uuid>,
+    /// Targets addressed by organization-relative path.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// What the caller may do on one inspected target.
+#[derive(Clone, Debug, Serialize)]
+pub struct EffectivePermissionDto {
+    /// Resolved entry identifier.
+    pub entry_id: Uuid,
+    /// Resolved organization-relative path.
+    pub path: String,
+    /// File or folder discriminator.
+    #[serde(rename = "type")]
+    pub entry_type: EntryTypeDto,
+    /// Everything the caller may do on this entry.
+    pub effective_access: Vec<EffectiveAccessDto>,
+}
+
+/// Effective-access answer for a batch of targets.
+#[derive(Clone, Debug, Serialize)]
+pub struct PermissionInspectionResultDto {
+    /// One item per readable target, ordered by path.
+    pub items: Vec<EffectivePermissionDto>,
+    /// Requested identifiers with no readable entry.
+    pub unresolved_entry_ids: Vec<Uuid>,
+    /// Requested paths with no readable entry.
+    pub unresolved_paths: Vec<String>,
 }
 
 /// Access-request creation payload.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessRequestCreateDto {
-    /// Desired access level.
-    pub access: RequestedAccessDto,
+    /// Non-empty set of desired rights.
+    pub access: Vec<GrantAccessDto>,
     /// Optional human-readable context.
     pub reason: Option<String>,
 }
@@ -340,8 +376,8 @@ pub struct AccessRequestDto {
     pub entry_id: Uuid,
     /// Requesting actor.
     pub requested_by: ActorRefDto,
-    /// Requested level.
-    pub access: RequestedAccessDto,
+    /// Requested rights.
+    pub access: Vec<GrantAccessDto>,
     /// Current workflow status.
     pub status: AccessRequestStatusDto,
     /// Creation timestamp.
@@ -365,8 +401,8 @@ pub enum AccessDecisionDto {
 pub struct AccessRequestDecisionDto {
     /// Terminal decision.
     pub decision: AccessDecisionDto,
-    /// Granted level; required on approval and forbidden on denial.
-    pub access: Option<RequestedAccessDto>,
+    /// Granted rights; required on approval and forbidden on denial.
+    pub access: Option<Vec<GrantAccessDto>>,
 }
 
 /// File search query.

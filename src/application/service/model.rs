@@ -10,8 +10,8 @@ use crate::{
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         permission::{
-            AccessLevel, EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput,
-            EntryVisibility, GrantApplication, PermissionGrant,
+            EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput, EntryVisibility,
+            GrantApplication, GrantedAccess, PermissionGrant,
         },
         version::{VersionNumber, VersionSource},
     },
@@ -282,8 +282,8 @@ pub struct ListEntriesQuery {
 pub struct InitialPermission {
     /// Current organization member.
     pub principal: ActorRef,
-    /// Read or write access.
-    pub access: AccessLevel,
+    /// Rights conveyed to the invitee.
+    pub access: GrantedAccess,
     /// Whether access flows to descendants.
     pub inherits_to_descendants: bool,
 }
@@ -388,8 +388,8 @@ pub struct GrantPermissionCommand {
     pub entry_id: EntryId,
     /// Current organization member.
     pub principal: ActorRef,
-    /// Access level.
-    pub access: AccessLevel,
+    /// Rights conveyed by the grant.
+    pub access: GrantedAccess,
     /// Whether access flows to descendants.
     pub inherits_to_descendants: bool,
 }
@@ -408,8 +408,8 @@ pub struct RevokePermissionCommand {
 pub struct RequestAccessCommand {
     /// Target entry from a permanent URL.
     pub entry_id: EntryId,
-    /// Requested access level.
-    pub access: AccessLevel,
+    /// Requested rights.
+    pub access: GrantedAccess,
     /// Optional user-supplied reason.
     pub reason: Option<String>,
 }
@@ -423,7 +423,7 @@ impl RequestAccessCommand {
     /// 1,000 Unicode scalar values after trimming.
     pub fn new(
         entry_id: EntryId,
-        access: AccessLevel,
+        access: GrantedAccess,
         reason: Option<String>,
     ) -> Result<Self, ValidationError> {
         let reason = reason.map(|value| value.trim().to_owned());
@@ -453,14 +453,14 @@ pub struct AccessRequestView {
     pub entry_id: EntryId,
     /// Requesting member.
     pub requested_by: ActorRef,
-    /// Requested access.
-    pub requested_access: AccessLevel,
+    /// Requested rights.
+    pub requested_access: GrantedAccess,
     /// Optional reason.
     pub reason: Option<String>,
     /// Current state.
     pub status: AccessRequestStatus,
-    /// Access actually granted.
-    pub granted_access: Option<AccessLevel>,
+    /// Rights actually granted.
+    pub granted_access: Option<GrantedAccess>,
     /// Decision actor.
     pub decided_by: Option<ActorRef>,
     /// Decision time.
@@ -489,6 +489,42 @@ pub struct DecideAccessRequestCommand {
     pub request_id: AccessRequestId,
     /// Terminal decision.
     pub decision: AccessDecision,
+}
+
+/// Maximum number of targets one permission inspection may name.
+pub const MAX_INSPECTED_TARGETS: usize = 100;
+
+/// A batch request for the caller's effective access on named targets.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InspectPermissionsQuery {
+    /// Targets addressed by identifier.
+    pub entry_ids: Vec<EntryId>,
+    /// Targets addressed by organization-relative path.
+    pub paths: Vec<EntryPath>,
+}
+
+impl InspectPermissionsQuery {
+    /// Validates that the batch names at least one and at most 100 targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] for an empty or oversized batch.
+    pub fn new(entry_ids: Vec<EntryId>, paths: Vec<EntryPath>) -> Result<Self, ValidationError> {
+        let total = entry_ids.len().saturating_add(paths.len());
+        if total == 0 {
+            return Err(ValidationError::new(
+                "targets",
+                "must name at least one entry or path",
+            ));
+        }
+        if total > MAX_INSPECTED_TARGETS {
+            return Err(ValidationError::new(
+                "targets",
+                "must name at most 100 entries and paths",
+            ));
+        }
+        Ok(Self { entry_ids, paths })
+    }
 }
 
 /// Permission page query.
@@ -605,7 +641,7 @@ mod tests {
     use crate::domain::{
         entry::{EntryBoundary, EntryName},
         ids::EntryId,
-        permission::AccessLevel,
+        permission::{AccessRight, GrantedAccess},
     };
 
     use super::{CreateFolderCommand, PageRequest, RequestAccessCommand, SearchQuery};
@@ -639,12 +675,19 @@ mod tests {
 
     #[test]
     fn access_request_normalizes_and_limits_reason() -> Result<(), Box<dyn Error>> {
-        let command =
-            RequestAccessCommand::new(EntryId::new(), AccessLevel::Read, Some("  ".to_owned()))?;
+        let command = RequestAccessCommand::new(
+            EntryId::new(),
+            GrantedAccess::READ_ONLY,
+            Some("  ".to_owned()),
+        )?;
         assert_eq!(command.reason, None);
         assert!(
-            RequestAccessCommand::new(EntryId::new(), AccessLevel::Write, Some("x".repeat(1_001)),)
-                .is_err()
+            RequestAccessCommand::new(
+                EntryId::new(),
+                GrantedAccess::new([AccessRight::Update]),
+                Some("x".repeat(1_001)),
+            )
+            .is_err()
         );
         Ok(())
     }

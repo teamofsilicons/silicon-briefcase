@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::permission::AccessLevel;
+use super::permission::GrantedAccess;
 
 /// Durable state of a request for explicit access.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -45,13 +45,12 @@ impl AccessRequestStatus {
 }
 
 /// An owner or administrator's decision on an access request.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "decision")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AccessDecision {
-    /// Approve and create a grant at the selected level.
+    /// Approve and create a grant conveying the selected rights.
     Approve {
-        /// Access level to grant; it may be no broader than policy permits.
-        access: AccessLevel,
+        /// Rights to grant; they may be no broader than policy permits.
+        access: GrantedAccess,
     },
     /// Deny without creating a grant.
     Deny,
@@ -71,12 +70,12 @@ pub enum AccessRequestTransitionError {
 #[cfg(test)]
 mod tests {
     use super::{AccessDecision, AccessRequestStatus};
-    use crate::domain::permission::AccessLevel;
+    use crate::domain::permission::GrantedAccess;
 
     #[test]
     fn pending_requests_receive_one_terminal_decision() {
         let approved = AccessRequestStatus::Pending.decide(AccessDecision::Approve {
-            access: AccessLevel::Read,
+            access: GrantedAccess::READ_ONLY,
         });
         assert_eq!(approved, Ok(AccessRequestStatus::Approved));
         assert!(

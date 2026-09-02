@@ -20,7 +20,7 @@ use crate::{
         },
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, SystemEntryKind},
         ids::{EntryId, GrantId, VersionId},
-        permission::{AccessLevel, PermissionGrant, PermissionGrantParts, PermissionInheritance},
+        permission::{GrantedAccess, PermissionGrant, PermissionGrantParts, PermissionInheritance},
     },
 };
 
@@ -326,7 +326,7 @@ async fn load_relevant_grants(
         grant_id: Uuid,
         principal_type: String,
         principal_id: String,
-        access_level: String,
+        access_mask: i16,
         inherits_to_descendants: bool,
         granted_by_type: String,
         granted_by_id: String,
@@ -340,7 +340,7 @@ async fn load_relevant_grants(
     let actor = execution.authorization().actor();
     let rows = sqlx::query_as::<_, ResolvedGrantRow>(
         "SELECT grant.org_id, grant.entry_id, grant.grant_id, grant.principal_type, \
-                grant.principal_id, grant.access_level, grant.inherits_to_descendants, \
+                grant.principal_id, grant.access_mask, grant.inherits_to_descendants, \
                 grant.granted_by_type, grant.granted_by_id, grant.revoked_at, \
                 grant.revoked_by_type, grant.revoked_by_id, grant.created_at, path.depth \
            FROM briefcase.entry_closure AS path \
@@ -368,7 +368,7 @@ async fn load_relevant_grants(
                 grant_id: row.grant_id,
                 principal_type: row.principal_type,
                 principal_id: row.principal_id,
-                access_level: row.access_level,
+                access_mask: row.access_mask,
                 inherits_to_descendants: row.inherits_to_descendants,
                 granted_by_type: row.granted_by_type,
                 granted_by_id: row.granted_by_id,
@@ -501,7 +501,7 @@ pub(in crate::infrastructure::postgres) fn permission_grant(
         organization_id: OrganizationId::new(row.org_id).map_err(invalid_data)?,
         entry_id: EntryId::from_uuid(row.entry_id).map_err(invalid_data)?,
         principal: actor_ref(&row.principal_type, &row.principal_id)?,
-        access: access_level(&row.access_level)?,
+        access: decode_access(row.access_mask)?,
         inheritance: PermissionInheritance::from_inherit_flag(row.inherits_to_descendants),
         granted_by: actor_ref(&row.granted_by_type, &row.granted_by_id)?,
         created_at: row.created_at,
@@ -534,21 +534,15 @@ pub(in crate::infrastructure::postgres) const fn organization_role(
     }
 }
 
-pub(in crate::infrastructure::postgres) const fn encode_access(
-    access: AccessLevel,
-) -> &'static str {
-    match access {
-        AccessLevel::Read => "read",
-        AccessLevel::Write => "write",
-    }
+pub(in crate::infrastructure::postgres) const fn encode_access(access: GrantedAccess) -> i16 {
+    access.bits() as i16
 }
 
-pub(in crate::infrastructure::postgres) fn access_level(value: &str) -> Result<AccessLevel> {
-    match value {
-        "read" => Ok(AccessLevel::Read),
-        "write" => Ok(AccessLevel::Write),
-        _ => Err(internal("invalid persisted access level")),
-    }
+pub(in crate::infrastructure::postgres) fn decode_access(value: i16) -> Result<GrantedAccess> {
+    u8::try_from(value)
+        .ok()
+        .and_then(|bits| GrantedAccess::from_bits(bits).ok())
+        .ok_or_else(|| internal("invalid persisted access mask"))
 }
 
 pub(in crate::infrastructure::postgres) fn entry_kind(value: &str) -> Result<EntryKind> {
