@@ -3,6 +3,7 @@
 mod content;
 mod metadata;
 mod models;
+mod quota;
 mod repository;
 mod roots;
 mod webhook;

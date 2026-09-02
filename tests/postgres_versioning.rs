@@ -1,4 +1,4 @@
-//! Versioning and bin checks that run against a live PostgreSQL instance.
+//! Versioning, bin, and upload-allowance checks against a live PostgreSQL.
 //!
 //! Uploading over an existing file name publishes that file's next version,
 //! and the bin pages like every other listing. Both are SQL the repository
@@ -24,7 +24,8 @@ use silicon_briefcase::{
         idempotency::IdempotencyKey,
         ports::{ObjectChecksum, ObjectChecksumAlgorithm, ObjectChecksumType, StoredObject},
         service::{
-            ListBinQuery, ListVersionsQuery, MetadataRepository, MutationMetadata, PageRequest,
+            ListBinQuery, ListEntriesQuery, ListVersionsQuery, MetadataRepository,
+            MutationMetadata, PageRequest,
         },
     },
     config::{DatabaseSettings, S3Encryption, S3Settings},
@@ -36,9 +37,11 @@ use silicon_briefcase::{
         entry::{EntryName, EntryPath},
         ids::EntryId,
         permission::Capability,
+        quota::DAILY_UPLOAD_LIMIT_BYTES,
     },
     infrastructure::postgres::{self, PostgresContentRepository, PostgresRepository},
 };
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const ACTOR_ID: &str = "cos:tos";
@@ -82,6 +85,53 @@ fn execution_context(organization: &str) -> anyhow::Result<ExecutionContext> {
         ),
         "postgres-versioning-test",
     ))
+}
+
+/// Returns the caller's own private folder, which the first request reconciles.
+async fn private_root(
+    metadata: &PostgresRepository,
+    context: &ExecutionContext,
+) -> anyhow::Result<EntryId> {
+    metadata
+        .list_active_children(
+            context,
+            &ListEntriesQuery {
+                parent_id: None,
+                filter: None,
+                page: PageRequest::new(None, 100)?,
+            },
+        )
+        .await?;
+    let path = EntryPath::new(format!("private/{ACTOR_ID}"))?;
+    let root = metadata
+        .find_active_entry_by_path(context, &path)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the caller's private folder must be reconciled"))?;
+    Ok(root.entry.id)
+}
+
+/// Reads the organization's charged bytes with the tenant setting applied.
+async fn charged_bytes(pool: &PgPool, organization: &str) -> anyhow::Result<(i64, i64)> {
+    let mut connection = tenant_connection(pool, organization).await?;
+    let row = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT daily_bytes, total_bytes FROM briefcase.organization_upload_usage \
+          WHERE org_id = briefcase.current_org_id()",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(row)
+}
+
+async fn tenant_connection(
+    pool: &PgPool,
+    organization: &str,
+) -> anyhow::Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SELECT set_config('briefcase.org_id', $1, false)")
+        .bind(organization)
+        .execute(&mut *connection)
+        .await?;
+    Ok(connection)
 }
 
 async fn publish(
@@ -148,26 +198,9 @@ async fn re_uploading_a_name_versions_the_same_file_and_the_bin_pages() -> anyho
     let organization = format!("test-{}", Uuid::now_v7().simple());
     let context = execution_context(&organization)?;
 
-    // The first request reconciles the reserved containers, so the caller's
-    // own private folder is a destination that always exists.
-    let parent_path = EntryPath::new(format!("private/{ACTOR_ID}"))?;
-    metadata
-        .list_active_children(
-            &context,
-            &silicon_briefcase::application::service::ListEntriesQuery {
-                parent_id: None,
-                filter: None,
-                page: PageRequest::new(None, 100)?,
-            },
-        )
-        .await?;
-    let parent = metadata
-        .find_active_entry_by_path(&context, &parent_path)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the caller's private folder must be reconciled"))?;
-
-    let created = publish(&files, &context, parent.entry.id, "upload-one", b"first").await?;
-    let updated = publish(&files, &context, parent.entry.id, "upload-two", b"second").await?;
+    let parent = private_root(&metadata, &context).await?;
+    let created = publish(&files, &context, parent, "upload-one", b"first").await?;
+    let updated = publish(&files, &context, parent, "upload-two", b"second").await?;
     assert_eq!(
         created, updated,
         "uploading the same name updates the file rather than creating another"
@@ -241,6 +274,100 @@ async fn re_uploading_a_name_versions_the_same_file_and_the_bin_pages() -> anyho
             "a cursor advances past what the previous page returned"
         );
     }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn uploads_are_charged_to_the_organization_and_refused_once_spent() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let pool = postgres::connect(&database_settings(url), "briefcase-tests").await?;
+    postgres::migrate(&pool).await?;
+    let metadata = PostgresRepository::new(pool.clone());
+    let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
+
+    let organization = format!("test-{}", Uuid::now_v7().simple());
+    let context = execution_context(&organization)?;
+    let parent = private_root(&metadata, &context).await?;
+
+    let first = b"a modest upload";
+    let first_bytes = i64::try_from(first.len())?;
+    publish(&files, &context, parent, "charge-one", first).await?;
+    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    assert_eq!(
+        (daily, total),
+        (first_bytes, first_bytes),
+        "an upload charges both the daily window and the organization total"
+    );
+
+    let second = b"another modest upload";
+    publish(&files, &context, parent, "charge-two", second).await?;
+    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    let expected = first_bytes + i64::try_from(second.len())?;
+    assert_eq!(
+        (daily, total),
+        (expected, expected),
+        "publishing a new version of the same file is charged like any upload"
+    );
+
+    // Spending the daily allowance must refuse the next upload before the
+    // bytes are asked for, and must leave the counters exactly as they were.
+    let mut connection = tenant_connection(&pool, &organization).await?;
+    sqlx::query(
+        "UPDATE briefcase.organization_upload_usage SET daily_bytes = $1 \
+          WHERE org_id = briefcase.current_org_id()",
+    )
+    .bind(i64::try_from(DAILY_UPLOAD_LIMIT_BYTES)?)
+    .execute(&mut *connection)
+    .await?;
+    let refused = publish(
+        &files,
+        &context,
+        parent,
+        "charge-three",
+        b"one byte too many",
+    )
+    .await;
+    match refused {
+        Err(error) => assert!(
+            error.to_string().contains("daily_upload_limit_exhausted"),
+            "the daily allowance is what refused the upload: {error}"
+        ),
+        Ok(_) => panic!("an organization with a spent daily allowance must not publish"),
+    }
+    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    assert_eq!(
+        (daily, total),
+        (i64::try_from(DAILY_UPLOAD_LIMIT_BYTES)?, expected),
+        "a refused upload charges nothing"
+    );
+
+    // Yesterday's window is spent allowance that has already returned.
+    sqlx::query(
+        "UPDATE briefcase.organization_upload_usage \
+            SET daily_window = daily_window - 1 WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+    // The pool cannot close while a borrowed connection is still held.
+    drop(connection);
+    let third = b"today is a new day";
+    let third_bytes = i64::try_from(third.len())?;
+    publish(&files, &context, parent, "charge-four", third).await?;
+    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    assert_eq!(
+        daily, third_bytes,
+        "midnight UTC restarts the daily counter rather than resuming it"
+    );
+    assert_eq!(
+        total,
+        expected + third_bytes,
+        "the organization total never resets"
+    );
 
     pool.close().await;
     Ok(())

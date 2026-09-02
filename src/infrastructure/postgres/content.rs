@@ -43,6 +43,7 @@ use super::{
         IdempotencyClaim, actor_kind, begin, boundary_columns, claim_idempotency,
         complete_idempotency, load_entry, map_sql, record_change,
     },
+    quota,
 };
 
 const SMALL_UPLOAD_OPERATION: &str = "upload_file";
@@ -88,9 +89,10 @@ impl ContentRepository for PostgresContentRepository {
         &self,
         context: &ExecutionContext,
         command: &SmallUploadCommand,
-        _content: &StagedContent<'_>,
+        staged: &StagedContent<'_>,
     ) -> std::result::Result<Prepared<SmallUploadPreparation, EntryId>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
+        quota::check_allowance(&mut request.transaction, staged.size).await?;
         let parent = require_parent(
             &mut request.transaction,
             context,
@@ -254,6 +256,7 @@ impl ContentRepository for PostgresContentRepository {
         expires_at: OffsetDateTime,
     ) -> std::result::Result<Prepared<MultipartPreparation, MultipartReceipt>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
+        quota::check_allowance(&mut request.transaction, command.size).await?;
         require_parent(
             &mut request.transaction,
             context,
@@ -1705,6 +1708,10 @@ async fn publish_file_content(
     stored: &StoredObject,
     storage: StorageReference<'_>,
 ) -> std::result::Result<EntryId, AppError> {
+    // Both allowances are charged here rather than at reservation time: this
+    // is the one statement every upload reaches, exactly once, and the charge
+    // rolls back with the publication it belongs to.
+    quota::charge(transaction, size).await?;
     if let Some((existing_id, kind)) =
         find_named_child(transaction, parent.entry.id, name, true).await?
     {

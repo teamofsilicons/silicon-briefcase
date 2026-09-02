@@ -98,7 +98,10 @@ permission error, so the API never confirms that a hidden entry exists.
 
 ### Errors
 
-Errors use the standard `error.code`, `error.message`, and `error.request_id` envelope.
+Errors use the standard `error.code`, `error.message`, and `error.request_id`
+envelope. Two codes are specific to upload allowances:
+`daily_upload_limit_exhausted` (`429`, with `Retry-After`) and
+`organization_upload_limit_exhausted` (`507`).
 
 ## Browsing and folder management
 
@@ -265,6 +268,15 @@ the bytes become its next version, the response is that same entry, and the
 history keeps the previous fifty versions. Creating a file needs write access
 on the folder; replacing one needs update access on the file itself. A folder
 of the same name is a conflict.
+
+Every upload is charged against two organization allowances: **100 GiB per UTC
+day**, and **100 TiB in total**. Both count uploaded bytes rather than stored
+bytes, so deleting a file frees storage but not allowance, and a restored
+version costs nothing because nothing was uploaded. An upload that does not fit
+is refused before its bytes are stored: a spent day answers `429` with
+`Retry-After` set to the seconds remaining until 00:00 UTC, and a spent total
+answers `507`. Concurrent uploads racing for the last of an allowance serialize
+on the organization's counter, so the limit cannot be overshot.
 
 Because the whole file arrives in one request, a very large upload occupies a
 connection and temporary disk for its duration. `BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`

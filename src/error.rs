@@ -8,6 +8,8 @@ use thiserror::Error;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::domain::quota::UploadLimit;
+
 /// Error returned by a Briefcase use case or transport boundary.
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -46,6 +48,14 @@ pub enum AppError {
     RangeNotSatisfiable {
         /// Complete size of the addressed content.
         total_size: u64,
+    },
+    /// The organization spent one of its upload allowances.
+    #[error("organization upload limit exhausted: {limit}")]
+    UploadLimitExhausted {
+        /// Which allowance stopped the upload.
+        limit: UploadLimit,
+        /// Seconds until the allowance returns, when it returns at all.
+        retry_after_seconds: Option<u64>,
     },
     /// A caller exceeded an abuse or capacity limit.
     #[error("rate limit exceeded")]
@@ -161,6 +171,20 @@ impl AppError {
                 Cow::Borrowed("range_not_satisfiable"),
                 Cow::Borrowed("The requested byte range is outside the content."),
             ),
+            Self::UploadLimitExhausted { limit, .. } => match limit {
+                UploadLimit::Daily => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Cow::Borrowed(UploadLimit::Daily.code()),
+                    Cow::Borrowed(
+                        "The organization's daily upload allowance is spent. It resets at 00:00 UTC.",
+                    ),
+                ),
+                UploadLimit::Organization => (
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    Cow::Borrowed(UploadLimit::Organization.code()),
+                    Cow::Borrowed("The organization has uploaded its total allowance."),
+                ),
+            },
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Cow::Borrowed("rate_limited"),
@@ -224,6 +248,10 @@ impl IntoResponse for AppError {
             Self::RateLimited {
                 retry_after_seconds,
             } => Some(*retry_after_seconds),
+            Self::UploadLimitExhausted {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
             _ => None,
         };
         let unsatisfiable_total_size = match &self {

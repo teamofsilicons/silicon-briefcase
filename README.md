@@ -48,6 +48,10 @@ or accepted from a client.
   request or as a durable multipart transfer, so a client never drives parts.
   Uploading over an existing file name is how a file is updated: the bytes
   become that file's next version and the history keeps the previous fifty.
+- **Bounded upload volume.** Every organization may upload 100 GiB per UTC day
+  and 100 TiB in total. The counters are charged in the same transaction that
+  publishes a file, so racing uploads cannot overshoot an allowance, and a
+  refused upload charges nothing.
 - **Independent access rights.** A grant conveys any set of `read`, `write`,
   `update`, and `delete`. Update never implies deletion, write never implies
   update, and `POST /permissions/effective` answers what the caller may

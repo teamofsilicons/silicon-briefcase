@@ -16,6 +16,8 @@ Both Silicons and carbons would be using this system.
 
 For each organisation there would be an organisation directory under which we are gonna manage all the files and manage their systems. For each file there would be CRUD operations and who can perform each of these C, R, U, D operations. 
 
+The client just needs to upload internall we decide:
+
 Files up to and including 100 MiB should be uploaded in a single request.
 
 Files larger than 100 MiB should use S3 multipart upload.
@@ -41,6 +43,8 @@ Example:
 |    10 GiB |        11 MiB |   931 |
 |   100 GiB |       103 MiB |   995 |
 
+Each organisation has an upload limit of 100gb per day (resets at 12:00am utc), and an organisation wide maximum upload of 100tb. 
+
 
 For every upload it should be possible to define the exact path and folder where i wanna store this file, this path would be defined from the base. 
 
@@ -63,8 +67,6 @@ Organisations are defined entirely inside Silicon IAm. Both organisation and all
 For the members that previously had access and now are kicked their access should instantly be revoked, you would know via the webhook endpoint defined. 
 
 Once the user has signed in they would also be able to create organisation that would again directly take them to IAm where they can configure the organisation, invite, etc. 
-
-Each organisation has a maximum of 
 
 
 # How to store data
@@ -111,7 +113,7 @@ For any other file types that are not recognised just dont render but CRUD opera
 
 `Private`: For Private folder, it means that all the files inside this folder can't be viewed without the explicit permission to view. 
 
-`Tag`: For the tags in the organisation, each tag would have it's own folder and everyone with that tag should be able to view the files inside that folder. 
+`Tag`: For the tags in the organisation, each tag would have it's own folder and everyone with that tag should be able to view the files inside that folder, or create files inside that folder.  
 
 These are folder types and names have nothing to do with them
 
@@ -203,8 +205,9 @@ The said url is gonna be a clean url so it's gonna show the folder structure ver
 
 Whenever someone requests from this url it should only be rendered if the user has the permissions to view the file. Or see the options accordingly for when they can perform other CRUD operations.
 
-For any url it should always have the org in it, so the base url would be per organisation 
-`briefcase.teamofsilicons.com/org/{org_id}/` and configured further accordingly. 
+For all permanent url it should always have the org in it, so the base url would be per organisation: `briefcase.teamofsilicons.com/org/{org_id}/` and configured further accordingly. 
+
+The backend is served on backend.briefcase.teamofsilicons.com but the permanent url 
 
 # Download
 
@@ -268,8 +271,13 @@ has: is content-only, matched against extracted document text.
 
 contains: is name or content. The contract mentioned contains: separately with the glob note but never said what it searches, so it became the union.
 
-name: is name-only — not in the contract at all. It exists to complete the trio: name-only / content-only / either. That's the one key I'd most want you to bless or delete.
+name: is name-only — not in the contract at all. It exists to complete the trio: name-only / content-only / either.
 
+location: as an anchored path prefix with `*`;
+
+the permissions:/permission: value set (read, write, update, delete, manage_permissions/manage);
+
+the boolean grammar (implicit AND, or, not, leading -, parentheses); last:/first:/sort: being top-level only; and the limits — take ≤ 100, expression ≤ 1,024 bytes, ≤ 32 predicates.
 
 # How other apps would use Briefcase
 

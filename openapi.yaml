@@ -4,7 +4,11 @@ info:
   version: 0.1.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
 servers:
-  - url: https://briefcase.teamofsilicons.com/api/v1
+  - url: https://backend.briefcase.teamofsilicons.com/api/v1
+    description: >-
+      The API is served by the backend host. Permanent entry URLs are minted on
+      the application host instead, always organization-scoped as
+      https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
 security:
   - bearerAuth: []
 tags:
@@ -170,6 +174,12 @@ paths:
         that same entry, and its history keeps the previous fifty versions.
         Creating a file needs `write` on the folder; replacing one needs
         `update` on the file. A folder with the same name is a conflict.
+
+
+        Every upload is charged against two organization allowances: 100 GiB
+        per UTC day, and 100 TiB in total. Both count uploaded bytes, so
+        deleting a file frees storage but not allowance. An upload that does
+        not fit is refused before its bytes are stored.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -187,6 +197,8 @@ paths:
       responses:
         '201': { description: File created, or a new version published on the existing file, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
+        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '507': { description: The organization has uploaded its total allowance }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/permissions:
     parameters:
@@ -356,6 +368,8 @@ paths:
       responses:
         '201': { description: File created, or a new version published, for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
+        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '507': { description: The organization has uploaded its total allowance }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
