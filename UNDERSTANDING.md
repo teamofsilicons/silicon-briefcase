@@ -40,8 +40,6 @@ Example:
 |     1 GiB |         8 MiB |   128 |
 |    10 GiB |        11 MiB |   931 |
 |   100 GiB |       103 MiB |   995 |
-|     1 TiB |         1 GiB | 1,024 |
-|     5 TiB |         5 GiB | 1,024 |
 
 
 For every upload it should be possible to define the exact path and folder where i wanna store this file, this path would be defined from the base. 
@@ -65,6 +63,8 @@ Organisations are defined entirely inside Silicon IAm. Both organisation and all
 For the members that previously had access and now are kicked their access should instantly be revoked, you would know via the webhook endpoint defined. 
 
 Once the user has signed in they would also be able to create organisation that would again directly take them to IAm where they can configure the organisation, invite, etc. 
+
+Each organisation has a maximum of 
 
 
 # How to store data
@@ -130,7 +130,9 @@ All the files and folders inside public are public and can be viewed by all the 
 
 Inside the private folder for all the files and folders there would be permissions assigned accordingly, who can read, who can update. 
 
-Inside private there would be a folder for all the carbons and silicons. One for each carbon and silicon id. Only display to users a folder of another carbon/silicon only if they have a file/folder shared with the logged in user. Otherwise keep such folders hidden.
+Inside private there would be a folder for all the carbons and silicons. One for each carbon and silicon id. Only display to users a folder of another carbon/silicon only if they have a file/folder shared with the logged in user. Otherwise keep such folders hidden. 
+
+For if a file is shared inside a folder, then fetching that folder directly as an user should return the files they have access to. If their access to all the files inside a directory is lost it should then start returning 404 on fetching the folder. 
 
 `Frontend note: For all the private folders except the user's own carbon_id/silicon_id add a small i box at the bottom most - You might not be seeing all the contents of this folder. This is a permission based folder.
 
@@ -201,10 +203,12 @@ The said url is gonna be a clean url so it's gonna show the folder structure ver
 
 Whenever someone requests from this url it should only be rendered if the user has the permissions to view the file. Or see the options accordingly for when they can perform other CRUD operations.
 
+For any url it should always have the org in it, so the base url would be per organisation 
+`briefcase.teamofsilicons.com/org/{org_id}/` and configured further accordingly. 
 
 # Download
 
-Anyone with read access to any file should be able to download the file locally. 
+Anyone with read access to the file should be able to download the file locally. 
 
 
 # No access
@@ -252,9 +256,20 @@ permissions
 location
 ```
 
+created-by / shared-with / accessible-to = from:@{...} / to:@{...} / for:@{...}
+
 There can be any possible PnC for the filters, i should be able to combine multiple filters. Filters should be super powerful, it should be possible to filter anything out, i should be able to filter niche things, for eg: filter out the most recent 5 files in the last 10 days or between 12 june 2026 and 12 july 2026 from the '/private/' folder that contain the word "apple" or "cat" and it must be in an .md file. 
 
 FIltering should only happen with the files i have access to.
+
+is: takes three vocabularies at once. Entry kind — is:file, is:folder (is:directory aliased). Renderer category — is:image, video, document, spreadsheet, presentation, audio, archive, code, unsupported, i.e. the nine buckets from §Files supported. Anything else alphanumeric and ≤16 chars falls through to a file extension, leading dot stripped (src/domain/filter.rs:727). So is:document is any file that opens in the document renderer — pdf, docx, md; is:md is literally .md.
+
+has: is content-only, matched against extracted document text.
+
+contains: is name or content. The contract mentioned contains: separately with the glob note but never said what it searches, so it became the union.
+
+name: is name-only — not in the contract at all. It exists to complete the trio: name-only / content-only / either. That's the one key I'd most want you to bless or delete.
+
 
 # How other apps would use Briefcase
 
