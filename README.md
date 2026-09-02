@@ -33,6 +33,31 @@ objects and assume every retained organization-storage role. Briefcase derives
 the organization-specific STS External ID itself; it is never loaded from a job
 or accepted from a client.
 
+## What the service exposes
+
+- **Clean permanent URLs.** Every entry carries a materialized
+  organization-relative path, so `GET /org/{org_id}/{path}` resolves in one
+  indexed lookup and shows the folder structure exactly as the contract does.
+  Anything the caller cannot read answers `404`.
+- **Proxied, sandboxed content.** File bytes are relayed by Briefcase, never by
+  a signed provider URL, so a permanent URL is never a bearer capability. Reads
+  are sandboxed by Content-Security-Policy, never sniffed, never cached, and
+  support byte ranges for media playback.
+- **Independent access rights.** A grant conveys any set of `read`, `write`,
+  `update`, and `delete`. Update never implies deletion, write never implies
+  update, and `POST /permissions/effective` answers what the caller may
+  actually do on up to a hundred named targets at once.
+- **A central inbox.** Grants, revocations, access requests, and decisions each
+  write a notification in the same transaction as the change, so the inbox
+  cannot disagree with the permissions it describes.
+- **A filter language.** Folder contents page a hundred newest-first, and a
+  filter expression combines every documented predicate with `and`, `or`,
+  `not`, and grouping. It is parsed in the domain, compiled to parameterized
+  SQL, and its `permissions:` predicate is decided by domain policy.
+- **One application endpoint.** `POST /obo/files` creates a file for a
+  represented member, taking its destination from IAM-bound proof metadata and
+  defaulting to `private/{actor}/apps/{app_id}`.
+
 ## Local development
 
 Prerequisites are Rust 1.98, PostgreSQL 16 or newer, and an S3-compatible service
@@ -101,16 +126,49 @@ cargo test --all-targets --all-features
 cargo deny check
 ```
 
+`tests/postgres_metadata.rs` exercises the SQL the repository actually builds —
+root reconciliation, path resolution, the compiled filter language, the
+notification inbox, the membership projection, and the application folder — and
+skips itself unless a database is named:
+
+```bash
+docker compose up -d postgres
+cargo run --bin briefcase-migrate
+BRIEFCASE_TEST_DATABASE_URL=postgres://briefcase:briefcase-local-only@127.0.0.1:5433/briefcase \
+  cargo test --test postgres_metadata
+```
+
+Each run uses a fresh organization identifier, so it is repeatable without
+deleting anything.
+
 ## Security model
 
 Every protected request is bound to a current IAM membership and an
-`X-Org-ID`. OBO requests are additionally bound to their verified application,
-action, resource, and represented actor. Entry IDs and permanent URLs are not
-capabilities. Authorization is reevaluated for browsing, direct reads, search,
-versions, bin access, and temporary URL generation.
+`X-Org-ID`. The contracted API is a bearer surface; an application acts only
+through `POST /obo/files`, where IAM binds the proof to the exact method,
+registered path, and body digest, consumes it once, and is never retried.
+Entry IDs and permanent URLs are not capabilities: authorization is reevaluated
+for browsing, filtering, direct reads, downloads, search, versions, and bin
+access, and an entry the caller may not read is reported as missing.
+
+The published OBO result carries no role or tags, so an application request
+pairs it with Briefcase's own IAM membership projection and falls back to the
+least authority any member has rather than assuming more.
+
+Every connection pins `search_path` to `public`. PostgreSQL's default path
+starts with a schema named after the connecting role, and one runtime role is
+named `briefcase` — the same name as the application schema — so an unqualified
+name would otherwise resolve differently depending on who connected.
 
 Do not place access tokens, OBO proofs, IAM application secrets, webhook
-secrets, signed URLs, filenames, or object keys in logs or metrics.
+secrets, filenames, or object keys in logs or metrics.
+
+Frontend note: the API supplies what the contract's interface notes need. An
+entry response carries `render` so a client knows which renderer to open (and
+when to say "unsupported file type"), and a folder the caller can navigate but
+not fully read is omitted from listings rather than half-described — which is
+the signal to show the "you might not be seeing all the contents of this
+folder" note on a permission-based folder.
 
 Historical-version restore is synchronous in the v1 API. It has an independent
 `BRIEFCASE_RESTORE_TIMEOUT_SECONDS` deadline and

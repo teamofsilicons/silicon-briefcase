@@ -913,6 +913,35 @@ mod tests {
     }
 
     #[test]
+    fn another_members_private_folder_is_hidden_and_unwritable() {
+        // The contract forbids saving into a folder assigned to someone else,
+        // and such a folder must not even be visible.
+        let context = context(
+            actor("carbon-a"),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::Folder,
+            system_kind: Some(SystemEntryKind::PrivateActorFolder),
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+
+        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
+        assert!(!authorization.allows(Capability::Read));
+        assert!(!authorization.allows(Capability::CreateChild));
+        assert!(authorization.capabilities().effective_access().is_empty());
+    }
+
+    #[test]
     fn tag_root_custodian_does_not_bypass_current_iam_tags() {
         let custodian = actor("carbon-a");
         let context = context(
