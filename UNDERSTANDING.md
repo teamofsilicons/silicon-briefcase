@@ -44,16 +44,19 @@ Example:
 |     5 TiB |         5 GiB | 1,024 |
 
 
+For every upload it should be possible to define the exact path and folder where i wanna store this file, this path would be defined from the base. 
+
+It shouldn't be possible to save files in:
+1) the base directory where private and public exist.
+2) directly inside the private directory
+3) inside folders assigned to other carbons/silicons/tags. Basically places where i dont have the access to. 
+
+
 # How Does login/signup work
 
-Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [[../silicon-iam/UNDERSTANDING.md]]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
+Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [https://backend.iam.teamofsilicons.com/docs/client/]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
 
-The webhook endpoint you have would give you information whenever someone logs out, kicked from org, anything changes you would know.
-
-
-# Webhook Endpoint
-
-You have a webhook endpoint at: briefcase.teamofsilicons.com/webhook/
+The webhook endpoint ([backend.briefcase.teamofsilicons.com/webhook/]) you have would give you information whenever someone logs out, kicked from org, anything changes you would know.
 
 # How organisations are defined
 
@@ -94,6 +97,8 @@ any presentation type (ppt, pptx, odp, key, etc.)
 any audio type (mp3, wav, m4a, aac, flac, ogg, opus, wma, aiff, amr, etc.)  
 any archive type (zip, rar, 7z, tar, gz, gzip, bz2, xz, tgz, iso, etc.)  
 any code or data type (json, xml, yaml, yml, html, css, js, ts, py, java, sql, log, etc.) 
+
+Ensure to render them all in a sandboxed enviorment. 
 
 For images open a detailed view, for videos they should have a good player, for documents it should be correctly rendered in place, for spreadsheets they should be visible in the correct format and well organised, for presentations also render them, for audio create an audio player, for any archives, dont unarchive it but let them be able to view the contents, for code or data type render in the correct syntax. 
 
@@ -176,23 +181,35 @@ For private folders, you can also explictly state the carbon_id's or silicon_id'
 
 Similar to how linux_filesystem works, we would also have a very similar workflow. For each private or tag based file or folder it would be possible to invite someone, while inviting the invite could either be just read access or also update access or also write access. So the scope of the invited person would be defined there. Based on the scope it should appear accordingly in the user's directory. 
 
-
 Each carbon/silicon that gets access to the permanent url and still don't have the access to the file, would see a button to request access clicking on request access would create a request for the owner of the file/org_admin/org_owner which they can approve and would give that carbon/silicon a view access or update access based on the request. 
 
+I should be able to request permissions of file(s) or folder(s) so that it's clear what all actions can be performed on this. 
+
+Just because someone has update permissions to a file doesn't mean they can delete it. They explicitly need the delete access to be able to delete it, same goes for update and write. Read just let's them view/download the file. 
 
 # Notifications
 
-There should be a centeral notification system where they would be able to approve/deny an access for a file/folder. 
+There should be a centeral notification system where it would contain all the information regarding when any carbon or silicon recieves access to the any new file or folder or added to a new file, or change in permissions for something, all of it should be reflected here. There should be endpoints to make the entire notification inbox mark as read. It should return the 20 latest notifications when fetched along with how many new notifications in a number that will be used to display the badge. 
 
 
 # Url
 
-For each file there would be a permanent url, this won't be a cdn url, hence only the ones with the proper access should be able to view the contents. 
+For each file there would be a permanent url, this is the url that would request the authenticated user's token to check if the person has access to the file and is rendered only if they have access to the file, otherwise it returns file not found. 
 
-### Temporary url
+The said url is gonna be a clean url so it's gonna show the folder structure very clearly, for eg for a file shared from org tos from private folder of cos:tos with the folder name top_secret and file name this_secret.md. The url of the stored file would look like:
+`briefcase.teamofsilicons.com/org/tos/private/cos:tos/top_secret/this_secret.md/`
 
-For the one's with the permanent url and also the read access to the file, they should be able to generate a temporary cdn url hosted at [cdn.briefcase.teamofsilicons.com] this cdn url would have a ttl of 12 hours. 
+Whenever someone requests from this url it should only be rendered if the user has the permissions to view the file. Or see the options accordingly for when they can perform other CRUD operations.
 
+
+# Download
+
+Anyone with read access to any file should be able to download the file locally. 
+
+
+# No access
+
+For the files and folders the user doesen't have access to they should return 404 to the user like the file doesen't exist, it should never say you don't have access to it, it should just return like that file/folder doesen't exist.
 
 # Search
 
@@ -212,18 +229,41 @@ For all the updates in a file, a version history should be maintained for it for
 
 For any file deleted, they should be stored in the bin for 45 days before being permanently discarded.
 
+# Contents
+
+I should be able to navigate and also request for every file inside that folder if i have access to it, i should be able to print all the contents. 
+
+For each content return the latest 100 entries, it's paginated so should be possible to ask for the next batch in case of more results. 
+
+
+# Filter
+
+For filtering the following options should be possible:
+
+```
+last:N / first:N                  take N, chronologically
+between:DD-MM-YYYY=DD-MM-YYYY     both ends inclusive
+after:DD-MM-YYYY / before:DD-MM-YYYY
+from:@{...} / to:@{...} / for:@{...}
+contains:'...'                    `*` is a glob: contains:'confirm*'
+sort:newest / sort:oldest         oldest last by default
+is:X / has:X                      is could define file types, has can define                                       content
+permissions
+location
+```
+
+There can be any possible PnC for the filters, i should be able to combine multiple filters. Filters should be super powerful, it should be possible to filter anything out, i should be able to filter niche things, for eg: filter out the most recent 5 files in the last 10 days or between 12 june 2026 and 12 july 2026 from the '/private/' folder that contain the word "apple" or "cat" and it must be in an .md file. 
+
+FIltering should only happen with the files i have access to.
 
 # How other apps would use Briefcase
 
-For other apps configured in IAm they should also be able to use Briefcase, for that the app would send a request to you to perform as a specific carbon or silicon user, for the said request it would send you app_id and an proof_token. You can send an request to IAm to verify this proof_token by sending it the app_id and the proof_token if it verifies let the application perform the requested action, otherwise deny it. Until the verification is held keep the request alive.  
-
-These authenticated apps should be able to perform all actions on behalf of the user. Except for the delete actions for the files they haven't created. 
-
+Refer to the OBO access on [https://backend.iam.teamofsilicons.com/docs/client/], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
+1) create a new file at any location for that user.
 
 ### How to store app specific data
 
 For everything created by a specific application inside the authenticated silicon/carbon folder  create an apps folder where based on the app_id you create a folder and store everything there by default.
-
 
 
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
