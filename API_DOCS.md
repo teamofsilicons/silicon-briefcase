@@ -243,7 +243,14 @@ Initializes an S3 multipart upload for a file larger than 100 MiB.
 - **Input:** Exactly one of `parent_id` or `path`, plus name, byte size, and content type.
 - **Returns:** `upload_id`, calculated part size, part count, and expiry.
 
-Part size is calculated from the declared file size, targets roughly 1,000 parts, and remains between 8 MiB and 5 GiB. The file size cannot exceed the configured 5 TiB limit.
+Part size is calculated from the declared file size, targets roughly 1,000
+parts, and remains between 8 MiB and 5 GiB. The file size cannot exceed the
+5 TiB limit.
+
+The contract's example table follows from that formula in every row but one:
+1 TiB is listed as 1 GiB across 1,024 parts, while the formula gives 1,049 MiB
+across 1,000 parts. The formula is normative, so a 1 TiB upload receives
+1,049 MiB parts.
 
 ### `PUT /multipart-uploads/{upload_id}/parts/{part_number}`
 
