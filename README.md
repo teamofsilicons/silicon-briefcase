@@ -48,10 +48,13 @@ or accepted from a client.
   request or as a durable multipart transfer, so a client never drives parts.
   Uploading over an existing file name is how a file is updated: the bytes
   become that file's next version and the history keeps the previous fifty.
-- **Bounded upload volume.** Every organization may upload 100 GiB per UTC day
-  and 100 TiB in total. The counters are charged in the same transaction that
-  publishes a file, so racing uploads cannot overshoot an allowance, and a
-  refused upload charges nothing.
+- **Bounded volume, reported in bytes.** Every organization may upload 100 GiB
+  per UTC day and store 1 PiB, both configurable per organization in the
+  database. The daily counter is charged in the same transaction that publishes
+  a file, and stored bytes are maintained by a trigger on the version rows
+  themselves, so retention, purges, and cascading deletes all account for
+  storage without knowing the counter exists. `GET /usage` reports exact byte
+  counts rather than percentages.
 - **Independent access rights.** A grant conveys any set of `read`, `write`,
   `update`, and `delete`. Update never implies deletion, write never implies
   update, and `POST /permissions/effective` answers what the caller may

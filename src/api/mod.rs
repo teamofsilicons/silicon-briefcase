@@ -43,7 +43,7 @@ pub mod upload;
 pub mod validation;
 mod webhook;
 
-use handlers::{content, entries, notifications, obo, permissions, system};
+use handlers::{content, entries, notifications, obo, permissions, system, usage};
 use state::{AppState, ContentUseCases};
 
 /// Builds the dependency graph, binds the configured listener, and serves the
@@ -255,6 +255,7 @@ fn ordinary_routes() -> Router<AppState> {
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
         )
+        .route("/api/v1/usage", get(usage::organization_usage))
         .route("/api/v1/bin", get(entries::list_bin))
         .route(
             "/api/v1/bin/{entry_id}/restore",
@@ -326,7 +327,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 25] = [
+    const CONTRACT: [(&str, &str, &str); 26] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -348,6 +349,7 @@ mod tests {
         ("/entries/{entry_id}/access-requests", "post", "201"),
         ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),
+        ("/usage", "get", "200"),
         ("/notifications", "get", "200"),
         ("/notifications/read", "post", "200"),
         ("/entries/{entry_id}/activity", "get", "200"),

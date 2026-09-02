@@ -43,8 +43,7 @@ Example:
 |    10 GiB |        11 MiB |   931 |
 |   100 GiB |       103 MiB |   995 |
 
-Each organisation has an upload limit of 100gb per day (resets at 12:00am utc), and an organisation wide maximum upload of 100tb. 
-
+Each organisation has an upload limit of 100gb per day (resets at 12:00am utc), and an organisation wide maximum total storage of 1 peta byte. The total storage limit and upload limit should be configurable per organisation by a variable in the database itself, so by default it's gonna be 100gb and 1 petabyte but can be configured per organisation. 
 
 For every upload it should be possible to define the exact path and folder where i wanna store this file, this path would be defined from the base. 
 
@@ -53,6 +52,7 @@ It shouldn't be possible to save files in:
 2) directly inside the private directory
 3) inside folders assigned to other carbons/silicons/tags. Basically places where i dont have the access to. 
 
+There should also be endpoints that shows how much are they currently using not in percent but actual space they are currently consuming. 
 
 # How Does login/signup work
 
@@ -207,7 +207,7 @@ Whenever someone requests from this url it should only be rendered if the user h
 
 For all permanent url it should always have the org in it, so the base url would be per organisation: `briefcase.teamofsilicons.com/org/{org_id}/` and configured further accordingly. 
 
-The backend is served on backend.briefcase.teamofsilicons.com but the permanent url 
+The backend is served on backend.briefcase.teamofsilicons.com but the permanent url is servered from briefcase.teamofsilicons.com. 
 
 # Download
 

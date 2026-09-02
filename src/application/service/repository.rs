@@ -11,6 +11,7 @@ use crate::{
         ids::{AccessRequestId, EntryId, GrantId},
         notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
+        quota::OrganizationUsage,
     },
 };
 
@@ -226,6 +227,12 @@ pub trait MetadataRepository: Send + Sync {
         &self,
         context: &ExecutionContext,
     ) -> Result<NotificationInbox, MetadataRepositoryError>;
+
+    /// Reads what the organization consumes and the limits it consumes against.
+    async fn load_organization_usage(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<OrganizationUsage, MetadataRepositoryError>;
 
     /// Marks the caller's complete inbox read and returns it afterwards.
     async fn mark_notifications_read(

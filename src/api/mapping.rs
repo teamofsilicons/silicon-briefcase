@@ -18,18 +18,28 @@ use crate::{
         media::RenderKind,
         notification::{Notification, NotificationDecision, NotificationInbox, NotificationKind},
         permission::{AccessRight, EffectiveAccess, GrantedAccess, PermissionGrant},
+        quota::OrganizationUsage,
     },
     error::AppError,
 };
 
 use super::dto::{
     AccessRequestDto, AccessRequestStatusDto, ActivityEventDto, ActivityPageDto, ActorRefDto,
-    ActorTypeDto, EffectiveAccessDto, EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto,
-    EntryVisibilityDto, FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto,
-    NotificationInboxDto, NotificationKindDto, NotificationSubjectDto, PermissionGrantDto,
-    PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto, RootTypeDto,
-    SearchPageDto, SearchResultDto,
+    ActorTypeDto, DailyUsageMeasureDto, EffectiveAccessDto, EffectivePermissionDto, EntryDto,
+    EntryPageDto, EntryTypeDto, EntryVisibilityDto, FileVersionDto, GrantAccessDto,
+    NotificationDecisionDto, NotificationDto, NotificationInboxDto, NotificationKindDto,
+    NotificationSubjectDto, OrganizationUsageDto, PermissionGrantDto, PermissionGrantPageDto,
+    PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
+    UsageMeasureDto,
 };
+
+/// Returns the next midnight UTC, when a daily allowance returns.
+fn next_utc_midnight() -> time::OffsetDateTime {
+    let now = time::OffsetDateTime::now_utc();
+    now.date()
+        .next_day()
+        .map_or(now, |day| day.midnight().assume_utc())
+}
 
 /// Characters that must not survive unencoded in a permanent-URL segment.
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -223,6 +233,23 @@ impl ResponseMapper {
     }
 
     /// Renders the notification inbox, including its badge count.
+    /// Renders organization consumption as exact byte counts.
+    pub(crate) fn usage(usage: &OrganizationUsage) -> OrganizationUsageDto {
+        OrganizationUsageDto {
+            storage: UsageMeasureDto {
+                used_bytes: usage.stored_bytes,
+                limit_bytes: usage.storage_allowance(),
+                remaining_bytes: usage.storage_remaining(),
+            },
+            daily_uploads: DailyUsageMeasureDto {
+                used_bytes: usage.daily_upload_bytes,
+                limit_bytes: usage.daily_upload_allowance(),
+                remaining_bytes: usage.daily_upload_remaining(),
+                resets_at: next_utc_midnight(),
+            },
+        }
+    }
+
     pub(crate) fn inbox(
         &self,
         organization_id: &str,

@@ -1,4 +1,4 @@
-//! Versioning, bin, and upload-allowance checks against a live PostgreSQL.
+//! Versioning, bin, and usage-limit checks against a live PostgreSQL.
 //!
 //! Uploading over an existing file name publishes that file's next version,
 //! and the bin pages like every other listing. Both are SQL the repository
@@ -37,7 +37,7 @@ use silicon_briefcase::{
         entry::{EntryName, EntryPath},
         ids::EntryId,
         permission::Capability,
-        quota::DAILY_UPLOAD_LIMIT_BYTES,
+        quota::{DEFAULT_DAILY_UPLOAD_LIMIT_BYTES, DEFAULT_STORAGE_LIMIT_BYTES},
     },
     infrastructure::postgres::{self, PostgresContentRepository, PostgresRepository},
 };
@@ -110,16 +110,26 @@ async fn private_root(
     Ok(root.entry.id)
 }
 
-/// Reads the organization's charged bytes with the tenant setting applied.
-async fn charged_bytes(pool: &PgPool, organization: &str) -> anyhow::Result<(i64, i64)> {
+/// Reads the day's uploaded bytes and the stored bytes, as the tenant.
+async fn usage(pool: &PgPool, organization: &str) -> anyhow::Result<(i64, i64)> {
     let mut connection = tenant_connection(pool, organization).await?;
     let row = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT daily_bytes, total_bytes FROM briefcase.organization_upload_usage \
+        "SELECT daily_upload_bytes, stored_bytes FROM briefcase.organization_usage \
           WHERE org_id = briefcase.current_org_id()",
     )
     .fetch_one(&mut *connection)
     .await?;
     Ok(row)
+}
+
+fn assert_refused(result: anyhow::Result<EntryId>, code: &str) {
+    match result {
+        Err(error) => assert!(
+            error.to_string().contains(code),
+            "expected {code}, got: {error}"
+        ),
+        Ok(_) => panic!("an organization over {code} must not publish"),
+    }
 }
 
 async fn tenant_connection(
@@ -280,7 +290,8 @@ async fn re_uploading_a_name_versions_the_same_file_and_the_bin_pages() -> anyho
 }
 
 #[tokio::test]
-async fn uploads_are_charged_to_the_organization_and_refused_once_spent() -> anyhow::Result<()> {
+#[allow(clippy::too_many_lines)]
+async fn usage_tracks_uploads_and_storage_and_refuses_what_exceeds_a_limit() -> anyhow::Result<()> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
         eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
         return Ok(());
@@ -296,77 +307,116 @@ async fn uploads_are_charged_to_the_organization_and_refused_once_spent() -> any
 
     let first = b"a modest upload";
     let first_bytes = i64::try_from(first.len())?;
-    publish(&files, &context, parent, "charge-one", first).await?;
-    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    let entry = publish(&files, &context, parent, "charge-one", first).await?;
     assert_eq!(
-        (daily, total),
+        usage(&pool, &organization).await?,
         (first_bytes, first_bytes),
-        "an upload charges both the daily window and the organization total"
+        "an upload charges the day and the bytes it stores"
     );
 
     let second = b"another modest upload";
+    let both_bytes = first_bytes + i64::try_from(second.len())?;
     publish(&files, &context, parent, "charge-two", second).await?;
-    let (daily, total) = charged_bytes(&pool, &organization).await?;
-    let expected = first_bytes + i64::try_from(second.len())?;
     assert_eq!(
-        (daily, total),
-        (expected, expected),
-        "publishing a new version of the same file is charged like any upload"
+        usage(&pool, &organization).await?,
+        (both_bytes, both_bytes),
+        "a new version is charged like any upload, and both versions stay stored"
     );
 
-    // Spending the daily allowance must refuse the next upload before the
-    // bytes are asked for, and must leave the counters exactly as they were.
+    // Spending the day must refuse the next upload before its bytes are
+    // stored, and must leave every counter as it was.
     let mut connection = tenant_connection(&pool, &organization).await?;
     sqlx::query(
-        "UPDATE briefcase.organization_upload_usage SET daily_bytes = $1 \
+        "UPDATE briefcase.organization_usage SET daily_upload_bytes = $1 \
           WHERE org_id = briefcase.current_org_id()",
     )
-    .bind(i64::try_from(DAILY_UPLOAD_LIMIT_BYTES)?)
+    .bind(i64::try_from(DEFAULT_DAILY_UPLOAD_LIMIT_BYTES)?)
     .execute(&mut *connection)
     .await?;
-    let refused = publish(
-        &files,
-        &context,
-        parent,
-        "charge-three",
-        b"one byte too many",
-    )
-    .await;
-    match refused {
-        Err(error) => assert!(
-            error.to_string().contains("daily_upload_limit_exhausted"),
-            "the daily allowance is what refused the upload: {error}"
-        ),
-        Ok(_) => panic!("an organization with a spent daily allowance must not publish"),
-    }
-    let (daily, total) = charged_bytes(&pool, &organization).await?;
+    assert_refused(
+        publish(
+            &files,
+            &context,
+            parent,
+            "charge-three",
+            b"one byte too many",
+        )
+        .await,
+        "daily_upload_limit_exhausted",
+    );
     assert_eq!(
-        (daily, total),
-        (i64::try_from(DAILY_UPLOAD_LIMIT_BYTES)?, expected),
+        usage(&pool, &organization).await?,
+        (i64::try_from(DEFAULT_DAILY_UPLOAD_LIMIT_BYTES)?, both_bytes),
         "a refused upload charges nothing"
     );
 
-    // Yesterday's window is spent allowance that has already returned.
+    // Yesterday's window is allowance that has already returned.
     sqlx::query(
-        "UPDATE briefcase.organization_upload_usage \
+        "UPDATE briefcase.organization_usage \
             SET daily_window = daily_window - 1 WHERE org_id = briefcase.current_org_id()",
     )
     .execute(&mut *connection)
     .await?;
-    // The pool cannot close while a borrowed connection is still held.
-    drop(connection);
     let third = b"today is a new day";
     let third_bytes = i64::try_from(third.len())?;
     publish(&files, &context, parent, "charge-four", third).await?;
-    let (daily, total) = charged_bytes(&pool, &organization).await?;
     assert_eq!(
-        daily, third_bytes,
-        "midnight UTC restarts the daily counter rather than resuming it"
+        usage(&pool, &organization).await?,
+        (third_bytes, both_bytes + third_bytes),
+        "midnight UTC restarts the day's counter while stored bytes keep climbing"
+    );
+
+    // A ceiling configured for this organization alone is the one enforced.
+    sqlx::query(
+        "UPDATE briefcase.organization_usage SET storage_limit_bytes = stored_bytes \
+          WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+    assert_refused(
+        publish(&files, &context, parent, "charge-five", b"no room left").await,
+        "storage_limit_exhausted",
+    );
+    sqlx::query(
+        "UPDATE briefcase.organization_usage SET storage_limit_bytes = NULL \
+          WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+
+    // Deleting a retained version returns its bytes, whichever process does it.
+    let removed = sqlx::query(
+        "DELETE FROM briefcase.entry_versions \
+          WHERE org_id = briefcase.current_org_id() AND entry_id = $1 AND version_number = 1",
+    )
+    .bind(entry.as_uuid())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    assert_eq!(
+        removed, 1,
+        "the first version must still have been retained"
     );
     assert_eq!(
-        total,
-        expected + third_bytes,
-        "the organization total never resets"
+        usage(&pool, &organization).await?.1,
+        both_bytes + third_bytes - first_bytes,
+        "storage falls by exactly what the deleted version weighed"
+    );
+
+    // What the usage endpoint reports is what the limits enforce.
+    drop(connection);
+    let reported = metadata.load_organization_usage(&context).await?;
+    assert_eq!(
+        (
+            i64::try_from(reported.daily_upload_bytes)?,
+            i64::try_from(reported.stored_bytes)?
+        ),
+        usage(&pool, &organization).await?
+    );
+    assert_eq!(
+        reported.storage_allowance(),
+        DEFAULT_STORAGE_LIMIT_BYTES,
+        "clearing an override restores the platform default"
     );
 
     pool.close().await;

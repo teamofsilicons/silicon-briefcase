@@ -34,6 +34,7 @@ use crate::{
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         notification::{NotificationDecision, NotificationInbox, NotificationKind},
         permission::{AccessRight, Capability, GrantedAccess, PermissionGrant},
+        quota::OrganizationUsage,
         version::{VersionNumber, VersionSource},
     },
 };
@@ -1683,6 +1684,18 @@ impl MetadataRepository for PostgresRepository {
         let inbox = notifications::load_inbox(&mut request.transaction, context).await?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(inbox)
+    }
+
+    async fn load_organization_usage(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<OrganizationUsage> {
+        let mut request = begin(self, context).await?;
+        let usage = super::quota::read_usage(&mut request.transaction)
+            .await
+            .map_err(|_| MetadataRepositoryError::Unavailable)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(usage)
     }
 
     async fn mark_notifications_read(

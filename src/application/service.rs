@@ -13,6 +13,7 @@ mod notifications;
 mod permissions;
 mod repository;
 mod search;
+mod usage;
 mod versions;
 
 use std::sync::Arc;

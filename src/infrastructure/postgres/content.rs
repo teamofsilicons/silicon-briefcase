@@ -92,7 +92,7 @@ impl ContentRepository for PostgresContentRepository {
         staged: &StagedContent<'_>,
     ) -> std::result::Result<Prepared<SmallUploadPreparation, EntryId>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
-        quota::check_allowance(&mut request.transaction, staged.size).await?;
+        quota::check_upload(&mut request.transaction, staged.size).await?;
         let parent = require_parent(
             &mut request.transaction,
             context,
@@ -256,7 +256,7 @@ impl ContentRepository for PostgresContentRepository {
         expires_at: OffsetDateTime,
     ) -> std::result::Result<Prepared<MultipartPreparation, MultipartReceipt>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
-        quota::check_allowance(&mut request.transaction, command.size).await?;
+        quota::check_upload(&mut request.transaction, command.size).await?;
         require_parent(
             &mut request.transaction,
             context,
@@ -838,6 +838,9 @@ impl ContentRepository for PostgresContentRepository {
         )
         .await?
         .ok_or(AppError::NotFound)?;
+        // A restore uploads nothing but stores a second copy, so the storage
+        // ceiling applies while the daily upload allowance does not.
+        quota::check_storage(&mut request.transaction, to_u64(source.size_bytes)?).await?;
         let proposed_version_id = VersionId::new();
         let metadata = keyed_metadata(&command.idempotency_key, command.request_hash);
         let new_version_id = match claim_idempotency(
@@ -958,6 +961,7 @@ impl ContentRepository for PostgresContentRepository {
             &self.platform,
         )
         .await?;
+        quota::charge_storage(&mut request.transaction, preparation.size).await?;
         let next_number = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version_number), 0) + 1 FROM briefcase.entry_versions \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
@@ -1708,10 +1712,11 @@ async fn publish_file_content(
     stored: &StoredObject,
     storage: StorageReference<'_>,
 ) -> std::result::Result<EntryId, AppError> {
-    // Both allowances are charged here rather than at reservation time: this
-    // is the one statement every upload reaches, exactly once, and the charge
-    // rolls back with the publication it belongs to.
-    quota::charge(transaction, size).await?;
+    // The day's allowance is charged here rather than at reservation time:
+    // this is the one statement every upload reaches, exactly once, and the
+    // charge rolls back with the publication it belongs to. Stored bytes move
+    // with the version row itself, under a trigger.
+    quota::charge_upload(transaction, size).await?;
     if let Some((existing_id, kind)) =
         find_named_child(transaction, parent.entry.id, name, true).await?
     {

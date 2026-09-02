@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 25] = [
+const EXPECTED_OPERATIONS: [&str; 26] = [
     "configureOrganizationBucket",
     "createFileOnBehalfOfMember",
     "createFolder",
@@ -21,6 +21,7 @@ const EXPECTED_OPERATIONS: [&str; 25] = [
     "listVersions",
     "moveEntryToBin",
     "readEntryContent",
+    "readOrganizationUsage",
     "readNotifications",
     "requestAccess",
     "resolvePermanentUrl",

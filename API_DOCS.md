@@ -99,9 +99,9 @@ permission error, so the API never confirms that a hidden entry exists.
 ### Errors
 
 Errors use the standard `error.code`, `error.message`, and `error.request_id`
-envelope. Two codes are specific to upload allowances:
+envelope. Two codes are specific to organization limits:
 `daily_upload_limit_exhausted` (`429`, with `Retry-After`) and
-`organization_upload_limit_exhausted` (`507`).
+`storage_limit_exhausted` (`507`).
 
 ## Browsing and folder management
 
@@ -269,14 +269,19 @@ history keeps the previous fifty versions. Creating a file needs write access
 on the folder; replacing one needs update access on the file itself. A folder
 of the same name is a conflict.
 
-Every upload is charged against two organization allowances: **100 GiB per UTC
-day**, and **100 TiB in total**. Both count uploaded bytes rather than stored
-bytes, so deleting a file frees storage but not allowance, and a restored
-version costs nothing because nothing was uploaded. An upload that does not fit
-is refused before its bytes are stored: a spent day answers `429` with
-`Retry-After` set to the seconds remaining until 00:00 UTC, and a spent total
-answers `507`. Concurrent uploads racing for the last of an allowance serialize
-on the organization's counter, so the limit cannot be overshot.
+Two organization limits apply: **100 GiB of uploads per UTC day** and **1 PiB
+of storage**, both configurable per organization. The daily figure counts
+uploaded bytes and returns at midnight UTC; the storage figure counts what is
+currently kept, so deleting content returns capacity as soon as the bytes are
+really gone — which is after the 45-day bin, not when the entry is binned.
+Restoring a historical version uploads nothing but does store a second copy, so
+it answers to the storage ceiling alone.
+
+An upload that does not fit is refused before its bytes are stored: a spent day
+answers `429` with `Retry-After` set to the seconds remaining until 00:00 UTC,
+and a full organization answers `507`. Concurrent uploads racing for the last
+of a limit serialize on the organization's counter row, so neither limit can be
+overshot.
 
 The two limits interact: a single file larger than the daily allowance can
 never be uploaded, whatever the 5 TiB per-file maximum allows, because no day
@@ -461,6 +466,34 @@ The v1 contract is synchronous. Deployments therefore give this route a
 separate, configurable deadline and concurrency budget; large cross-target
 restores stream one bounded multipart range at a time and may keep the request
 open substantially longer than an ordinary upload.
+
+## Usage
+
+### `GET /usage`
+
+Reports what the organization is actually consuming.
+
+- **Authentication:** Bearer.
+- **Returns:** Exact byte counts for storage and for today's uploads, each with its limit and what remains.
+
+Every figure is a byte count, never a percentage, so a client renders whichever
+unit or proportion it prefers. `storage.used_bytes` is what every retained
+version currently weighs, binned entries included, because those bytes are
+still stored; `daily_uploads.resets_at` is the next midnight UTC.
+
+Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and
+either may be set for one organization by writing its row — there is no API for
+raising a limit, deliberately, because that is an operator decision rather than
+a tenant one:
+
+```sql
+INSERT INTO briefcase.organization_usage (org_id, daily_window, storage_limit_bytes)
+VALUES ('tos', (clock_timestamp() AT TIME ZONE 'UTC')::date, 2251799813685248)
+ON CONFLICT (org_id) DO UPDATE SET storage_limit_bytes = EXCLUDED.storage_limit_bytes;
+```
+
+A null limit means the platform default, so an organization that never asked
+for anything special follows the default if it later changes.
 
 ## Bin
 

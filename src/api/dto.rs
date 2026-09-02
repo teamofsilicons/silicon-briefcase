@@ -462,6 +462,43 @@ pub struct NotificationInboxDto {
     pub unread_count: u64,
 }
 
+/// What one organization consumes, and what it may consume.
+///
+/// Every figure is an exact byte count rather than a percentage, so a client
+/// can render whichever unit or proportion it likes without losing precision.
+#[derive(Clone, Debug, Serialize)]
+pub struct OrganizationUsageDto {
+    /// Current storage consumption and ceiling.
+    pub storage: UsageMeasureDto,
+    /// Upload volume within the current UTC day.
+    pub daily_uploads: DailyUsageMeasureDto,
+}
+
+/// One consumption figure against its limit.
+#[derive(Clone, Debug, Serialize)]
+pub struct UsageMeasureDto {
+    /// Bytes currently consumed.
+    pub used_bytes: u64,
+    /// Bytes this organization may consume.
+    pub limit_bytes: u64,
+    /// Bytes still available.
+    pub remaining_bytes: u64,
+}
+
+/// The day's upload consumption and when it resets.
+#[derive(Clone, Debug, Serialize)]
+pub struct DailyUsageMeasureDto {
+    /// Bytes uploaded so far today.
+    pub used_bytes: u64,
+    /// Bytes this organization may upload in one UTC day.
+    pub limit_bytes: u64,
+    /// Bytes still available today.
+    pub remaining_bytes: u64,
+    /// The next midnight UTC, when the day's allowance returns.
+    #[serde(with = "time::serde::rfc3339")]
+    pub resets_at: OffsetDateTime,
+}
+
 /// File search query.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

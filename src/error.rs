@@ -49,12 +49,12 @@ pub enum AppError {
         /// Complete size of the addressed content.
         total_size: u64,
     },
-    /// The organization spent one of its upload allowances.
-    #[error("organization upload limit exhausted: {limit}")]
+    /// The organization reached its daily upload allowance or storage ceiling.
+    #[error("organization limit exhausted: {limit}")]
     UploadLimitExhausted {
-        /// Which allowance stopped the upload.
+        /// Which limit stopped the write.
         limit: UploadLimit,
-        /// Seconds until the allowance returns, when it returns at all.
+        /// Seconds until the capacity returns, when waiting alone restores it.
         retry_after_seconds: Option<u64>,
     },
     /// A caller exceeded an abuse or capacity limit.
@@ -172,17 +172,17 @@ impl AppError {
                 Cow::Borrowed("The requested byte range is outside the content."),
             ),
             Self::UploadLimitExhausted { limit, .. } => match limit {
-                UploadLimit::Daily => (
+                UploadLimit::DailyUpload => (
                     StatusCode::TOO_MANY_REQUESTS,
-                    Cow::Borrowed(UploadLimit::Daily.code()),
+                    Cow::Borrowed(UploadLimit::DailyUpload.code()),
                     Cow::Borrowed(
                         "The organization's daily upload allowance is spent. It resets at 00:00 UTC.",
                     ),
                 ),
-                UploadLimit::Organization => (
+                UploadLimit::Storage => (
                     StatusCode::INSUFFICIENT_STORAGE,
-                    Cow::Borrowed(UploadLimit::Organization.code()),
-                    Cow::Borrowed("The organization has uploaded its total allowance."),
+                    Cow::Borrowed(UploadLimit::Storage.code()),
+                    Cow::Borrowed("The organization has no storage capacity left."),
                 ),
             },
             Self::RateLimited { .. } => (

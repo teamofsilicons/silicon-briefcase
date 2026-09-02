@@ -1,17 +1,21 @@
-//! Organization upload allowances, counted where they are spent.
+//! Organization usage counters, read and charged where they are spent.
 //!
-//! An upload is checked twice. The check before the bytes are stored is
-//! advisory: it refuses an upload that obviously does not fit, so a caller is
-//! not asked to transfer bytes that cannot be kept. The charge at publication
-//! is authoritative: it increments and re-reads the counters inside the same
+//! An upload is measured twice. Before the bytes are asked for, the check is
+//! advisory: it refuses an upload that obviously cannot be kept, so a caller is
+//! not made to transfer a file that has nowhere to go. At publication the
+//! charge is authoritative: it locks the organization's counter row inside the
 //! transaction that records the file, so two uploads racing for the last of an
-//! allowance serialize on that row and only one of them can win.
+//! allowance serialize and only one of them can win.
+//!
+//! Stored bytes are not charged here at all. A database trigger moves that
+//! counter with the version rows themselves, so publication, retention, bin
+//! purges, and cascading deletes all account for storage without knowing it.
 
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use crate::{
-    domain::quota::{UploadLimit, UploadUsage},
+    domain::quota::{OrganizationUsage, UploadLimit},
     error::AppError,
 };
 
@@ -24,85 +28,159 @@ macro_rules! utc_today {
     };
 }
 
-/// Refuses an upload that current usage already cannot admit.
+/// Reads what the organization currently consumes and the ceilings in force.
 ///
 /// # Errors
 ///
-/// Returns [`AppError::UploadLimitExhausted`] when the organization has spent
-/// the allowance, or a database error.
-pub(super) async fn check_allowance(
+/// Returns an error when the usage row cannot be read.
+pub(super) async fn read_usage(
     transaction: &mut Transaction<'_, Postgres>,
-    bytes: u64,
-) -> Result<(), AppError> {
-    let usage = read_usage(transaction).await?;
-    usage.admits(bytes).map_err(exhausted)
-}
-
-/// Charges an upload against both allowances, refusing what does not fit.
-///
-/// # Errors
-///
-/// Returns [`AppError::UploadLimitExhausted`] when the charge exceeds an
-/// allowance, which rolls the whole publication back, or a database error.
-pub(super) async fn charge(
-    transaction: &mut Transaction<'_, Postgres>,
-    bytes: u64,
-) -> Result<(), AppError> {
-    let charged = i64::try_from(bytes).map_err(|_| AppError::Internal {
-        category: "upload_usage_overflow",
-    })?;
-    let (daily_bytes, total_bytes) = sqlx::query_as::<_, (i64, i64)>(concat!(
-        "INSERT INTO briefcase.organization_upload_usage AS current_usage \
-                (org_id, daily_window, daily_bytes, total_bytes) \
-         VALUES (briefcase.current_org_id(), ",
-        utc_today!(),
-        ", $1, $1) \
-         ON CONFLICT (org_id) DO UPDATE \
-            SET daily_window = ",
-        utc_today!(),
-        ", daily_bytes = CASE \
-                    WHEN current_usage.daily_window = ",
-        utc_today!(),
-        " THEN current_usage.daily_bytes + $1 \
-                    ELSE $1 \
-                END, \
-                total_bytes = current_usage.total_bytes + $1 \
-         RETURNING daily_bytes, total_bytes"
-    ))
-    .bind(charged)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(database_error)?;
-    // The counters now include this upload, so admitting zero further bytes is
-    // exactly the question "did this one still fit?".
-    usage(daily_bytes, total_bytes).admits(0).map_err(exhausted)
-}
-
-async fn read_usage(transaction: &mut Transaction<'_, Postgres>) -> Result<UploadUsage, AppError> {
-    let row = sqlx::query_as::<_, (i64, i64)>(concat!(
+) -> Result<OrganizationUsage, AppError> {
+    let row = sqlx::query_as::<_, (i64, i64, Option<i64>, Option<i64>)>(concat!(
         "SELECT CASE WHEN daily_window = ",
         utc_today!(),
-        " THEN daily_bytes ELSE 0 END, total_bytes \
-           FROM briefcase.organization_upload_usage \
+        " THEN daily_upload_bytes ELSE 0 END, \
+           stored_bytes, daily_upload_limit_bytes, storage_limit_bytes \
+           FROM briefcase.organization_usage \
           WHERE org_id = briefcase.current_org_id()"
     ))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?;
-    Ok(
-        row.map_or_else(UploadUsage::default, |(daily_bytes, total_bytes)| {
-            usage(daily_bytes, total_bytes)
-        }),
-    )
+    Ok(row.map_or(OrganizationUsage::EMPTY, usage))
 }
 
-fn usage(daily_bytes: i64, total_bytes: i64) -> UploadUsage {
-    // The column is constrained non-negative, so a negative value could only
-    // come from a corrupted row; treating it as spent is the safe reading.
-    UploadUsage {
-        daily_bytes: u64::try_from(daily_bytes).unwrap_or(u64::MAX),
-        total_bytes: u64::try_from(total_bytes).unwrap_or(u64::MAX),
+/// Refuses an upload that current usage already cannot admit.
+///
+/// # Errors
+///
+/// Returns [`AppError::UploadLimitExhausted`] when the organization has no room
+/// for the upload, or a database error.
+pub(super) async fn check_upload(
+    transaction: &mut Transaction<'_, Postgres>,
+    bytes: u64,
+) -> Result<(), AppError> {
+    read_usage(transaction)
+        .await?
+        .admits_upload(bytes)
+        .map_err(exhausted)
+}
+
+/// Refuses bytes the organization has no room to store.
+///
+/// # Errors
+///
+/// Returns [`AppError::UploadLimitExhausted`] when the storage ceiling is
+/// reached, or a database error.
+pub(super) async fn check_storage(
+    transaction: &mut Transaction<'_, Postgres>,
+    bytes: u64,
+) -> Result<(), AppError> {
+    read_usage(transaction)
+        .await?
+        .admits_storage(bytes)
+        .map_err(exhausted)
+}
+
+/// Charges an upload against the daily allowance and the storage ceiling.
+///
+/// # Errors
+///
+/// Returns [`AppError::UploadLimitExhausted`] when the upload exceeds a limit,
+/// or a database error.
+pub(super) async fn charge_upload(
+    transaction: &mut Transaction<'_, Postgres>,
+    bytes: u64,
+) -> Result<(), AppError> {
+    let usage = lock_usage(transaction, bytes).await?;
+    // The daily counter now includes this upload while the stored counter does
+    // not: the version row that moves it is inserted next. Asking whether the
+    // organization still admits these bytes therefore answers both questions
+    // at once — did the day have room, and does the storage.
+    usage
+        .admits_upload(0)
+        .and_then(|()| usage.admits_storage(bytes))
+        .map_err(exhausted)
+}
+
+/// Claims storage for bytes that are copied rather than uploaded.
+///
+/// A restore consumes storage without spending the day's upload allowance, so
+/// it locks the same row and answers to the storage ceiling alone.
+///
+/// # Errors
+///
+/// Returns [`AppError::UploadLimitExhausted`] when the storage ceiling is
+/// reached, or a database error.
+pub(super) async fn charge_storage(
+    transaction: &mut Transaction<'_, Postgres>,
+    bytes: u64,
+) -> Result<(), AppError> {
+    lock_usage(transaction, 0)
+        .await?
+        .admits_storage(bytes)
+        .map_err(exhausted)
+}
+
+/// Adds `daily_charge` to the day's counter and returns the locked row.
+///
+/// The upsert locks the organization's row before the caller reads it, so a
+/// concurrent write cannot slip past on stale counters. Returning an error
+/// rolls the whole publication back, charging nothing.
+async fn lock_usage(
+    transaction: &mut Transaction<'_, Postgres>,
+    daily_charge: u64,
+) -> Result<OrganizationUsage, AppError> {
+    let charged = i64::try_from(daily_charge).map_err(|_| AppError::Internal {
+        category: "usage_overflow",
+    })?;
+    let row = sqlx::query_as::<_, (i64, i64, Option<i64>, Option<i64>)>(concat!(
+        "INSERT INTO briefcase.organization_usage AS usage_row \
+                (org_id, daily_window, daily_upload_bytes) \
+         VALUES (briefcase.current_org_id(), ",
+        utc_today!(),
+        ", $1) \
+         ON CONFLICT (org_id) DO UPDATE \
+            SET daily_window = ",
+        utc_today!(),
+        ", daily_upload_bytes = CASE \
+                    WHEN usage_row.daily_window = ",
+        utc_today!(),
+        " THEN usage_row.daily_upload_bytes + $1 \
+                    ELSE $1 \
+                END \
+         RETURNING daily_upload_bytes, stored_bytes, \
+                   daily_upload_limit_bytes, storage_limit_bytes"
+    ))
+    .bind(charged)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    Ok(usage(row))
+}
+
+fn usage(
+    (daily_upload_bytes, stored_bytes, daily_upload_limit, storage_limit): (
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+    ),
+) -> OrganizationUsage {
+    OrganizationUsage {
+        daily_upload_bytes: counter(daily_upload_bytes),
+        stored_bytes: counter(stored_bytes),
+        daily_upload_limit: daily_upload_limit.map(counter),
+        storage_limit: storage_limit.map(counter),
     }
+}
+
+/// Reads one non-negative counter or ceiling.
+///
+/// The columns are constrained non-negative, so a negative value could only
+/// come from a corrupted row; reading it as exhausted is the safe direction.
+fn counter(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn exhausted(limit: UploadLimit) -> AppError {
@@ -125,10 +203,10 @@ fn database_error(error: sqlx::Error) -> AppError {
     match map_sql(error) {
         crate::application::service::MetadataRepositoryError::NotFound => AppError::NotFound,
         crate::application::service::MetadataRepositoryError::Conflict => {
-            AppError::conflict("upload_usage_conflict")
+            AppError::conflict("organization_usage_conflict")
         }
         _ => AppError::Internal {
-            category: "upload_usage",
+            category: "organization_usage",
         },
     }
 }

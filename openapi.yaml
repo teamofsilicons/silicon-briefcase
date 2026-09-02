@@ -176,10 +176,12 @@ paths:
         `update` on the file. A folder with the same name is a conflict.
 
 
-        Every upload is charged against two organization allowances: 100 GiB
-        per UTC day, and 100 TiB in total. Both count uploaded bytes, so
-        deleting a file frees storage but not allowance. An upload that does
-        not fit is refused before its bytes are stored.
+        Two organization limits apply: 100 GiB of uploads per UTC day, and
+        1 PiB of storage. The daily figure counts uploaded bytes and returns at
+        midnight UTC; the storage figure counts what is currently kept, so
+        deleting content returns capacity once the bytes are gone. Either limit
+        may be configured per organization. An upload that does not fit is
+        refused before its bytes are stored, and `GET /usage` reports both.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -198,7 +200,7 @@ paths:
         '201': { description: File created, or a new version published on the existing file, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
         '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
-        '507': { description: The organization has uploaded its total allowance }
+        '507': { description: The organization has no storage capacity left }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/permissions:
     parameters:
@@ -370,7 +372,7 @@ paths:
         '201': { description: File created, or a new version published, for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
         '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
-        '507': { description: The organization has uploaded its total allowance }
+        '507': { description: The organization has no storage capacity left }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
@@ -393,6 +395,35 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200': { description: Version restored as a new current version, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /usage:
+    get:
+      tags: [Storage]
+      operationId: readOrganizationUsage
+      summary: Report the organization's consumption and limits, in bytes
+      description: >-
+        Answers how much space the organization is actually consuming — exact
+        byte counts, never percentages, so a client renders whichever unit or
+        proportion it prefers.
+
+
+        `storage.used_bytes` is what every retained version currently weighs,
+        including versions of entries sitting in the bin, because those bytes
+        are still stored. It falls as soon as content is really deleted.
+        `daily_uploads.used_bytes` is what has been uploaded since the last
+        midnight UTC, and `resets_at` is the next one.
+
+
+        Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage,
+        and either may be raised or lowered per organization, so the figures
+        reported here are the ones actually in force.
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Consumption and limits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrganizationUsage' }
         default: { $ref: '#/components/responses/Error' }
   /bin:
     get:
@@ -509,6 +540,28 @@ components:
         root_type: { type: string, enum: [public, private, tag], description: Required only when creating at organization root }
         tag: { type: string, description: Required for a tag root }
         invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
+    OrganizationUsage:
+      type: object
+      required: [storage, daily_uploads]
+      properties:
+        storage: { $ref: '#/components/schemas/UsageMeasure' }
+        daily_uploads:
+          allOf:
+            - $ref: '#/components/schemas/UsageMeasure'
+            - type: object
+              required: [resets_at]
+              properties:
+                resets_at:
+                  type: string
+                  format: date-time
+                  description: The next midnight UTC, when the day's allowance returns
+    UsageMeasure:
+      type: object
+      required: [used_bytes, limit_bytes, remaining_bytes]
+      properties:
+        used_bytes: { type: integer, format: int64, minimum: 0 }
+        limit_bytes: { type: integer, format: int64, minimum: 0 }
+        remaining_bytes: { type: integer, format: int64, minimum: 0 }
     Entry:
       type: object
       required: [id, org_id, type, visibility, name, path, permanent_url, effective_access]

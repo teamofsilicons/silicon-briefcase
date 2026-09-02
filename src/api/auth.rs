@@ -64,6 +64,8 @@ pub enum IamAction {
     RestoreBinEntry,
     /// Configure organization storage.
     ConfigureStorage,
+    /// Read the organization's consumption and limits.
+    ReadUsage,
 }
 
 impl IamAction {
@@ -94,6 +96,7 @@ impl IamAction {
             Self::ListBin => "briefcase.bin.list",
             Self::RestoreBinEntry => "briefcase.bin.restore",
             Self::ConfigureStorage => "briefcase.storage.configure",
+            Self::ReadUsage => "briefcase.usage.read",
         }
     }
 }
