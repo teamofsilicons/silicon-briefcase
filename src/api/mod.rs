@@ -256,6 +256,10 @@ fn ordinary_routes() -> Router<AppState> {
         )
         .route("/org/{org_id}/{*path}", get(entries::resolve_path))
         .route(
+            "/api/v1/entries/{entry_id}/activity",
+            get(entries::entry_activity),
+        )
+        .route(
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
         )
@@ -343,7 +347,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 27] = [
+    const CONTRACT: [(&str, &str, &str); 28] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -374,6 +378,7 @@ mod tests {
         ("/search", "get", "200"),
         ("/notifications", "get", "200"),
         ("/notifications/read", "post", "200"),
+        ("/entries/{entry_id}/activity", "get", "200"),
         ("/entries/{entry_id}/versions", "get", "200"),
         (
             "/entries/{entry_id}/versions/{version_id}/restore",

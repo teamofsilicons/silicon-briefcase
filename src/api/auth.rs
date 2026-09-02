@@ -73,6 +73,8 @@ pub enum IamAction {
     ListNotifications,
     /// Mark the notification inbox read.
     ReadNotifications,
+    /// Read an entry's action history.
+    ListActivity,
     /// List retained versions.
     ListVersions,
     /// Restore a retained version.
@@ -111,6 +113,7 @@ impl IamAction {
             Self::Search => "briefcase.search",
             Self::ListNotifications => "briefcase.notifications.list",
             Self::ReadNotifications => "briefcase.notifications.read",
+            Self::ListActivity => "briefcase.activity.list",
             Self::ListVersions => "briefcase.versions.list",
             Self::RestoreVersion => "briefcase.versions.restore",
             Self::ListBin => "briefcase.bin.list",
@@ -366,6 +369,7 @@ mod tests {
             (IamAction::Search, "briefcase.search"),
             (IamAction::ListNotifications, "briefcase.notifications.list"),
             (IamAction::ReadNotifications, "briefcase.notifications.read"),
+            (IamAction::ListActivity, "briefcase.activity.list"),
             (IamAction::ListVersions, "briefcase.versions.list"),
             (IamAction::RestoreVersion, "briefcase.versions.restore"),
             (IamAction::ListBin, "briefcase.bin.list"),

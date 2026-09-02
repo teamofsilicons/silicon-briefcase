@@ -510,6 +510,27 @@ pub struct SearchPageDto {
     pub items: Vec<SearchResultDto>,
 }
 
+/// One recorded action in an entry's history.
+#[derive(Clone, Debug, Serialize)]
+pub struct ActivityEventDto {
+    /// Stable, versioned action name.
+    pub action: String,
+    /// Actor who performed the action.
+    pub actor: ActorRefDto,
+    /// Application that acted on the actor's behalf.
+    pub app_id: Option<String>,
+    /// When the action happened.
+    #[serde(with = "time::serde::rfc3339")]
+    pub occurred_at: OffsetDateTime,
+}
+
+/// Retained action history of one entry.
+#[derive(Clone, Debug, Serialize)]
+pub struct ActivityPageDto {
+    /// Newest-first history, capped at 100 entries.
+    pub items: Vec<ActivityEventDto>,
+}
+
 /// Retained file version.
 #[derive(Clone, Debug, Serialize)]
 pub struct FileVersionDto {

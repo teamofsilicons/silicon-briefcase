@@ -10,7 +10,7 @@ use crate::{
 };
 
 use super::{
-    AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
+    ActivityEvent, AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
     ListEntriesQuery, MetadataService, MetadataServiceError, MutationMetadata, Page,
     UpdateEntryCommand, require_capability, validate_context,
 };
@@ -192,6 +192,33 @@ impl MetadataService {
             .record_metadata_access(context, &[entry_id])
             .await?;
         entry.into_full_view(authorization)
+    }
+
+    /// Returns the retained action history of one readable entry.
+    ///
+    /// The history answers "who did what, and when" for the last hundred
+    /// recorded actions, which is exactly what the product contract retains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// the entry is unavailable or unreadable, or repository access fails.
+    pub async fn entry_activity(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Vec<ActivityEvent>, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry(context, entry_id)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        require_capability(&entry, context, Capability::Read)?;
+        self.repository
+            .list_entry_activity(context, entry_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Renames and/or moves an active entry without crossing permission boundaries.

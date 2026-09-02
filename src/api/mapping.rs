@@ -7,12 +7,12 @@ use url::Url;
 
 use crate::{
     application::service::{
-        AccessRequestView, AuthorizedEntryView, FileVersionView, MetadataRepositoryError,
-        MetadataServiceError, Page, SearchResultView,
+        AccessRequestView, ActivityEvent, AuthorizedEntryView, FileVersionView,
+        MetadataRepositoryError, MetadataServiceError, Page, SearchResultView,
     },
     domain::{
         access::AccessRequestStatus,
-        actor::{ActorKind, ActorRef},
+        actor::{ActorKind, ActorRef, ApplicationId},
         entry::{EntryKind, EntryPath, RootType},
         ids::EntryId,
         media::RenderKind,
@@ -23,10 +23,10 @@ use crate::{
 };
 
 use super::dto::{
-    AccessRequestDto, AccessRequestStatusDto, ActorRefDto, ActorTypeDto, EffectiveAccessDto,
-    EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto, FileVersionDto, GrantAccessDto,
-    NotificationDecisionDto, NotificationDto, NotificationInboxDto, NotificationKindDto,
-    NotificationSubjectDto, PermissionGrantDto, PermissionGrantPageDto,
+    AccessRequestDto, AccessRequestStatusDto, ActivityEventDto, ActivityPageDto, ActorRefDto,
+    ActorTypeDto, EffectiveAccessDto, EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto,
+    FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto, NotificationInboxDto,
+    NotificationKindDto, NotificationSubjectDto, PermissionGrantDto, PermissionGrantPageDto,
     PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
 };
 
@@ -305,6 +305,20 @@ impl ResponseMapper {
             })
             .collect::<Result<_, _>>()?;
         Ok(SearchPageDto { items })
+    }
+
+    pub(crate) fn activity(events: Vec<ActivityEvent>) -> ActivityPageDto {
+        ActivityPageDto {
+            items: events
+                .into_iter()
+                .map(|event| ActivityEventDto {
+                    action: event.action,
+                    actor: actor(&event.actor),
+                    app_id: event.application_id.map(ApplicationId::into_inner),
+                    occurred_at: event.occurred_at,
+                })
+                .collect(),
+        }
     }
 
     pub(crate) fn versions(

@@ -14,10 +14,10 @@ use crate::{
 };
 
 use super::model::{
-    AccessRequestView, AuthorizableAccessRequest, AuthorizableEntry, CreateFolderMutation,
-    DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand, ListBinQuery,
-    ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata, Page,
-    RequestAccessCommand, RevokePermissionCommand, SearchCandidate, SearchQuery,
+    AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
+    CreateFolderMutation, DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand,
+    ListBinQuery, ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata,
+    Page, RequestAccessCommand, RevokePermissionCommand, SearchCandidate, SearchQuery,
     UpdateEntryCommand,
 };
 
@@ -194,6 +194,13 @@ pub trait MetadataRepository: Send + Sync {
         metadata: &MutationMetadata,
         required_capability: Capability,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
+
+    /// Lists the retained action history of one entry, newest first.
+    async fn list_entry_activity(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Vec<ActivityEvent>, MetadataRepositoryError>;
 
     /// Loads the caller's newest notifications and unread badge count.
     async fn load_notification_inbox(

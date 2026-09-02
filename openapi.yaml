@@ -321,6 +321,24 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationInbox' }
         default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/activity:
+    get:
+      tags: [Entries]
+      operationId: listEntryActivity
+      summary: Read the retained action history of an entry
+      description: >-
+        Returns up to the last hundred recorded actions on the entry — who
+        created, read, updated, downloaded, deleted, or restored it, and when.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Newest-first action history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityPage' }
+        default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
       tags: [Versions]
@@ -535,6 +553,19 @@ components:
       type: object
       required: [id, entry_id, requested_by, access, status, created_at]
       properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { $ref: '#/components/schemas/AccessRights' }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
+    ActivityEvent:
+      type: object
+      required: [action, actor, occurred_at]
+      properties:
+        action: { type: string, description: 'Stable versioned action name, for example entry.downloaded.v1' }
+        actor: { $ref: '#/components/schemas/ActorRef' }
+        app_id: { type: [string, 'null'], description: Application that acted on the actor's behalf }
+        occurred_at: { type: string, format: date-time }
+    ActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ActivityEvent' } }
     NotificationSubject:
       type: object
       required: [entry_id, name, path, type, permanent_url]

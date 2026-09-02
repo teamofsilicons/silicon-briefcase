@@ -620,6 +620,22 @@ pub struct ListVersionsQuery {
     pub page: PageRequest,
 }
 
+/// Number of history entries retained and returned for one entry.
+pub const ENTRY_ACTIVITY_HISTORY_SIZE: u16 = 100;
+
+/// One recorded action in an entry's history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivityEvent {
+    /// Stable, versioned action name.
+    pub action: String,
+    /// Actor who performed the action.
+    pub actor: ActorRef,
+    /// Application that acted on the actor's behalf.
+    pub application_id: Option<ApplicationId>,
+    /// When the action happened.
+    pub occurred_at: OffsetDateTime,
+}
+
 /// Query for recoverable entries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListBinQuery {

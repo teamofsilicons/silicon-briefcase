@@ -33,8 +33,8 @@ use super::{
         auth::IamAction,
         cursor,
         dto::{
-            ActorRefDto, ActorTypeDto, DispositionDto, EntryDto, EntryPageDto, EntryPatchDto,
-            FolderCreateDto, GrantAccessDto, ListEntriesQuery, PathContentQuery,
+            ActivityPageDto, ActorRefDto, ActorTypeDto, DispositionDto, EntryDto, EntryPageDto,
+            EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery, PathContentQuery,
             PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
         },
         extract,
@@ -167,6 +167,24 @@ const fn content_intent(value: DispositionDto) -> ContentIntent {
         DispositionDto::Inline => ContentIntent::Render,
         DispositionDto::Attachment => ContentIntent::Download,
     }
+}
+
+/// Returns the retained "who did what, when" history of one entry.
+pub(crate) async fn entry_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<Json<ActivityPageDto>, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::ListActivity, &resource).await?;
+    let events = extract::scoped(&context, state.metadata.entry_activity(&context, entry_id))
+        .await
+        .map_err(metadata_error)?;
+    Ok(Json(super::super::mapping::ResponseMapper::activity(
+        events,
+    )))
 }
 
 pub(crate) async fn update_entry(

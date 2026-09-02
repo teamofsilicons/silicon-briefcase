@@ -15,16 +15,17 @@ use crate::{
     application::{
         context::ExecutionContext,
         service::{
-            AccessRequestView, AuthorizableAccessRequest, AuthorizableEntry, CreateFolderMutation,
-            DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand, ListBinQuery,
-            ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MetadataRepository,
-            MetadataRepositoryError, MutationMetadata, Page, RequestAccessCommand,
-            RevokePermissionCommand, SearchCandidate, SearchQuery, UpdateEntryCommand,
+            AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
+            CreateFolderMutation, DecideAccessRequestCommand, ENTRY_ACTIVITY_HISTORY_SIZE,
+            FileVersionView, GrantPermissionCommand, ListBinQuery, ListEntriesQuery,
+            ListPermissionsQuery, ListVersionsQuery, MetadataRepository, MetadataRepositoryError,
+            MutationMetadata, Page, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
+            SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
         access::{AccessDecision, AccessRequestStatus},
-        actor::ActorRef,
+        actor::{ActorRef, ApplicationId},
         entry::{EntryKind, EntryPath},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         notification::{NotificationDecision, NotificationInbox, NotificationKind},
@@ -1476,6 +1477,52 @@ impl MetadataRepository for PostgresRepository {
             .ok_or_else(|| internal("restored entry disappeared"))?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(restored)
+    }
+
+    async fn list_entry_activity(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Vec<ActivityEvent>> {
+        #[derive(sqlx::FromRow)]
+        struct ActivityRow {
+            actor_type: String,
+            actor_id: String,
+            origin_app_id: Option<String>,
+            action: String,
+            occurred_at: OffsetDateTime,
+        }
+
+        let mut request = begin(self, context).await?;
+        let rows = sqlx::query_as::<_, ActivityRow>(
+            "SELECT actor_type, actor_id, origin_app_id, action, occurred_at \
+               FROM briefcase.audit_events \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+              ORDER BY occurred_at DESC, audit_id DESC \
+              LIMIT $2",
+        )
+        .bind(entry_id.as_uuid())
+        .bind(i64::from(ENTRY_ACTIVITY_HISTORY_SIZE))
+        .fetch_all(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        request.transaction.commit().await.map_err(map_sql)?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ActivityEvent {
+                    action: row.action,
+                    actor: actor_ref(&row.actor_type, &row.actor_id)?,
+                    application_id: row
+                        .origin_app_id
+                        .filter(|value| !value.is_empty())
+                        .map(ApplicationId::new)
+                        .transpose()
+                        .map_err(internal_data)?,
+                    occurred_at: row.occurred_at,
+                })
+            })
+            .collect()
     }
 
     async fn load_notification_inbox(
