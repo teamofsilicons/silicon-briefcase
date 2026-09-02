@@ -43,7 +43,7 @@ pub mod upload;
 pub mod validation;
 mod webhook;
 
-use handlers::{content, entries, permissions, system};
+use handlers::{content, entries, notifications, permissions, system};
 use state::{AppState, ContentUseCases};
 
 const SMALL_MULTIPART_BODY_LIMIT: usize = 101 * 1_048_576;
@@ -239,6 +239,14 @@ fn ordinary_routes() -> Router<AppState> {
         )
         .route("/api/v1/search", get(entries::search))
         .route(
+            "/api/v1/notifications",
+            get(notifications::list_notifications),
+        )
+        .route(
+            "/api/v1/notifications/read",
+            post(notifications::read_notifications),
+        )
+        .route(
             "/api/v1/entries/{entry_id}/content",
             get(content::read_content),
         )
@@ -335,7 +343,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 25] = [
+    const CONTRACT: [(&str, &str, &str); 27] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -364,6 +372,8 @@ mod tests {
         ("/entries/{entry_id}/access-requests", "post", "201"),
         ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),
+        ("/notifications", "get", "200"),
+        ("/notifications/read", "post", "200"),
         ("/entries/{entry_id}/versions", "get", "200"),
         (
             "/entries/{entry_id}/versions/{version_id}/restore",

@@ -130,6 +130,7 @@ impl WorkerRuntime {
                 indexed_entries = stats.indexed_entries,
                 removed_search_documents = stats.removed_search_documents,
                 expired_idempotency_records = stats.expired_idempotency_records,
+                pruned_notifications = stats.pruned_notifications,
                 "worker database maintenance completed"
             );
         } else {

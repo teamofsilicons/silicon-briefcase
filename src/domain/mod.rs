@@ -10,6 +10,7 @@ pub mod entry;
 pub mod ids;
 pub mod media;
 pub mod multipart;
+pub mod notification;
 pub mod permission;
 pub mod storage;
 pub mod version;

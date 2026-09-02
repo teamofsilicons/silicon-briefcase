@@ -69,6 +69,10 @@ pub enum IamAction {
     DecideAccessRequest,
     /// Search visible content.
     Search,
+    /// Read the notification inbox.
+    ListNotifications,
+    /// Mark the notification inbox read.
+    ReadNotifications,
     /// List retained versions.
     ListVersions,
     /// Restore a retained version.
@@ -105,6 +109,8 @@ impl IamAction {
             Self::CreateAccessRequest => "briefcase.access_request.create",
             Self::DecideAccessRequest => "briefcase.access_request.decide",
             Self::Search => "briefcase.search",
+            Self::ListNotifications => "briefcase.notifications.list",
+            Self::ReadNotifications => "briefcase.notifications.read",
             Self::ListVersions => "briefcase.versions.list",
             Self::RestoreVersion => "briefcase.versions.restore",
             Self::ListBin => "briefcase.bin.list",
@@ -358,6 +364,8 @@ mod tests {
                 "briefcase.access_request.decide",
             ),
             (IamAction::Search, "briefcase.search"),
+            (IamAction::ListNotifications, "briefcase.notifications.list"),
+            (IamAction::ReadNotifications, "briefcase.notifications.read"),
             (IamAction::ListVersions, "briefcase.versions.list"),
             (IamAction::RestoreVersion, "briefcase.versions.restore"),
             (IamAction::ListBin, "briefcase.bin.list"),

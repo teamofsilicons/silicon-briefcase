@@ -8,6 +8,7 @@ use crate::{
     domain::{
         entry::EntryPath,
         ids::{AccessRequestId, EntryId, GrantId},
+        notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
     },
 };
@@ -193,6 +194,19 @@ pub trait MetadataRepository: Send + Sync {
         metadata: &MutationMetadata,
         required_capability: Capability,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
+
+    /// Loads the caller's newest notifications and unread badge count.
+    async fn load_notification_inbox(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<NotificationInbox, MetadataRepositoryError>;
+
+    /// Marks the caller's complete inbox read and returns it afterwards.
+    async fn mark_notifications_read(
+        &self,
+        context: &ExecutionContext,
+        metadata: &MutationMetadata,
+    ) -> Result<NotificationInbox, MetadataRepositoryError>;
 
     /// Records successful metadata reads for the required audit history.
     async fn record_metadata_access(

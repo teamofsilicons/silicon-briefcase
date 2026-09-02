@@ -13,6 +13,7 @@ tags:
   - name: Entries
   - name: Uploads
   - name: Permissions
+  - name: Notifications
   - name: Search
   - name: Versions
   - name: Bin
@@ -291,6 +292,35 @@ paths:
       responses:
         '200': { description: Permission-filtered results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/SearchResult' } } } } } } }
         default: { $ref: '#/components/responses/Error' }
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: Read the central notification inbox
+      description: >-
+        Returns the twenty newest notifications for the authenticated Carbon or
+        Silicon together with the unread count used for the badge.
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Newest notifications and unread badge count
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationInbox' }
+        default: { $ref: '#/components/responses/Error' }
+  /notifications/read:
+    post:
+      tags: [Notifications]
+      operationId: readNotifications
+      summary: Mark the entire notification inbox read
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Inbox after every notification was marked read
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationInbox' }
+        default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
       tags: [Versions]
@@ -505,6 +535,44 @@ components:
       type: object
       required: [id, entry_id, requested_by, access, status, created_at]
       properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { $ref: '#/components/schemas/AccessRights' }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
+    NotificationSubject:
+      type: object
+      required: [entry_id, name, path, type, permanent_url]
+      description: The entry as it was when the notification was created.
+      properties:
+        entry_id: { type: string, format: uuid }
+        name: { type: string }
+        path: { type: string }
+        type: { type: string, enum: [file, folder] }
+        permanent_url: { type: string, format: uri }
+    Notification:
+      type: object
+      required: [id, kind, read, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [access_granted, access_revoked, access_requested, access_request_decided] }
+        read: { type: boolean }
+        actor:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ActorRef'
+        subject:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/NotificationSubject'
+        access:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/AccessRights'
+        access_request_id: { type: [string, 'null'], format: uuid }
+        decision: { type: [string, 'null'], enum: [approved, denied, null] }
+        created_at: { type: string, format: date-time }
+    NotificationInbox:
+      type: object
+      required: [items, unread_count]
+      properties:
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/Notification' } }
+        unread_count: { type: integer, minimum: 0 }
     SearchResult:
       type: object
       required: [entry, score, filename_match, content_hits]

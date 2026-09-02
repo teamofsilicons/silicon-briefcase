@@ -1,6 +1,7 @@
 //! Concrete tenant-safe implementation of metadata application ports.
 
 pub(super) mod common;
+pub(super) mod notifications;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -26,6 +27,7 @@ use crate::{
         actor::ActorRef,
         entry::{EntryKind, EntryPath},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
+        notification::{NotificationDecision, NotificationInbox, NotificationKind},
         permission::{AccessRight, Capability, GrantedAccess, PermissionGrant},
         version::{VersionNumber, VersionSource},
     },
@@ -310,6 +312,24 @@ impl MetadataRepository for PostgresRepository {
         let created = load_entry(&mut request.transaction, context, entry_id, false, false)
             .await?
             .ok_or_else(|| internal("created folder disappeared"))?;
+        // Invitees learn about the folder from their inbox, in the same
+        // transaction that gave them access to it.
+        let subject = notifications::snapshot(&created.entry);
+        for invitee in &mutation.command.invitees {
+            notifications::insert(
+                &mut request.transaction,
+                &notifications::NewNotification {
+                    recipient: &invitee.principal,
+                    kind: NotificationKind::AccessGranted,
+                    actor: Some(actor),
+                    subject: Some(&subject),
+                    access: Some(invitee.access),
+                    access_request_id: None,
+                    decision: None,
+                },
+            )
+            .await?;
+        }
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(created)
     }
@@ -649,6 +669,19 @@ impl MetadataRepository for PostgresRepository {
             Some(grant_id.as_uuid()),
         )
         .await?;
+        notifications::insert(
+            &mut request.transaction,
+            &notifications::NewNotification {
+                recipient: &command.principal,
+                kind: NotificationKind::AccessGranted,
+                actor: Some(actor),
+                subject: Some(&notifications::snapshot(&entry.entry)),
+                access: Some(command.access),
+                access_request_id: None,
+                decision: None,
+            },
+        )
+        .await?;
         let grant = permission_grant(row)?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(grant)
@@ -735,6 +768,20 @@ impl MetadataRepository for PostgresRepository {
             OPERATION,
             metadata,
             Some(command.grant_id.as_uuid()),
+        )
+        .await?;
+        let principal = actor_ref(&row.principal_type, &row.principal_id)?;
+        notifications::insert(
+            &mut request.transaction,
+            &notifications::NewNotification {
+                recipient: &principal,
+                kind: NotificationKind::AccessRevoked,
+                actor: Some(actor),
+                subject: Some(&notifications::snapshot(&entry.entry)),
+                access: Some(decode_access(row.access_mask)?),
+                access_request_id: None,
+                decision: None,
+            },
         )
         .await?;
         request.transaction.commit().await.map_err(map_sql)?;
@@ -832,6 +879,27 @@ impl MetadataRepository for PostgresRepository {
             Some(request_id.as_uuid()),
         )
         .await?;
+        // The people who can approve this are the entry owner and every
+        // organization owner or admin. The requester never notifies itself.
+        let subject = notifications::snapshot(&entry.entry);
+        let recipients =
+            notifications::decision_recipients(&mut request.transaction, &entry.entry.owner, actor)
+                .await?;
+        for recipient in &recipients {
+            notifications::insert(
+                &mut request.transaction,
+                &notifications::NewNotification {
+                    recipient,
+                    kind: NotificationKind::AccessRequested,
+                    actor: Some(actor),
+                    subject: Some(&subject),
+                    access: Some(command.access),
+                    access_request_id: Some(request_id),
+                    decision: None,
+                },
+            )
+            .await?;
+        }
         let result = access_request_view(row)?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(result)
@@ -958,6 +1026,35 @@ impl MetadataRepository for PostgresRepository {
             OPERATION,
             metadata,
             Some(command.request_id.as_uuid()),
+        )
+        .await?;
+        let requester = actor_ref(&row.requested_by_type, &row.requested_by_id)?;
+        let entry = load_entry(
+            &mut request.transaction,
+            context,
+            EntryId::from_uuid(row.entry_id).map_err(internal_data)?,
+            false,
+            false,
+        )
+        .await?;
+        notifications::insert(
+            &mut request.transaction,
+            &notifications::NewNotification {
+                recipient: &requester,
+                kind: NotificationKind::AccessRequestDecided,
+                actor: Some(actor),
+                subject: entry
+                    .as_ref()
+                    .map(|entry| notifications::snapshot(&entry.entry))
+                    .as_ref(),
+                access,
+                access_request_id: Some(command.request_id),
+                decision: Some(if access.is_some() {
+                    NotificationDecision::Approved
+                } else {
+                    NotificationDecision::Denied
+                }),
+            },
         )
         .await?;
         let result = access_request_view(updated)?;
@@ -1379,6 +1476,62 @@ impl MetadataRepository for PostgresRepository {
             .ok_or_else(|| internal("restored entry disappeared"))?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(restored)
+    }
+
+    async fn load_notification_inbox(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<NotificationInbox> {
+        let mut request = begin(self, context).await?;
+        let inbox = notifications::load_inbox(&mut request.transaction, context).await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(inbox)
+    }
+
+    async fn mark_notifications_read(
+        &self,
+        context: &ExecutionContext,
+        metadata: &MutationMetadata,
+    ) -> Result<NotificationInbox> {
+        const OPERATION: &str = "mark_notifications_read";
+        let mut request = begin(self, context).await?;
+        // Marking the inbox read is idempotent by nature, but claiming the key
+        // keeps a retried request from writing a second audit record.
+        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            None,
+        )
+        .await?
+        {
+            let inbox = notifications::load_inbox(&mut request.transaction, context).await?;
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(inbox);
+        }
+        notifications::mark_all_read(&mut request.transaction, context).await?;
+        record_change(
+            &mut request.transaction,
+            &request.context,
+            None,
+            "notifications.inbox_read.v1",
+            "notification_inbox",
+            context.authorization().actor().id().as_str(),
+            json!({}),
+        )
+        .await?;
+        complete_idempotency(
+            &mut request.transaction,
+            &request.context,
+            OPERATION,
+            metadata,
+            None,
+        )
+        .await?;
+        let inbox = notifications::load_inbox(&mut request.transaction, context).await?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(inbox)
     }
 
     async fn record_metadata_access(

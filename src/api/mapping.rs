@@ -16,6 +16,7 @@ use crate::{
         entry::{EntryKind, EntryPath, RootType},
         ids::EntryId,
         media::RenderKind,
+        notification::{Notification, NotificationDecision, NotificationInbox, NotificationKind},
         permission::{AccessRight, EffectiveAccess, GrantedAccess, PermissionGrant},
     },
     error::AppError,
@@ -24,8 +25,9 @@ use crate::{
 use super::dto::{
     AccessRequestDto, AccessRequestStatusDto, ActorRefDto, ActorTypeDto, EffectiveAccessDto,
     EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto, FileVersionDto, GrantAccessDto,
-    PermissionGrantDto, PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto,
-    RootTypeDto, SearchPageDto, SearchResultDto,
+    NotificationDecisionDto, NotificationDto, NotificationInboxDto, NotificationKindDto,
+    NotificationSubjectDto, PermissionGrantDto, PermissionGrantPageDto,
+    PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
 };
 
 /// Characters that must not survive unencoded in a permanent-URL segment.
@@ -159,6 +161,56 @@ impl ResponseMapper {
                 .map(|entry| self.entry(entry))
                 .collect::<Result<_, _>>()?,
             next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Renders the notification inbox, including its badge count.
+    pub(crate) fn inbox(
+        &self,
+        organization_id: &str,
+        inbox: NotificationInbox,
+    ) -> Result<NotificationInboxDto, AppError> {
+        let items = inbox
+            .items
+            .into_iter()
+            .map(|item| self.notification(organization_id, item))
+            .collect::<Result<_, _>>()?;
+        Ok(NotificationInboxDto {
+            items,
+            unread_count: inbox.unread_count,
+        })
+    }
+
+    fn notification(
+        &self,
+        organization_id: &str,
+        notification: Notification,
+    ) -> Result<NotificationDto, AppError> {
+        let read = notification.is_read();
+        let subject = notification
+            .subject
+            .map(|subject| -> Result<NotificationSubjectDto, AppError> {
+                Ok(NotificationSubjectDto {
+                    entry_id: subject.entry_id.as_uuid(),
+                    name: subject.name,
+                    entry_type: entry_kind(subject.kind),
+                    permanent_url: self.permanent_url(organization_id, &subject.path)?,
+                    path: subject.path.into_inner(),
+                })
+            })
+            .transpose()?;
+        Ok(NotificationDto {
+            id: notification.id.as_uuid(),
+            kind: notification_kind(notification.kind),
+            read,
+            actor: notification.actor.as_ref().map(actor),
+            subject,
+            access: notification.access.map(access_rights),
+            access_request_id: notification
+                .access_request_id
+                .map(crate::domain::ids::AccessRequestId::as_uuid),
+            decision: notification.decision.map(notification_decision),
+            created_at: notification.created_at,
         })
     }
 
@@ -316,6 +368,22 @@ const fn entry_kind(value: EntryKind) -> EntryTypeDto {
     match value {
         EntryKind::File => EntryTypeDto::File,
         EntryKind::Folder => EntryTypeDto::Folder,
+    }
+}
+
+const fn notification_kind(value: NotificationKind) -> NotificationKindDto {
+    match value {
+        NotificationKind::AccessGranted => NotificationKindDto::AccessGranted,
+        NotificationKind::AccessRevoked => NotificationKindDto::AccessRevoked,
+        NotificationKind::AccessRequested => NotificationKindDto::AccessRequested,
+        NotificationKind::AccessRequestDecided => NotificationKindDto::AccessRequestDecided,
+    }
+}
+
+const fn notification_decision(value: NotificationDecision) -> NotificationDecisionDto {
+    match value {
+        NotificationDecision::Approved => NotificationDecisionDto::Approved,
+        NotificationDecision::Denied => NotificationDecisionDto::Denied,
     }
 }
 

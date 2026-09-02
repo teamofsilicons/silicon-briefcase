@@ -2,11 +2,19 @@
 
 use sqlx::PgPool;
 
+/// Notifications retained per recipient inbox.
+///
+/// The inbox is a live signal, not an archive: the audit history is the record
+/// of what happened. Keeping the newest few hundred bounds inbox growth in an
+/// organization that shares aggressively.
+const RETAINED_NOTIFICATIONS_PER_RECIPIENT: i64 = 200;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MaintenanceStats {
     pub(super) indexed_entries: u64,
     pub(super) removed_search_documents: u64,
     pub(super) expired_idempotency_records: u64,
+    pub(super) pruned_notifications: u64,
 }
 
 pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> {
@@ -51,10 +59,30 @@ pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> 
     .await?
     .rows_affected();
 
+    let pruned_notifications = sqlx::query(
+        "DELETE FROM briefcase.notifications AS notification \
+          USING ( \
+              SELECT org_id, notification_id, \
+                     row_number() OVER ( \
+                         PARTITION BY org_id, recipient_type, recipient_id \
+                         ORDER BY created_at DESC, notification_id DESC \
+                     ) AS position \
+                FROM briefcase.notifications \
+          ) AS ranked \
+          WHERE ranked.position > $1 \
+            AND notification.org_id = ranked.org_id \
+            AND notification.notification_id = ranked.notification_id",
+    )
+    .bind(RETAINED_NOTIFICATIONS_PER_RECIPIENT)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+
     transaction.commit().await?;
     Ok(MaintenanceStats {
         indexed_entries,
         removed_search_documents,
         expired_idempotency_records,
+        pruned_notifications,
     })
 }

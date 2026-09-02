@@ -405,6 +405,79 @@ pub struct AccessRequestDecisionDto {
     pub access: Option<Vec<GrantAccessDto>>,
 }
 
+/// What a notification is about.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationKindDto {
+    /// The recipient received access to an entry.
+    AccessGranted,
+    /// The recipient's explicit access was revoked.
+    AccessRevoked,
+    /// An access request awaits the recipient's decision.
+    AccessRequested,
+    /// The recipient's own access request was decided.
+    AccessRequestDecided,
+}
+
+/// Outcome recorded on a decided access request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDecisionDto {
+    /// Approved, so a grant now exists.
+    Approved,
+    /// Denied without creating a grant.
+    Denied,
+}
+
+/// The entry a notification refers to, as it was at that moment.
+#[derive(Clone, Debug, Serialize)]
+pub struct NotificationSubjectDto {
+    /// Entry identifier.
+    pub entry_id: Uuid,
+    /// Name at the time of the event.
+    pub name: String,
+    /// Path at the time of the event.
+    pub path: String,
+    /// File or folder discriminator.
+    #[serde(rename = "type")]
+    pub entry_type: EntryTypeDto,
+    /// Clean permanent URL of the entry.
+    pub permanent_url: Url,
+}
+
+/// One notification in the central inbox.
+#[derive(Clone, Debug, Serialize)]
+pub struct NotificationDto {
+    /// Notification identifier.
+    pub id: Uuid,
+    /// What happened.
+    pub kind: NotificationKindDto,
+    /// Whether the recipient has read it.
+    pub read: bool,
+    /// Actor whose action produced it.
+    pub actor: Option<ActorRefDto>,
+    /// Entry it refers to.
+    pub subject: Option<NotificationSubjectDto>,
+    /// Rights involved.
+    pub access: Option<Vec<GrantAccessDto>>,
+    /// Access request it belongs to.
+    pub access_request_id: Option<Uuid>,
+    /// Outcome of a decided access request.
+    pub decision: Option<NotificationDecisionDto>,
+    /// Creation timestamp.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// The notification inbox and its badge count.
+#[derive(Clone, Debug, Serialize)]
+pub struct NotificationInboxDto {
+    /// Twenty newest notifications, newest first.
+    pub items: Vec<NotificationDto>,
+    /// Unread notification count used for the badge.
+    pub unread_count: u64,
+}
+
 /// File search query.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
