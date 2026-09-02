@@ -354,7 +354,8 @@ paths:
         The represented member's own permissions still apply: the file is only
         created where that member may add content, and a name that an active
         file already carries publishes that file's next version. Any supported
-        size is accepted; Briefcase picks the storage route internally.
+        size is accepted; Briefcase picks the storage route internally, and the
+        organization's daily and total upload allowances apply as usual.
       security:
         - oboAccess: []
           appId: []

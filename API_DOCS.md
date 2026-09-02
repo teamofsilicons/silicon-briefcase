@@ -278,6 +278,10 @@ is refused before its bytes are stored: a spent day answers `429` with
 answers `507`. Concurrent uploads racing for the last of an allowance serialize
 on the organization's counter, so the limit cannot be overshot.
 
+The two limits interact: a single file larger than the daily allowance can
+never be uploaded, whatever the 5 TiB per-file maximum allows, because no day
+has room for it.
+
 Because the whole file arrives in one request, a very large upload occupies a
 connection and temporary disk for its duration. `BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`
 and the staging volume are sized for the largest file an operator expects.
@@ -412,7 +416,9 @@ An empty `path` stores the file in the application's own folder,
 on. Any other path must name an existing folder the represented member may add
 content to; their own permissions still decide. The proof identifier doubles as
 the idempotency key. Any supported size is accepted here too, and a name an
-active file already carries publishes that file's next version.
+active file already carries publishes that file's next version. The
+organization's upload allowances apply exactly as they do to a member's own
+upload.
 
 ## Search
 
