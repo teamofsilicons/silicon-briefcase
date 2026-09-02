@@ -43,10 +43,17 @@ or accepted from a client.
   a signed provider URL, so a permanent URL is never a bearer capability. Reads
   are sandboxed by Content-Security-Policy, never sniffed, never cached, and
   support byte ranges for media playback.
+- **One upload endpoint.** `POST /uploads` takes a whole file of any supported
+  size and decides internally whether the bytes travel as a single provider
+  request or as a durable multipart transfer, so a client never drives parts.
+  Uploading over an existing file name is how a file is updated: the bytes
+  become that file's next version and the history keeps the previous fifty.
 - **Independent access rights.** A grant conveys any set of `read`, `write`,
   `update`, and `delete`. Update never implies deletion, write never implies
   update, and `POST /permissions/effective` answers what the caller may
-  actually do on up to a hundred named targets at once.
+  actually do on up to a hundred named targets at once. Tag members share
+  create, read, and update inside a tag folder while deletion stays with the
+  creator; organization owners and admins hold every operation everywhere.
 - **A central inbox.** Grants, revocations, access requests, and decisions each
   write a notification in the same transaction as the change, so the inbox
   cannot disagree with the permissions it describes.

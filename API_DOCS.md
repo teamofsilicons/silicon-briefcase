@@ -67,12 +67,16 @@ aggregate UUID.
 ### Entry model
 
 Files and folders are both entries. Every entry has an owner, an
-organization-relative `path`, the clean `permanent_url` built from it, a
-parent, effective access, timestamps, and one of three inherited root types:
+organization-relative `path`, the clean `permanent_url` built from it — always
+carrying the organization, as `https://briefcase.teamofsilicons.com/org/{org_id}/{path}` —
+a parent, effective access, timestamps, and one of three inherited root types:
 
 - **Public:** Readable by every current organization member.
 - **Private:** Visible only to its owner and explicitly authorized members.
-- **Tag:** Readable by members who currently possess the matching IAM tag.
+- **Tag:** Everyone currently carrying the matching IAM tag may read, add, and
+  change what is inside. Deletion is not shared: it stays with whoever created
+  the entry and with organization owners and admins, so a shared tag folder
+  cannot be emptied by anyone who happens to hold the tag.
 
 A file additionally carries `render` — the renderer a client should open
 (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`,
@@ -84,8 +88,12 @@ A file additionally carries `render` — the renderer a client should open
 does), `delete`, and `manage_permissions`. Update never implies delete, and
 write never implies update.
 
-Organization owners and authorized administrators have full administrative
-visibility. Anything the caller may not read is reported as `404`, never as a
+Organization owners and authorized administrators hold every operation on
+every piece of content in their organization: read, write, update, delete, and
+permission management, anywhere, without needing a grant. The reserved
+containers themselves — the Public, Private, and Tag bases and the per-member
+folders IAM keeps in step with membership — are structure rather than content,
+so nobody renames, moves, deletes, or shares those, an administrator included. Anything the caller may not read is reported as `404`, never as a
 permission error, so the API never confirms that a hidden entry exists.
 
 ### Errors
@@ -147,12 +155,16 @@ Creates a folder.
 - **Optional:** `parent_id` or `parent_path`, `root_type`, `tag`, and initial invitees.
 - **Returns:** The created folder entry.
 
-`root_type` is required only when creating at the organization base. A tag root also requires its IAM tag. Below an existing folder, the child inherits the parent's root type and permission boundary.
+`root_type` is required only when creating at the organization base. A tag root
+also requires its IAM tag. Below an existing folder, the child inherits the
+parent's root type and permission boundary.
 
-The caller needs write access to the parent, and invitees must already belong
-to the organization. Three destinations are always refused: the organization
-base itself, directly inside the Private container, and any folder assigned to
-another member — the last is reported as `404`.
+Any current member may create a folder at the organization base, declaring
+which kind it is; it is their own space, so this needs no administrative
+authority. Below the base the caller needs write access to the parent, and
+invitees must already belong to the organization. Two destinations are always
+refused: directly inside the Private container, and any folder assigned to
+another member — the latter is reported as `404`.
 
 ### `GET /entries/{entry_id}`
 
@@ -219,68 +231,44 @@ answers `404`, so the URL is safe to share: a recipient without access sees
 exactly what they would see for a path that never existed, and can then request
 access.
 
+A folder shared only through something inside it resolves as a traversal view:
+`visibility` is `traversal`, the folder opens, and it lists exactly the entries
+the caller was given. Its owner, timestamps, and effective access are withheld,
+because being able to walk to a share is not the same as being a member of the
+folder. When nothing inside it remains accessible, the folder answers `404`
+like anything else the caller may not see.
+
 ## Uploads
 
 ### `POST /uploads`
 
-Uploads a file of at most 100 MiB in one request.
+Uploads a file of any supported size in one request.
 
 - **Authentication:** Bearer.
 - **Content type:** `multipart/form-data`.
 - **Required:** binary `file`, `Idempotency-Key`, and exactly one of `parent_id` or `path`.
-- **Returns:** Created file entry.
+- **Returns:** The created file entry, or the updated entry when the upload published a new version.
 
 The destination folder is named either by identifier or by the same path its
 permanent URL shows, which is how a client stores a file at an exact location.
-The caller requires write access there. Files larger than 100 MiB receive `413`
-and must use multipart upload.
 
-### `POST /multipart-uploads`
+There is one upload endpoint because a client should not have to know how large
+"large" is. Briefcase stages the bytes, then decides internally: a file within
+the single-request limit goes to storage in one call, and anything above it is
+split into parts by the sizing formula, targeting roughly 1,000 parts clamped
+between 8 MiB and 5 GiB, up to the 5 TiB maximum. The multipart session is
+durable, so an interrupted transfer resumes rather than restarting. A file
+beyond 5 TiB receives `413`.
 
-Initializes an S3 multipart upload for a file larger than 100 MiB.
+Uploading a name an active file already carries is how that file is updated:
+the bytes become its next version, the response is that same entry, and the
+history keeps the previous fifty versions. Creating a file needs write access
+on the folder; replacing one needs update access on the file itself. A folder
+of the same name is a conflict.
 
-- **Authentication:** Bearer.
-- **Input:** Exactly one of `parent_id` or `path`, plus name, byte size, and content type.
-- **Returns:** `upload_id`, calculated part size, part count, and expiry.
-
-Part size is calculated from the declared file size, targets roughly 1,000
-parts, and remains between 8 MiB and 5 GiB. The file size cannot exceed the
-5 TiB limit.
-
-The contract's example table follows from that formula in every row but one:
-1 TiB is listed as 1 GiB across 1,024 parts, while the formula gives 1,049 MiB
-across 1,000 parts. The formula is normative, so a 1 TiB upload receives
-1,049 MiB parts.
-
-### `PUT /multipart-uploads/{upload_id}/parts/{part_number}`
-
-Uploads one binary part.
-
-- **Authentication:** Bearer.
-- **Content type:** `application/octet-stream`.
-- **Returns:** The part `ETag` header.
-
-Part numbers start at 1. The client must retain each ETag because completion needs the ordered list. Retrying the same part number replaces that part rather than adding a duplicate.
-
-### `POST /multipart-uploads/{upload_id}/complete`
-
-Finalizes a multipart upload.
-
-- **Authentication:** Bearer.
-- **Input:** Ordered `part_number` and `etag` pairs.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Created file entry.
-
-Briefcase verifies the expected parts and asks storage to assemble them. Completion must be idempotent so a network retry returns the same entry.
-
-### `DELETE /multipart-uploads/{upload_id}`
-
-Aborts an unfinished multipart upload.
-
-- **Authentication:** Bearer.
-- **Returns:** `204 No Content`.
-
-Aborting removes uploaded parts and releases storage. It does not create a file or bin entry.
+Because the whole file arrives in one request, a very large upload occupies a
+connection and temporary disk for its duration. `BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`
+and the staging volume are sized for the largest file an operator expects.
 
 ## Permissions and access requests
 
@@ -411,8 +399,8 @@ An empty `path` stores the file in the application's own folder,
 `private/{actor}/apps/{app_id}`, created on first use and reserved from then
 on. Any other path must name an existing folder the represented member may add
 content to; their own permissions still decide. The proof identifier doubles as
-the idempotency key, and files larger than 100 MiB use the member's own
-multipart upload.
+the idempotency key. Any supported size is accepted here too, and a name an
+active file already carries publishes that file's next version.
 
 ## Search
 
@@ -460,10 +448,11 @@ open substantially longer than an ordinary upload.
 
 ### `GET /bin`
 
-Lists deleted entries visible to the caller.
+Lists deleted entries visible to the caller, newest deletion first.
 
 - **Authentication:** Bearer.
-- **Returns:** Deleted entries.
+- **Query:** Optional `cursor` and `limit` from 1 to 100.
+- **Returns:** A page of deleted entries and the cursor for the next one.
 
 The owner sees their recoverable entries. Administrators see entries allowed by administrative policy. Deleted entries remain recoverable for 45 days.
 
@@ -495,23 +484,23 @@ Briefcase assumes the configured role and performs a temporary create, read, upd
 
 ## Complete flows
 
-### Small upload
+### Upload, of any size
 
 ```text
 Name the destination by parent_id or path
-  -> POST /uploads
+  -> POST /uploads with the whole file
+  -> Briefcase sizes it and picks single-request or multipart storage
   -> store the returned permanent URL
   -> render with GET /entries/{id}/content, save with /download
 ```
 
-### Multipart upload
+### Update a file
 
 ```text
-Initialize multipart upload
-  -> upload every numbered part
-  -> retain every ETag
-  -> complete with ordered ETags
-  -> receive the final file entry
+POST /uploads to the same folder with the same file name
+  -> the bytes become that file's next version
+  -> the same entry and permanent URL come back
+  -> GET /entries/{id}/versions lists the history, up to fifty versions
 ```
 
 ### Access request
