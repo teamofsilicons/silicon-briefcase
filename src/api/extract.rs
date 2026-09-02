@@ -20,7 +20,10 @@ use crate::{
         idempotency::{IdempotencyKey, bytes_fingerprint},
         service::MutationMetadata,
     },
-    domain::ids::{AccessRequestId, EntryId, GrantId, MultipartUploadId, VersionId},
+    domain::{
+        entry::EntryPath,
+        ids::{AccessRequestId, EntryId, GrantId, MultipartUploadId, VersionId},
+    },
     error::AppError,
     request_context,
 };
@@ -153,6 +156,21 @@ where
         category: "request_fingerprint",
     })?;
     Ok(bytes_fingerprint(operation, &canonical))
+}
+
+/// Validates a permanent-URL location against the authenticated tenant header.
+///
+/// A mismatched organization or an unparsable path is reported as not found:
+/// the permanent URL must never confirm that an inaccessible entry exists.
+pub(crate) fn entry_location(
+    (organization, path): (String, String),
+    headers: &HeaderMap,
+) -> Result<(String, EntryPath), AppError> {
+    if auth::organization_resource(headers)? != organization {
+        return Err(AppError::NotFound);
+    }
+    let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
+    Ok((organization, path))
 }
 
 pub(crate) fn entry_id(value: Uuid) -> Result<EntryId, AppError> {

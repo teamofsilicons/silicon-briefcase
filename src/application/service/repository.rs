@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{
     application::context::ExecutionContext,
     domain::{
+        entry::EntryPath,
         ids::{AccessRequestId, EntryId, GrantId},
         permission::{Capability, PermissionGrant},
     },
@@ -50,6 +51,16 @@ pub trait MetadataRepository: Send + Sync {
         &self,
         context: &ExecutionContext,
         entry_id: EntryId,
+    ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
+
+    /// Loads an active entry addressed by its organization-relative path.
+    ///
+    /// Path resolution is a lookup, not an authorization decision: the caller
+    /// still evaluates domain policy and answers not-found for a hidden entry.
+    async fn find_active_entry_by_path(
+        &self,
+        context: &ExecutionContext,
+        path: &EntryPath,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
     /// Lists tenant-local active child candidates in stable cursor order.

@@ -1,5 +1,6 @@
 //! Mapping between transport DTOs and application/domain models.
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use url::Url;
 
 use crate::{
@@ -10,7 +11,8 @@ use crate::{
     domain::{
         access::AccessRequestStatus,
         actor::{ActorKind, ActorRef},
-        entry::{EntryKind, RootType},
+        entry::{EntryKind, EntryPath, RootType},
+        media::RenderKind,
         permission::{AccessLevel, EffectiveAccess, PermissionGrant},
     },
     error::AppError,
@@ -19,44 +21,82 @@ use crate::{
 use super::dto::{
     AccessRequestDto, AccessRequestStatusDto, ActorRefDto, ActorTypeDto, EffectiveAccessDto,
     EntryDto, EntryPageDto, EntryTypeDto, FileVersionDto, GrantAccessDto, PermissionGrantDto,
-    PermissionGrantPageDto, RootTypeDto, SearchPageDto, SearchResultDto,
+    PermissionGrantPageDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
 };
 
-/// Builds public response representations with the configured canonical URL.
+/// Characters that must not survive unencoded in a permanent-URL segment.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
+
+fn with_directory_path(mut base: Url) -> Url {
+    if !base.path().ends_with('/') {
+        let normalized_path = format!("{}/", base.path());
+        base.set_path(&normalized_path);
+    }
+    base
+}
+
+fn encode_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT).to_string()
+}
+
+/// Builds public response representations with the configured canonical URLs.
 #[derive(Clone)]
 pub(crate) struct ResponseMapper {
     public_base_url: Url,
+    public_site_base_url: Url,
 }
 
 impl ResponseMapper {
-    pub(crate) fn new(mut public_base_url: Url) -> Self {
-        if !public_base_url.path().ends_with('/') {
-            let normalized_path = format!("{}/", public_base_url.path());
-            public_base_url.set_path(&normalized_path);
+    pub(crate) fn new(public_base_url: Url, public_site_base_url: Url) -> Self {
+        Self {
+            public_base_url: with_directory_path(public_base_url),
+            public_site_base_url: with_directory_path(public_site_base_url),
         }
-        Self { public_base_url }
     }
 
     pub(crate) fn entry(&self, view: AuthorizedEntryView) -> Result<EntryDto, AppError> {
         let entry = view.entry;
-        let permanent_url = self
-            .public_base_url
-            .join(&format!("entries/{}", entry.id))
-            .map_err(|_| AppError::Internal {
-                category: "public_entry_url",
-            })?;
+        let is_file = entry.kind == EntryKind::File;
+        let permanent_url = self.permanent_url(entry.organization_id.as_str(), &entry.path)?;
+        let content_url = is_file
+            .then(|| self.api_url(&format!("entries/{}/content", entry.id)))
+            .transpose()?;
+        let download_url = is_file
+            .then(|| self.api_url(&format!("entries/{}/download", entry.id)))
+            .transpose()?;
+        let render = is_file.then(|| {
+            render_kind(RenderKind::classify(
+                entry.name.as_str(),
+                entry.content_type.as_deref(),
+            ))
+        });
 
         Ok(EntryDto {
             id: entry.id.as_uuid(),
             org_id: entry.organization_id.as_str().to_owned(),
             entry_type: entry_kind(entry.kind),
             name: entry.name.into_inner(),
+            path: entry.path.into_inner(),
             parent_id: entry.parent_id.map(crate::domain::ids::EntryId::as_uuid),
             root_type: root_type(entry.boundary.root_type()),
             tag: entry.boundary.tag().map(|tag| tag.as_str().to_owned()),
             content_type: entry.content_type,
             size: entry.size,
+            render,
             permanent_url,
+            content_url,
+            download_url,
             owner: actor(&entry.owner),
             origin_app_id: entry
                 .origin_application_id
@@ -70,6 +110,38 @@ impl ResponseMapper {
             updated_at: entry.updated_at,
             deleted_at: entry.deleted_at,
         })
+    }
+
+    /// Builds the contracted clean permanent URL for one entry.
+    ///
+    /// The organization identifier and every path segment are percent-encoded
+    /// so a name containing a URL-significant character cannot change the
+    /// resolved location.
+    pub(crate) fn permanent_url(
+        &self,
+        organization_id: &str,
+        path: &EntryPath,
+    ) -> Result<Url, AppError> {
+        let mut target = String::from("org/");
+        target.push_str(&encode_segment(organization_id));
+        for segment in path.segments() {
+            target.push('/');
+            target.push_str(&encode_segment(segment));
+        }
+        target.push('/');
+        self.public_site_base_url
+            .join(&target)
+            .map_err(|_| AppError::Internal {
+                category: "permanent_entry_url",
+            })
+    }
+
+    fn api_url(&self, relative: &str) -> Result<Url, AppError> {
+        self.public_base_url
+            .join(relative)
+            .map_err(|_| AppError::Internal {
+                category: "public_entry_url",
+            })
     }
 
     pub(crate) fn entry_page(
@@ -203,6 +275,20 @@ const fn entry_kind(value: EntryKind) -> EntryTypeDto {
     match value {
         EntryKind::File => EntryTypeDto::File,
         EntryKind::Folder => EntryTypeDto::Folder,
+    }
+}
+
+const fn render_kind(value: RenderKind) -> RenderKindDto {
+    match value {
+        RenderKind::Image => RenderKindDto::Image,
+        RenderKind::Video => RenderKindDto::Video,
+        RenderKind::Document => RenderKindDto::Document,
+        RenderKind::Spreadsheet => RenderKindDto::Spreadsheet,
+        RenderKind::Presentation => RenderKindDto::Presentation,
+        RenderKind::Audio => RenderKindDto::Audio,
+        RenderKind::Archive => RenderKindDto::Archive,
+        RenderKind::Code => RenderKindDto::Code,
+        RenderKind::Unsupported => RenderKindDto::Unsupported,
     }
 }
 

@@ -66,6 +66,30 @@ pub enum EffectiveAccessDto {
     ManagePermissions,
 }
 
+/// Renderer a client should open for a file.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderKindDto {
+    /// Detail image view.
+    Image,
+    /// Video player.
+    Video,
+    /// In-place document view.
+    Document,
+    /// Sheet view.
+    Spreadsheet,
+    /// Presentation view.
+    Presentation,
+    /// Audio player.
+    Audio,
+    /// Archive content listing without extraction.
+    Archive,
+    /// Syntax-highlighted code or data view.
+    Code,
+    /// No renderer applies.
+    Unsupported,
+}
+
 /// Entry representation returned by the public API.
 #[derive(Clone, Debug, Serialize)]
 pub struct EntryDto {
@@ -78,6 +102,8 @@ pub struct EntryDto {
     pub entry_type: EntryTypeDto,
     /// Display name within the parent.
     pub name: String,
+    /// Organization-relative path, without a leading separator.
+    pub path: String,
     /// Parent folder, or `None` at organization root.
     pub parent_id: Option<Uuid>,
     /// Inherited visibility boundary.
@@ -88,8 +114,14 @@ pub struct EntryDto {
     pub content_type: Option<String>,
     /// File size in bytes.
     pub size: Option<u64>,
-    /// Stable authenticated resource URL.
+    /// Client renderer for a file.
+    pub render: Option<RenderKindDto>,
+    /// Clean permanent URL that shows the folder structure.
     pub permanent_url: Url,
+    /// Authenticated sandboxed content URL for a file.
+    pub content_url: Option<Url>,
+    /// Authenticated attachment URL for a file.
+    pub download_url: Option<Url>,
     /// Represented actor who owns the entry.
     pub owner: ActorRefDto,
     /// Verified application that originated the entry.

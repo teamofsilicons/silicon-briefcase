@@ -18,7 +18,7 @@ use crate::{
         actor::{
             ActorId, ActorKind, ActorRef, ApplicationId, OrganizationId, OrganizationRole, TagName,
         },
-        entry::{EntryBoundary, EntryKind, EntryName, SystemEntryKind},
+        entry::{EntryBoundary, EntryKind, EntryName, EntryPath, SystemEntryKind},
         ids::{EntryId, GrantId, VersionId},
         permission::{AccessLevel, PermissionGrant, PermissionGrantParts, PermissionInheritance},
     },
@@ -462,6 +462,7 @@ pub(in crate::infrastructure::postgres) fn entry_view(
         organization_id,
         kind: entry_kind(&row.entry_type)?,
         name: EntryName::new(&row.name).map_err(invalid_data)?,
+        path: EntryPath::new(&row.path).map_err(invalid_data)?,
         parent_id: row
             .parent_id
             .map(EntryId::from_uuid)

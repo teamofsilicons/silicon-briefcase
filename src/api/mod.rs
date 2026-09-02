@@ -77,7 +77,10 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         content,
         webhook_repository,
         database: database.clone(),
-        mapper: mapping::ResponseMapper::new(settings.server.public_base_url.clone()),
+        mapper: mapping::ResponseMapper::new(
+            settings.server.public_base_url.clone(),
+            settings.server.public_site_base_url.clone(),
+        ),
         temporary_directory: settings.s3.temporary_directory.clone(),
         webhook_settings: settings.webhook.clone(),
     };
@@ -230,6 +233,7 @@ fn ordinary_routes() -> Router<AppState> {
             post(permissions::decide_access_request),
         )
         .route("/api/v1/search", get(entries::search))
+        .route("/org/{org_id}/{*path}", get(entries::resolve_path))
         .route(
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
@@ -554,7 +558,7 @@ mod tests {
         let server = ServerSettings {
             bind_addr: ([127, 0, 0, 1], 0).into(),
             public_base_url: Url::parse("https://briefcase.example/api/v1/")?,
-            cdn_base_url: Url::parse("https://cdn.briefcase.example/")?,
+            public_site_base_url: Url::parse("https://briefcase.example/")?,
             request_timeout: Duration::from_secs(1),
             upload_timeout: Duration::from_secs(1),
             restore_timeout: Duration::from_secs(1),
@@ -569,7 +573,10 @@ mod tests {
             content,
             webhook_repository,
             database,
-            mapper: ResponseMapper::new(server.public_base_url.clone()),
+            mapper: ResponseMapper::new(
+                server.public_base_url.clone(),
+                server.public_site_base_url.clone(),
+            ),
             temporary_directory: s3.temporary_directory,
             webhook_settings: webhook.clone(),
         };

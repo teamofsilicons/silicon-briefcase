@@ -24,14 +24,17 @@ use crate::{
     domain::{
         access::{AccessDecision, AccessRequestStatus},
         actor::ActorRef,
-        entry::EntryKind,
+        entry::{EntryKind, EntryPath},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         permission::{AccessLevel, Capability, PermissionGrant},
         version::{VersionNumber, VersionSource},
     },
 };
 
-use super::{AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, roots};
+use super::{
+    AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, models::entry_columns,
+    roots,
+};
 use common::{
     IdempotencyClaim, Result, access_level, actor_kind, actor_ref, begin, boundary_columns,
     build_authorizable, claim_idempotency, complete_idempotency, current_member, encode_access,
@@ -75,6 +78,31 @@ impl MetadataRepository for PostgresRepository {
         Ok(entry)
     }
 
+    async fn find_active_entry_by_path(
+        &self,
+        context: &ExecutionContext,
+        path: &EntryPath,
+    ) -> Result<Option<AuthorizableEntry>> {
+        let mut request = begin(self, context).await?;
+        let row = sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() \
+                AND path = $1 AND deleted_at IS NULL",
+        ))
+        .bind(path.as_str())
+        .fetch_optional(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let entry = match row {
+            Some(row) => Some(build_authorizable(&mut request.transaction, context, row).await?),
+            None => None,
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(entry)
+    }
+
     async fn list_active_children(
         &self,
         context: &ExecutionContext,
@@ -84,17 +112,15 @@ impl MetadataRepository for PostgresRepository {
         let after = cursor.map_or(Uuid::nil(), |value| value.id);
         let limit = i64::from(query.page.limit) + 1;
         let mut request = begin(self, context).await?;
-        let rows = sqlx::query_as::<_, EntryRow>(
-            "SELECT org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, \
-                    system_kind, owner_type, owner_id, origin_app_id, content_type, size_bytes, \
-                    current_version_id, created_by_type, created_by_id, updated_by_type, \
-                    updated_by_id, deletion_batch_id, deleted_at, purge_after, created_at, updated_at \
-               FROM briefcase.entries \
+        let rows = sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() \
                 AND parent_id IS NOT DISTINCT FROM $1 \
                 AND deleted_at IS NULL AND entry_id > $2 \
               ORDER BY entry_id LIMIT $3",
-        )
+        ))
         .bind(query.parent_id.map(EntryId::as_uuid))
         .bind(after)
         .bind(limit)
@@ -1075,15 +1101,10 @@ impl MetadataRepository for PostgresRepository {
         let origin = authorization
             .originating_application()
             .map_or("", |application| application.as_str());
-        let rows = sqlx::query_as::<_, EntryRow>(
-            "SELECT entry.org_id, entry.entry_id, entry.parent_id, entry.entry_type, \
-                    entry.name, entry.root_type, entry.tag_id, entry.system_kind, \
-                    entry.owner_type, entry.owner_id, entry.origin_app_id, entry.content_type, \
-                    entry.size_bytes, entry.current_version_id, entry.created_by_type, \
-                    entry.created_by_id, entry.updated_by_type, entry.updated_by_id, \
-                    entry.deletion_batch_id, entry.deleted_at, entry.purge_after, \
-                    entry.created_at, entry.updated_at \
-               FROM briefcase.entries AS entry \
+        let rows = sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries AS entry \
               WHERE entry.org_id = briefcase.current_org_id() \
                 AND entry.deleted_at IS NOT NULL AND entry.purge_after > clock_timestamp() \
                 AND NOT EXISTS ( \
@@ -1106,7 +1127,7 @@ impl MetadataRepository for PostgresRepository {
                 ) \
                 AND ($5::timestamptz IS NULL OR (entry.deleted_at, entry.entry_id) < ($5, $6)) \
               ORDER BY entry.deleted_at DESC, entry.entry_id DESC LIMIT $7",
-        )
+        ))
         .bind(origin)
         .bind(authorization.role().has_administrative_access())
         .bind(actor_kind(actor.kind()))

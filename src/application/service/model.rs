@@ -7,7 +7,7 @@ use crate::{
     domain::{
         access::{AccessDecision, AccessRequestStatus},
         actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
-        entry::{EntryBoundary, EntryKind, EntryName, RootType, SystemEntryKind},
+        entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         permission::{
             AccessLevel, EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput,
@@ -116,6 +116,8 @@ pub struct EntryView {
     pub kind: EntryKind,
     /// Validated display name.
     pub name: EntryName,
+    /// Materialized organization-relative path used by the permanent URL.
+    pub path: EntryPath,
     /// Parent folder, or organization root.
     pub parent_id: Option<EntryId>,
     /// Inherited access boundary.

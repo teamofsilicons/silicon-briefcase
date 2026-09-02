@@ -3,7 +3,7 @@
 use crate::{
     application::context::ExecutionContext,
     domain::{
-        entry::EntryKind,
+        entry::{EntryKind, EntryPath},
         ids::EntryId,
         permission::{Capability, EntryVisibility},
     },
@@ -160,6 +160,34 @@ impl MetadataService {
             .await?
             .ok_or(MetadataServiceError::NotFound)?;
         let authorization = require_capability(&entry, context, Capability::Read)?;
+        self.repository
+            .record_metadata_access(context, &[entry_id])
+            .await?;
+        entry.into_full_view(authorization)
+    }
+
+    /// Resolves the entry addressed by a permanent URL path.
+    ///
+    /// An entry the caller cannot read is indistinguishable from one that does
+    /// not exist, which is what the permanent URL must return.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// nothing readable exists at the path, or repository access fails.
+    pub async fn get_entry_by_path(
+        &self,
+        context: &ExecutionContext,
+        path: &EntryPath,
+    ) -> Result<AuthorizedEntryView, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry_by_path(context, path)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        let authorization = require_capability(&entry, context, Capability::Read)?;
+        let entry_id = entry.entry.id;
         self.repository
             .record_metadata_access(context, &[entry_id])
             .await?;

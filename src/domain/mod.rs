@@ -8,6 +8,7 @@ pub mod access;
 pub mod actor;
 pub mod entry;
 pub mod ids;
+pub mod media;
 pub mod multipart;
 pub mod permission;
 pub mod storage;

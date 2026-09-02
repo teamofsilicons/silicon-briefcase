@@ -119,6 +119,27 @@ pub(crate) async fn get_entry(
     Ok(Json(state.mapper.entry(entry)?))
 }
 
+/// Serves the contracted clean permanent URL `/org/{org_id}/{path}`.
+///
+/// The organization segment must match the authenticated tenant header, and an
+/// entry the caller cannot read is reported exactly like a missing one.
+pub(crate) async fn resolve_path(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Json<EntryDto>, AppError> {
+    let (organization, entry_path) = extract::entry_location(extract::path(path)?, &headers)?;
+    let resource = format!("{organization}/{entry_path}");
+    let context = extract::authenticate(&state, &headers, IamAction::ReadEntry, &resource).await?;
+    let entry = extract::scoped(
+        &context,
+        state.metadata.get_entry_by_path(&context, &entry_path),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(state.mapper.entry(entry)?))
+}
+
 pub(crate) async fn update_entry(
     State(state): State<AppState>,
     headers: HeaderMap,
