@@ -99,11 +99,13 @@ pub(super) async fn reconcile_system_roots(
         return Ok(());
     };
 
+    // The container names are the lowercase segments that appear in every
+    // permanent URL, so they are created exactly as the contract shows them.
     ensure_singleton_root(
         transaction,
         "public_root",
         "public",
-        "Public",
+        "public",
         "public",
         &custodian,
     )
@@ -112,7 +114,7 @@ pub(super) async fn reconcile_system_roots(
         transaction,
         "private_root",
         "private",
-        "Private",
+        "private",
         "private",
         &custodian,
     )

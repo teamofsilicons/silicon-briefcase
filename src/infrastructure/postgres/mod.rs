@@ -142,6 +142,16 @@ pub async fn connect(
         .test_before_acquire(true)
         .after_connect(move |connection, _metadata| {
             Box::pin(async move {
+                // PostgreSQL's default search path starts with a schema named
+                // after the connecting role, and one runtime role is named
+                // `briefcase` — the same name as the application schema. Every
+                // statement Briefcase issues is schema-qualified, so the path
+                // is pinned to `public` to keep unqualified names (notably the
+                // migration bookkeeping table) resolving to one fixed schema
+                // no matter which role connects.
+                sqlx::query("SELECT set_config('search_path', 'public', false)")
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query("SELECT set_config('timezone', 'UTC', false)")
                     .execute(&mut *connection)
                     .await?;

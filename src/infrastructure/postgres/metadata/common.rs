@@ -339,19 +339,19 @@ async fn load_relevant_grants(
 
     let actor = execution.authorization().actor();
     let rows = sqlx::query_as::<_, ResolvedGrantRow>(
-        "SELECT grant.org_id, grant.entry_id, grant.grant_id, grant.principal_type, \
-                grant.principal_id, grant.access_mask, grant.inherits_to_descendants, \
-                grant.granted_by_type, grant.granted_by_id, grant.revoked_at, \
-                grant.revoked_by_type, grant.revoked_by_id, grant.created_at, path.depth \
+        "SELECT access_grant.org_id, access_grant.entry_id, access_grant.grant_id, access_grant.principal_type, \
+                access_grant.principal_id, access_grant.access_mask, access_grant.inherits_to_descendants, \
+                access_grant.granted_by_type, access_grant.granted_by_id, access_grant.revoked_at, \
+                access_grant.revoked_by_type, access_grant.revoked_by_id, access_grant.created_at, path.depth \
            FROM briefcase.entry_closure AS path \
-           JOIN briefcase.permission_grants AS grant \
-             ON grant.org_id = path.org_id AND grant.entry_id = path.ancestor_id \
+           JOIN briefcase.permission_grants AS access_grant \
+             ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
           WHERE path.org_id = briefcase.current_org_id() \
             AND path.descendant_id = $1 \
-            AND grant.principal_type = $2 AND grant.principal_id = $3 \
-            AND grant.revoked_at IS NULL \
-            AND (path.depth = 0 OR grant.inherits_to_descendants) \
-          ORDER BY path.depth, grant.grant_id",
+            AND access_grant.principal_type = $2 AND access_grant.principal_id = $3 \
+            AND access_grant.revoked_at IS NULL \
+            AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
+          ORDER BY path.depth, access_grant.grant_id",
     )
     .bind(entry_id)
     .bind(actor_kind(actor.kind()))
@@ -422,14 +422,14 @@ async fn has_visible_descendant(
                     OR EXISTS ( \
                         SELECT 1 \
                           FROM briefcase.entry_closure AS grant_path \
-                          JOIN briefcase.permission_grants AS grant \
-                            ON grant.org_id = grant_path.org_id \
-                           AND grant.entry_id = grant_path.ancestor_id \
+                          JOIN briefcase.permission_grants AS access_grant \
+                            ON access_grant.org_id = grant_path.org_id \
+                           AND access_grant.entry_id = grant_path.ancestor_id \
                          WHERE grant_path.org_id = child.org_id \
                            AND grant_path.descendant_id = child.entry_id \
-                           AND grant.principal_type = $2 AND grant.principal_id = $3 \
-                           AND grant.revoked_at IS NULL \
-                           AND (grant_path.depth = 0 OR grant.inherits_to_descendants) \
+                           AND access_grant.principal_type = $2 AND access_grant.principal_id = $3 \
+                           AND access_grant.revoked_at IS NULL \
+                           AND (grant_path.depth = 0 OR access_grant.inherits_to_descendants) \
                     ) \
                 ) \
          )",

@@ -24,6 +24,7 @@ use crate::{
         actor::{ActorId, ActorKind, ActorRef, TagName},
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath},
         filter::FilterQuery,
+        ids::EntryId,
         permission::{AccessRight, GrantedAccess},
     },
     error::AppError,
@@ -128,13 +129,29 @@ pub(crate) async fn create_folder(
     let body = extract::json(body)?;
     extract::validation(validation::create_folder(&body))?;
     let organization = extract::organization_resource(&headers)?;
-    let resource = body
-        .parent_id
-        .map_or_else(|| organization.clone(), |id| id.to_string());
     let context =
-        extract::authenticate(&state, &headers, IamAction::CreateFolder, &resource).await?;
+        extract::authenticate(&state, &headers, IamAction::CreateFolder, &organization).await?;
+    // A parent may be addressed by identifier or by path; omitting both means
+    // the organization base, where only a typed root may be created.
+    let parent_id = match (body.parent_id, body.parent_path.as_deref()) {
+        (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
+        (Some(parent_id), None) => Some(extract::entry_id(parent_id)?),
+        (None, Some(path)) => {
+            let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
+            let parent =
+                extract::scoped(&context, state.metadata.get_entry_by_path(&context, &path))
+                    .await
+                    .map_err(metadata_error)?;
+            if parent.entry.kind != EntryKind::Folder {
+                return Err(AppError::NotFound);
+            }
+            Some(parent.entry.id)
+        }
+        (None, None) => None,
+    };
+    let resource = parent_id.map_or(organization, |id| id.to_string());
     let metadata = extract::mutation(&headers, "create_folder", &resource, &body, true)?;
-    let command = folder_command(body)?;
+    let command = folder_command(body, parent_id)?;
     let created = extract::scoped(
         &context,
         state.metadata.create_folder(&context, command, &metadata),
@@ -330,9 +347,11 @@ pub(crate) async fn restore_bin_entry(
     Ok(Json(state.mapper.entry(restored)?))
 }
 
-fn folder_command(body: FolderCreateDto) -> Result<CreateFolderCommand, AppError> {
+fn folder_command(
+    body: FolderCreateDto,
+    parent_id: Option<EntryId>,
+) -> Result<CreateFolderCommand, AppError> {
     let name = EntryName::new(&body.name).map_err(|_| AppError::validation("invalid_name"))?;
-    let parent_id = body.parent_id.map(extract::entry_id).transpose()?;
     let root_boundary = match body.root_type {
         Some(RootTypeDto::Public) => Some(EntryBoundary::Public),
         Some(RootTypeDto::Private) => Some(EntryBoundary::Private),

@@ -1168,12 +1168,12 @@ impl MetadataRepository for PostgresRepository {
                     OR (entry.root_type = 'tag' AND tag.name = ANY($5)) \
                     OR EXISTS ( \
                         SELECT 1 FROM briefcase.entry_closure AS path \
-                        JOIN briefcase.permission_grants AS grant \
-                          ON grant.org_id = path.org_id AND grant.entry_id = path.ancestor_id \
+                        JOIN briefcase.permission_grants AS access_grant \
+                          ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
                        WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
-                         AND grant.principal_type = $3 AND grant.principal_id = $4 \
-                         AND grant.revoked_at IS NULL \
-                         AND (path.depth = 0 OR grant.inherits_to_descendants) \
+                         AND access_grant.principal_type = $3 AND access_grant.principal_id = $4 \
+                         AND access_grant.revoked_at IS NULL \
+                         AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
                     ) \
                 ) \
               ORDER BY filename_match DESC, content_hits DESC, score DESC, document.entry_id \
@@ -1310,13 +1310,13 @@ impl MetadataRepository for PostgresRepository {
                     $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
                     OR EXISTS ( \
                         SELECT 1 FROM briefcase.entry_closure AS path \
-                        JOIN briefcase.permission_grants AS grant \
-                          ON grant.org_id = path.org_id AND grant.entry_id = path.ancestor_id \
+                        JOIN briefcase.permission_grants AS access_grant \
+                          ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
                        WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
-                         AND grant.principal_type = $3 AND grant.principal_id = $4 \
-                         AND (grant.access_mask & ~briefcase.access_bit('read')) <> 0 \
-                         AND grant.revoked_at IS NULL \
-                         AND (path.depth = 0 OR grant.inherits_to_descendants) \
+                         AND access_grant.principal_type = $3 AND access_grant.principal_id = $4 \
+                         AND (access_grant.access_mask & ~briefcase.access_bit('read')) <> 0 \
+                         AND access_grant.revoked_at IS NULL \
+                         AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
                     ) \
                 ) \
                 AND ($5::timestamptz IS NULL OR (entry.deleted_at, entry.entry_id) < ($5, $6)) \
@@ -1956,15 +1956,15 @@ async fn lock_and_require_subtree_capability(
                         $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
                         OR EXISTS ( \
                             SELECT 1 FROM briefcase.entry_closure AS grant_path \
-                            JOIN briefcase.permission_grants AS grant \
-                              ON grant.org_id = grant_path.org_id \
-                             AND grant.entry_id = grant_path.ancestor_id \
+                            JOIN briefcase.permission_grants AS access_grant \
+                              ON access_grant.org_id = grant_path.org_id \
+                             AND access_grant.entry_id = grant_path.ancestor_id \
                            WHERE grant_path.org_id = entry.org_id \
                              AND grant_path.descendant_id = entry.entry_id \
-                             AND grant.principal_type = $3 AND grant.principal_id = $4 \
-                             AND (grant.access_mask & ~briefcase.access_bit('read')) <> 0 \
-                         AND grant.revoked_at IS NULL \
-                             AND (grant_path.depth = 0 OR grant.inherits_to_descendants) \
+                             AND access_grant.principal_type = $3 AND access_grant.principal_id = $4 \
+                             AND (access_grant.access_mask & ~briefcase.access_bit('read')) <> 0 \
+                         AND access_grant.revoked_at IS NULL \
+                             AND (grant_path.depth = 0 OR access_grant.inherits_to_descendants) \
                         ) \
                     ) \
                 ), false) \

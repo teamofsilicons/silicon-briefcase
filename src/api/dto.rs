@@ -174,6 +174,8 @@ pub struct FolderCreateDto {
     pub name: String,
     /// Destination folder, or organization root when omitted.
     pub parent_id: Option<Uuid>,
+    /// Destination folder path, as an alternative to `parent_id`.
+    pub parent_path: Option<String>,
     /// Required only for organization-root creation.
     pub root_type: Option<RootTypeDto>,
     /// Required for a tag root.
@@ -215,8 +217,10 @@ pub struct PathContentQuery {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultipartUploadCreateDto {
-    /// Destination folder.
-    pub parent_id: Uuid,
+    /// Destination folder; omitted when `path` names it instead.
+    pub parent_id: Option<Uuid>,
+    /// Destination folder path, as an alternative to `parent_id`.
+    pub path: Option<String>,
     /// Final file name.
     pub name: String,
     /// Declared final size in bytes.

@@ -161,10 +161,25 @@ pub(crate) async fn initiate_multipart(
 ) -> Result<(StatusCode, Json<MultipartUploadDto>), AppError> {
     let body = extract::json(body)?;
     extract::validation(validation::create_multipart(&body))?;
-    let parent_id = extract::entry_id(body.parent_id)?;
+    let organization = extract::organization_resource(&headers)?;
+    let context = extract::authenticate(
+        &state,
+        &headers,
+        IamAction::InitiateMultipart,
+        &organization,
+    )
+    .await?;
+    let destination = match (body.parent_id, body.path.as_deref()) {
+        (Some(parent_id), None) => UploadDestination::Folder(extract::entry_id(parent_id)?),
+        (None, Some(path)) => UploadDestination::Path(
+            EntryPath::new(path).map_err(|_| AppError::validation("invalid_path"))?,
+        ),
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(AppError::bad_request("ambiguous_destination"));
+        }
+    };
+    let parent_id = destination_folder(&state, &context, &destination).await?;
     let resource = parent_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::InitiateMultipart, &resource).await?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
     let request_hash = extract::request_fingerprint("initiate_multipart_upload", &resource, &body)?;
     let content_type = body.content_type.trim().to_owned();

@@ -103,12 +103,26 @@ pub fn create_folder(request: &FolderCreateDto) -> Result<(), ValidationErrors> 
     let mut errors = ValidationErrors::default();
     validate_name(&request.name, "name", &mut errors);
 
-    match (request.parent_id, request.root_type, request.tag.as_deref()) {
-        (None, None, _) => errors.push("root_type", "is required when parent_id is omitted"),
-        (Some(_), Some(_), _) => {
+    if request.parent_id.is_some() && request.parent_path.is_some() {
+        errors.push("parent_path", "must not be combined with parent_id");
+    }
+    if request
+        .parent_path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        errors.push("parent_path", "must not be blank when provided");
+    }
+    let parent = request
+        .parent_id
+        .map(|_| ())
+        .or_else(|| request.parent_path.as_ref().map(|_| ()));
+    match (parent, request.root_type, request.tag.as_deref()) {
+        (None, None, _) => errors.push("root_type", "is required when no parent is named"),
+        (Some(()), Some(_), _) => {
             errors.push("root_type", "must be omitted when creating below a parent");
         }
-        (Some(_), None, Some(_)) => {
+        (Some(()), None, Some(_)) => {
             errors.push("tag", "must be omitted when creating below a parent");
         }
         (_, Some(RootTypeDto::Tag), None) => {
@@ -164,6 +178,14 @@ pub fn patch_entry(request: &EntryPatchDto) -> Result<(), ValidationErrors> {
 pub fn create_multipart(request: &MultipartUploadCreateDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
     validate_name(&request.name, "name", &mut errors);
+    match (request.parent_id, request.path.as_deref()) {
+        (Some(_), Some(_)) => errors.push("path", "must not be combined with parent_id"),
+        (None, None) => errors.push("parent_id", "is required unless path names the folder"),
+        (None, Some(path)) if path.trim().is_empty() => {
+            errors.push("path", "must not be blank when provided");
+        }
+        _ => {}
+    }
     if !(SMALL_UPLOAD_LIMIT + 1..=MAXIMUM_FILE_SIZE).contains(&request.size) {
         errors.push("size", "must be greater than 100 MiB and at most 5 TiB");
     }
@@ -479,6 +501,7 @@ mod tests {
     #[test]
     fn tag_root_requires_a_tag() {
         let result = create_folder(&FolderCreateDto {
+            parent_path: None,
             name: "Engineering".to_owned(),
             parent_id: None,
             root_type: Some(RootTypeDto::Tag),
@@ -491,6 +514,7 @@ mod tests {
     #[test]
     fn inherited_folder_rejects_an_ignored_tag() {
         let result = create_folder(&FolderCreateDto {
+            parent_path: None,
             name: "Engineering".to_owned(),
             parent_id: Some(uuid::Uuid::now_v7()),
             root_type: None,
