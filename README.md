@@ -5,10 +5,10 @@ Silicons, and IAM-authorized applications. The backend is written in Rust and
 keeps filesystem metadata and authorization state in PostgreSQL while storing
 file bytes in S3-compatible object storage.
 
-The product contract lives in [UNDERSTANDING.md](./UNDERSTANDING.md), the public
-API in [openapi.yaml](./openapi.yaml), and implementation interpretations in
-[decisions.md](./decisions.md). Contract gaps are deliberately documented rather
-than filled by undocumented endpoints.
+The product contract lives in [UNDERSTANDING.md](./UNDERSTANDING.md) and the
+public API in [openapi.yaml](./openapi.yaml), with the operational reference in
+[API_DOCS.md](./API_DOCS.md). UNDERSTANDING.md is the single source of truth;
+the implementation follows it and does not add undocumented behavior.
 
 ## Process layout
 
