@@ -126,7 +126,90 @@ const CODE_EXTENSIONS: &[&str] = &[
     "zsh",
 ];
 
+/// Every renderer that a file can actually open with.
+pub const ALL_RENDER_KINDS: [RenderKind; 8] = [
+    RenderKind::Image,
+    RenderKind::Video,
+    RenderKind::Document,
+    RenderKind::Spreadsheet,
+    RenderKind::Presentation,
+    RenderKind::Audio,
+    RenderKind::Archive,
+    RenderKind::Code,
+];
+
 impl RenderKind {
+    /// Returns the extensions that select this renderer.
+    ///
+    /// Persistence compiles these lists into filter queries so that `is:image`
+    /// in a filter and the `render` field on a response can never disagree.
+    #[must_use]
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Image => IMAGE_EXTENSIONS,
+            Self::Video => VIDEO_EXTENSIONS,
+            Self::Document => DOCUMENT_EXTENSIONS,
+            Self::Spreadsheet => SPREADSHEET_EXTENSIONS,
+            Self::Presentation => PRESENTATION_EXTENSIONS,
+            Self::Audio => AUDIO_EXTENSIONS,
+            Self::Archive => ARCHIVE_EXTENSIONS,
+            Self::Code => CODE_EXTENSIONS,
+            Self::Unsupported => &[],
+        }
+    }
+
+    /// Returns the media-type prefixes that select this renderer.
+    ///
+    /// A prefix is only consulted when the file name carries no known
+    /// extension, mirroring [`RenderKind::classify`].
+    #[must_use]
+    pub const fn media_type_prefixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Image => &["image/"],
+            Self::Video => &["video/"],
+            Self::Audio => &["audio/"],
+            Self::Document => &[
+                "text/plain",
+                "text/markdown",
+                "text/richtext",
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessing",
+            ],
+            Self::Spreadsheet => &[
+                "text/csv",
+                "text/tab-separated-values",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheet",
+                "application/vnd.oasis.opendocument.spreadsheet",
+            ],
+            Self::Presentation => &[
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentation",
+                "application/vnd.oasis.opendocument.presentation",
+            ],
+            Self::Archive => &[
+                "application/zip",
+                "application/gzip",
+                "application/x-tar",
+                "application/x-7z-compressed",
+                "application/x-bzip2",
+                "application/x-rar",
+                "application/vnd.rar",
+            ],
+            Self::Code => &[
+                "text/",
+                "application/json",
+                "application/xml",
+                "application/javascript",
+                "application/sql",
+                "application/yaml",
+                "application/x-yaml",
+            ],
+            Self::Unsupported => &[],
+        }
+    }
+
     /// Classifies a file from its name and current media type.
     #[must_use]
     pub fn classify(name: &str, content_type: Option<&str>) -> Self {
@@ -145,20 +228,9 @@ impl RenderKind {
     }
 
     fn from_extension(extension: &str) -> Option<Self> {
-        let table = [
-            (IMAGE_EXTENSIONS, Self::Image),
-            (VIDEO_EXTENSIONS, Self::Video),
-            (DOCUMENT_EXTENSIONS, Self::Document),
-            (SPREADSHEET_EXTENSIONS, Self::Spreadsheet),
-            (PRESENTATION_EXTENSIONS, Self::Presentation),
-            (AUDIO_EXTENSIONS, Self::Audio),
-            (ARCHIVE_EXTENSIONS, Self::Archive),
-            (CODE_EXTENSIONS, Self::Code),
-        ];
-        table
+        ALL_RENDER_KINDS
             .into_iter()
-            .find(|(extensions, _)| extensions.contains(&extension))
-            .map(|(_, kind)| kind)
+            .find(|kind| kind.extensions().contains(&extension))
     }
 
     fn from_media_type(content_type: &str) -> Option<Self> {

@@ -150,15 +150,19 @@ pub struct EntryPageDto {
     pub next_cursor: Option<String>,
 }
 
-/// Query parameters for listing entries.
+/// Query parameters for listing folder contents or filtering the tree.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListEntriesQuery {
     /// Parent folder; omission lists organization roots.
     pub parent_id: Option<Uuid>,
+    /// Parent folder addressed by path instead of identifier.
+    pub path: Option<String>,
+    /// Filter expression; with one and no parent, the whole tree is searched.
+    pub filter: Option<String>,
     /// Opaque pagination cursor.
     pub cursor: Option<String>,
-    /// Page size from 1 through 100.
+    /// Page size from 1 through 100, defaulting to 100.
     pub limit: Option<u16>,
 }
 

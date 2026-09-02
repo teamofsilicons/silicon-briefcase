@@ -7,6 +7,7 @@
 pub mod access;
 pub mod actor;
 pub mod entry;
+pub mod filter;
 pub mod ids;
 pub mod media;
 pub mod multipart;

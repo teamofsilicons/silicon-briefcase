@@ -1,13 +1,16 @@
 //! Concrete tenant-safe implementation of metadata application ports.
 
 pub(super) mod common;
+pub(super) mod filter;
 pub(super) mod notifications;
+
+use filter as filter_sql;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, QueryBuilder, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -27,6 +30,7 @@ use crate::{
         access::{AccessDecision, AccessRequestStatus},
         actor::{ActorRef, ApplicationId},
         entry::{EntryKind, EntryPath},
+        filter::{FilterQuery, SortOrder},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         notification::{NotificationDecision, NotificationInbox, NotificationKind},
         permission::{AccessRight, Capability, GrantedAccess, PermissionGrant},
@@ -58,6 +62,13 @@ struct NumberCursor {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct BinCursor {
     deleted_at: OffsetDateTime,
+    id: Uuid,
+}
+
+/// Cursor for a chronological listing, which orders by last change.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct ChangeCursor {
+    changed_at: OffsetDateTime,
     id: Uuid,
 }
 
@@ -145,36 +156,65 @@ impl MetadataRepository for PostgresRepository {
         context: &ExecutionContext,
         query: &ListEntriesQuery,
     ) -> Result<Page<AuthorizableEntry>> {
-        let cursor = decode_optional::<UuidCursor>(query.page.cursor.as_deref())?;
-        let after = cursor.map_or(Uuid::nil(), |value| value.id);
-        let limit = i64::from(query.page.limit) + 1;
+        let filter = query.filter.as_ref();
+        let scan = filter.map_or(SortOrder::Newest, FilterQuery::scan_order);
+        let cursor = decode_optional::<ChangeCursor>(query.page.cursor.as_deref())?;
+        // A chronological cap answers in one page, so it never carries a cursor.
+        let take = filter.and_then(|filter| filter.take);
+        let page_size = take.map_or(query.page.limit, |take| take.count.min(query.page.limit));
+        let mut builder = QueryBuilder::<Postgres>::new(concat!("SELECT ", entry_columns!()));
+        builder.push(
+            " FROM briefcase.entries AS entry \
+              WHERE entry.org_id = briefcase.current_org_id() \
+                AND entry.deleted_at IS NULL",
+        );
+        // Without a filter the listing browses one level. With one, an
+        // unspecified parent widens the scan to the whole organization so a
+        // `location:` predicate can reach anywhere the caller may look.
+        if let Some(parent_id) = query.parent_id {
+            builder.push(" AND entry.parent_id = ");
+            builder.push_bind(parent_id.as_uuid());
+        } else if filter.is_none() {
+            builder.push(" AND entry.parent_id IS NULL");
+        }
+        if let Some(cursor) = cursor {
+            builder.push(" AND (entry.updated_at, entry.entry_id) ");
+            builder.push(match scan {
+                SortOrder::Newest => "< (",
+                SortOrder::Oldest => "> (",
+            });
+            builder.push_bind(cursor.changed_at);
+            builder.push(", ");
+            builder.push_bind(cursor.id);
+            builder.push(")");
+        }
+        if let Some(expression) = filter.and_then(|filter| filter.expression.as_ref()) {
+            builder.push(" AND ");
+            filter_sql::push_expression(&mut builder, expression);
+        }
+        builder.push(match scan {
+            SortOrder::Newest => " ORDER BY entry.updated_at DESC, entry.entry_id DESC LIMIT ",
+            SortOrder::Oldest => " ORDER BY entry.updated_at ASC, entry.entry_id ASC LIMIT ",
+        });
+        builder.push_bind(i64::from(page_size) + 1);
+
         let mut request = begin(self, context).await?;
-        let rows = sqlx::query_as::<_, EntryRow>(concat!(
-            "SELECT ",
-            entry_columns!(),
-            " FROM briefcase.entries \
-              WHERE org_id = briefcase.current_org_id() \
-                AND parent_id IS NOT DISTINCT FROM $1 \
-                AND deleted_at IS NULL AND entry_id > $2 \
-              ORDER BY entry_id LIMIT $3",
-        ))
-        .bind(query.parent_id.map(EntryId::as_uuid))
-        .bind(after)
-        .bind(limit)
-        .fetch_all(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
-        let has_more = rows.len() > usize::from(query.page.limit);
-        let rows = rows.into_iter().take(usize::from(query.page.limit));
-        let mut items = Vec::with_capacity(usize::from(query.page.limit));
-        for row in rows {
+        let rows = builder
+            .build_query_as::<EntryRow>()
+            .fetch_all(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
+        let has_more = take.is_none() && rows.len() > usize::from(page_size);
+        let mut items = Vec::with_capacity(usize::from(page_size));
+        for row in rows.into_iter().take(usize::from(page_size)) {
             items.push(build_authorizable(&mut request.transaction, context, row).await?);
         }
         let next_cursor = if has_more {
             items
                 .last()
                 .map(|entry| {
-                    encode_cursor(&UuidCursor {
+                    encode_cursor(&ChangeCursor {
+                        changed_at: entry.entry.updated_at,
                         id: entry.entry.id.as_uuid(),
                     })
                 })
@@ -182,6 +222,9 @@ impl MetadataRepository for PostgresRepository {
         } else {
             None
         };
+        if filter.is_some_and(FilterQuery::requires_reversal) {
+            items.reverse();
+        }
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(Page { items, next_cursor })
     }

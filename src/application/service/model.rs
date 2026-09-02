@@ -8,6 +8,7 @@ use crate::{
         access::{AccessDecision, AccessRequestStatus},
         actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
+        filter::FilterQuery,
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         permission::{
             EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput, EntryVisibility,
@@ -23,6 +24,8 @@ use super::{MetadataServiceError, ValidationError};
 pub const MAX_PAGE_SIZE: u16 = 100;
 /// Default page size from the `OpenAPI` contract.
 pub const DEFAULT_PAGE_SIZE: u16 = 50;
+/// Contents are returned in pages of a hundred, newest first.
+pub const CONTENTS_PAGE_SIZE: u16 = 100;
 /// Maximum search result count.
 pub const MAX_SEARCH_RESULTS: u8 = 20;
 
@@ -268,11 +271,18 @@ impl AuthorizableEntry {
     }
 }
 
-/// Query for visible children of an organization root or folder.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Query for the contents of a folder, or for a filtered organization view.
+///
+/// Without a filter the query browses one level: the organization roots, or
+/// the direct children of `parent_id`. With a filter and no `parent_id` it
+/// scans everything the caller may reach, which is what a `location:`
+/// predicate needs in order to select a subtree.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListEntriesQuery {
-    /// Parent folder; omission means organization root.
+    /// Parent folder; omission means organization root or the whole tree.
     pub parent_id: Option<EntryId>,
+    /// Parsed filter expression, ordering, and chronological cap.
+    pub filter: Option<FilterQuery>,
     /// Cursor pagination.
     pub page: PageRequest,
 }

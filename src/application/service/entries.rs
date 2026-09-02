@@ -45,12 +45,25 @@ impl MetadataService {
         }
 
         let candidates = self.repository.list_active_children(context, query).await?;
+        // A `permissions:` predicate is not a column: persistence returns the
+        // candidates and policy decides them here, against the same effective
+        // access the response reports.
+        let permission_filter = query
+            .filter
+            .as_ref()
+            .and_then(|filter| filter.expression.as_ref())
+            .filter(|expression| expression.requires_policy_evaluation());
         let mut accessed = Vec::with_capacity(candidates.items.len());
         let items = candidates
             .items
             .into_iter()
             .filter_map(|entry| {
                 let authorization = entry.authorization(context.authorization());
+                if let Some(expression) = permission_filter
+                    && !expression.permits(&authorization.capabilities().effective_access())
+                {
+                    return None;
+                }
                 let item = entry.clone().into_list_item(authorization);
                 if item.is_some() {
                     accessed.push(entry.entry.id);

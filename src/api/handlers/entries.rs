@@ -15,14 +15,15 @@ use crate::{
     application::{
         content::ContentIntent,
         service::{
-            CreateFolderCommand, EntryListItem, InitialPermission, ListBinQuery,
-            ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
-            SearchQuery, UpdateEntryCommand,
+            CONTENTS_PAGE_SIZE, CreateFolderCommand, EntryListItem, InitialPermission,
+            ListBinQuery, ListEntriesQuery as ServiceListEntriesQuery, PageRequest,
+            RestoreBinEntryCommand, SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
         actor::{ActorId, ActorKind, ActorRef, TagName},
-        entry::{EntryBoundary, EntryKind, EntryName},
+        entry::{EntryBoundary, EntryKind, EntryName, EntryPath},
+        filter::FilterQuery,
         permission::{AccessRight, GrantedAccess},
     },
     error::AppError,
@@ -45,6 +46,11 @@ use super::{
     content,
 };
 
+/// Lists folder contents, or the filtered organization view.
+///
+/// The default page is the hundred most recently changed entries. A `filter`
+/// without a parent searches everything the caller may reach, which is how a
+/// `location:` predicate selects a subtree.
 pub(crate) async fn list_entries(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -58,14 +64,42 @@ pub(crate) async fn list_entries(
     let resource = extract::organization_resource(&headers)?;
     let context =
         extract::authenticate(&state, &headers, IamAction::ListEntries, &resource).await?;
-    let parent_id = query.parent_id.map(extract::entry_id).transpose()?;
-    let page = PageRequest::new(query.cursor, query.limit.unwrap_or(50))
+    let filter = query
+        .filter
+        .as_deref()
+        .map(FilterQuery::parse)
+        .transpose()
+        .map_err(|_| AppError::validation("invalid_filter"))?;
+    let parent_id = match (query.parent_id, query.path.as_deref()) {
+        (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
+        (Some(parent_id), None) => Some(extract::entry_id(parent_id)?),
+        (None, Some(path)) => {
+            let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
+            let parent = extract::scoped(
+                &context,
+                state.metadata.get_entry_by_path(&context, &path),
+            )
+            .await
+            .map_err(metadata_error)?;
+            if parent.entry.kind != EntryKind::Folder {
+                return Err(AppError::NotFound);
+            }
+            Some(parent.entry.id)
+        }
+        (None, None) => None,
+    };
+    let page = PageRequest::new(query.cursor, query.limit.unwrap_or(CONTENTS_PAGE_SIZE))
         .map_err(|_| AppError::validation("invalid_pagination"))?;
     let result = extract::scoped(
         &context,
-        state
-            .metadata
-            .list_entries(&context, &ServiceListEntriesQuery { parent_id, page }),
+        state.metadata.list_entries(
+            &context,
+            &ServiceListEntriesQuery {
+                parent_id,
+                filter,
+                page,
+            },
+        ),
     )
     .await
     .map_err(metadata_error)?;

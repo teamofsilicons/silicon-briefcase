@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::domain::filter::MAX_FILTER_LENGTH;
+
 use super::dto::{
     AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
     BucketConfigurationDto, CompletedPartDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
@@ -63,6 +65,20 @@ pub fn list_entries(query: &ListEntriesQuery) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
     if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
         errors.push("limit", "must be between 1 and 100");
+    }
+    if query.parent_id.is_some() && query.path.is_some() {
+        errors.push("path", "must not be combined with parent_id");
+    }
+    if query.path.as_ref().is_some_and(|path| path.trim().is_empty()) {
+        errors.push("path", "must not be blank when provided");
+    }
+    if let Some(filter) = query.filter.as_deref() {
+        if filter.trim().is_empty() {
+            errors.push("filter", "must not be blank when provided");
+        }
+        if filter.len() > MAX_FILTER_LENGTH {
+            errors.push("filter", "is too long");
+        }
     }
     if query
         .cursor

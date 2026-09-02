@@ -23,12 +23,45 @@ paths:
     get:
       tags: [Entries]
       operationId: listEntries
-      summary: List visible children of a folder
+      summary: List folder contents, or filter everything the caller can reach
+      description: >-
+        Returns the hundred most recently changed visible entries per page,
+        newest first. Without `filter`, the listing browses one level: the
+        organization roots, or the contents of `parent_id`/`path`. With
+        `filter` and no parent, it searches every entry the caller may reach,
+        which is how a `location:` predicate selects a subtree.
+
+
+        The filter language combines freely. Terms are ANDed; `or` introduces
+        an alternative; `not` or a leading `-` negates; parentheses group.
+        Supported keys:
+
+
+        `last:N` / `first:N` take N entries chronologically (1-100, single
+        page); `sort:newest` / `sort:oldest` order the result, newest first by
+        default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with
+        both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound
+        one side; `from:@{carbon:id}` matches the creator; `to:@{silicon:id}`
+        matches an explicit share; `for:@{id}` matches what that member can
+        reach; `contains:'term'` matches names and extracted content, with `*`
+        as a wildcard; `has:'term'` matches extracted content only;
+        `name:'term'` matches names only; `location:'private/cos:tos'` matches
+        a path prefix; `is:` takes `file`, `folder`, a renderer
+        (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`,
+        `archive`, `code`, `unsupported`), or an extension such as `md`;
+        `permissions:` takes `read`, `write`, `update`, `delete`, or
+        `manage_permissions` and matches the caller's effective access. A bare
+        word is shorthand for `contains:`.
+
+
+        Filtering only ever returns entries the caller can already see.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - { name: parent_id, in: query, schema: { type: string, format: uuid }, description: Omit for the organization root }
+        - { name: path, in: query, schema: { type: string, maxLength: 2048 }, description: Parent folder addressed by path instead of identifier }
+        - { name: filter, in: query, schema: { type: string, maxLength: 1024 }, description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md" }
         - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ContentsLimit'
       responses:
         '200':
           description: Visible entries
@@ -430,6 +463,7 @@ components:
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
     Cursor: { name: cursor, in: query, schema: { type: string } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+    ContentsLimit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
     Range:
       name: Range
       in: header
