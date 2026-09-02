@@ -73,6 +73,12 @@ cargo run --bin briefcase-api
 cargo run --bin briefcase-worker
 ```
 
+The Compose MinIO service carries an obviously-local `MINIO_KMS_SECRET_KEY`
+because Briefcase always stores objects encrypted, and MinIO answers
+`501 NotImplemented` to an SSE-S3 upload when no key is configured. A MinIO
+volume created before that setting existed will keep refusing uploads until the
+service is recreated.
+
 The PostgreSQL initialization directory creates the two local runtime roles on
 a new Compose volume. If the volume predates those role definitions, create a
 fresh development database volume or provision equivalent roles before running
@@ -140,6 +146,15 @@ BRIEFCASE_TEST_DATABASE_URL=postgres://briefcase:briefcase-local-only@127.0.0.1:
 
 Each run uses a fresh organization identifier, so it is repeatable without
 deleting anything.
+
+`tests/s3_object_store.rs` does the same for object delivery — a stored object
+streams back whole, and one exact range comes back as the bytes a media player
+asked for:
+
+```bash
+docker compose up -d minio minio-init
+BRIEFCASE_TEST_S3_BUCKET=briefcase-local cargo test --test s3_object_store
+```
 
 ## Security model
 
