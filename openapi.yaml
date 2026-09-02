@@ -150,15 +150,29 @@ paths:
     post:
       tags: [Uploads]
       operationId: uploadFile
-      summary: Upload a file up to and including 100 MiB
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
+      summary: Upload a file of any supported size
       description: >-
+        One request carries the whole file. Briefcase stages the bytes, then
+        decides internally whether they fit a single provider request or need a
+        multipart transfer, so a client never drives parts. Files up to 5 TiB
+        are accepted; operators size the upload deadline and temporary disk for
+        the sizes they expect.
+
+
         The destination folder is named either by `parent_id` or by `path`,
         never both. A path is resolved from the organization base, so
         `private/cos:tos/reports` addresses the same folder its permanent URL
         shows.
+
+
+        Uploading a name that an active file already carries is how a file is
+        updated: the bytes become that file's next version, the response is
+        that same entry, and its history keeps the previous fifty versions.
+        Creating a file needs `write` on the folder; replacing one needs
+        `update` on the file. A folder with the same name is a conflict.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -171,79 +185,8 @@ paths:
                 path: { type: string, maxLength: 2048, description: Destination folder path, as an alternative to parent_id }
                 file: { type: string, format: binary }
       responses:
-        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
-        '413': { description: Use multipart upload for files larger than 100 MiB }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads:
-    post:
-      tags: [Uploads]
-      operationId: initiateMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [parent_id, name, size, content_type]
-              properties:
-                parent_id: { type: string, format: uuid }
-                name: { type: string }
-                size: { type: integer, minimum: 104857601, maximum: 5497558138880 }
-                content_type: { type: string }
-      responses:
-        '201':
-          description: Upload initialized with calculated part size
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MultipartUpload' }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}/parts/{part_number}:
-    put:
-      tags: [Uploads]
-      operationId: uploadPart
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-        - { name: part_number, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 10000 } }
-      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
-      responses:
-        '200': { description: Part accepted, headers: { ETag: { schema: { type: string } } } }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}/complete:
-    post:
-      tags: [Uploads]
-      operationId: completeMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [parts]
-              properties:
-                parts:
-                  type: array
-                  minItems: 1
-                  items: { type: object, required: [part_number, etag], properties: { part_number: { type: integer }, etag: { type: string } } }
-      responses:
-        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}:
-    delete:
-      tags: [Uploads]
-      operationId: abortMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-      responses:
-        '204': { description: Upload aborted }
+        '201': { description: File created, or a new version published on the existing file, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: The file exceeds the 5 TiB maximum }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/permissions:
     parameters:
@@ -397,8 +340,9 @@ paths:
 
 
         The represented member's own permissions still apply: the file is only
-        created where that member may add content. Files larger than 100 MiB
-        use the member's own multipart upload.
+        created where that member may add content, and a name that an active
+        file already carries publishes that file's next version. Any supported
+        size is accepted; Briefcase picks the storage route internally.
       security:
         - oboAccess: []
           appId: []
@@ -410,8 +354,8 @@ paths:
           application/octet-stream:
             schema: { type: string, format: binary }
       responses:
-        '201': { description: File created for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
-        '413': { description: Use the member's multipart upload for files larger than 100 MiB }
+        '201': { description: File created, or a new version published, for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: The file exceeds the 5 TiB maximum }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
@@ -439,7 +383,11 @@ paths:
     get:
       tags: [Bin]
       operationId: listBin
-      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      summary: List recoverable entries, newest deletion first
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/ContentsLimit'
       responses:
         '200': { description: Deleted entries visible to the actor, content: { application/json: { schema: { $ref: '#/components/schemas/EntryPage' } } } }
         default: { $ref: '#/components/responses/Error' }
@@ -548,11 +496,16 @@ components:
         invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
     Entry:
       type: object
-      required: [id, org_id, type, name, path, permanent_url, owner, effective_access, created_at, updated_at]
+      required: [id, org_id, type, visibility, name, path, permanent_url, effective_access]
+      description: >-
+        A `traversal` entry is a folder the caller reaches only because
+        something inside it was shared. It can be opened and lists what was
+        shared; its owner, timestamps, and effective access are withheld.
       properties:
         id: { type: string, format: uuid }
         org_id: { type: string }
         type: { type: string, enum: [file, folder] }
+        visibility: { type: string, enum: [full, traversal] }
         name: { type: string }
         path: { type: string, maxLength: 2048, description: Organization-relative path without a leading separator }
         parent_id: { type: [string, 'null'], format: uuid }
@@ -568,11 +521,14 @@ components:
         permanent_url: { type: string, format: uri, description: Clean permanent URL that shows the folder structure }
         content_url: { type: [string, 'null'], format: uri, description: Authenticated sandboxed content URL for a file }
         download_url: { type: [string, 'null'], format: uri, description: Authenticated attachment URL for a file }
-        owner: { $ref: '#/components/schemas/ActorRef' }
+        owner:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ActorRef'
         origin_app_id: { type: [string, 'null'] }
         effective_access: { type: array, items: { type: string, enum: [read, write, update, delete, manage_permissions] } }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        created_at: { type: [string, 'null'], format: date-time }
+        updated_at: { type: [string, 'null'], format: date-time }
         deleted_at: { type: [string, 'null'], format: date-time }
     EntryPage:
       type: object

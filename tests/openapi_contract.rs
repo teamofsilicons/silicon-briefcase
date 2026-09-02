@@ -4,9 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 29] = [
-    "abortMultipartUpload",
-    "completeMultipartUpload",
+const EXPECTED_OPERATIONS: [&str; 25] = [
     "configureOrganizationBucket",
     "createFileOnBehalfOfMember",
     "createFolder",
@@ -14,7 +12,6 @@ const EXPECTED_OPERATIONS: [&str; 29] = [
     "downloadEntry",
     "getEntry",
     "grantPermission",
-    "initiateMultipartUpload",
     "inspectEffectivePermissions",
     "listBin",
     "listEntryActivity",
@@ -33,7 +30,6 @@ const EXPECTED_OPERATIONS: [&str; 29] = [
     "searchFiles",
     "updateEntry",
     "uploadFile",
-    "uploadPart",
 ];
 
 #[test]

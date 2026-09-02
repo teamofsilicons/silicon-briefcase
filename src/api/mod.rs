@@ -46,8 +46,6 @@ mod webhook;
 use handlers::{content, entries, notifications, obo, permissions, system};
 use state::{AppState, ContentUseCases};
 
-const SMALL_MULTIPART_BODY_LIMIT: usize = 101 * 1_048_576;
-
 /// Builds the dependency graph, binds the configured listener, and serves the
 /// complete HTTP contract until graceful shutdown.
 ///
@@ -79,7 +77,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         webhook_repository,
         database: database.clone(),
         mapper: mapping::ResponseMapper::new(
-            settings.server.public_base_url.clone(),
+            &settings.server.public_base_url,
             settings.server.public_site_base_url.clone(),
         ),
         temporary_directory: settings.s3.temporary_directory.clone(),
@@ -161,19 +159,13 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         server.max_concurrent_restores.get(),
     ));
 
-    let small_upload = with_deadline(
+    // One upload route accepts a file of any supported size and decides
+    // internally how to store it, so the body limit is the staging ceiling
+    // rather than an HTTP one.
+    let uploads = with_deadline(
         Router::new()
-            .route("/api/v1/uploads", post(content::upload_small))
+            .route("/api/v1/uploads", post(content::upload))
             .route(obo::CREATE_FILE_PATH, post(obo::create_file))
-            .layer(DefaultBodyLimit::max(SMALL_MULTIPART_BODY_LIMIT)),
-        server.upload_timeout,
-    );
-    let part_upload = with_deadline(
-        Router::new()
-            .route(
-                "/api/v1/multipart-uploads/{upload_id}/parts/{part_number}",
-                put(content::upload_part),
-            )
             .layer(DefaultBodyLimit::disable()),
         server.upload_timeout,
     );
@@ -187,8 +179,7 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
     ordinary
         .merge(upload_control)
         .merge(restore)
-        .merge(small_upload)
-        .merge(part_upload)
+        .merge(uploads)
         .merge(webhook)
         .fallback(not_found)
         .layer(ConcurrencyLimitLayer::new(
@@ -272,23 +263,10 @@ fn ordinary_routes() -> Router<AppState> {
 }
 
 fn upload_control_routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/api/v1/multipart-uploads",
-            post(content::initiate_multipart),
-        )
-        .route(
-            "/api/v1/multipart-uploads/{upload_id}/complete",
-            post(content::complete_multipart),
-        )
-        .route(
-            "/api/v1/multipart-uploads/{upload_id}",
-            delete(content::abort_multipart),
-        )
-        .route(
-            "/api/v1/storage/configuration",
-            put(content::configure_storage),
-        )
+    Router::new().route(
+        "/api/v1/storage/configuration",
+        put(content::configure_storage),
+    )
 }
 
 fn with_deadline(routes: Router<AppState>, timeout: Duration) -> Router<AppState> {
@@ -348,7 +326,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 29] = [
+    const CONTRACT: [(&str, &str, &str); 25] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -359,14 +337,6 @@ mod tests {
         ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
         ("/obo/files", "post", "201"),
-        ("/multipart-uploads", "post", "201"),
-        (
-            "/multipart-uploads/{upload_id}/parts/{part_number}",
-            "put",
-            "200",
-        ),
-        ("/multipart-uploads/{upload_id}/complete", "post", "201"),
-        ("/multipart-uploads/{upload_id}", "delete", "204"),
         ("/entries/{entry_id}/permissions", "get", "200"),
         ("/entries/{entry_id}/permissions", "post", "201"),
         (
@@ -611,7 +581,7 @@ mod tests {
             webhook_repository,
             database,
             mapper: ResponseMapper::new(
-                server.public_base_url.clone(),
+                &server.public_base_url,
                 server.public_site_base_url.clone(),
             ),
             temporary_directory: s3.temporary_directory,

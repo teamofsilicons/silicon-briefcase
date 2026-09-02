@@ -15,14 +15,14 @@ use crate::{
     application::{
         content::ContentIntent,
         service::{
-            CONTENTS_PAGE_SIZE, CreateFolderCommand, EntryListItem, InitialPermission,
-            ListBinQuery, ListEntriesQuery as ServiceListEntriesQuery, PageRequest,
-            RestoreBinEntryCommand, SearchQuery, UpdateEntryCommand,
+            CONTENTS_PAGE_SIZE, CreateFolderCommand, InitialPermission, ListBinQuery,
+            ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
+            SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
         actor::{ActorId, ActorKind, ActorRef, TagName},
-        entry::{EntryBoundary, EntryKind, EntryName, EntryPath},
+        entry::{EntryBoundary, EntryName, EntryPath},
         filter::FilterQuery,
         ids::EntryId,
         permission::{AccessRight, GrantedAccess},
@@ -36,8 +36,8 @@ use super::{
         cursor,
         dto::{
             ActivityPageDto, ActorRefDto, ActorTypeDto, DispositionDto, EntryDto, EntryPageDto,
-            EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery, PathContentQuery,
-            PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
+            EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery, PageQuery,
+            PathContentQuery, PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
         },
         extract,
         mapping::metadata_error,
@@ -80,10 +80,10 @@ pub(crate) async fn list_entries(
                 extract::scoped(&context, state.metadata.get_entry_by_path(&context, &path))
                     .await
                     .map_err(metadata_error)?;
-            if parent.entry.kind != EntryKind::Folder {
+            if !parent.is_folder() {
                 return Err(AppError::NotFound);
             }
-            Some(parent.entry.id)
+            Some(parent.id())
         }
         (None, None) => None,
     };
@@ -103,17 +103,13 @@ pub(crate) async fn list_entries(
     .await
     .map_err(metadata_error)?;
 
-    // OpenAPI v1 has no structurally redacted traversal representation. Until
-    // one is added, exposing a fabricated full Entry would leak protected
-    // metadata, so traversal-only ancestors are intentionally omitted.
+    // A folder shared only through its contents is listed as a traversal
+    // entry: the caller can open it and see what was shared, and nothing else
+    // about it is disclosed.
     let items = result
         .items
         .into_iter()
-        .filter_map(|item| match item {
-            EntryListItem::Full(entry) => Some(*entry),
-            EntryListItem::Traversal(_) => None,
-        })
-        .map(|entry| state.mapper.entry(entry))
+        .map(|item| state.mapper.entry_item(&resource, item))
         .collect::<Result<_, _>>()?;
     Ok(Json(EntryPageDto {
         items,
@@ -142,10 +138,10 @@ pub(crate) async fn create_folder(
                 extract::scoped(&context, state.metadata.get_entry_by_path(&context, &path))
                     .await
                     .map_err(metadata_error)?;
-            if parent.entry.kind != EntryKind::Folder {
+            if !parent.is_folder() {
                 return Err(AppError::NotFound);
             }
-            Some(parent.entry.id)
+            Some(parent.id())
         }
         (None, None) => None,
     };
@@ -167,12 +163,13 @@ pub(crate) async fn get_entry(
     path: Result<Path<Uuid>, PathRejection>,
 ) -> Result<Json<EntryDto>, AppError> {
     let entry_id = extract::entry_id(extract::path(path)?)?;
+    let organization = extract::organization_resource(&headers)?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, IamAction::ReadEntry, &resource).await?;
-    let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
+    let entry = extract::scoped(&context, state.metadata.visible_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(entry)?))
+    Ok(Json(state.mapper.entry_item(&organization, entry)?))
 }
 
 /// Serves the contracted clean permanent URL `/org/{org_id}/{path}`.
@@ -203,12 +200,12 @@ pub(crate) async fn resolve_path(
     .await
     .map_err(metadata_error)?;
     let Some(intent) = intent else {
-        return Ok(Json(state.mapper.entry(entry)?).into_response());
+        return Ok(Json(state.mapper.entry_item(&organization, entry)?).into_response());
     };
-    if entry.entry.kind != EntryKind::File {
+    if entry.is_folder() {
         return Err(AppError::NotFound);
     }
-    content::serve(&state, &headers, &context, entry.entry.id, intent).await
+    content::serve(&state, &headers, &context, entry.id(), intent).await
 }
 
 const fn content_intent(value: DispositionDto) -> ContentIntent {
@@ -289,20 +286,24 @@ pub(crate) async fn delete_entry(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists recoverable entries, newest deletion first, one page at a time.
 pub(crate) async fn list_bin(
     State(state): State<AppState>,
     headers: HeaderMap,
+    query: Result<Query<PageQuery>, QueryRejection>,
 ) -> Result<Json<EntryPageDto>, AppError> {
+    let query = extract::query(query)?;
+    extract::validation(validation::page(&query))?;
+    if let Some(cursor) = query.cursor.as_deref() {
+        cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
+    }
     let resource = extract::organization_resource(&headers)?;
     let context = extract::authenticate(&state, &headers, IamAction::ListBin, &resource).await?;
+    let page = PageRequest::new(query.cursor, query.limit.unwrap_or(CONTENTS_PAGE_SIZE))
+        .map_err(|_| AppError::validation("invalid_pagination"))?;
     let result = extract::scoped(
         &context,
-        state.metadata.list_bin(
-            &context,
-            &ListBinQuery {
-                page: PageRequest::default(),
-            },
-        ),
+        state.metadata.list_bin(&context, &ListBinQuery { page }),
     )
     .await
     .map_err(metadata_error)?;

@@ -215,6 +215,10 @@ pub struct AuthorizedEntryView {
 }
 
 /// Minimal metadata safe for traversing to a visible descendant.
+///
+/// A folder shared only through its contents is real to the caller: they can
+/// open it and see the entries they were given. Nothing else about it is
+/// disclosed — not its owner, not its timestamps, not its other children.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraversalEntryView {
     /// Folder identifier.
@@ -223,6 +227,8 @@ pub struct TraversalEntryView {
     pub parent_id: Option<EntryId>,
     /// Folder display name.
     pub name: EntryName,
+    /// Organization-relative path used by the permanent URL.
+    pub path: EntryPath,
     /// Inherited API boundary discriminator.
     pub root_type: RootType,
 }
@@ -232,8 +238,28 @@ pub struct TraversalEntryView {
 pub enum EntryListItem {
     /// Caller has normal read visibility.
     Full(Box<AuthorizedEntryView>),
-    /// Caller may navigate through the folder but not inspect its contents.
+    /// Caller may open the folder but sees only what was shared inside it.
     Traversal(TraversalEntryView),
+}
+
+impl EntryListItem {
+    /// Returns the entry identifier, whichever visibility applies.
+    #[must_use]
+    pub const fn id(&self) -> EntryId {
+        match self {
+            Self::Full(view) => view.entry.id,
+            Self::Traversal(view) => view.id,
+        }
+    }
+
+    /// Returns whether the entry is a folder.
+    #[must_use]
+    pub const fn is_folder(&self) -> bool {
+        match self {
+            Self::Full(view) => matches!(view.entry.kind, EntryKind::Folder),
+            Self::Traversal(_) => true,
+        }
+    }
 }
 
 impl AuthorizableEntry {
@@ -247,6 +273,7 @@ impl AuthorizableEntry {
                     id: self.entry.id,
                     parent_id: self.entry.parent_id,
                     name: self.entry.name,
+                    path: self.entry.path,
                     root_type: self.entry.boundary.root_type(),
                 }))
             }

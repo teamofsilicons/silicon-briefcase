@@ -34,14 +34,6 @@ pub enum IamAction {
     DownloadFile,
     /// Upload a small file.
     UploadFile,
-    /// Initialize multipart upload.
-    InitiateMultipart,
-    /// Upload one multipart part.
-    UploadMultipartPart,
-    /// Complete multipart upload.
-    CompleteMultipart,
-    /// Abort multipart upload.
-    AbortMultipart,
     /// List explicit permissions.
     ListPermissions,
     /// Inspect the caller's own effective access on named targets.
@@ -87,10 +79,6 @@ impl IamAction {
             Self::ReadContent => "briefcase.file.read_content",
             Self::DownloadFile => "briefcase.file.download",
             Self::UploadFile => "briefcase.file.upload",
-            Self::InitiateMultipart => "briefcase.multipart.initiate",
-            Self::UploadMultipartPart => "briefcase.multipart.upload_part",
-            Self::CompleteMultipart => "briefcase.multipart.complete",
-            Self::AbortMultipart => "briefcase.multipart.abort",
             Self::ListPermissions => "briefcase.permissions.list",
             Self::InspectPermissions => "briefcase.permissions.inspect",
             Self::GrantPermission => "briefcase.permissions.grant",
@@ -313,13 +301,6 @@ mod tests {
             (IamAction::ReadContent, "briefcase.file.read_content"),
             (IamAction::DownloadFile, "briefcase.file.download"),
             (IamAction::UploadFile, "briefcase.file.upload"),
-            (IamAction::InitiateMultipart, "briefcase.multipart.initiate"),
-            (
-                IamAction::UploadMultipartPart,
-                "briefcase.multipart.upload_part",
-            ),
-            (IamAction::CompleteMultipart, "briefcase.multipart.complete"),
-            (IamAction::AbortMultipart, "briefcase.multipart.abort"),
             (IamAction::ListPermissions, "briefcase.permissions.list"),
             (
                 IamAction::InspectPermissions,

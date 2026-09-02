@@ -1074,12 +1074,16 @@ impl ObjectStore for S3ObjectStore {
             provider_upload_id,
             part_number,
             path,
+            offset,
             size,
             checksum_sha256,
         } = request;
         let clients = self.clients(target).await?;
+        // A part is a range of one staged upload, so the body reads exactly
+        // that range instead of copying it to its own temporary file.
         let body = ByteStream::read_from()
             .path(path)
+            .offset(offset)
             .length(Length::Exact(size))
             .build()
             .await

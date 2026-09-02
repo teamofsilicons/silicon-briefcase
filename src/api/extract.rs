@@ -22,7 +22,7 @@ use crate::{
     },
     domain::{
         entry::EntryPath,
-        ids::{AccessRequestId, EntryId, GrantId, MultipartUploadId, VersionId},
+        ids::{AccessRequestId, EntryId, GrantId, VersionId},
     },
     error::AppError,
     request_context,
@@ -183,12 +183,6 @@ pub(crate) fn grant_id(value: Uuid) -> Result<GrantId, AppError> {
 
 pub(crate) fn access_request_id(value: Uuid) -> Result<AccessRequestId, AppError> {
     AccessRequestId::from_uuid(value).map_err(|_| AppError::NotFound)
-}
-
-pub(crate) fn multipart_upload_id(value: &str) -> Result<MultipartUploadId, AppError> {
-    value
-        .parse()
-        .map_err(|_| AppError::bad_request("invalid_upload_id"))
 }
 
 pub(crate) fn version_id(value: &str) -> Result<VersionId, AppError> {

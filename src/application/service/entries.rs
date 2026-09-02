@@ -110,11 +110,8 @@ impl MetadataService {
             require_capability(&parent, context, Capability::CreateChild)?;
             (parent.entry.boundary, Some(Capability::CreateChild))
         } else {
-            if !context.authorization().role().has_administrative_access() {
-                return Err(MetadataServiceError::Forbidden {
-                    required: Capability::CreateChild,
-                });
-            }
+            // Any current member may create a folder at the organization base,
+            // declaring which kind of folder it is.
             let boundary =
                 command
                     .root_boundary
@@ -181,30 +178,63 @@ impl MetadataService {
 
     /// Resolves the entry addressed by a permanent URL path.
     ///
-    /// An entry the caller cannot read is indistinguishable from one that does
-    /// not exist, which is what the permanent URL must return.
+    /// A folder that is shared only through its contents resolves as a
+    /// traversal view: the caller opens it and sees exactly the entries they
+    /// were given. When nothing inside it remains accessible, the folder
+    /// answers not found, like anything else the caller may not see.
     ///
     /// # Errors
     ///
     /// Returns [`MetadataServiceError`] when the request context is invalid,
-    /// nothing readable exists at the path, or repository access fails.
+    /// nothing visible exists at the path, or repository access fails.
     pub async fn get_entry_by_path(
         &self,
         context: &ExecutionContext,
         path: &EntryPath,
-    ) -> Result<AuthorizedEntryView, MetadataServiceError> {
+    ) -> Result<EntryListItem, MetadataServiceError> {
         validate_context(context)?;
         let entry = self
             .repository
             .find_active_entry_by_path(context, path)
             .await?
             .ok_or(MetadataServiceError::NotFound)?;
-        let authorization = require_capability(&entry, context, Capability::Read)?;
+        self.visible_view(context, entry).await
+    }
+
+    /// Returns one visible entry by identifier, traversal folders included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// the entry is not visible, or repository access fails.
+    pub async fn visible_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<EntryListItem, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry(context, entry_id)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        self.visible_view(context, entry).await
+    }
+
+    async fn visible_view(
+        &self,
+        context: &ExecutionContext,
+        entry: super::AuthorizableEntry,
+    ) -> Result<EntryListItem, MetadataServiceError> {
         let entry_id = entry.entry.id;
+        let authorization = entry.authorization(context.authorization());
+        let item = entry
+            .into_list_item(authorization)
+            .ok_or(MetadataServiceError::NotFound)?;
         self.repository
             .record_metadata_access(context, &[entry_id])
             .await?;
-        entry.into_full_view(authorization)
+        Ok(item)
     }
 
     /// Returns the retained action history of one readable entry.

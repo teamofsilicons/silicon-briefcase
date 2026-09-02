@@ -92,6 +92,18 @@ pub enum RenderKindDto {
     Unsupported,
 }
 
+/// How much of an entry the caller may see.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryVisibilityDto {
+    /// Normal read visibility; every field is populated.
+    Full,
+    /// The folder is reachable because something inside it was shared. It can
+    /// be opened, and lists only the entries the caller was given; nothing else
+    /// about it is disclosed.
+    Traversal,
+}
+
 /// Entry representation returned by the public API.
 #[derive(Clone, Debug, Serialize)]
 pub struct EntryDto {
@@ -102,6 +114,8 @@ pub struct EntryDto {
     /// Entry discriminator.
     #[serde(rename = "type")]
     pub entry_type: EntryTypeDto,
+    /// How much of this entry is disclosed.
+    pub visibility: EntryVisibilityDto,
     /// Display name within the parent.
     pub name: String,
     /// Organization-relative path, without a leading separator.
@@ -124,18 +138,18 @@ pub struct EntryDto {
     pub content_url: Option<Url>,
     /// Authenticated attachment URL for a file.
     pub download_url: Option<Url>,
-    /// Represented actor who owns the entry.
-    pub owner: ActorRefDto,
+    /// Represented actor who owns the entry; absent for a traversal folder.
+    pub owner: Option<ActorRefDto>,
     /// Verified application that originated the entry.
     pub origin_app_id: Option<String>,
     /// Capabilities effective for the current caller.
     pub effective_access: Vec<EffectiveAccessDto>,
-    /// Creation timestamp.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    /// Last metadata or content update timestamp.
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
+    /// Creation timestamp; absent for a traversal folder.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+    /// Last update timestamp; absent for a traversal folder.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub updated_at: Option<OffsetDateTime>,
     /// Recoverable deletion timestamp.
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
@@ -160,6 +174,16 @@ pub struct ListEntriesQuery {
     pub path: Option<String>,
     /// Filter expression; with one and no parent, the whole tree is searched.
     pub filter: Option<String>,
+    /// Opaque pagination cursor.
+    pub cursor: Option<String>,
+    /// Page size from 1 through 100, defaulting to 100.
+    pub limit: Option<u16>,
+}
+
+/// Cursor pagination shared by simple listings.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageQuery {
     /// Opaque pagination cursor.
     pub cursor: Option<String>,
     /// Page size from 1 through 100, defaulting to 100.
@@ -211,54 +235,6 @@ pub enum DispositionDto {
 pub struct PathContentQuery {
     /// Omission returns entry metadata instead of content.
     pub disposition: Option<DispositionDto>,
-}
-
-/// Multipart-upload initialization request.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MultipartUploadCreateDto {
-    /// Destination folder; omitted when `path` names it instead.
-    pub parent_id: Option<Uuid>,
-    /// Destination folder path, as an alternative to `parent_id`.
-    pub path: Option<String>,
-    /// Final file name.
-    pub name: String,
-    /// Declared final size in bytes.
-    pub size: u64,
-    /// Declared media type.
-    pub content_type: String,
-}
-
-/// Multipart-upload initialization response.
-#[derive(Clone, Debug, Serialize)]
-pub struct MultipartUploadDto {
-    /// Briefcase upload identifier.
-    pub upload_id: Uuid,
-    /// Required non-final part size.
-    pub part_size: u64,
-    /// Expected number of parts.
-    pub part_count: u32,
-    /// Session expiry.
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
-}
-
-/// Client-reported completed S3 part.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompletedPartDto {
-    /// One-based part number.
-    pub part_number: u32,
-    /// Exact `ETag` returned by the part endpoint.
-    pub etag: String,
-}
-
-/// Multipart completion request.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MultipartCompleteDto {
-    /// Exact ordered part list.
-    pub parts: Vec<CompletedPartDto>,
 }
 
 /// One right conveyed by an invitation or requested through the workflow.

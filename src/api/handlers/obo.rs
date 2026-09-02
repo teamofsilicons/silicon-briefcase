@@ -1,24 +1,24 @@
 //! The endpoint other applications may call on behalf of a member.
 //!
 //! Briefcase exposes exactly one OBO operation: create a file at any location
-//! the represented member may write to. Everything that decides where the file
-//! lands travels inside the proof as IAM-bound metadata, never as a header or
-//! query parameter, so an application cannot redirect a proof it legitimately
-//! obtained to a different destination.
+//! the represented member may write to, at any supported size. Everything that
+//! decides where the file lands travels inside the proof as IAM-bound
+//! metadata, never as a header or query parameter, so an application cannot
+//! redirect a proof it legitimately obtained to a different destination.
 
 use axum::{Json, body::Body, extract::State, http::HeaderMap, http::StatusCode};
 use serde::Deserialize;
 
 use crate::{
     application::{
-        content::{SmallUploadCommand, StagedContent},
+        content::{StagedContent, UploadCommand},
         context::ExecutionContext,
         idempotency::{IdempotencyKey, upload_fingerprint},
     },
     domain::{
-        entry::{EntryKind, EntryName, EntryPath},
+        entry::{EntryName, EntryPath},
         ids::EntryId,
-        multipart::SINGLE_UPLOAD_MAX_BYTES,
+        multipart::MAX_UPLOAD_BYTES,
     },
     error::AppError,
     infrastructure::iam::OboRequestBinding,
@@ -64,13 +64,9 @@ pub(crate) async fn create_file(
 
     // The proof commits to the digest of the exact bytes, so they are staged
     // and hashed before IAM is asked to consume it.
-    let file = upload::stage_body(
-        body,
-        state.temporary_directory.clone(),
-        SINGLE_UPLOAD_MAX_BYTES,
-    )
-    .await
-    .map_err(extract::map_staging_error)?;
+    let file = upload::stage_body(body, state.temporary_directory.clone(), MAX_UPLOAD_BYTES)
+        .await
+        .map_err(extract::map_staging_error)?;
     let body_sha256 = hex::encode(file.sha256());
 
     let verified = state
@@ -133,7 +129,7 @@ pub(crate) async fn create_file(
                 category: "obo_idempotency_key",
             }
         })?;
-    let command = SmallUploadCommand {
+    let command = UploadCommand {
         parent_id,
         name,
         content_type,
@@ -142,14 +138,14 @@ pub(crate) async fn create_file(
     };
     let staged = StagedContent {
         path: file.path(),
+        offset: 0,
         size: file.size(),
         sha256: *file.sha256(),
     };
-    let entry_id = extract::scoped(
-        &context,
-        state.content.upload_small(&context, &command, staged),
-    )
-    .await?;
+    // The size decides the storage route, so an application uploads a file of
+    // any supported size through this one endpoint.
+    let entry_id =
+        extract::scoped(&context, state.content.upload(&context, &command, staged)).await?;
     let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
@@ -171,10 +167,10 @@ async fn destination_folder(
     let parent = extract::scoped(context, state.metadata.get_entry_by_path(context, path))
         .await
         .map_err(metadata_error)?;
-    if parent.entry.kind != EntryKind::Folder {
+    if !parent.is_folder() {
         return Err(AppError::NotFound);
     }
-    Ok(parent.entry.id)
+    Ok(parent.id())
 }
 
 fn normalized_content_type(declared: &str) -> Result<String, AppError> {

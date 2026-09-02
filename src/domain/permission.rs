@@ -524,7 +524,13 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
             }
         }
         EntryBoundary::Tag { tag } if input.context.has_tag(tag) => {
+            // Everyone carrying the tag may create, read, and update inside the
+            // tag's tree. Deletion is deliberately absent: it belongs to
+            // whoever created the entry and to organization administrators.
             capabilities.insert(Capability::Read);
+            capabilities.insert(Capability::CreateChild);
+            capabilities.insert(Capability::UpdateMetadata);
+            capabilities.insert(Capability::WriteContent);
         }
         EntryBoundary::Private | EntryBoundary::Tag { .. } => {}
     }
@@ -560,15 +566,32 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
     }
 
     if input.system_kind.is_some() {
+        // Reserved containers are structure, not content: IAM reconciliation
+        // owns their existence, name, and place, so nobody renames, moves,
+        // deletes, or shares them — an administrator included. Everything
+        // inside them is ordinary content and is administered normally.
         capabilities.remove(Capability::UpdateMetadata);
         capabilities.remove(Capability::WriteContent);
         capabilities.remove(Capability::Delete);
         capabilities.remove(Capability::ManagePermissions);
+    } else if is_administrator {
+        // Organization owners and admins hold every operation on every piece
+        // of content in their organization. Restating it here keeps a boundary
+        // rule from quietly narrowing administrative authority.
+        capabilities = CapabilitySet::all();
+        if !input.entry_kind.can_contain_children() {
+            capabilities.remove(Capability::CreateChild);
+        }
+        if input.entry_kind == EntryKind::Folder {
+            capabilities.remove(Capability::WriteContent);
+        }
     }
 
     if let Some(application_id) = input.context.originating_application()
         && input.origin_application_id != Some(application_id)
     {
+        // An application acts with its own authority as well as the member's,
+        // and it may only delete what it created — even for an administrator.
         capabilities.remove(Capability::Delete);
     }
 
@@ -622,7 +645,7 @@ mod tests {
         external_id(OrganizationId::new("tos"))
     }
 
-    fn context(
+    fn request_context(
         represented_actor: ActorRef,
         role: OrganizationRole,
         tags: Vec<TagName>,
@@ -641,7 +664,7 @@ mod tests {
     fn public_members_can_create_children_without_mutating_the_folder() {
         let caller = actor("carbon-a");
         let owner = actor("carbon-b");
-        let context = context(
+        let context = request_context(
             caller,
             OrganizationRole::Member,
             Vec::new(),
@@ -667,9 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn matching_tag_derives_read_only() {
+    fn a_matching_tag_conveys_create_read_and_update_but_never_deletion() {
         let finance = external_id(TagName::new("finance"));
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Member,
             vec![finance.clone()],
@@ -681,7 +704,9 @@ mod tests {
             entry_id: EntryId::new(),
             entry_kind: EntryKind::File,
             system_kind: None,
-            boundary: &EntryBoundary::Tag { tag: finance },
+            boundary: &EntryBoundary::Tag {
+                tag: finance.clone(),
+            },
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
@@ -690,13 +715,98 @@ mod tests {
 
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
         assert!(authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::WriteContent));
+        assert!(authorization.allows(Capability::WriteContent));
+        assert!(authorization.allows(Capability::UpdateMetadata));
+        // Deletion belongs to whoever created the entry, and to admins.
+        assert!(!authorization.allows(Capability::Delete));
+        assert!(!authorization.allows(Capability::ManagePermissions));
+
+        // The member who created the entry may delete their own.
+        let creator = request_context(
+            actor("carbon-b"),
+            OrganizationRole::Member,
+            vec![finance.clone()],
+            AuthenticationMode::Bearer,
+        );
+        let own = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &creator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Tag {
+                tag: finance.clone(),
+            },
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+        assert!(own.allows(Capability::Delete));
+
+        // So may an organization administrator without the tag at all.
+        let administrator = request_context(
+            actor("carbon-admin"),
+            OrganizationRole::Admin,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let administered = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &administrator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Tag { tag: finance },
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+        assert!(administered.allows(Capability::Delete));
+        assert!(administered.allows(Capability::ManagePermissions));
+    }
+
+    #[test]
+    fn administrators_hold_every_operation_on_content_anywhere() {
+        let administrator = request_context(
+            actor("carbon-owner"),
+            OrganizationRole::Owner,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        // Another member's private folder, which the owner does not own and has
+        // never been granted.
+        let folder = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &administrator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::Folder,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+
+        assert_eq!(folder.visibility(), EntryVisibility::Full);
+        assert_eq!(
+            folder.capabilities().effective_access(),
+            vec![
+                EffectiveAccess::Read,
+                EffectiveAccess::Write,
+                EffectiveAccess::Update,
+                EffectiveAccess::Delete,
+                EffectiveAccess::ManagePermissions,
+            ]
+        );
     }
 
     #[test]
     fn an_inherited_update_grant_conveys_neither_deletion_nor_management() {
         let caller = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -747,7 +857,7 @@ mod tests {
     #[test]
     fn deletion_requires_its_own_right_even_alongside_update() {
         let caller = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -786,7 +896,7 @@ mod tests {
     #[test]
     fn a_write_grant_adds_children_without_renaming_or_deleting() {
         let caller = actor("silicon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -825,7 +935,7 @@ mod tests {
     #[test]
     fn non_inheritable_grants_do_not_flow_to_descendants() {
         let caller = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -861,7 +971,7 @@ mod tests {
 
     #[test]
     fn canonical_private_container_is_navigation_visible_to_every_member() {
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Member,
             Vec::new(),
@@ -888,7 +998,7 @@ mod tests {
     #[test]
     fn private_container_custodial_owner_cannot_create_arbitrary_children() {
         let custodian = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             custodian.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -916,7 +1026,7 @@ mod tests {
     fn another_members_private_folder_is_hidden_and_unwritable() {
         // The contract forbids saving into a folder assigned to someone else,
         // and such a folder must not even be visible.
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Member,
             Vec::new(),
@@ -944,7 +1054,7 @@ mod tests {
     #[test]
     fn tag_root_custodian_does_not_bypass_current_iam_tags() {
         let custodian = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             custodian.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -972,7 +1082,7 @@ mod tests {
     #[test]
     fn system_entries_remain_immutable_even_for_administrators() {
         let administrator = actor("carbon-admin");
-        let context = context(
+        let context = request_context(
             administrator.clone(),
             OrganizationRole::Admin,
             Vec::new(),
@@ -1003,7 +1113,7 @@ mod tests {
         let application_id = external_id(ApplicationId::new("silicon-dm"));
         let other_application_id = external_id(ApplicationId::new("silicon-remind"));
         let represented_actor = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             represented_actor.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -1031,7 +1141,7 @@ mod tests {
 
     #[test]
     fn tenant_mismatch_fails_closed() {
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Owner,
             Vec::new(),

@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tracing::warn;
 
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
         ids::{EntryId, MultipartUploadId, StorageConfigurationId, VersionId},
         multipart::{
             CompletedPart, MULTIPART_SESSION_TTL_SECONDS, MultipartPlan, MultipartPlanError,
-            SINGLE_UPLOAD_MAX_BYTES, validate_completion,
+            SINGLE_UPLOAD_MAX_BYTES, UploadStrategy, validate_completion,
         },
         storage::EncryptionMode,
     },
@@ -39,14 +39,34 @@ const RESTORE_LEASE_RENEWAL_INTERVAL: Duration = Duration::from_mins(1);
 /// Lease window left after every successful restore heartbeat.
 pub(crate) const RESTORE_LEASE_DURATION: Duration = Duration::from_mins(10);
 
+/// One upload, whatever its size.
+#[derive(Clone, Debug)]
+pub struct UploadCommand {
+    /// Destination folder.
+    pub parent_id: EntryId,
+    /// File name; an existing file with this name receives a new version.
+    pub name: EntryName,
+    /// Declared media type.
+    pub content_type: String,
+    /// Client idempotency key.
+    pub idempotency_key: IdempotencyKey,
+    /// Canonical request fingerprint.
+    pub request_hash: [u8; 32],
+}
+
 /// A body already staged and hashed by the HTTP streaming boundary.
 #[derive(Clone, Copy, Debug)]
 pub struct StagedContent<'a> {
     /// Private temporary path.
     pub path: &'a Path,
+    /// First byte of the staged file this content starts at.
+    ///
+    /// A multipart transfer sends ranges of one staged file rather than
+    /// copying each part to its own temporary file.
+    pub offset: u64,
     /// Exact received bytes.
     pub size: u64,
-    /// SHA-256 computed while receiving the body.
+    /// SHA-256 computed over exactly those bytes.
     pub sha256: [u8; 32],
 }
 
@@ -707,6 +727,108 @@ where
         }
     }
 
+    /// Stores an uploaded file, choosing the storage route from its size.
+    ///
+    /// The contract has one upload: the caller streams bytes and Briefcase
+    /// decides whether they fit in a single provider request or need a
+    /// multipart transfer. Uploading over an existing file publishes that
+    /// file's next version.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified application error when the size is out of range or
+    /// authorization, persistence, or object storage fails.
+    pub async fn upload(
+        &self,
+        context: &ExecutionContext,
+        command: &UploadCommand,
+        staged: StagedContent<'_>,
+    ) -> Result<EntryId, AppError> {
+        match UploadStrategy::for_file_size(staged.size).map_err(|error| map_plan_error(&error))? {
+            UploadStrategy::SingleRequest => {
+                self.upload_small(
+                    context,
+                    &SmallUploadCommand {
+                        parent_id: command.parent_id,
+                        name: command.name.clone(),
+                        content_type: command.content_type.clone(),
+                        idempotency_key: command.idempotency_key.clone(),
+                        request_hash: command.request_hash,
+                    },
+                    staged,
+                )
+                .await
+            }
+            UploadStrategy::Multipart(plan) => {
+                self.upload_multipart(context, command, staged, plan).await
+            }
+        }
+    }
+
+    /// Transfers one staged file as a multipart upload, part by part.
+    ///
+    /// Every step reuses the durable session the contracted multipart flow
+    /// uses, so an interrupted transfer leaves exactly the state the worker
+    /// already knows how to abort and clean up, and a retry with the same
+    /// idempotency key resumes rather than duplicating.
+    async fn upload_multipart(
+        &self,
+        context: &ExecutionContext,
+        command: &UploadCommand,
+        staged: StagedContent<'_>,
+        plan: MultipartPlan,
+    ) -> Result<EntryId, AppError> {
+        let receipt = self
+            .initiate_multipart(
+                context,
+                &InitiateMultipartCommand {
+                    parent_id: command.parent_id,
+                    name: command.name.clone(),
+                    size: staged.size,
+                    content_type: command.content_type.clone(),
+                    idempotency_key: command.idempotency_key.clone(),
+                    request_hash: command.request_hash,
+                },
+            )
+            .await?;
+
+        let mut parts = Vec::with_capacity(plan.part_count() as usize);
+        for part_number in 1..=plan.part_count() {
+            let size = plan
+                .expected_part_size(part_number)
+                .map_err(|_| AppError::Internal {
+                    category: "multipart_plan",
+                })?;
+            let offset = u64::from(part_number - 1) * plan.part_size();
+            let sha256 = sha256_file_range(staged.path, offset, size).await?;
+            let etag = self
+                .upload_part(
+                    context,
+                    receipt.upload_id,
+                    part_number,
+                    StagedContent {
+                        path: staged.path,
+                        offset,
+                        size,
+                        sha256,
+                    },
+                )
+                .await?;
+            parts.push(ClientCompletedPart { part_number, etag });
+        }
+
+        self.complete_multipart(
+            context,
+            &CompleteMultipartCommand {
+                upload_id: receipt.upload_id,
+                parts,
+                idempotency_key: command.idempotency_key.clone(),
+                request_hash: command.request_hash,
+            },
+        )
+        .await
+    }
+
     /// Creates an S3 multipart session using the canonical plan.
     ///
     /// # Errors
@@ -816,6 +938,7 @@ where
                 provider_upload_id: &target.provider_upload_id,
                 part_number,
                 path: staged.path,
+                offset: staged.offset,
                 size: staged.size,
                 checksum_sha256: &staged.sha256,
             })
@@ -1474,6 +1597,8 @@ where
                 provider_upload_id: self.upload_id,
                 part_number,
                 path: temporary.path(),
+                // A restore stages each part in its own temporary file.
+                offset: 0,
                 size,
                 checksum_sha256: &checksum_sha256,
             })
@@ -1669,6 +1794,43 @@ async fn sha256_file_and_update(
         full_digest.update(&buffer[..read]);
     }
     Ok(part_digest.finalize().into())
+}
+
+/// Digests exactly one byte range of a staged file.
+///
+/// The provider verifies a per-part checksum, and each part is a range of the
+/// single staged upload, so the digest is taken over that range alone.
+async fn sha256_file_range(path: &Path, offset: u64, length: u64) -> Result<[u8; 32], AppError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AppError::Internal {
+            category: "temporary_storage",
+        })?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|_| AppError::Internal {
+            category: "temporary_storage",
+        })?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut remaining = length;
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file
+            .read(&mut buffer[..wanted])
+            .await
+            .map_err(|_| AppError::Internal {
+                category: "temporary_storage",
+            })?;
+        if read == 0 {
+            return Err(AppError::Internal {
+                category: "staged_upload_truncated",
+            });
+        }
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(digest.finalize().into())
 }
 
 async fn sha256_file(path: &Path) -> Result<[u8; 32], AppError> {

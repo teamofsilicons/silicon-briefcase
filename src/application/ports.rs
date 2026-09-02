@@ -207,9 +207,11 @@ pub struct UploadPartRequest<'a> {
     pub provider_upload_id: &'a str,
     /// One-based part number.
     pub part_number: u32,
-    /// Private staged part path.
+    /// Private staged path holding the part's bytes.
     pub path: &'a Path,
-    /// Exact staged byte count.
+    /// First byte of that file belonging to this part.
+    pub offset: u64,
+    /// Exact part byte count.
     pub size: u64,
     /// SHA-256 calculated while staging.
     pub checksum_sha256: &'a [u8; 32],

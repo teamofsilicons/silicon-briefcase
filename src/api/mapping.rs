@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{
     application::service::{
-        AccessRequestView, ActivityEvent, AuthorizedEntryView, FileVersionView,
+        AccessRequestView, ActivityEvent, AuthorizedEntryView, EntryListItem, FileVersionView,
         MetadataRepositoryError, MetadataServiceError, Page, SearchResultView,
     },
     domain::{
@@ -25,9 +25,10 @@ use crate::{
 use super::dto::{
     AccessRequestDto, AccessRequestStatusDto, ActivityEventDto, ActivityPageDto, ActorRefDto,
     ActorTypeDto, EffectiveAccessDto, EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto,
-    FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto, NotificationInboxDto,
-    NotificationKindDto, NotificationSubjectDto, PermissionGrantDto, PermissionGrantPageDto,
-    PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
+    EntryVisibilityDto, FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto,
+    NotificationInboxDto, NotificationKindDto, NotificationSubjectDto, PermissionGrantDto,
+    PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto, RootTypeDto,
+    SearchPageDto, SearchResultDto,
 };
 
 /// Characters that must not survive unencoded in a permanent-URL segment.
@@ -59,27 +60,33 @@ fn encode_segment(value: &str) -> String {
 /// Builds public response representations with the configured canonical URLs.
 #[derive(Clone)]
 pub(crate) struct ResponseMapper {
-    public_base_url: Url,
+    public_api_origin: Url,
     public_site_base_url: Url,
 }
 
 impl ResponseMapper {
-    pub(crate) fn new(public_base_url: Url, public_site_base_url: Url) -> Self {
+    pub(crate) fn new(public_base_url: &Url, public_site_base_url: Url) -> Self {
+        // Organization-scoped routes live at the API origin rather than below
+        // its version prefix, so the origin is derived once here.
+        let public_api_origin = public_base_url
+            .join("/")
+            .unwrap_or_else(|_| public_base_url.clone());
         Self {
-            public_base_url: with_directory_path(public_base_url),
+            public_api_origin,
             public_site_base_url: with_directory_path(public_site_base_url),
         }
     }
 
     pub(crate) fn entry(&self, view: AuthorizedEntryView) -> Result<EntryDto, AppError> {
         let entry = view.entry;
+        let organization_id = entry.organization_id.as_str().to_owned();
         let is_file = entry.kind == EntryKind::File;
-        let permanent_url = self.permanent_url(entry.organization_id.as_str(), &entry.path)?;
+        let permanent_url = self.permanent_url(&organization_id, &entry.path)?;
         let content_url = is_file
-            .then(|| self.api_url(&format!("entries/{}/content", entry.id)))
+            .then(|| self.content_url(&organization_id, &entry.path, "inline"))
             .transpose()?;
         let download_url = is_file
-            .then(|| self.api_url(&format!("entries/{}/download", entry.id)))
+            .then(|| self.content_url(&organization_id, &entry.path, "attachment"))
             .transpose()?;
         let render = is_file.then(|| {
             render_kind(RenderKind::classify(
@@ -90,8 +97,9 @@ impl ResponseMapper {
 
         Ok(EntryDto {
             id: entry.id.as_uuid(),
-            org_id: entry.organization_id.as_str().to_owned(),
+            org_id: organization_id,
             entry_type: entry_kind(entry.kind),
+            visibility: EntryVisibilityDto::Full,
             name: entry.name.into_inner(),
             path: entry.path.into_inner(),
             parent_id: entry.parent_id.map(crate::domain::ids::EntryId::as_uuid),
@@ -103,7 +111,7 @@ impl ResponseMapper {
             permanent_url,
             content_url,
             download_url,
-            owner: actor(&entry.owner),
+            owner: Some(actor(&entry.owner)),
             origin_app_id: entry
                 .origin_application_id
                 .map(crate::domain::actor::ApplicationId::into_inner),
@@ -112,9 +120,48 @@ impl ResponseMapper {
                 .into_iter()
                 .map(effective_access)
                 .collect(),
-            created_at: entry.created_at,
-            updated_at: entry.updated_at,
+            created_at: Some(entry.created_at),
+            updated_at: Some(entry.updated_at),
             deleted_at: entry.deleted_at,
+        })
+    }
+
+    /// Renders one visible entry, redacting a folder shared only by contents.
+    ///
+    /// A traversal folder is real to the caller — they can open it and see what
+    /// was shared inside — so it keeps its identity, path, and permanent URL,
+    /// and discloses nothing else.
+    pub(crate) fn entry_item(
+        &self,
+        organization_id: &str,
+        item: EntryListItem,
+    ) -> Result<EntryDto, AppError> {
+        let view = match item {
+            EntryListItem::Full(view) => return self.entry(*view),
+            EntryListItem::Traversal(view) => view,
+        };
+        Ok(EntryDto {
+            id: view.id.as_uuid(),
+            org_id: organization_id.to_owned(),
+            entry_type: EntryTypeDto::Folder,
+            visibility: EntryVisibilityDto::Traversal,
+            name: view.name.into_inner(),
+            permanent_url: self.permanent_url(organization_id, &view.path)?,
+            path: view.path.into_inner(),
+            parent_id: view.parent_id.map(EntryId::as_uuid),
+            root_type: root_type(view.root_type),
+            tag: None,
+            content_type: None,
+            size: None,
+            render: None,
+            content_url: None,
+            download_url: None,
+            owner: None,
+            origin_app_id: None,
+            effective_access: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
         })
     }
 
@@ -128,26 +175,37 @@ impl ResponseMapper {
         organization_id: &str,
         path: &EntryPath,
     ) -> Result<Url, AppError> {
+        Self::entry_url(&self.public_site_base_url, organization_id, path)
+    }
+
+    fn entry_url(base: &Url, organization_id: &str, path: &EntryPath) -> Result<Url, AppError> {
+        // Every Briefcase URL is scoped to an organization: the base is
+        // effectively `{host}/org/{org_id}/`, and the entry path continues it.
         let mut target = String::from("org/");
         target.push_str(&encode_segment(organization_id));
         for segment in path.segments() {
             target.push('/');
             target.push_str(&encode_segment(segment));
         }
-        target.push('/');
-        self.public_site_base_url
-            .join(&target)
-            .map_err(|_| AppError::Internal {
-                category: "permanent_entry_url",
-            })
+        base.join(&target).map_err(|_| AppError::Internal {
+            category: "permanent_entry_url",
+        })
     }
 
-    fn api_url(&self, relative: &str) -> Result<Url, AppError> {
-        self.public_base_url
-            .join(relative)
-            .map_err(|_| AppError::Internal {
-                category: "public_entry_url",
-            })
+    /// Builds the authenticated content URL for one file.
+    ///
+    /// Every minted URL is organization-scoped and path-addressed, so a client
+    /// that holds one URL holds all three: the same address serves the entry,
+    /// its rendered bytes, and its download.
+    fn content_url(
+        &self,
+        organization_id: &str,
+        path: &EntryPath,
+        disposition: &str,
+    ) -> Result<Url, AppError> {
+        let mut url = Self::entry_url(&self.public_api_origin, organization_id, path)?;
+        url.set_query(Some(&format!("disposition={disposition}")));
+        Ok(url)
     }
 
     pub(crate) fn entry_page(

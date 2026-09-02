@@ -9,14 +9,11 @@ use crate::domain::filter::MAX_FILTER_LENGTH;
 
 use super::dto::{
     AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
-    BucketConfigurationDto, CompletedPartDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
-    GrantAccessDto, ListEntriesQuery, MultipartCompleteDto, MultipartUploadCreateDto,
-    PermissionGrantCreateDto, PermissionInspectionDto, RootTypeDto, SearchQueryDto,
+    BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto, GrantAccessDto,
+    ListEntriesQuery, PageQuery, PermissionGrantCreateDto, PermissionInspectionDto, RootTypeDto,
+    SearchQueryDto,
 };
 
-const MIB: u64 = 1_048_576;
-const SMALL_UPLOAD_LIMIT: u64 = 100 * MIB;
-const MAXIMUM_FILE_SIZE: u64 = 5 * 1_024 * 1_024 * 1_024 * 1_024;
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
 const MAXIMUM_SEARCH_LENGTH: usize = 512;
 const MAXIMUM_INVITEES: usize = 100;
@@ -83,6 +80,26 @@ pub fn list_entries(query: &ListEntriesQuery) -> Result<(), ValidationErrors> {
         if filter.len() > MAX_FILTER_LENGTH {
             errors.push("filter", "is too long");
         }
+    }
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > MAXIMUM_CURSOR_LENGTH)
+    {
+        errors.push("cursor", "is too long");
+    }
+    errors.finish()
+}
+
+/// Validates cursor pagination for a simple listing.
+///
+/// # Errors
+///
+/// Returns all invalid pagination fields.
+pub fn page(query: &PageQuery) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+        errors.push("limit", "must be between 1 and 100");
     }
     if query
         .cursor
@@ -166,51 +183,6 @@ pub fn patch_entry(request: &EntryPatchDto) -> Result<(), ValidationErrors> {
     }
     if let Some(name) = request.name.as_deref() {
         validate_name(name, "name", &mut errors);
-    }
-    errors.finish()
-}
-
-/// Validates multipart initialization boundaries.
-///
-/// # Errors
-///
-/// Returns all invalid multipart initialization fields.
-pub fn create_multipart(request: &MultipartUploadCreateDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    validate_name(&request.name, "name", &mut errors);
-    match (request.parent_id, request.path.as_deref()) {
-        (Some(_), Some(_)) => errors.push("path", "must not be combined with parent_id"),
-        (None, None) => errors.push("parent_id", "is required unless path names the folder"),
-        (None, Some(path)) if path.trim().is_empty() => {
-            errors.push("path", "must not be blank when provided");
-        }
-        _ => {}
-    }
-    if !(SMALL_UPLOAD_LIMIT + 1..=MAXIMUM_FILE_SIZE).contains(&request.size) {
-        errors.push("size", "must be greater than 100 MiB and at most 5 TiB");
-    }
-    let media_type = request.content_type.trim();
-    if media_type.is_empty() || media_type.len() > 255 || media_type.parse::<mime::Mime>().is_err()
-    {
-        errors.push("content_type", "must be a valid media type");
-    }
-    errors.finish()
-}
-
-/// Validates that completion parts are strictly ordered and syntactically safe.
-///
-/// # Errors
-///
-/// Returns all invalid completion fields and parts.
-pub fn complete_multipart(request: &MultipartCompleteDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    if request.parts.is_empty() {
-        errors.push("parts", "must contain at least one part");
-    }
-    let mut previous = 0;
-    for (index, part) in request.parts.iter().enumerate() {
-        validate_completed_part(part, index, previous, &mut errors);
-        previous = part.part_number;
     }
     errors.finish()
 }
@@ -394,35 +366,6 @@ fn validate_access_rights(access: &[GrantAccessDto], field: &str, errors: &mut V
     }
 }
 
-fn validate_completed_part(
-    part: &CompletedPartDto,
-    index: usize,
-    previous: u32,
-    errors: &mut ValidationErrors,
-) {
-    if !(1..=10_000).contains(&part.part_number) {
-        errors.push(
-            format!("parts[{index}].part_number"),
-            "must be between 1 and 10000",
-        );
-    }
-    if part.part_number <= previous {
-        errors.push(
-            format!("parts[{index}].part_number"),
-            "must be strictly increasing",
-        );
-    }
-    if part.etag.trim().is_empty()
-        || part.etag.len() > 1_024
-        || part.etag.chars().any(char::is_control)
-    {
-        errors.push(
-            format!("parts[{index}].etag"),
-            "must be a non-empty printable value of at most 1024 bytes",
-        );
-    }
-}
-
 fn validate_name(value: &str, field: &str, errors: &mut ValidationErrors) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -492,10 +435,10 @@ fn valid_kms_key_arn(value: &str, region: &str, account_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bucket_configuration, complete_multipart, create_folder, decide_access};
+    use super::{bucket_configuration, create_folder, decide_access};
     use crate::api::dto::{
-        AccessDecisionDto, AccessRequestDecisionDto, BucketConfigurationDto, CompletedPartDto,
-        EncryptionModeDto, FolderCreateDto, MultipartCompleteDto, RootTypeDto,
+        AccessDecisionDto, AccessRequestDecisionDto, BucketConfigurationDto, EncryptionModeDto,
+        FolderCreateDto, RootTypeDto,
     };
 
     #[test]
@@ -520,23 +463,6 @@ mod tests {
             root_type: None,
             tag: Some("engineering".to_owned()),
             invitees: Vec::new(),
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn multipart_parts_must_be_ordered() {
-        let result = complete_multipart(&MultipartCompleteDto {
-            parts: vec![
-                CompletedPartDto {
-                    part_number: 2,
-                    etag: "second".to_owned(),
-                },
-                CompletedPartDto {
-                    part_number: 1,
-                    etag: "first".to_owned(),
-                },
-            ],
         });
         assert!(result.is_err());
     }
