@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{
     application::context::ExecutionContext,
     domain::{
+        actor::{ActorRef, OrganizationId},
         entry::EntryPath,
         ids::{AccessRequestId, EntryId, GrantId},
         notification::NotificationInbox,
@@ -17,8 +18,8 @@ use super::model::{
     AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
     CreateFolderMutation, DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand,
     ListBinQuery, ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata,
-    Page, RequestAccessCommand, RevokePermissionCommand, SearchCandidate, SearchQuery,
-    UpdateEntryCommand,
+    Page, ProjectedMembership, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
+    SearchQuery, UpdateEntryCommand,
 };
 
 /// Persistence failures classified without exposing SQL or tenant details.
@@ -193,6 +194,24 @@ pub trait MetadataRepository: Send + Sync {
         entry_id: EntryId,
         metadata: &MutationMetadata,
         required_capability: Capability,
+    ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
+
+    /// Reads the projected organization role and tags of one member.
+    ///
+    /// IAM's OBO result names the represented actor but carries no role or
+    /// tags, so an application request derives them from Briefcase's own IAM
+    /// projection instead of assuming them.
+    async fn project_member_authorization(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+        request_id: &str,
+    ) -> Result<Option<ProjectedMembership>, MetadataRepositoryError>;
+
+    /// Materializes the calling application's folder for the represented actor.
+    async fn ensure_application_folder(
+        &self,
+        context: &ExecutionContext,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
 
     /// Lists the retained action history of one entry, newest first.

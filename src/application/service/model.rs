@@ -1,12 +1,16 @@
 //! Commands, repository snapshots, and safe service views.
 
+use std::collections::BTreeSet;
+
 use time::OffsetDateTime;
 
 use crate::{
     application::idempotency::IdempotencyKey,
     domain::{
         access::{AccessDecision, AccessRequestStatus},
-        actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
+        actor::{
+            ActorRef, ApplicationId, OrganizationId, OrganizationRole, RequestAuthContext, TagName,
+        },
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         filter::FilterQuery,
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
@@ -628,6 +632,15 @@ pub struct ListVersionsQuery {
     pub entry_id: EntryId,
     /// Cursor pagination, capped by the 50-version retention rule.
     pub page: PageRequest,
+}
+
+/// The projected organization standing of one member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedMembership {
+    /// Current organization role.
+    pub role: OrganizationRole,
+    /// Current IAM tags.
+    pub tags: BTreeSet<TagName>,
 }
 
 /// Number of history entries retained and returned for one entry.

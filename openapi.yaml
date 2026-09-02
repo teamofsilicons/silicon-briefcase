@@ -7,10 +7,9 @@ servers:
   - url: https://briefcase.teamofsilicons.com/api/v1
 security:
   - bearerAuth: []
-  - oboAccess: []
-    appId: []
 tags:
   - name: Entries
+  - name: Applications
   - name: Uploads
   - name: Permissions
   - name: Notifications
@@ -155,18 +154,22 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
+      description: >-
+        The destination folder is named either by `parent_id` or by `path`,
+        never both. A path is resolved from the organization base, so
+        `private/cos:tos/reports` addresses the same folder its permanent URL
+        shows.
       requestBody:
         required: true
-        description: For OBO Access, clients must serialize the `parent_id` part before the binary `file` part so IAM can verify the proof's exact destination binding before Briefcase accepts file bytes.
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [parent_id, file]
+              required: [file]
               properties:
-                parent_id: { type: string, format: uuid }
+                parent_id: { type: string, format: uuid, description: Destination folder identifier }
+                path: { type: string, maxLength: 2048, description: Destination folder path, as an alternative to parent_id }
                 file: { type: string, format: binary }
-                app_id: { type: string, description: Originating application when using OBO Access }
       responses:
         '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: Use multipart upload for files larger than 100 MiB }
@@ -371,6 +374,44 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ActivityPage' }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/files:
+    post:
+      tags: [Applications]
+      operationId: createFileOnBehalfOfMember
+      summary: Create a file for a member on behalf of another application
+      description: >-
+        The only operation Briefcase exposes to other applications. The request
+        body is the raw file bytes, and everything else — the destination
+        folder path, the file name, and the media type — travels as metadata
+        bound into the IAM OBO proof, so an application cannot redirect a proof
+        it legitimately obtained to another destination.
+
+
+        Register the endpoint in IAM as `briefcase.files.create` at the path
+        `/api/v1/obo/files` with metadata keys `path` (empty selects the
+        application's own folder under `private/{actor}/apps/{app_id}`), `name`,
+        and `content_type`. Exchange the proof over the SHA-256 digest of the
+        exact bytes, then send those bytes here. Verification consumes the
+        proof exactly once and is never retried.
+
+
+        The represented member's own permissions still apply: the file is only
+        created where that member may add content. Files larger than 100 MiB
+        use the member's own multipart upload.
+      security:
+        - oboAccess: []
+          appId: []
+      parameters:
+        - { name: X-Org-ID, in: header, required: false, schema: { type: string }, description: Optional; IAM derives the tenant and the header must agree with it }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '201': { description: File created for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: Use the member's multipart upload for files larger than 100 MiB }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:

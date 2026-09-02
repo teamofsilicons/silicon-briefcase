@@ -746,6 +746,114 @@ async fn find_tag_root(
     .await
 }
 
+/// Name of the reserved folder that holds one member's application data.
+const APPLICATION_CONTAINER_NAME: &str = "apps";
+
+/// Materializes `private/{actor}/apps/{app_id}` for one member and application.
+///
+/// The product contract gives every application its own folder inside the
+/// represented member's private folder, and that is where app-created files
+/// land by default. Both levels are reserved system folders, so nobody can
+/// rename, move, delete, or share them out from under the application.
+pub(super) async fn ensure_application_container(
+    transaction: &mut Transaction<'_, Postgres>,
+    actor: (&str, &str),
+    application_id: &str,
+) -> Result<Uuid, sqlx::Error> {
+    lock_organization_reconciliation(transaction).await?;
+    let member = ProjectedMember {
+        actor_type: actor.0.to_owned(),
+        actor_id: actor.1.to_owned(),
+    };
+    let custodian = Custodian {
+        actor_type: member.actor_type.clone(),
+        actor_id: member.actor_id.clone(),
+    };
+    let private_root_id = find_system_root(
+        transaction,
+        SystemRootExpectation {
+            system_kind: "private_root",
+            root_type: "private",
+            parent_id: None,
+            tag_id: None,
+            actor_owner: None,
+        },
+    )
+    .await?
+    .ok_or_else(|| reconciliation_error("private root is missing"))?;
+    let actor_root_id =
+        ensure_actor_root(transaction, private_root_id, &member, &custodian).await?;
+
+    let apps_id = ensure_container(
+        transaction,
+        actor_root_id,
+        APPLICATION_CONTAINER_NAME,
+        &member,
+        &custodian,
+    )
+    .await?;
+    ensure_container(transaction, apps_id, application_id, &member, &custodian).await
+}
+
+/// Finds or creates one reserved application folder below a parent.
+async fn ensure_container(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_id: Uuid,
+    name: &str,
+    member: &ProjectedMember,
+    custodian: &Custodian,
+) -> Result<Uuid, sqlx::Error> {
+    if let Some(entry_id) = find_container(transaction, parent_id, name, member).await? {
+        return Ok(entry_id);
+    }
+    let entry_id = Uuid::now_v7();
+    let inserted = insert_root(
+        transaction,
+        entry_id,
+        &RootInsert {
+            parent_id: Some(parent_id),
+            name,
+            root_type: "private",
+            tag_id: None,
+            system_kind: "app_container",
+            owner_type: &member.actor_type,
+            owner_id: &member.actor_id,
+        },
+        custodian,
+    )
+    .await?;
+    if inserted {
+        return Ok(entry_id);
+    }
+    // A concurrent request created it, or a user folder already owns the name.
+    find_container(transaction, parent_id, name, member)
+        .await?
+        .ok_or_else(|| reconciliation_error("application container name is taken"))
+}
+
+async fn find_container(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_id: Uuid,
+    name: &str,
+    member: &ProjectedMember,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT entry_id FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() \
+            AND parent_id = $1 AND name = $2 \
+            AND entry_type = 'folder' AND root_type = 'private' \
+            AND system_kind = 'app_container' \
+            AND owner_type = $3 AND owner_id = $4 \
+            AND deleted_at IS NULL",
+    )
+    .bind(parent_id)
+    .bind(name)
+    .bind(&member.actor_type)
+    .bind(&member.actor_id)
+    .fetch_optional(&mut **transaction)
+    .await
+}
+
 async fn find_actor_root(
     transaction: &mut Transaction<'_, Postgres>,
     private_root_id: Uuid,

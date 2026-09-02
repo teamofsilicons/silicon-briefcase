@@ -75,12 +75,10 @@ pub(crate) async fn list_entries(
         (Some(parent_id), None) => Some(extract::entry_id(parent_id)?),
         (None, Some(path)) => {
             let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
-            let parent = extract::scoped(
-                &context,
-                state.metadata.get_entry_by_path(&context, &path),
-            )
-            .await
-            .map_err(metadata_error)?;
+            let parent =
+                extract::scoped(&context, state.metadata.get_entry_by_path(&context, &path))
+                    .await
+                    .map_err(metadata_error)?;
             if parent.entry.kind != EntryKind::Folder {
                 return Err(AppError::NotFound);
             }

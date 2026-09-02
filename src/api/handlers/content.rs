@@ -27,7 +27,7 @@ use crate::{
         service::{ListVersionsQuery, PageRequest},
     },
     domain::{
-        entry::EntryName,
+        entry::{EntryKind, EntryName, EntryPath},
         ids::EntryId,
         multipart::{MULTIPART_MAX_PART_BYTES, SINGLE_UPLOAD_MAX_BYTES},
         storage::EncryptionMode,
@@ -36,7 +36,7 @@ use crate::{
 };
 
 use super::super::{
-    auth::{self, CredentialMode, IamAction},
+    auth::{self, IamAction},
     delivery,
     dto::{
         BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
@@ -104,33 +104,25 @@ pub(crate) async fn serve(
     delivery::response(delivery, intent)
 }
 
+/// Uploads a file of up to 100 MiB into a folder named by identifier or path.
 pub(crate) async fn upload_small(
     State(state): State<AppState>,
     headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<(StatusCode, Json<EntryDto>), AppError> {
-    let credential_mode = auth::credential_mode(&headers)?;
+    // Verify the credential shape before admitting a single byte of body.
+    auth::require_bearer_shape(&headers)?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
-    let initial_context = match credential_mode {
-        CredentialMode::Bearer => {
-            let organization = extract::organization_resource(&headers)?;
-            Some(
-                extract::authenticate(&state, &headers, IamAction::UploadFile, &organization)
-                    .await?,
-            )
-        }
-        CredentialMode::OnBehalfOf => None,
-    };
-    let (parts, context) = parse_small_upload(
+    let organization = extract::organization_resource(&headers)?;
+    let context =
+        extract::authenticate(&state, &headers, IamAction::UploadFile, &organization).await?;
+    let parts = parse_small_upload(
         extract::multipart(multipart)?,
         state.temporary_directory.clone(),
-        &state,
-        &headers,
-        initial_context,
     )
     .await?;
-    validate_body_application(&headers, parts.application_id.as_deref())?;
-    let resource = parts.parent_id.to_string();
+    let parent_id = destination_folder(&state, &context, &parts.destination).await?;
+    let resource = parent_id.to_string();
     let request_hash = upload_fingerprint(
         "upload_file",
         &resource,
@@ -140,7 +132,7 @@ pub(crate) async fn upload_small(
         parts.file.sha256(),
     );
     let command = SmallUploadCommand {
-        parent_id: parts.parent_id,
+        parent_id,
         name: parts.name,
         content_type: parts.content_type,
         idempotency_key,
@@ -401,23 +393,46 @@ pub(crate) async fn configure_storage(
     }))
 }
 
+/// Where an upload should land, named either way the contract allows.
+enum UploadDestination {
+    /// Destination folder identifier.
+    Folder(EntryId),
+    /// Destination folder path, resolved from the organization base.
+    Path(EntryPath),
+}
+
 struct SmallUploadParts {
-    parent_id: crate::domain::ids::EntryId,
-    application_id: Option<String>,
+    destination: UploadDestination,
     name: EntryName,
     content_type: String,
     file: StagedUpload,
 }
 
+/// Resolves the destination folder, whichever way the client addressed it.
+async fn destination_folder(
+    state: &AppState,
+    context: &ExecutionContext,
+    destination: &UploadDestination,
+) -> Result<EntryId, AppError> {
+    match destination {
+        UploadDestination::Folder(entry_id) => Ok(*entry_id),
+        UploadDestination::Path(path) => {
+            let parent = extract::scoped(context, state.metadata.get_entry_by_path(context, path))
+                .await
+                .map_err(metadata_error)?;
+            if parent.entry.kind != EntryKind::Folder {
+                return Err(AppError::NotFound);
+            }
+            Ok(parent.entry.id)
+        }
+    }
+}
+
 async fn parse_small_upload(
     mut multipart: Multipart,
     temporary_directory: std::path::PathBuf,
-    state: &AppState,
-    headers: &HeaderMap,
-    mut context: Option<ExecutionContext>,
-) -> Result<(SmallUploadParts, ExecutionContext), AppError> {
-    let mut parent_id = None;
-    let mut application_id = None;
+) -> Result<SmallUploadParts, AppError> {
+    let mut destination = None;
     let mut file = None;
 
     while let Some(field) = multipart
@@ -431,20 +446,22 @@ async fn parse_small_upload(
             .to_owned();
         match field_name.as_str() {
             "parent_id" => {
-                if parent_id.is_some() {
-                    return Err(AppError::bad_request("duplicate_parent_id"));
+                if destination.is_some() {
+                    return Err(AppError::bad_request("duplicate_destination"));
                 }
                 let value = read_text_field(field, 64).await?;
                 let value = Uuid::parse_str(value.trim())
                     .map_err(|_| AppError::bad_request("invalid_parent_id"))?;
-                parent_id = Some(extract::entry_id(value)?);
+                destination = Some(UploadDestination::Folder(extract::entry_id(value)?));
             }
-            "app_id" => {
-                if application_id.is_some() {
-                    return Err(AppError::bad_request("duplicate_app_id"));
+            "path" => {
+                if destination.is_some() {
+                    return Err(AppError::bad_request("duplicate_destination"));
                 }
-                let value = read_text_field(field, 255).await?;
-                application_id = Some(value);
+                let value = read_text_field(field, 2_048).await?;
+                let path =
+                    EntryPath::new(&value).map_err(|_| AppError::validation("invalid_path"))?;
+                destination = Some(UploadDestination::Path(path));
             }
             "file" => {
                 if file.is_some() {
@@ -462,20 +479,6 @@ async fn parse_small_upload(
                 }
                 let name =
                     EntryName::new(name).map_err(|_| AppError::validation("invalid_name"))?;
-                if context.is_none() {
-                    let parent_id = parent_id.as_ref().ok_or_else(|| {
-                        AppError::bad_request("parent_id_must_precede_file_for_obo")
-                    })?;
-                    context = Some(
-                        extract::authenticate(
-                            state,
-                            headers,
-                            IamAction::UploadFile,
-                            &parent_id.to_string(),
-                        )
-                        .await?,
-                    );
-                }
                 let staged = upload::stage_multipart_field(
                     field,
                     temporary_directory.clone(),
@@ -489,21 +492,14 @@ async fn parse_small_upload(
         }
     }
 
-    let parent_id = parent_id.ok_or_else(|| AppError::bad_request("missing_parent_id"))?;
+    let destination = destination.ok_or_else(|| AppError::bad_request("missing_destination"))?;
     let (name, content_type, file) = file.ok_or_else(|| AppError::bad_request("missing_file"))?;
-    let context = context.ok_or(AppError::Internal {
-        category: "upload_authentication_order",
-    })?;
-    Ok((
-        SmallUploadParts {
-            parent_id,
-            application_id,
-            name,
-            content_type,
-            file,
-        },
-        context,
-    ))
+    Ok(SmallUploadParts {
+        destination,
+        name,
+        content_type,
+        file,
+    })
 }
 
 async fn read_text_field(mut field: Field<'_>, maximum_bytes: usize) -> Result<String, AppError> {
@@ -523,24 +519,6 @@ async fn read_text_field(mut field: Field<'_>, maximum_bytes: usize) -> Result<S
         value.extend_from_slice(&chunk);
     }
     String::from_utf8(value).map_err(|_| AppError::bad_request("invalid_multipart_text"))
-}
-
-fn validate_body_application(
-    headers: &HeaderMap,
-    application_id: Option<&str>,
-) -> Result<(), AppError> {
-    let Some(application_id) = application_id else {
-        return Ok(());
-    };
-    let presented = headers
-        .get_all("x-app-id")
-        .iter()
-        .next()
-        .and_then(|value| value.to_str().ok());
-    if presented != Some(application_id) {
-        return Err(AppError::bad_request("app_id_mismatch"));
-    }
-    Ok(())
 }
 
 fn require_octet_stream(headers: &HeaderMap) -> Result<(), AppError> {

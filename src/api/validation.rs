@@ -69,7 +69,11 @@ pub fn list_entries(query: &ListEntriesQuery) -> Result<(), ValidationErrors> {
     if query.parent_id.is_some() && query.path.is_some() {
         errors.push("path", "must not be combined with parent_id");
     }
-    if query.path.as_ref().is_some_and(|path| path.trim().is_empty()) {
+    if query
+        .path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
         errors.push("path", "must not be blank when provided");
     }
     if let Some(filter) = query.filter.as_deref() {

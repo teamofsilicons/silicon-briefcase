@@ -10,11 +10,14 @@
 //! - the original bearer is then presented to userinfo with the same
 //!   organization, and principal, actor kind, membership, and organization must
 //!   agree across both responses;
-//! - OBO verification uses IAM's single-use request, organization, and
-//!   idempotency headers and validates its singular action binding;
-//! - IAM's published OBO response does not yet carry current role and tags, so
-//!   the adapter accepts those only as a coordinated extension and otherwise
-//!   fails closed;
+//! - OBO verification submits the exact method, registered path, and body
+//!   digest of the request Briefcase actually received, authenticated with
+//!   application HTTP Basic credentials alone. It accepts no organization
+//!   header and no idempotency key, and it is never retried: IAM consumes the
+//!   proof exactly once, so a retry is indistinguishable from a replay;
+//! - the published OBO result carries the represented actor and organization
+//!   but no role or tags, so the caller pairs it with Briefcase's own IAM
+//!   membership projection and never assumes more authority than that;
 //! - unknown response fields are ignored for forward compatibility, while any
 //!   missing security-relevant field on a successful response fails closed.
 
@@ -24,7 +27,6 @@ use bytes::BytesMut;
 use reqwest::{StatusCode, header, redirect::Policy};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::warn;
@@ -43,7 +45,6 @@ use crate::{
 const MAX_IDENTIFIER_BYTES: usize = 255;
 const MAX_TAGS: usize = 256;
 const MAX_RESOURCE_BYTES: usize = 2_048;
-const IDEMPOTENCY_KEY_PREFIX: &str = "briefcase-obo-v1-";
 
 /// Online IAM verifier with bounded transport and response budgets.
 #[derive(Clone)]
@@ -213,32 +214,36 @@ impl IamClient {
         validate_userinfo(&introspection, userinfo, expected_organization)
     }
 
-    /// Verifies and consumes an OBO proof, checking every Briefcase-visible
-    /// issuer, audience, action, resource, organization, and expiry binding.
+    /// Verifies and consumes an OBO proof against the request that arrived.
+    ///
+    /// The proof commits to the method, the registered path, and the body
+    /// digest, so those are recomputed from the received request rather than
+    /// taken from anything the caller can choose freely. Verification is
+    /// single-use and must never be retried.
     ///
     /// # Errors
     ///
-    /// Returns [`IamClientError::Rejected`] when IAM reports an invalid proof
-    /// and otherwise fails closed for transport, schema, expiry, or mismatch.
+    /// Returns [`IamClientError::Rejected`] when IAM reports an invalid,
+    /// consumed, or expired proof and otherwise fails closed for transport,
+    /// schema, or binding mismatches.
     pub async fn verify_obo(
         &self,
         proof: &SecretString,
         presented_application: &ApplicationId,
-        expected_organization: &OrganizationId,
-        action: &str,
-        resource: Option<&str>,
-    ) -> Result<VerifiedIdentity, IamClientError> {
-        validate_outbound_binding("action", action, MAX_IDENTIFIER_BYTES)?;
-        if let Some(resource) = resource {
-            validate_outbound_binding("resource", resource, MAX_RESOURCE_BYTES)?;
-        }
+        expected_organization: Option<&OrganizationId>,
+        binding: &OboRequestBinding<'_>,
+    ) -> Result<VerifiedOboAccess, IamClientError> {
+        validate_outbound_binding("request.method", binding.method, MAX_IDENTIFIER_BYTES)?;
+        validate_outbound_binding("request.path", binding.path, MAX_RESOURCE_BYTES)?;
+        validate_outbound_binding("request.body_sha256", binding.body_sha256, 64)?;
         let request = WireOboRequest {
             access_proof: proof.expose_secret(),
-            audience: self.audience.as_str(),
-            action,
-            resource,
+            request: WireOboRequestBinding {
+                method: binding.method,
+                path: binding.path,
+                body_sha256: binding.body_sha256,
+            },
         };
-        let idempotency_key = obo_idempotency_key(proof);
         let response = self
             .http
             .post(self.obo_verification_url.clone())
@@ -246,8 +251,6 @@ impl IamClient {
                 self.service_app_id.as_str(),
                 Some(self.service_app_secret.expose_secret()),
             )
-            .header("X-Org-ID", expected_organization.as_str())
-            .header("Idempotency-Key", idempotency_key)
             .json(&request)
             .send()
             .await
@@ -260,10 +263,37 @@ impl IamClient {
             &self.audience,
             presented_application,
             expected_organization,
-            action,
-            resource,
+            binding,
         )
     }
+}
+
+/// The exact downstream request an OBO proof is bound to.
+#[derive(Clone, Copy, Debug)]
+pub struct OboRequestBinding<'a> {
+    /// Canonical uppercase HTTP method.
+    pub method: &'a str,
+    /// Registered absolute endpoint path.
+    pub path: &'a str,
+    /// Lowercase hexadecimal SHA-256 digest of the exact body bytes.
+    pub body_sha256: &'a str,
+}
+
+/// A consumed OBO proof and everything it authorizes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedOboAccess {
+    /// IAM identifier of the consumed proof, unique to this one request.
+    pub proof_id: Uuid,
+    /// Represented Carbon or Silicon.
+    pub actor: ActorRef,
+    /// Organization the proof is bound to.
+    pub organization_id: OrganizationId,
+    /// Application that obtained the proof.
+    pub issuer: ApplicationId,
+    /// Registered endpoint identifier the proof was minted for.
+    pub endpoint_id: String,
+    /// Exact metadata bound into the proof.
+    pub metadata: serde_json::Value,
 }
 
 impl From<IamClientError> for AppError {
@@ -319,33 +349,43 @@ struct WireUserInfoResponse {
 #[derive(Serialize)]
 struct WireOboRequest<'a> {
     access_proof: &'a str,
-    audience: &'a str,
-    action: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resource: Option<&'a str>,
+    request: WireOboRequestBinding<'a>,
+}
+
+#[derive(Serialize)]
+struct WireOboRequestBinding<'a> {
+    method: &'a str,
+    path: &'a str,
+    body_sha256: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireOboEndpoint {
+    endpoint_id: String,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct WireOboResponse {
     valid: bool,
     #[serde(default)]
+    proof_id: Option<Uuid>,
+    #[serde(default)]
     actor: Option<WireActor>,
     #[serde(default)]
     org_id: Option<String>,
-    #[serde(default)]
-    org_role: Option<OrganizationRole>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
     #[serde(default)]
     issuer_app_id: Option<String>,
     #[serde(default)]
     audience: Option<String>,
     #[serde(default)]
-    action: Option<String>,
+    endpoint: Option<WireOboEndpoint>,
     #[serde(default)]
-    resource: Option<String>,
+    metadata: Option<serde_json::Value>,
     #[serde(default, with = "time::serde::rfc3339::option")]
     expires_at: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    consumed_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug)]
@@ -423,10 +463,9 @@ fn validate_obo(
     wire: WireOboResponse,
     expected_audience: &ApplicationId,
     presented_application: &ApplicationId,
-    expected_organization: &OrganizationId,
-    action: &str,
-    resource: Option<&str>,
-) -> Result<VerifiedIdentity, IamClientError> {
+    expected_organization: Option<&OrganizationId>,
+    binding: &OboRequestBinding<'_>,
+) -> Result<VerifiedOboAccess, IamClientError> {
     if !wire.valid {
         return Err(IamClientError::Rejected);
     }
@@ -441,24 +480,51 @@ fn validate_obo(
     if &audience != expected_audience {
         return Err(binding_mismatch("audience"));
     }
-    if required_wire(wire.action, "action")? != action {
-        return Err(binding_mismatch("action"));
+    let endpoint = required_wire(wire.endpoint, "endpoint")?;
+    // The proof commits to the registered path. Confirming it against the path
+    // Briefcase actually served keeps one endpoint's proof from being spent on
+    // another.
+    if endpoint.path != binding.path {
+        return Err(binding_mismatch("endpoint.path"));
     }
-    if wire.resource.as_deref() != resource {
-        return Err(binding_mismatch("resource"));
+    validate_wire_text("endpoint.endpoint_id", &endpoint.endpoint_id, 128)?;
+
+    // IAM derives the tenant from the two applications and never accepts one
+    // from the caller, so the response is authoritative. A request that still
+    // declared an organization must agree with it.
+    let organization_id = OrganizationId::new(required_wire(wire.org_id, "org_id")?)
+        .map_err(|_| invalid_response("org_id"))?;
+    if expected_organization.is_some_and(|expected| expected != &organization_id) {
+        return Err(binding_mismatch("org_id"));
+    }
+    // IAM consumes the proof as part of a successful verification, so it is
+    // authoritative on expiry; the timestamps are only checked for coherence.
+    let expires_at = required_wire(wire.expires_at, "expires_at")?;
+    let consumed_at = required_wire(wire.consumed_at, "consumed_at")?;
+    if expires_at < consumed_at {
+        return Err(invalid_response("consumed_at"));
     }
 
-    verified_identity(
-        required_wire(wire.actor, "actor")?,
-        required_wire(wire.org_id, "org_id")?,
-        required_wire(wire.org_role, "org_role")?,
-        required_wire(wire.tags, "tags")?,
-        required_wire(wire.expires_at, "expires_at")?,
-        expected_organization,
-        AuthenticationMode::OnBehalfOf {
-            application_id: issuer,
-        },
-    )
+    let actor = required_wire(wire.actor, "actor")?;
+    if actor.principal_id.is_nil() {
+        return Err(invalid_response("actor.principal_id"));
+    }
+    validate_wire_text("actor.public_id", &actor.public_id, MAX_IDENTIFIER_BYTES)?;
+    let actor_id =
+        ActorId::new(actor.public_id).map_err(|_| invalid_response("actor.public_id"))?;
+    let metadata = wire.metadata.unwrap_or(serde_json::Value::Null);
+    if !metadata.is_object() && !metadata.is_null() {
+        return Err(invalid_response("metadata"));
+    }
+
+    Ok(VerifiedOboAccess {
+        proof_id: required_wire(wire.proof_id, "proof_id")?,
+        actor: ActorRef::new(actor.kind, actor_id),
+        organization_id,
+        issuer,
+        endpoint_id: endpoint.endpoint_id,
+        metadata,
+    })
 }
 
 fn verified_identity(
@@ -553,11 +619,6 @@ fn binding_mismatch(binding: &'static str) -> IamClientError {
 
 fn invalid_response(reason: &'static str) -> IamClientError {
     IamClientError::InvalidResponse { reason }
-}
-
-fn obo_idempotency_key(proof: &SecretString) -> String {
-    let digest = Sha256::digest(proof.expose_secret().as_bytes());
-    format!("{IDEMPOTENCY_KEY_PREFIX}{}", hex::encode(digest))
 }
 
 fn classify_transport_error(error: &reqwest::Error) -> IamClientError {
@@ -705,9 +766,9 @@ mod tests {
     use crate::config::IamSettings;
 
     use super::{
-        ApplicationId, AuthenticationMode, IamClient, IamClientError, OrganizationId,
-        WireIntrospectionResponse, WireOboResponse, WireUserInfoResponse, deserialize_json,
-        obo_idempotency_key, validate_introspection, validate_obo, validate_userinfo,
+        ApplicationId, AuthenticationMode, IamClient, IamClientError, OboRequestBinding,
+        OrganizationId, WireIntrospectionResponse, WireOboResponse, WireUserInfoResponse,
+        deserialize_json, validate_introspection, validate_obo, validate_userinfo,
     };
 
     const PRINCIPAL_ID: &str = "01990a9d-86f1-7000-8000-000000000001";
@@ -810,20 +871,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obo_request_matches_published_headers_and_singular_binding() {
+    async fn obo_verification_sends_only_the_published_single_use_binding() {
         let server = MockServer::start().await;
         let proof = SecretString::from(OBO_PROOF.to_owned());
-        let idempotency_key = obo_idempotency_key(&proof);
+        let digest = "a".repeat(64);
         Mock::given(method("POST"))
             .and(path("/api/v1/obo-access/verify"))
             .and(header("authorization", basic_authorization()))
-            .and(header("x-org-id", "tos"))
-            .and(header("idempotency-key", idempotency_key))
             .and(body_json(json!({
                 "access_proof": OBO_PROOF,
-                "audience": "silicon-briefcase",
-                "action": "briefcase.entry.read",
-                "resource": "entry-1"
+                "request": {
+                    "method": "POST",
+                    "path": "/api/v1/obo/files",
+                    "body_sha256": digest,
+                }
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "valid": true,
@@ -836,12 +897,13 @@ mod tests {
                     "public_id": "carbon-a"
                 },
                 "org_id": "tos",
-                "action": "briefcase.entry.read",
-                "resource": "entry-1",
+                "endpoint": {
+                    "endpoint_id": "briefcase.files.create",
+                    "path": "/api/v1/obo/files"
+                },
+                "metadata": { "path": "", "name": "report.pdf" },
                 "expires_at": "2099-01-01T00:00:00Z",
-                "consumed_at": "2026-08-31T12:00:00Z",
-                "org_role": "member",
-                "tags": []
+                "consumed_at": "2026-08-31T12:00:00Z"
             })))
             .expect(1)
             .mount(&server)
@@ -853,14 +915,19 @@ mod tests {
             .verify_obo(
                 &proof,
                 &application(),
-                &organization(),
-                "briefcase.entry.read",
-                Some("entry-1"),
+                Some(&organization()),
+                &OboRequestBinding {
+                    method: "POST",
+                    path: "/api/v1/obo/files",
+                    body_sha256: &digest,
+                },
             )
             .await
             .unwrap_or_else(|error| panic!("published OBO exchange should verify: {error}"));
 
-        assert_eq!(verified.authorization().actor().id().as_str(), "carbon-a");
+        assert_eq!(verified.actor.id().as_str(), "carbon-a");
+        assert_eq!(verified.endpoint_id, "briefcase.files.create");
+        assert_eq!(verified.issuer.as_str(), "silicon-dm");
         server.verify().await;
     }
 
@@ -970,137 +1037,134 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn published_obo_contract_checks_every_binding_with_authorization_extension() {
-        let wire: WireOboResponse = deserialize_json(
-            &serde_json::to_vec(&json!({
-                "valid": true,
-                "actor": {
-                    "principal_id": "01990a9d-86f1-7000-8000-000000000003",
-                    "type": "silicon",
-                    "public_id": "researcher:tos"
-                },
-                "org_id": "tos",
-                "org_role": "member",
-                "tags": ["research"],
-                "issuer_app_id": "silicon-dm",
-                "audience": "silicon-briefcase",
-                "action": "briefcase.file.temporary_url",
-                "resource": "018f6f9e-7b62-7d6e-bf19-b0fd6a879710",
-                "expires_at": "2099-01-01T00:00:00Z"
-            }))
-            .unwrap_or_else(|error| panic!("test fixture: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("OBO response should parse: {error}"));
-        let audience = ApplicationId::new("silicon-briefcase")
-            .unwrap_or_else(|error| panic!("test fixture: {error}"));
-
-        let verified = validate_obo(
-            wire,
-            &audience,
-            &application(),
-            &organization(),
-            "briefcase.file.temporary_url",
-            Some("018f6f9e-7b62-7d6e-bf19-b0fd6a879710"),
-        )
-        .unwrap_or_else(|error| panic!("OBO contract should verify: {error}"));
-
-        assert_eq!(
-            verified
-                .authorization()
-                .originating_application()
-                .map(ApplicationId::as_str),
-            Some("silicon-dm")
-        );
+    fn obo_binding() -> OboRequestBinding<'static> {
+        OboRequestBinding {
+            method: "POST",
+            path: "/api/v1/obo/files",
+            body_sha256: "b".repeat(64).leak(),
+        }
     }
 
-    #[test]
-    fn obo_issuer_header_mismatch_fails_closed() {
-        let wire: WireOboResponse = serde_json::from_value(json!({
+    fn obo_response(overrides: &serde_json::Value) -> WireOboResponse {
+        let mut body = json!({
             "valid": true,
+            "proof_id": "01990a9d-86f1-7000-8000-000000000004",
             "actor": {
                 "principal_id": "01990a9d-86f1-7000-8000-000000000003",
-                "type": "carbon",
-                "public_id": "carbon-a"
-            },
-            "org_id": "tos",
-            "org_role": "owner",
-            "tags": [],
-            "issuer_app_id": "different-app",
-            "audience": "silicon-briefcase",
-            "action": "briefcase.entry.read",
-            "resource": null,
-            "expires_at": "2099-01-01T00:00:00Z"
-        }))
-        .unwrap_or_else(|error| panic!("test fixture: {error}"));
-        let audience = ApplicationId::new("silicon-briefcase")
-            .unwrap_or_else(|error| panic!("test fixture: {error}"));
-
-        assert!(matches!(
-            validate_obo(
-                wire,
-                &audience,
-                &application(),
-                &organization(),
-                "briefcase.entry.read",
-                None,
-            ),
-            Err(IamClientError::BindingMismatch {
-                binding: "issuer_app_id"
-            })
-        ));
-    }
-
-    #[test]
-    fn published_obo_response_without_role_and_tags_fails_closed() {
-        let wire: WireOboResponse = serde_json::from_value(json!({
-            "valid": true,
-            "actor": {
-                "principal_id": "01990a9d-86f1-7000-8000-000000000003",
-                "type": "carbon",
-                "public_id": "carbon-a"
+                "type": "silicon",
+                "public_id": "researcher:tos"
             },
             "org_id": "tos",
             "issuer_app_id": "silicon-dm",
             "audience": "silicon-briefcase",
-            "action": "briefcase.entry.read",
-            "resource": null,
-            "expires_at": "2099-01-01T00:00:00Z"
-        }))
-        .unwrap_or_else(|error| panic!("test fixture: {error}"));
-        let audience = ApplicationId::new("silicon-briefcase")
-            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+            "endpoint": {
+                "endpoint_id": "briefcase.files.create",
+                "path": "/api/v1/obo/files"
+            },
+            "metadata": { "path": "public/reports", "name": "q3.pdf" },
+            "expires_at": "2099-01-01T00:00:00Z",
+            "consumed_at": "2026-08-31T12:00:00Z"
+        });
+        if let (Some(target), Some(source)) = (body.as_object_mut(), overrides.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::from_value(body).unwrap_or_else(|error| panic!("test fixture: {error}"))
+    }
 
-        assert!(matches!(
-            validate_obo(
-                wire,
-                &audience,
-                &application(),
-                &organization(),
-                "briefcase.entry.read",
-                None,
+    fn audience() -> ApplicationId {
+        ApplicationId::new("silicon-briefcase")
+            .unwrap_or_else(|error| panic!("test fixture: {error}"))
+    }
+
+    #[test]
+    fn the_published_obo_result_yields_the_represented_actor_and_metadata() {
+        let verified = validate_obo(
+            obo_response(&json!({})),
+            &audience(),
+            &application(),
+            Some(&organization()),
+            &obo_binding(),
+        )
+        .unwrap_or_else(|error| panic!("OBO contract should verify: {error}"));
+
+        assert_eq!(verified.actor.id().as_str(), "researcher:tos");
+        assert_eq!(verified.organization_id.as_str(), "tos");
+        assert_eq!(verified.metadata["name"], json!("q3.pdf"));
+    }
+
+    #[test]
+    fn obo_issuer_audience_endpoint_and_organization_all_fail_closed() {
+        let cases = [
+            (json!({ "issuer_app_id": "different-app" }), "issuer_app_id"),
+            (json!({ "audience": "someone-else" }), "audience"),
+            (
+                json!({
+                    "endpoint": {
+                        "endpoint_id": "briefcase.files.create",
+                        "path": "/api/v1/obo/other"
+                    }
+                }),
+                "endpoint.path",
             ),
-            Err(IamClientError::InvalidResponse { .. })
-        ));
+            (json!({ "org_id": "other-org" }), "org_id"),
+        ];
+
+        for (overrides, binding) in cases {
+            let result = validate_obo(
+                obo_response(&overrides),
+                &audience(),
+                &application(),
+                Some(&organization()),
+                &obo_binding(),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(IamClientError::BindingMismatch { binding: reported }) if reported == binding
+                ),
+                "{binding} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_obo_result_without_an_endpoint_or_proof_identity_fails_closed() {
+        for overrides in [json!({ "endpoint": null }), json!({ "proof_id": null })] {
+            assert!(matches!(
+                validate_obo(
+                    obo_response(&overrides),
+                    &audience(),
+                    &application(),
+                    Some(&organization()),
+                    &obo_binding(),
+                ),
+                Err(IamClientError::InvalidResponse { .. })
+            ));
+        }
     }
 
     #[test]
     fn obo_application_actor_is_not_a_represented_member() {
         let response = serde_json::to_vec(&json!({
             "valid": true,
+            "proof_id": "01990a9d-86f1-7000-8000-000000000004",
             "actor": {
                 "principal_id": "01990a9d-86f1-7000-8000-000000000003",
                 "type": "application",
                 "public_id": "external-app"
             },
             "org_id": "tos",
-            "org_role": "member",
-            "tags": [],
             "issuer_app_id": "silicon-dm",
             "audience": "silicon-briefcase",
-            "action": "briefcase.entry.read",
-            "resource": null,
-            "expires_at": "2099-01-01T00:00:00Z"
+            "endpoint": {
+                "endpoint_id": "briefcase.files.create",
+                "path": "/api/v1/obo/files"
+            },
+            "metadata": {},
+            "expires_at": "2099-01-01T00:00:00Z",
+            "consumed_at": "2026-08-31T12:00:00Z"
         }))
         .unwrap_or_else(|error| panic!("test fixture: {error}"));
 
@@ -1108,16 +1172,5 @@ mod tests {
             deserialize_json::<WireOboResponse>(&response),
             Err(IamClientError::InvalidResponse { .. })
         ));
-    }
-
-    #[test]
-    fn obo_idempotency_key_is_deterministic_and_does_not_expose_the_proof() {
-        let proof = SecretString::from("obo_secret-proof".to_owned());
-        let first = obo_idempotency_key(&proof);
-        let second = obo_idempotency_key(&proof);
-
-        assert_eq!(first, second);
-        assert!(first.starts_with("briefcase-obo-v1-"));
-        assert!(!first.contains("secret-proof"));
     }
 }

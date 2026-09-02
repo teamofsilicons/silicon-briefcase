@@ -22,13 +22,13 @@ use crate::{
             CreateFolderMutation, DecideAccessRequestCommand, ENTRY_ACTIVITY_HISTORY_SIZE,
             FileVersionView, GrantPermissionCommand, ListBinQuery, ListEntriesQuery,
             ListPermissionsQuery, ListVersionsQuery, MetadataRepository, MetadataRepositoryError,
-            MutationMetadata, Page, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
-            SearchQuery, UpdateEntryCommand,
+            MutationMetadata, Page, ProjectedMembership, RequestAccessCommand,
+            RevokePermissionCommand, SearchCandidate, SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
         access::{AccessDecision, AccessRequestStatus},
-        actor::{ActorRef, ApplicationId},
+        actor::{ActorRef, ApplicationId, OrganizationId, OrganizationRole, TagName},
         entry::{EntryKind, EntryPath},
         filter::{FilterQuery, SortOrder},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
@@ -39,8 +39,8 @@ use crate::{
 };
 
 use super::{
-    AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, models::entry_columns,
-    roots,
+    AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, TenantContext,
+    models::entry_columns, roots,
 };
 use common::{
     IdempotencyClaim, Result, actor_kind, actor_ref, begin, boundary_columns, build_authorizable,
@@ -1116,7 +1116,7 @@ impl MetadataRepository for PostgresRepository {
             entry_id: Uuid,
             score: f32,
             filename_match: bool,
-            content_hits: i32,
+            content_hits: i64,
             snippet: Option<String>,
         }
 
@@ -1129,12 +1129,18 @@ impl MetadataRepository for PostgresRepository {
             .map(crate::domain::actor::TagName::as_str)
             .collect();
         let rows = sqlx::query_as::<_, SearchHit>(
-            "WITH search_query AS (SELECT websearch_to_tsquery('simple'::regconfig, $1) AS value) \
+            "WITH search_query AS ( \
+                    SELECT websearch_to_tsquery('simple'::regconfig, $1) AS value, \
+                           ARRAY( \
+                               SELECT term.lexeme \
+                                 FROM unnest(to_tsvector('simple'::regconfig, $1)) AS term \
+                           ) AS lexemes \
+             ) \
              SELECT document.entry_id, \
                     (2.0 * ts_rank(document.filename_search, search_query.value) \
                          + ts_rank(document.content_search, search_query.value))::real AS score, \
                     document.filename_search @@ search_query.value AS filename_match, \
-                    CASE WHEN document.content_search @@ search_query.value THEN 1 ELSE 0 END AS content_hits, \
+                    content.hits AS content_hits, \
                     CASE WHEN document.content_search @@ search_query.value \
                          THEN ts_headline('simple'::regconfig, COALESCE(document.extracted_content, ''), \
                                           search_query.value, 'MaxFragments=2,MaxWords=24,MinWords=8') \
@@ -1143,6 +1149,14 @@ impl MetadataRepository for PostgresRepository {
                JOIN briefcase.entries AS entry \
                  ON entry.org_id = document.org_id AND entry.entry_id = document.entry_id \
                CROSS JOIN search_query \
+     CROSS JOIN LATERAL ( \
+                    SELECT COALESCE( \
+                               SUM(COALESCE(array_length(word.positions, 1), 0)), \
+                               0 \
+                           )::bigint AS hits \
+                      FROM unnest(document.content_search) AS word \
+                     WHERE word.lexeme = ANY(search_query.lexemes) \
+                 ) AS content \
           LEFT JOIN briefcase.organization_tags AS tag \
                  ON tag.org_id = entry.org_id AND tag.tag_id = entry.tag_id \
               WHERE document.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
@@ -1162,7 +1176,7 @@ impl MetadataRepository for PostgresRepository {
                          AND (path.depth = 0 OR grant.inherits_to_descendants) \
                     ) \
                 ) \
-              ORDER BY score DESC, document.entry_id \
+              ORDER BY filename_match DESC, content_hits DESC, score DESC, document.entry_id \
               LIMIT $6",
         )
         .bind(&query.query)
@@ -1520,6 +1534,99 @@ impl MetadataRepository for PostgresRepository {
             .ok_or_else(|| internal("restored entry disappeared"))?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(restored)
+    }
+
+    async fn project_member_authorization(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+        request_id: &str,
+    ) -> Result<Option<ProjectedMembership>> {
+        #[derive(sqlx::FromRow)]
+        struct MembershipRow {
+            org_role: String,
+            tag_names: Vec<String>,
+        }
+
+        // This read runs before any request context exists, so it opens its own
+        // tenant transaction and never reconciles anything.
+        let context = TenantContext::for_projection(
+            organization_id.as_str().to_owned(),
+            actor,
+            request_id.to_owned(),
+        );
+        let mut transaction = self.begin(&context).await.map_err(map_sql)?;
+        let row = sqlx::query_as::<_, MembershipRow>(
+            "SELECT member.org_role, \
+                    COALESCE( \
+                        array_agg(tag.name ORDER BY tag.name COLLATE \"C\") \
+                            FILTER ( \
+                                WHERE tag.tag_id IS NOT NULL \
+                                  AND tag.lifecycle_status = 'active' \
+                            ), \
+                        ARRAY[]::text[] \
+                    ) AS tag_names \
+               FROM briefcase.organization_members AS member \
+               LEFT JOIN briefcase.organization_member_tags AS member_tag \
+                 ON member_tag.org_id = member.org_id \
+                AND member_tag.actor_type = member.actor_type \
+                AND member_tag.actor_id = member.actor_id \
+               LEFT JOIN briefcase.organization_tags AS tag \
+                 ON tag.org_id = member_tag.org_id AND tag.tag_id = member_tag.tag_id \
+              WHERE member.org_id = briefcase.current_org_id() \
+                AND member.actor_type = $1 AND member.actor_id = $2 \
+                AND member.membership_status = 'active' \
+              GROUP BY member.org_role",
+        )
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sql)?;
+        transaction.commit().await.map_err(map_sql)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let role = match row.org_role.as_str() {
+            "owner" => OrganizationRole::Owner,
+            "admin" => OrganizationRole::Admin,
+            "member" => OrganizationRole::Member,
+            _ => return Err(internal("invalid persisted organization role")),
+        };
+        let tags = row
+            .tag_names
+            .into_iter()
+            .map(|tag| TagName::new(tag).map_err(internal_data))
+            .collect::<Result<_>>()?;
+        Ok(Some(ProjectedMembership { role, tags }))
+    }
+
+    async fn ensure_application_folder(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<AuthorizableEntry> {
+        let application_id = context
+            .authorization()
+            .originating_application()
+            .ok_or_else(|| internal("application folder requires an OBO request"))?
+            .as_str()
+            .to_owned();
+        let actor = context.authorization().actor().clone();
+        let mut request = begin(self, context).await?;
+        let entry_id = roots::ensure_application_container(
+            &mut request.transaction,
+            (actor_kind(actor.kind()), actor.id().as_str()),
+            &application_id,
+        )
+        .await
+        .map_err(map_sql)?;
+        let entry_id = EntryId::from_uuid(entry_id).map_err(internal_data)?;
+        let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
+            .await?
+            .ok_or_else(|| internal("application folder disappeared"))?;
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(entry)
     }
 
     async fn list_entry_activity(

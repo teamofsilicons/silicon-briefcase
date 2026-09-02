@@ -15,19 +15,6 @@ const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
 const APP_ID: HeaderName = HeaderName::from_static("x-app-id");
 const MAX_CREDENTIAL_BYTES: usize = 8_192;
 
-/// Credential shape presented by a request before online IAM verification.
-///
-/// This is intentionally not an authenticated identity. It exists so
-/// streaming handlers can verify bearer credentials before reading a body and
-/// defer an OBO proof only until its exact resource binding is known.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CredentialMode {
-    /// A direct IAM bearer token.
-    Bearer,
-    /// An IAM OBO proof paired with its originating application.
-    OnBehalfOf,
-}
-
 /// Stable IAM action bound to one Briefcase operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IamAction {
@@ -144,11 +131,12 @@ impl AuthenticatedRequest {
     }
 }
 
-/// Authenticates one operation using exactly one supported IAM credential mode.
+/// Authenticates one operation with a direct IAM bearer token.
 ///
-/// Bearer and OBO credentials are mutually exclusive. OBO verification binds
-/// the proof to the route's exact action and resource before Briefcase policy
-/// is evaluated by the application service.
+/// The contracted API is a bearer surface. An application acts through the one
+/// exposed OBO endpoint instead, where IAM binds the proof to the exact
+/// request; presenting an OBO proof anywhere else is a request error rather
+/// than a partially honored credential.
 ///
 /// # Errors
 ///
@@ -161,38 +149,17 @@ pub async fn authenticate(
     resource: &str,
 ) -> Result<AuthenticatedRequest, AppError> {
     let organization = parse_organization(headers)?;
-    let bearer = optional_single_header(headers, &AUTHORIZATION)?;
-    let proof = optional_single_header(headers, &OBO_PROOF)?;
-    let app_id = optional_single_header(headers, &APP_ID)?;
-
-    let verified = match (bearer, proof, app_id) {
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-            return Err(AppError::bad_request("ambiguous_authentication"));
-        }
-        (Some(authorization), None, None) => {
-            let token = parse_bearer(authorization)?;
-            iam.introspect_bearer(&token, &organization).await?
-        }
-        (None, Some(proof), Some(app_id)) => {
-            let proof = parse_secret_header(proof)?;
-            let application = ApplicationId::new(app_id.to_owned())
-                .map_err(|_| AppError::bad_request("invalid_app_id"))?;
-            iam.verify_obo(
-                &proof,
-                &application,
-                &organization,
-                action.as_str(),
-                Some(resource),
-            )
-            .await?
-        }
-        (None, None | Some(_), None) | (None, None, Some(_)) => {
-            return Err(AppError::Unauthenticated);
-        }
-    };
+    let authorization = require_bearer_only(headers)?;
+    let token = parse_bearer(authorization)?;
+    let verified = iam.introspect_bearer(&token, &organization).await?;
     if verified.authorization().organization_id() != &organization {
         return Err(AppError::Forbidden);
     }
+    tracing::debug!(
+        iam.action = action.as_str(),
+        iam.resource = resource,
+        "IAM bearer identity verified"
+    );
     let request_id = request_context::current_request_id().ok_or(AppError::Internal {
         category: "request_scope_missing",
     })?;
@@ -203,37 +170,18 @@ pub async fn authenticate(
     })
 }
 
-/// Validates the mutually exclusive authentication header shape without
-/// consuming an OBO proof.
+/// Validates the credential shape before a streaming handler reads a body.
 ///
 /// # Errors
 ///
 /// Returns an opaque authentication or request error for missing, ambiguous,
 /// duplicated, or syntactically invalid security headers.
-pub(crate) fn credential_mode(headers: &HeaderMap) -> Result<CredentialMode, AppError> {
+pub(crate) fn require_bearer_shape(headers: &HeaderMap) -> Result<(), AppError> {
     // Parse the organization here as well so a streaming endpoint rejects a
     // malformed tenant boundary before it admits request-body bytes.
     parse_organization(headers)?;
-    let bearer = optional_single_header(headers, &AUTHORIZATION)?;
-    let proof = optional_single_header(headers, &OBO_PROOF)?;
-    let app_id = optional_single_header(headers, &APP_ID)?;
-
-    match (bearer, proof, app_id) {
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-            Err(AppError::bad_request("ambiguous_authentication"))
-        }
-        (Some(authorization), None, None) => {
-            parse_bearer(authorization)?;
-            Ok(CredentialMode::Bearer)
-        }
-        (None, Some(proof), Some(app_id)) => {
-            parse_secret_header(proof)?;
-            ApplicationId::new(app_id.to_owned())
-                .map_err(|_| AppError::bad_request("invalid_app_id"))?;
-            Ok(CredentialMode::OnBehalfOf)
-        }
-        (None, None | Some(_), None) | (None, None, Some(_)) => Err(AppError::Unauthenticated),
-    }
+    parse_bearer(require_bearer_only(headers)?)?;
+    Ok(())
 }
 
 /// Authenticates an operation that explicitly permits only a direct bearer
@@ -244,30 +192,51 @@ pub async fn authenticate_bearer(
     action: IamAction,
 ) -> Result<AuthenticatedRequest, AppError> {
     let organization = parse_organization(headers)?;
-    let authorization =
-        optional_single_header(headers, &AUTHORIZATION)?.ok_or(AppError::Unauthenticated)?;
+    authenticate(iam, headers, action, organization.as_str()).await
+}
+
+/// Reads the application identity and proof presented to the OBO endpoint.
+///
+/// # Errors
+///
+/// Returns an opaque public error when either credential is absent, malformed,
+/// duplicated, or accompanied by a bearer token.
+pub(crate) fn obo_credentials(
+    headers: &HeaderMap,
+) -> Result<(ApplicationId, SecretString), AppError> {
+    if optional_single_header(headers, &AUTHORIZATION)?.is_some() {
+        return Err(AppError::bad_request("ambiguous_authentication"));
+    }
+    let proof = optional_single_header(headers, &OBO_PROOF)?.ok_or(AppError::Unauthenticated)?;
+    let app_id = optional_single_header(headers, &APP_ID)?.ok_or(AppError::Unauthenticated)?;
+    let application = ApplicationId::new(app_id.to_owned())
+        .map_err(|_| AppError::bad_request("invalid_app_id"))?;
+    Ok((application, parse_secret_header(proof)?))
+}
+
+/// Reads an optional tenant header, for a route where IAM names the tenant.
+///
+/// # Errors
+///
+/// Returns a request error when the header is duplicated or malformed.
+pub(crate) fn optional_organization(
+    headers: &HeaderMap,
+) -> Result<Option<OrganizationId>, AppError> {
+    optional_single_header(headers, &ORG_ID)?
+        .map(|value| {
+            OrganizationId::new(value.to_owned())
+                .map_err(|_| AppError::bad_request("invalid_org_id"))
+        })
+        .transpose()
+}
+
+fn require_bearer_only(headers: &HeaderMap) -> Result<&str, AppError> {
     if optional_single_header(headers, &OBO_PROOF)?.is_some()
         || optional_single_header(headers, &APP_ID)?.is_some()
     {
         return Err(AppError::bad_request("ambiguous_authentication"));
     }
-    let token = parse_bearer(authorization)?;
-    let verified = iam.introspect_bearer(&token, &organization).await?;
-    if verified.authorization().organization_id() != &organization {
-        return Err(AppError::Forbidden);
-    }
-    tracing::debug!(
-        iam.action = action.as_str(),
-        iam.resource = organization.as_str(),
-        "IAM bearer identity verified"
-    );
-    let request_id = request_context::current_request_id().ok_or(AppError::Internal {
-        category: "request_scope_missing",
-    })?;
-    Ok(AuthenticatedRequest {
-        authorization: verified.into_authorization(),
-        request_id,
-    })
+    optional_single_header(headers, &AUTHORIZATION)?.ok_or(AppError::Unauthenticated)
 }
 
 /// Returns the validated organization identifier used as an IAM resource for
@@ -331,7 +300,7 @@ fn optional_single_header<'a>(
 mod tests {
     use http::{HeaderMap, HeaderValue};
 
-    use super::{CredentialMode, IamAction, credential_mode, parse_bearer};
+    use super::{IamAction, obo_credentials, parse_bearer, require_bearer_shape};
 
     #[test]
     fn action_names_are_stable_capabilities() {
@@ -383,29 +352,25 @@ mod tests {
     }
 
     #[test]
-    fn credential_shape_is_validated_before_streaming() {
+    fn the_bearer_surface_accepts_only_a_bearer_token() {
         let mut bearer = HeaderMap::new();
         bearer.insert("x-org-id", HeaderValue::from_static("org_example"));
         bearer.insert(
             http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer opaque-token"),
         );
-        assert!(matches!(
-            credential_mode(&bearer),
-            Ok(CredentialMode::Bearer)
-        ));
+        assert!(require_bearer_shape(&bearer).is_ok());
 
-        let mut obo = HeaderMap::new();
-        obo.insert("x-org-id", HeaderValue::from_static("org_example"));
-        obo.insert(
+        let mut proof_only = HeaderMap::new();
+        proof_only.insert("x-org-id", HeaderValue::from_static("org_example"));
+        proof_only.insert(
             "x-iam-obo-access-proof",
             HeaderValue::from_static("opaque-proof"),
         );
-        obo.insert("x-app-id", HeaderValue::from_static("app_example"));
-        assert!(matches!(
-            credential_mode(&obo),
-            Ok(CredentialMode::OnBehalfOf)
-        ));
+        proof_only.insert("x-app-id", HeaderValue::from_static("app_example"));
+        // An application must use the OBO endpoint, not the bearer surface.
+        assert!(require_bearer_shape(&proof_only).is_err());
+        assert!(obo_credentials(&proof_only).is_ok());
     }
 
     #[test]
@@ -422,7 +387,8 @@ mod tests {
         );
         headers.insert("x-app-id", HeaderValue::from_static("app_example"));
 
-        assert!(credential_mode(&headers).is_err());
+        assert!(require_bearer_shape(&headers).is_err());
+        assert!(obo_credentials(&headers).is_err());
     }
 
     #[test]

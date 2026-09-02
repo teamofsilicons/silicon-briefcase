@@ -260,10 +260,7 @@ fn push_media_prefixes(builder: &mut QueryBuilder<Postgres>, prefixes: &[&str]) 
         builder.push("false");
         return;
     }
-    let patterns: Vec<String> = prefixes
-        .iter()
-        .map(|prefix| format!("{prefix}%"))
-        .collect();
+    let patterns: Vec<String> = prefixes.iter().map(|prefix| format!("{prefix}%")).collect();
     builder.push("COALESCE(entry.content_type ILIKE ANY(");
     builder.push_bind(patterns);
     builder.push("), false)");

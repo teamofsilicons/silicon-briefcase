@@ -230,12 +230,8 @@ impl FilterExpression {
                     true
                 }
             }
-            Self::All(children) => children
-                .iter()
-                .all(|child| child.permits(effective_access)),
-            Self::Any(children) => children
-                .iter()
-                .any(|child| child.permits(effective_access)),
+            Self::All(children) => children.iter().all(|child| child.permits(effective_access)),
+            Self::Any(children) => children.iter().any(|child| child.permits(effective_access)),
         }
     }
 }
@@ -553,11 +549,12 @@ impl Parser<'_> {
                 .predicate(FilterPredicate::ChangedBefore(date(key, value)?))
                 .map(Some),
             "between" => {
-                let (start, end) = value
-                    .split_once('=')
-                    .ok_or_else(|| FilterError::InvalidValue {
-                        key: key.to_owned(),
-                    })?;
+                let (start, end) =
+                    value
+                        .split_once('=')
+                        .ok_or_else(|| FilterError::InvalidValue {
+                            key: key.to_owned(),
+                        })?;
                 let (start, end) = (date(key, start)?, date(key, end)?);
                 if start > end {
                     return Err(FilterError::InvalidValue {
@@ -775,7 +772,9 @@ mod tests {
 
     /// Parses a filter and returns its conditions, or an error when it has none.
     fn conditions(input: &str) -> Result<FilterExpression, FilterError> {
-        FilterQuery::parse(input)?.expression.ok_or(FilterError::Empty)
+        FilterQuery::parse(input)?
+            .expression
+            .ok_or(FilterError::Empty)
     }
 
     fn predicates(expression: &FilterExpression) -> Vec<&FilterPredicate> {
@@ -835,7 +834,8 @@ mod tests {
 
     #[test]
     fn actor_selectors_keep_colons_inside_identifiers() -> Result<(), FilterError> {
-        let query = FilterQuery::parse("from:@{carbon:cos:tos} to:@{silicon:agent} for:@{cos:tos}")?;
+        let query =
+            FilterQuery::parse("from:@{carbon:cos:tos} to:@{silicon:agent} for:@{cos:tos}")?;
         let expression = query.expression.ok_or(FilterError::Empty)?;
         let parsed = predicates(&expression);
         assert_eq!(

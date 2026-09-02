@@ -63,6 +63,31 @@ impl TenantContext {
         }
     }
 
+    /// Creates database context for reading one member's own projection.
+    ///
+    /// An application request has an IAM-verified organization and actor but no
+    /// request authority yet, so this constructor exists to read that member's
+    /// projected role and tags under row-level security before authority is
+    /// constructed. It grants nothing by itself.
+    #[must_use]
+    pub fn for_projection(
+        org_id: String,
+        actor: &crate::domain::actor::ActorRef,
+        request_id: String,
+    ) -> Self {
+        let actor_type = match actor.kind() {
+            ActorKind::Carbon => "carbon",
+            ActorKind::Silicon => "silicon",
+        };
+        Self {
+            org_id,
+            actor_type,
+            actor_id: actor.id().as_str().to_owned(),
+            origin_app_id: None,
+            request_id,
+        }
+    }
+
     /// Returns the authoritative organization identifier.
     #[must_use]
     pub fn org_id(&self) -> &str {

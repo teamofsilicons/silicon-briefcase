@@ -4,6 +4,7 @@
 //! storage details behind explicit ports.
 
 mod access_requests;
+mod applications;
 mod bin;
 mod entries;
 mod error;

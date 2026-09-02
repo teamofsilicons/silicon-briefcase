@@ -43,7 +43,7 @@ pub mod upload;
 pub mod validation;
 mod webhook;
 
-use handlers::{content, entries, notifications, permissions, system};
+use handlers::{content, entries, notifications, obo, permissions, system};
 use state::{AppState, ContentUseCases};
 
 const SMALL_MULTIPART_BODY_LIMIT: usize = 101 * 1_048_576;
@@ -164,6 +164,7 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
     let small_upload = with_deadline(
         Router::new()
             .route("/api/v1/uploads", post(content::upload_small))
+            .route(obo::CREATE_FILE_PATH, post(obo::create_file))
             .layer(DefaultBodyLimit::max(SMALL_MULTIPART_BODY_LIMIT)),
         server.upload_timeout,
     );
@@ -347,7 +348,7 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 28] = [
+    const CONTRACT: [(&str, &str, &str); 29] = [
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -357,6 +358,7 @@ mod tests {
         ("/entries/{entry_id}/download", "get", "200"),
         ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
+        ("/obo/files", "post", "201"),
         ("/multipart-uploads", "post", "201"),
         (
             "/multipart-uploads/{upload_id}/parts/{part_number}",
@@ -421,26 +423,33 @@ mod tests {
     }
 
     #[test]
-    fn openapi_requires_complete_obo_credentials_and_bearer_for_storage_configuration()
-    -> anyhow::Result<()> {
+    fn openapi_keeps_the_api_bearer_only_and_obo_to_its_own_endpoint() -> anyhow::Result<()> {
         let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
         let global_security = document["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("OpenAPI security must be a sequence"))?;
 
-        assert!(global_security.iter().any(|requirement| {
-            requirement["bearerAuth"].is_sequence()
-                && requirement
-                    .as_mapping()
-                    .is_some_and(|mapping| mapping.len() == 1)
-        }));
-        assert!(global_security.iter().any(|requirement| {
-            requirement["oboAccess"].is_sequence()
-                && requirement["appId"].is_sequence()
-                && requirement
-                    .as_mapping()
-                    .is_some_and(|mapping| mapping.len() == 2)
-        }));
+        // The contracted surface is a bearer surface, and nothing else.
+        assert_eq!(global_security.len(), 1);
+        assert!(global_security[0]["bearerAuth"].is_sequence());
+        assert_eq!(
+            global_security[0]
+                .as_mapping()
+                .map(serde_yaml::Mapping::len),
+            Some(1)
+        );
+
+        // The one application endpoint requires both OBO credentials together.
+        let obo_security = document["paths"]["/obo/files"]["post"]["security"]
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("OBO security must be a sequence"))?;
+        assert_eq!(obo_security.len(), 1);
+        assert!(obo_security[0]["oboAccess"].is_sequence());
+        assert!(obo_security[0]["appId"].is_sequence());
+        assert_eq!(
+            obo_security[0].as_mapping().map(serde_yaml::Mapping::len),
+            Some(2)
+        );
 
         let storage_security = document["paths"]["/storage/configuration"]["put"]["security"]
             .as_sequence()
