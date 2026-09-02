@@ -505,7 +505,13 @@ Lists deleted entries visible to the caller, newest deletion first.
 - **Query:** Optional `cursor` and `limit` from 1 to 100.
 - **Returns:** A page of deleted entries and the cursor for the next one.
 
-The owner sees their recoverable entries. Administrators see entries allowed by administrative policy. Deleted entries remain recoverable for 45 days.
+The owner sees their recoverable entries. Administrators see entries allowed by
+administrative policy. Deleted entries remain recoverable for 45 days.
+
+A binned entry still occupies the organization's storage, because its bytes are
+still stored — that is what makes it recoverable. The space returns when the
+entry is permanently discarded at the end of the 45 days, and `GET /usage`
+reports the larger figure until then.
 
 ### `POST /bin/{entry_id}/restore`
 

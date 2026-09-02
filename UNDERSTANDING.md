@@ -234,7 +234,7 @@ For all the updates in a file, a version history should be maintained for it for
 
 # Bin 
 
-For any file deleted, they should be stored in the bin for 45 days before being permanently discarded.
+For any file deleted, they should be stored in the bin for 45 days before being permanently discarded. When a file is permnanently deleted the space should return to the the total availaible space. 
 
 # Contents
 

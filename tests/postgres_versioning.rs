@@ -290,6 +290,78 @@ async fn re_uploading_a_name_versions_the_same_file_and_the_bin_pages() -> anyho
 }
 
 #[tokio::test]
+async fn purging_the_bin_returns_the_space_that_binning_alone_still_holds() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let pool = postgres::connect(&database_settings(url), "briefcase-tests").await?;
+    postgres::migrate(&pool).await?;
+    let metadata = PostgresRepository::new(pool.clone());
+    let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
+
+    let organization = format!("test-{}", Uuid::now_v7().simple());
+    let context = execution_context(&organization)?;
+    let parent = private_root(&metadata, &context).await?;
+
+    let file = b"space that comes back later";
+    let stored_bytes = i64::try_from(file.len())?;
+    let entry = publish(&files, &context, parent, "bin-upload-one", file).await?;
+    assert_eq!(usage(&pool, &organization).await?.1, stored_bytes);
+
+    // Binning holds the space: the object is still in storage, recoverable for
+    // the whole retention window.
+    let mutation = MutationMetadata::new(
+        Some(IdempotencyKey::new("bin-delete-one".to_owned())?),
+        [9; 32],
+    );
+    metadata
+        .soft_delete_entry(&context, entry, &mutation, Capability::Delete)
+        .await?;
+    assert_eq!(
+        usage(&pool, &organization).await?.1,
+        stored_bytes,
+        "a binned file is still stored, so it still consumes the organization's space"
+    );
+
+    // Purging is what returns it. This is the statement the worker runs once
+    // the retention window has passed and every object is confirmed deleted.
+    let mut connection = tenant_connection(&pool, &organization).await?;
+    let batch: Uuid = sqlx::query_scalar(
+        "SELECT deletion_batch_id FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
+    )
+    .bind(entry.as_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    let purged = sqlx::query(
+        "DELETE FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() AND deletion_batch_id = $1",
+    )
+    .bind(batch)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    assert_eq!(purged, 1, "the binned file is the whole deletion batch");
+    assert_eq!(
+        usage(&pool, &organization).await?.1,
+        0,
+        "permanent deletion returns the space to the organization"
+    );
+
+    drop(connection);
+    let reported = metadata.load_organization_usage(&context).await?;
+    assert_eq!(
+        reported.storage_remaining(),
+        reported.storage_allowance(),
+        "the whole ceiling is available again"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn usage_tracks_uploads_and_storage_and_refuses_what_exceeds_a_limit() -> anyhow::Result<()> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
