@@ -14,8 +14,8 @@ the implementation follows it and does not add undocumented behavior.
 
 - `briefcase-api` serves health checks, the `/api/v1` contract, and the IAM
   webhook receiver.
-- `briefcase-worker` performs outbox delivery, indexing, multipart cleanup,
-  retention, and reconciliation.
+- `briefcase-worker` performs outbox delivery, search indexing and text
+  extraction, multipart cleanup, retention, and reconciliation.
 - `briefcase-migrate` is the only process that applies forward SQL migrations.
 
 The three binaries share the `silicon_briefcase` library. API replicas never run
@@ -57,14 +57,18 @@ or accepted from a client.
   counts rather than percentages.
 - **Independent access rights.** A grant conveys any set of `read`, `write`,
   `update`, and `delete`. Update never implies deletion, write never implies
-  update, and `POST /permissions/effective` answers what the caller may
-  actually do on up to a hundred named targets at once. Tag members share
-  create, read, and update inside a tag folder while deletion stays with the
-  creator; organization owners and admins hold every operation everywhere.
+  update — write on a folder adds files to it and never replaces one already
+  there — and `POST /permissions/effective` answers what the caller may
+  actually do on up to a hundred named targets at once. Owning a folder always
+  shows what is inside it, and conveys nothing over another member's file there
+  beyond reading it. Tag members share create, read, and update inside a tag
+  folder while deletion stays with the creator; organization owners and admins
+  hold every operation everywhere.
 - **A central inbox.** Grants, revocations, access requests, and decisions each
   write a notification in the same transaction as the change, so the inbox
   cannot disagree with the permissions it describes.
-- **A filter language.** Folder contents page a hundred newest-first, and a
+- **A filter language.** Folder contents page a hundred newest-first — pages
+  are refilled after permission filtering rather than answered short — and a
   filter expression combines every documented predicate with `and`, `or`,
   `not`, and grouping. It is parsed in the domain, compiled to parameterized
   SQL, and its `permissions:` predicate is decided by domain policy.
@@ -78,6 +82,10 @@ or accepted from a client.
   client crate. It negotiates the API version and verifies every operation's
   revision against this build before its first call, so an incompatible pairing
   fails at startup rather than mid-request.
+- **Command line:** `briefcase`, in the same repository, is built on that crate
+  and exposes the same operations to a shell. It has no capability the crate
+  lacks; what it adds is a saved profile, a token stored under `~/.briefcase/`,
+  `--json` output, and exit codes a script can branch on.
 
 Any client can do the same by reading `GET /api/version`, which names the
 served API majors and every operation with the revision of its request and

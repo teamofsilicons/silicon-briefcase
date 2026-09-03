@@ -93,6 +93,50 @@ impl MetadataRepository for PostgresRepository {
         Ok(entry)
     }
 
+    async fn find_boundary_container(
+        &self,
+        context: &ExecutionContext,
+        boundary: &crate::domain::entry::EntryBoundary,
+    ) -> Result<Option<AuthorizableEntry>> {
+        let mut request = begin(self, context).await?;
+        let actor = context.authorization().actor();
+        let row = sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() \
+                AND deleted_at IS NULL \
+                AND ( \
+                    ($1 = 'public' AND system_kind = 'public_root') \
+                    OR ($1 = 'private' AND system_kind = 'actor_root' \
+                        AND owner_type = $3 AND owner_id = $4) \
+                    OR ($1 = 'tag' AND system_kind = 'tag_root' AND tag_id IN ( \
+                            SELECT tag_id FROM briefcase.organization_tags \
+                             WHERE org_id = briefcase.current_org_id() \
+                               AND name = $2 AND lifecycle_status = 'active' \
+                        )) \
+                ) \
+              LIMIT 1",
+        ))
+        .bind(match boundary.root_type() {
+            crate::domain::entry::RootType::Public => "public",
+            crate::domain::entry::RootType::Private => "private",
+            crate::domain::entry::RootType::Tag => "tag",
+        })
+        .bind(boundary.tag().map(crate::domain::actor::TagName::as_str))
+        .bind(actor_kind(actor.kind()))
+        .bind(actor.id().as_str())
+        .fetch_optional(&mut *request.transaction)
+        .await
+        .map_err(map_sql)?;
+        let entry = match row {
+            Some(row) => Some(build_authorizable(&mut request.transaction, context, row).await?),
+            None => None,
+        };
+        request.transaction.commit().await.map_err(map_sql)?;
+        Ok(entry)
+    }
+
     async fn find_active_entry_by_path(
         &self,
         context: &ExecutionContext,
@@ -677,10 +721,21 @@ impl MetadataRepository for PostgresRepository {
         };
         let actor = context.authorization().actor();
         let row = sqlx::query_as::<_, PermissionGrantRow>(
+            // Granting a principal who already holds a grant amends it rather
+            // than colliding with it: the contract has no operation that edits
+            // a grant, so the alternative would be revoking access and issuing
+            // it again, which briefly removes the access being widened and
+            // tells the recipient their access was revoked.
             "INSERT INTO briefcase.permission_grants ( \
                     org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                     inherits_to_descendants, granted_by_type, granted_by_id \
              ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (org_id, entry_id, principal_type, principal_id) \
+                  WHERE revoked_at IS NULL \
+             DO UPDATE SET access_mask = EXCLUDED.access_mask, \
+                           inherits_to_descendants = EXCLUDED.inherits_to_descendants, \
+                           granted_by_type = EXCLUDED.granted_by_type, \
+                           granted_by_id = EXCLUDED.granted_by_id \
              RETURNING org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                        inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
                        revoked_by_type, revoked_by_id, created_at",
@@ -1130,11 +1185,17 @@ impl MetadataRepository for PostgresRepository {
             .map(crate::domain::actor::TagName::as_str)
             .collect();
         let rows = sqlx::query_as::<_, SearchHit>(
+            // Both sides are normalized by the same function, so a term
+            // inside a filename matches the name it belongs to.
             "WITH search_query AS ( \
-                    SELECT websearch_to_tsquery('simple'::regconfig, $1) AS value, \
+                    SELECT websearch_to_tsquery( \
+                               'simple'::regconfig, briefcase.searchable_text($1) \
+                           ) AS value, \
                            ARRAY( \
                                SELECT term.lexeme \
-                                 FROM unnest(to_tsvector('simple'::regconfig, $1)) AS term \
+                                 FROM unnest(to_tsvector( \
+                                          'simple'::regconfig, briefcase.searchable_text($1) \
+                                      )) AS term \
                            ) AS lexemes \
              ) \
              SELECT document.entry_id, \
@@ -2113,9 +2174,10 @@ where
         .map(|value| {
             URL_SAFE_NO_PAD
                 .decode(value)
-                .map_err(|_| MetadataRepositoryError::Conflict)
+                .map_err(|_| MetadataRepositoryError::InvalidCursor)
                 .and_then(|bytes| {
-                    serde_json::from_slice(&bytes).map_err(|_| MetadataRepositoryError::Conflict)
+                    serde_json::from_slice(&bytes)
+                        .map_err(|_| MetadataRepositoryError::InvalidCursor)
                 })
         })
         .transpose()

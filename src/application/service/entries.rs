@@ -11,9 +11,17 @@ use crate::{
 
 use super::{
     ActivityEvent, AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
-    ListEntriesQuery, MetadataService, MetadataServiceError, MutationMetadata, Page,
+    ListEntriesQuery, MetadataService, MetadataServiceError, MutationMetadata, Page, PageRequest,
     UpdateEntryCommand, require_capability, validate_context,
 };
+
+/// How many extra keyset reads one listing may spend refilling a page.
+///
+/// A folder whose entries are almost all invisible to the caller would
+/// otherwise scan to its end inside a single request. Past this bound the
+/// listing answers with what it has and its cursor, which is still complete
+/// for a client that follows the cursor.
+const MAX_PAGE_REFILLS: usize = 8;
 
 impl MetadataService {
     /// Lists visible or traversal-safe children of an organization root or folder.
@@ -44,7 +52,6 @@ impl MetadataService {
             }
         }
 
-        let candidates = self.repository.list_active_children(context, query).await?;
         // A `permissions:` predicate is not a column: persistence returns the
         // candidates and policy decides them here, against the same effective
         // access the response reports.
@@ -53,33 +60,63 @@ impl MetadataService {
             .as_ref()
             .and_then(|filter| filter.expression.as_ref())
             .filter(|expression| expression.requires_policy_evaluation());
-        let mut accessed = Vec::with_capacity(candidates.items.len());
-        let items = candidates
-            .items
-            .into_iter()
-            .filter_map(|entry| {
+        let wanted = usize::from(query.page.limit);
+        let mut items: Vec<EntryListItem> = Vec::with_capacity(wanted);
+        let mut accessed = Vec::with_capacity(wanted);
+        let mut page = query.page.clone();
+        let mut next_cursor: Option<String> = None;
+
+        // Candidates the caller may not see are dropped after the keyset page
+        // is read, so a page can arrive with room left in it. Refill from the
+        // next position rather than answering short: a client that stops when
+        // a page is smaller than the limit would otherwise miss the rest of
+        // the folder. Each round asks only for what is still missing, so no
+        // entry is fetched twice and the cursor keeps meaning what it says.
+        for _ in 0..=MAX_PAGE_REFILLS {
+            let candidates = self
+                .repository
+                .list_active_children(
+                    context,
+                    &ListEntriesQuery {
+                        parent_id: query.parent_id,
+                        filter: query.filter.clone(),
+                        page: page.clone(),
+                    },
+                )
+                .await?;
+            next_cursor = candidates.next_cursor;
+            for entry in candidates.items {
                 let authorization = entry.authorization(context.authorization());
                 if let Some(expression) = permission_filter
                     && !expression.permits(&authorization.capabilities().effective_access())
                 {
-                    return None;
+                    continue;
                 }
-                let item = entry.clone().into_list_item(authorization);
-                if item.is_some() {
+                if let Some(item) = entry.clone().into_list_item(authorization) {
                     accessed.push(entry.entry.id);
+                    items.push(item);
                 }
-                item
-            })
-            .collect();
+            }
+
+            let remaining = wanted.saturating_sub(items.len());
+            let Some(cursor) = next_cursor.clone().filter(|_| remaining > 0) else {
+                break;
+            };
+            let Ok(limit) = u16::try_from(remaining) else {
+                break;
+            };
+            page = PageRequest {
+                cursor: Some(cursor),
+                limit,
+            };
+        }
+
         if !accessed.is_empty() {
             self.repository
                 .record_metadata_access(context, &accessed)
                 .await?;
         }
-        Ok(Page {
-            items,
-            next_cursor: candidates.next_cursor,
-        })
+        Ok(Page { items, next_cursor })
     }
 
     /// Creates a user folder after applying root or parent policy.
@@ -98,7 +135,8 @@ impl MetadataService {
         validate_context(context)?;
         metadata.require_key()?;
 
-        let (boundary, required_parent_capability) = if let Some(parent_id) = command.parent_id {
+        let mut command = command;
+        let (boundary, parent_id) = if let Some(parent_id) = command.parent_id {
             let parent = self
                 .repository
                 .find_active_entry(context, parent_id)
@@ -108,10 +146,13 @@ impl MetadataService {
                 return Err(MetadataServiceError::NotFound);
             }
             require_capability(&parent, context, Capability::CreateChild)?;
-            (parent.entry.boundary, Some(Capability::CreateChild))
+            (parent.entry.boundary, parent_id)
         } else {
-            // Any current member may create a folder at the organization base,
-            // declaring which kind of folder it is.
+            // The organization base holds exactly the reserved containers:
+            // Public, Private, and one per tag. Declaring a kind of folder at
+            // that level chooses which container it goes into — Public, the
+            // caller's own folder inside Private, or that tag's folder — so a
+            // member's material always sits somewhere the contract describes.
             let boundary =
                 command
                     .root_boundary
@@ -120,8 +161,18 @@ impl MetadataService {
                         field: "root_boundary",
                         message: "is required for a user root",
                     }))?;
-            (boundary, None)
+            let container = self
+                .repository
+                .find_boundary_container(context, &boundary)
+                .await?
+                .ok_or(MetadataServiceError::NotFound)?;
+            // A tag folder the caller does not carry is not visible to them,
+            // so this reports it exactly as a container that is not there.
+            require_capability(&container, context, Capability::CreateChild)?;
+            (container.entry.boundary.clone(), container.entry.id)
         };
+        command.parent_id = Some(parent_id);
+        let required_parent_capability = Some(Capability::CreateChild);
 
         for invitee in &command.invitees {
             if !self

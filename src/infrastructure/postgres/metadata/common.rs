@@ -301,6 +301,7 @@ pub(in crate::infrastructure::postgres) async fn build_authorizable(
         None => None,
     };
     let grants = load_relevant_grants(transaction, execution, row.entry_id).await?;
+    let owns_ancestor = owns_containing_folder(transaction, execution, row.entry_id).await?;
     let required_for_traversal = if row.deleted_at.is_some() {
         false
     } else {
@@ -310,8 +311,46 @@ pub(in crate::infrastructure::postgres) async fn build_authorizable(
         entry: entry_view(&row, tag_name.as_deref())?,
         system_kind: system_kind(row.system_kind.as_deref())?,
         grants,
+        owns_ancestor,
         required_for_traversal,
     })
+}
+
+/// Reports whether the caller owns a folder the entry sits inside.
+///
+/// The reserved Public, Private, and Tag containers are excluded: their owner
+/// column names the member whose request first materialized them, which is a
+/// persistence custodian rather than a proprietor. A member's own actor folder
+/// is included, because everything below `private/{actor}` really is theirs.
+async fn owns_containing_folder(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution: &ExecutionContext,
+    entry_id: Uuid,
+) -> Result<bool> {
+    let actor = execution.authorization().actor();
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+               FROM briefcase.entry_closure AS path \
+               JOIN briefcase.entries AS ancestor \
+                 ON ancestor.org_id = path.org_id AND ancestor.entry_id = path.ancestor_id \
+              WHERE path.org_id = briefcase.current_org_id() \
+                AND path.descendant_id = $1 \
+                AND path.depth > 0 \
+                AND ancestor.entry_type = 'folder' \
+                AND ancestor.owner_type = $2 AND ancestor.owner_id = $3 \
+                AND ( \
+                    ancestor.system_kind IS NULL \
+                    OR ancestor.system_kind = 'actor_root' \
+                ) \
+         )",
+    )
+    .bind(entry_id)
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sql)
 }
 
 async fn load_relevant_grants(
@@ -470,6 +509,10 @@ pub(in crate::infrastructure::postgres) fn entry_view(
             .map_err(invalid_data)?,
         boundary,
         owner: actor_ref(&row.owner_type, &row.owner_id)?,
+        reserved: matches!(
+            row.system_kind.as_deref(),
+            Some("public_root" | "private_root" | "tag_root")
+        ),
         origin_application_id: row
             .origin_app_id
             .as_deref()

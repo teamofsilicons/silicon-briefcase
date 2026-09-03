@@ -1,6 +1,7 @@
 //! Durable cross-tenant maintenance and outbox worker.
 
 mod cleanup;
+mod extraction;
 mod maintenance;
 mod outbox;
 mod policy;
@@ -138,6 +139,22 @@ impl WorkerRuntime {
                 event = "worker_maintenance_failed",
                 error_code = "maintenance_database_error",
                 "worker database maintenance failed"
+            );
+        }
+
+        if let Ok(stats) = extraction::run(pool, objects, self.batch_size).await {
+            info!(
+                event = "search_extraction_completed",
+                documents_indexed = stats.indexed,
+                documents_unsupported = stats.unsupported,
+                documents_deferred = stats.deferred,
+                "search extraction batch completed"
+            );
+        } else {
+            error!(
+                event = "search_extraction_failed",
+                error_code = "extraction_database_error",
+                "search extraction batch failed"
             );
         }
 

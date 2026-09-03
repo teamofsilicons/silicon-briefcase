@@ -121,7 +121,8 @@ impl ResponseMapper {
             permanent_url,
             content_url,
             download_url,
-            owner: Some(actor(&entry.owner)),
+            // A reserved container has no proprietor to name.
+            owner: (!entry.reserved).then(|| actor(&entry.owner)),
             origin_app_id: entry
                 .origin_application_id
                 .map(crate::domain::actor::ApplicationId::into_inner),
@@ -444,6 +445,9 @@ fn repository_error(error: &MetadataRepositoryError) -> AppError {
     match error {
         MetadataRepositoryError::NotFound => AppError::NotFound,
         MetadataRepositoryError::Conflict => AppError::conflict("metadata_conflict"),
+        // A cursor the caller made up is a request error, not a conflict with
+        // the current state of anything, and retrying it will never help.
+        MetadataRepositoryError::InvalidCursor => AppError::bad_request("invalid_cursor"),
         MetadataRepositoryError::Unavailable => AppError::DependencyUnavailable {
             dependency: "database",
         },
