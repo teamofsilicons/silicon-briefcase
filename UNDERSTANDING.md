@@ -290,3 +290,35 @@ For everything created by a specific application inside the authenticated silico
 
 
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
+
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+
+Only above this line is what the IAm backend would hold, below this would be the users of the backend, the client, the frontend, the cli, etc. 
+
+# Rust Package & CLI
+
+The Rust package & cli using that rust package are first hand client with an always running deamon if needed in the background. the UI will be a subset of the cli. make sure everything works via the CLI first, and then we'll make the UI. Everyone should be able to use the CLI/Rust Package (carbons, silicons, org, access keys, api keys, read, write, patch, delete, everything).
+
+The rust package would be stateless whereas the cli would be statefull. CLI built on top of the rust package.
+
+For how this CLI is built, rust as the programming language, but can use anything under the hood that is needed. Maybe rust, or node, or shell, as and when the work comes. That is decided by the implementor based on the work. If something requirs a UI (like graph, live, video, images etc). for that the UI has an endpoint that can be viewed/used/downloaded and the cli gives the link to that.
+
+The primary Interface is the Rust Package. CLI is built using the Rust Package only and doesn't have any feature that the Rust package does not.
+
+if you need a local store for auth or something else, use ~/.{appname}/ dir.
+
+For both package and the cli write detailed docs on how to use the package and how to use the cli, and also another doc on how to use the package. 
+
+Package and CLI must only expose the client side actions, and not the internal actions performed by the backend. For the CLI follow the standard command line grammar rules, and also include a -h command that shows all the possible commands.
