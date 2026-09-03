@@ -103,6 +103,27 @@ envelope. Two codes are specific to organization limits:
 `daily_upload_limit_exhausted` (`429`, with `Retry-After`) and
 `storage_limit_exhausted` (`507`).
 
+## Version and compatibility
+
+### `GET /api/version`
+
+Reports the API majors this build serves and every operation's contract
+revision. Also served at `/api/v1/version`.
+
+- **Authentication:** none; this is what a client reads before it has anything else.
+- **Request header:** optional `Briefcase-Supported-API-Versions`, the client's majors newest first, comma separated.
+- **Returns:** `service`, `selected_api_version`, `supported_api_versions`, `contract_version`, `build`, and `operations`.
+
+The server selects the newest major both sides support, names it in
+`Briefcase-API-Version`, and answers `406` when there is no overlap rather than
+guessing. `Vary` names the request header, so a cache never serves one client's
+selection to another.
+
+Each operation carries a `version`, bumped whenever its request or response
+shape changes observably; adding an operation leaves the others alone. A client
+that checks its own operations against this list fails at startup instead of at
+the first call that no longer means what it did.
+
 ## Browsing and folder management
 
 ### `GET /entries`

@@ -72,6 +72,17 @@ or accepted from a client.
   represented member, taking its destination from IAM-bound proof metadata and
   defaulting to `private/{actor}/apps/{app_id}`.
 
+## Clients
+
+- **Rust:** [`briefcase-client`](../briefcase-client-rust) is the official
+  client crate. It negotiates the API version and verifies every operation's
+  revision against this build before its first call, so an incompatible pairing
+  fails at startup rather than mid-request.
+
+Any client can do the same by reading `GET /api/version`, which names the
+served API majors and every operation with the revision of its request and
+response shape.
+
 ## Local development
 
 Prerequisites are Rust 1.98, PostgreSQL 16 or newer, and an S3-compatible service
