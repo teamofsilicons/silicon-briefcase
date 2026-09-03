@@ -86,7 +86,17 @@ A file additionally carries `render` — the renderer a client should open
 `effective_access` answers "what can I do here?" with independent labels:
 `read`, `write` (add content that does not exist yet), `update` (change what
 does), `delete`, and `manage_permissions`. Update never implies delete, and
-write never implies update.
+write never implies update — so write on a folder adds new files to it and
+never replaces a file that is already there, which is an update on that file.
+
+The owner of a folder can always read what is inside it, including files
+another member added through a grant. Reading is all that ownership of the
+folder conveys: renaming, replacing, and deleting an entry stay with whoever
+created it, so a shared folder cannot be quietly rewritten by the member who
+happens to own it.
+
+The reserved containers carry no `owner`. They are structure that IAM
+reconciliation maintains, so no member is named as their proprietor.
 
 Organization owners and authorized administrators hold every operation on
 every piece of content in their organization: read, write, update, delete, and
@@ -134,6 +144,11 @@ Lists folder contents, or filters everything the caller can reach.
 - **Required header:** `X-Org-ID`.
 - **Query:** Optional `parent_id` or `path`, optional `filter`, cursor, and limit (default and maximum 100).
 - **Returns:** Permission-filtered entries, newest first, and `next_cursor`.
+
+Entries the caller may not see are filtered after the page is read, and the
+page is refilled from the next position rather than answered short, so a full
+page means what it says. A cursor that Briefcase did not issue is a request
+error (`400`), never a conflict.
 
 Without `filter`, the listing browses one level: the organization roots, or the
 contents of `parent_id`/`path`. With `filter` and no parent, it searches every
@@ -183,12 +198,20 @@ Creates a folder.
 also requires its IAM tag. Below an existing folder, the child inherits the
 parent's root type and permission boundary.
 
-Any current member may create a folder at the organization base, declaring
-which kind it is; it is their own space, so this needs no administrative
-authority. Below the base the caller needs write access to the parent, and
-invitees must already belong to the organization. Two destinations are always
-refused: directly inside the Private container, and any folder assigned to
-another member — the latter is reported as `404`.
+The organization base holds exactly the reserved containers: Public, Private,
+and one folder per tag. Declaring a kind at that level chooses which container
+the new folder goes into — Public, the caller's own folder inside Private, or
+that tag's folder — so a member's material always sits somewhere the folder
+structure describes, and two members can use the same folder name without ever
+meeting each other's. Any current member may do this; it is their own space, so
+it needs no administrative authority. A tag the caller does not carry has no
+container they can reach, and answers `404` exactly as a tag that does not
+exist.
+
+Below the base the caller needs write access to the parent, and invitees must
+already belong to the organization. Two destinations are always refused:
+directly inside the Private container, and any folder assigned to another
+member — the latter is reported as `404`.
 
 ### `GET /entries/{entry_id}`
 
@@ -337,6 +360,12 @@ or replacing what already exists.
 
 Only the owner or an actor with permission-management authority may grant access. The principal must be a current Carbon or Silicon in the same organization.
 
+Granting a principal who already holds a grant amends that grant in place and
+returns it: the rights and inheritance become exactly what this request named.
+There is no separate edit operation, and widening access never has to pass
+through a revocation that would briefly remove it and tell the recipient their
+access was taken away.
+
 ### `DELETE /entries/{entry_id}/permissions/{grant_id}`
 
 Revokes an explicit permission grant.
@@ -461,6 +490,14 @@ falling off from there. `content_hits` is the real number of matching
 occurrences in the extracted text, not a flag. Authorization is applied again in
 the search query, so permission changes do not rely on duplicating content into
 ACL-specific indexes.
+
+A filename is searched by the words inside it: `notes` finds `notes.md`,
+because the separators a filename uses are split on both sides of the
+comparison. Content search covers files that already are text — anything under
+`text/*` plus the structured text types such as JSON, YAML, and XML — up to the
+first megabyte of each. Other formats are stored and served identically and are
+recorded as `unsupported` in the index rather than left waiting for an
+extractor that does not exist yet.
 
 ## File versions
 
@@ -616,8 +653,10 @@ product decision before it can be added.
 - There is no endpoint to permanently erase a bin item before its 45 days
   elapse.
 - Multipart-upload expiry and cleanup happen in the worker but are not exposed.
-- Search indexing status and unsupported-document behavior are not represented
-  in a response.
+- Search indexing status is not represented in a response: a file uploaded a
+  moment ago may not be findable by its content yet, and nothing says so.
+- Extracting text from PDF, Office, and other binary document formats needs a
+  format-specific extractor; those files are indexed by filename alone.
 - Listing an archive's contents without extracting it is a client concern:
   Briefcase reports `render: archive` and serves the bytes, and does not parse
   the container.

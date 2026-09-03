@@ -7,7 +7,7 @@ use crate::{
     application::context::ExecutionContext,
     domain::{
         actor::{ActorRef, OrganizationId},
-        entry::EntryPath,
+        entry::{EntryBoundary, EntryPath},
         ids::{AccessRequestId, EntryId, GrantId},
         notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
@@ -32,6 +32,9 @@ pub enum MetadataRepositoryError {
     /// Uniqueness, state, or optimistic authorization changed concurrently.
     #[error("metadata state conflict")]
     Conflict,
+    /// Supplied pagination cursor is not one this repository issued.
+    #[error("pagination cursor is invalid")]
+    InvalidCursor,
     /// Repository cannot serve the operation before its deadline.
     #[error("metadata repository unavailable")]
     Unavailable,
@@ -54,6 +57,18 @@ pub trait MetadataRepository: Send + Sync {
         &self,
         context: &ExecutionContext,
         entry_id: EntryId,
+    ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
+
+    /// Loads the reserved container a boundary's content belongs in.
+    ///
+    /// Public and Tag resolve to their own container; Private resolves to the
+    /// caller's own folder inside it, never to the shared Private container.
+    /// Resolution is a lookup: the caller still evaluates domain policy, which
+    /// is what keeps a tag the caller does not carry out of reach.
+    async fn find_boundary_container(
+        &self,
+        context: &ExecutionContext,
+        boundary: &EntryBoundary,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
     /// Loads an active entry addressed by its organization-relative path.

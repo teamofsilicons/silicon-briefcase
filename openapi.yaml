@@ -630,6 +630,9 @@ components:
         A `traversal` entry is a folder the caller reaches only because
         something inside it was shared. It can be opened and lists what was
         shared; its owner, timestamps, and effective access are withheld.
+        The reserved Public, Private, and tag containers carry no `owner`:
+        they are structure IAM reconciliation maintains rather than any
+        member's property.
       properties:
         id: { type: string, format: uuid }
         org_id: { type: string }

@@ -278,7 +278,7 @@ pub enum Capability {
     CreateChild,
     /// Rename or move an existing entry.
     UpdateMetadata,
-    /// Create or restore file content.
+    /// Replace or restore the content of a file that already exists.
     WriteContent,
     /// Move an entry to the recoverable bin.
     Delete,
@@ -334,8 +334,11 @@ impl CapabilitySet {
     pub fn from_granted_access(access: GrantedAccess) -> Self {
         let mut capabilities = Self(Capability::Read.mask());
         if access.contains(AccessRight::Write) {
+            // Write adds content that does not exist yet, so it conveys child
+            // creation and nothing more. Replacing the bytes of a file that
+            // already exists is an update, and a grant that does not say
+            // `update` never permits it.
             capabilities.insert(Capability::CreateChild);
-            capabilities.insert(Capability::WriteContent);
         }
         if access.contains(AccessRight::Update) {
             capabilities.insert(Capability::UpdateMetadata);
@@ -456,6 +459,12 @@ pub struct EffectiveAuthorizationInput<'a> {
     pub origin_application_id: Option<&'a ApplicationId>,
     /// Direct and repository-proven ancestor grants relevant to the entry.
     pub grants: &'a [GrantApplication<'a>],
+    /// Whether the caller owns a folder this entry sits inside.
+    ///
+    /// The repository proves this over the entry's ancestry and excludes the
+    /// reserved Public, Private, and Tag containers, whose persistence
+    /// custodian is not their proprietor.
+    pub owns_ancestor: bool,
     /// Whether a visible descendant requires this otherwise-hidden folder.
     pub required_for_traversal: bool,
 }
@@ -533,6 +542,15 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
             capabilities.insert(Capability::WriteContent);
         }
         EntryBoundary::Private | EntryBoundary::Tag { .. } => {}
+    }
+
+    // Owning a folder means seeing what is inside it. Without this, a member
+    // who invites someone into their own folder loses sight of whatever that
+    // person puts there. It conveys reading only: renaming, replacing, and
+    // deleting stay with whoever created the entry, so a shared tag folder
+    // still cannot be emptied by the member who happened to create it.
+    if input.owns_ancestor {
+        capabilities.insert(Capability::Read);
     }
 
     // System entries cannot receive grants. Ignoring them here makes the
@@ -680,6 +698,7 @@ mod tests {
             owner: &owner,
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -710,6 +729,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -740,6 +760,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
         assert!(own.allows(Capability::Delete));
@@ -761,6 +782,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
         assert!(administered.allows(Capability::Delete));
@@ -787,6 +809,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -835,6 +858,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &grants,
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -885,6 +909,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &grants,
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -924,6 +949,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &grants,
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -962,6 +988,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &grants,
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -987,6 +1014,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: true,
         });
 
@@ -1014,6 +1042,7 @@ mod tests {
             owner: &custodian,
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -1042,6 +1071,7 @@ mod tests {
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -1072,6 +1102,7 @@ mod tests {
             owner: &custodian,
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -1098,6 +1129,7 @@ mod tests {
             owner: &administrator,
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -1131,6 +1163,7 @@ mod tests {
             owner: &represented_actor,
             origin_application_id: Some(&other_application_id),
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
@@ -1158,10 +1191,202 @@ mod tests {
             owner: context.actor(),
             origin_application_id: None,
             grants: &[],
+            owns_ancestor: false,
             required_for_traversal: false,
         });
 
         assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
         assert!(authorization.capabilities().is_empty());
+    }
+
+    #[test]
+    fn folder_write_never_replaces_a_file_that_already_exists() {
+        let caller = actor("carbon-a");
+        let context = request_context(
+            caller.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let folder_id = EntryId::new();
+        let file_id = EntryId::new();
+        let grant = PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: organization(),
+            entry_id: folder_id,
+            principal: caller,
+            access: GrantedAccess::new([AccessRight::Write]),
+            inheritance: PermissionInheritance::Descendants,
+            granted_by: actor("carbon-owner"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let grants = [GrantApplication::Inherited(&grant)];
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: file_id,
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-owner"),
+            origin_application_id: None,
+            grants: &grants,
+            owns_ancestor: false,
+            required_for_traversal: false,
+        });
+
+        // Write adds what is not there yet. Replacing the bytes of someone
+        // else's existing file is an update, and this grant never said so.
+        assert!(authorization.allows(Capability::Read));
+        assert!(!authorization.allows(Capability::WriteContent));
+        assert!(!authorization.allows(Capability::UpdateMetadata));
+        assert!(!authorization.allows(Capability::Delete));
+    }
+
+    #[test]
+    fn write_still_adds_children_to_the_folder_it_was_granted_on() {
+        let caller = actor("carbon-a");
+        let context = request_context(
+            caller.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let folder_id = EntryId::new();
+        let grant = PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: organization(),
+            entry_id: folder_id,
+            principal: caller,
+            access: GrantedAccess::new([AccessRight::Write]),
+            inheritance: PermissionInheritance::EntryOnly,
+            granted_by: actor("carbon-owner"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let grants = [GrantApplication::Direct(&grant)];
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: folder_id,
+            entry_kind: EntryKind::Folder,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-owner"),
+            origin_application_id: None,
+            grants: &grants,
+            owns_ancestor: false,
+            required_for_traversal: false,
+        });
+
+        assert!(authorization.allows(Capability::CreateChild));
+        assert!(
+            authorization
+                .capabilities()
+                .effective_access()
+                .contains(&EffectiveAccess::Write)
+        );
+        assert!(!authorization.allows(Capability::UpdateMetadata));
+    }
+
+    #[test]
+    fn update_conveys_replacing_the_content_of_an_existing_file() {
+        let caller = actor("carbon-a");
+        let context = request_context(
+            caller.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let file_id = EntryId::new();
+        let grant = PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: organization(),
+            entry_id: file_id,
+            principal: caller,
+            access: GrantedAccess::new([AccessRight::Update]),
+            inheritance: PermissionInheritance::EntryOnly,
+            granted_by: actor("carbon-owner"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let grants = [GrantApplication::Direct(&grant)];
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: file_id,
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-owner"),
+            origin_application_id: None,
+            grants: &grants,
+            owns_ancestor: false,
+            required_for_traversal: false,
+        });
+
+        assert!(authorization.allows(Capability::WriteContent));
+        assert!(authorization.allows(Capability::UpdateMetadata));
+        assert!(!authorization.allows(Capability::Delete));
+    }
+
+    #[test]
+    fn owning_a_folder_shows_what_others_put_inside_it_and_nothing_more() {
+        let owner = actor("carbon-a");
+        let context = request_context(
+            owner.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            // An invitee created this file inside the caller's own folder.
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            owns_ancestor: true,
+            required_for_traversal: false,
+        });
+
+        assert_eq!(authorization.visibility(), EntryVisibility::Full);
+        assert!(authorization.allows(Capability::Read));
+        // Reading is all it conveys: the file still belongs to its creator.
+        assert!(!authorization.allows(Capability::WriteContent));
+        assert!(!authorization.allows(Capability::UpdateMetadata));
+        assert!(!authorization.allows(Capability::Delete));
+        assert!(!authorization.allows(Capability::ManagePermissions));
+    }
+
+    #[test]
+    fn a_reserved_container_custodian_gains_nothing_over_its_contents() {
+        let caller = actor("carbon-a");
+        let context = request_context(
+            caller,
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            // The repository never reports the Public, Private, or Tag
+            // containers as an owned ancestor, so a member who happened to
+            // materialize them sees no more than anyone else.
+            owns_ancestor: false,
+            required_for_traversal: false,
+        });
+
+        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
     }
 }

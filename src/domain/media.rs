@@ -295,9 +295,53 @@ fn extension(name: &str) -> Option<String> {
     Some(extension.to_ascii_lowercase())
 }
 
+/// Media types whose bytes are plain text Briefcase can index as they are.
+///
+/// Everything outside this list is stored and served exactly the same way; it
+/// simply has no text to search until a format-specific extractor exists, so
+/// it is recorded as unsupported rather than left waiting forever.
+const EXTRACTABLE_MEDIA_TYPES: &[&str] = &[
+    "application/csv",
+    "application/graphql",
+    "application/javascript",
+    "application/json",
+    "application/ld+json",
+    "application/markdown",
+    "application/sql",
+    "application/toml",
+    "application/x-httpd-php",
+    "application/x-sh",
+    "application/x-yaml",
+    "application/xhtml+xml",
+    "application/xml",
+    "application/yaml",
+];
+
+/// Returns whether a file's bytes can be read as searchable text directly.
+///
+/// The media type decides this rather than the extension, because the bytes
+/// either are text or they are not, whatever the file is called.
+#[must_use]
+pub fn is_extractable_text(content_type: Option<&str>) -> bool {
+    let Some(content_type) = content_type else {
+        return false;
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    media_type.starts_with("text/")
+        || EXTRACTABLE_MEDIA_TYPES.contains(&media_type.as_str())
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
+        || media_type.ends_with("+yaml")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::RenderKind;
+    use super::{RenderKind, is_extractable_text};
 
     #[test]
     fn extensions_select_the_contracted_renderer() {
@@ -346,5 +390,38 @@ mod tests {
         );
         assert!(RenderKind::classify("report.pdf", None).is_renderable());
         assert!(!RenderKind::classify("report", None).is_renderable());
+    }
+
+    #[test]
+    fn text_media_types_are_extractable() {
+        for content_type in [
+            "text/plain",
+            "text/markdown; charset=utf-8",
+            "TEXT/CSV",
+            "application/json",
+            "application/vnd.api+json",
+            "application/yaml",
+        ] {
+            assert!(
+                is_extractable_text(Some(content_type)),
+                "{content_type} should be extractable"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_media_types_are_not_extractable() {
+        for content_type in [
+            "application/pdf",
+            "image/png",
+            "application/octet-stream",
+            "application/zip",
+        ] {
+            assert!(
+                !is_extractable_text(Some(content_type)),
+                "{content_type} should not be extractable"
+            );
+        }
+        assert!(!is_extractable_text(None));
     }
 }

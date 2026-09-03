@@ -131,6 +131,12 @@ pub struct EntryView {
     pub boundary: EntryBoundary,
     /// Entry owner.
     pub owner: ActorRef,
+    /// Whether Briefcase reconciles this entry as a reserved container.
+    ///
+    /// The Public, Private, and Tag containers are structure that IAM
+    /// reconciliation maintains, not a member's property, so their owner
+    /// column names a persistence custodian and is never published.
+    pub reserved: bool,
     /// Server-verified originating OBO application.
     pub origin_application_id: Option<ApplicationId>,
     /// File media type.
@@ -174,6 +180,8 @@ pub struct AuthorizableEntry {
     pub system_kind: Option<SystemEntryKind>,
     /// Relevant direct and inheritable ancestor grants.
     pub grants: Vec<ResolvedPermissionGrant>,
+    /// Whether the caller owns a folder this entry sits inside.
+    pub owns_ancestor: bool,
     /// Whether a visible descendant requires this folder for navigation.
     pub required_for_traversal: bool,
 }
@@ -200,6 +208,7 @@ impl AuthorizableEntry {
             owner: &self.entry.owner,
             origin_application_id: self.entry.origin_application_id.as_ref(),
             grants: &grants,
+            owns_ancestor: self.owns_ancestor,
             required_for_traversal: self.required_for_traversal,
         })
     }

@@ -30,7 +30,7 @@ use crate::{
         entry::EntryKind,
         ids::{EntryId, MultipartUploadId, StorageConfigurationId, VersionId},
         multipart::{CompletedPart, MultipartPlan},
-        permission::Capability,
+        permission::{Capability, EntryVisibility},
         storage::EncryptionMode,
     },
     error::AppError,
@@ -1345,15 +1345,22 @@ async fn require_parent(
     Ok(parent)
 }
 
+/// Authorizes one content operation, reporting an invisible entry as missing.
+///
+/// An entry the caller cannot read must answer exactly as one that does not
+/// exist, so possessing an identifier never confirms that a file is there.
+/// Only a caller who can already see the entry is told that a particular
+/// operation on it is forbidden.
 fn require_entry_capability(
     entry: &AuthorizableEntry,
     context: &ExecutionContext,
     capability: Capability,
 ) -> std::result::Result<(), AppError> {
-    if entry
-        .authorization(context.authorization())
-        .allows(capability)
-    {
+    let authorization = entry.authorization(context.authorization());
+    if authorization.visibility() != EntryVisibility::Full {
+        return Err(AppError::NotFound);
+    }
+    if authorization.allows(capability) {
         Ok(())
     } else {
         Err(AppError::Forbidden)
@@ -2279,6 +2286,9 @@ fn map_metadata(error: crate::application::service::MetadataRepositoryError) -> 
         crate::application::service::MetadataRepositoryError::NotFound => AppError::NotFound,
         crate::application::service::MetadataRepositoryError::Conflict => {
             conflict("metadata_conflict")
+        }
+        crate::application::service::MetadataRepositoryError::InvalidCursor => {
+            AppError::bad_request("invalid_cursor")
         }
         crate::application::service::MetadataRepositoryError::Unavailable => {
             AppError::DependencyUnavailable {

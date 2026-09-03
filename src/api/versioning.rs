@@ -46,30 +46,30 @@ pub struct OperationVersion {
 /// Every contracted operation, with the revision this build serves.
 pub const OPERATIONS: [OperationVersion; 27] = [
     operation("readApiVersion", "1.0.0", "GET", "/version"),
-    operation("listEntries", "1.0.0", "GET", "/entries"),
-    operation("createFolder", "1.0.0", "POST", "/entries"),
-    operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
+    operation("listEntries", "1.1.0", "GET", "/entries"),
+    operation("createFolder", "1.1.0", "POST", "/entries"),
+    operation("getEntry", "1.1.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.0.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
     operation(
         "readEntryContent",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/entries/{entry_id}/content",
     ),
     operation(
         "downloadEntry",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/entries/{entry_id}/download",
     ),
     operation(
         "resolvePermanentUrl",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/org/{org_id}/{path}",
     ),
-    operation("uploadFile", "1.0.0", "POST", "/uploads"),
+    operation("uploadFile", "1.1.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "1.0.0", "POST", "/obo/files"),
     operation(
         "listPermissions",
@@ -79,7 +79,7 @@ pub const OPERATIONS: [OperationVersion; 27] = [
     ),
     operation(
         "grantPermission",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
@@ -107,7 +107,7 @@ pub const OPERATIONS: [OperationVersion; 27] = [
         "POST",
         "/access-requests/{request_id}/decision",
     ),
-    operation("searchFiles", "1.0.0", "GET", "/search"),
+    operation("searchFiles", "1.1.0", "GET", "/search"),
     operation("listNotifications", "1.0.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
     operation(
@@ -124,7 +124,7 @@ pub const OPERATIONS: [OperationVersion; 27] = [
     ),
     operation(
         "restoreVersion",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/entries/{entry_id}/versions/{version_id}/restore",
     ),
