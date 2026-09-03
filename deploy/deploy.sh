@@ -91,6 +91,8 @@ ensure_repository() {
 
 build_and_push() {
   require_command docker
+  # Fail on the local problem before spending a round trip on AWS.
+  image_tag >/dev/null
   ensure_repository
   local uri registry
   uri=$(image_uri)
@@ -119,33 +121,33 @@ build_and_push() {
   docker push "$uri"
 }
 
-stack_parameters() {
-  cat <<PARAMS
-VpcId=$BRIEFCASE_VPC_ID
-PrivateSubnetA=$BRIEFCASE_PRIVATE_SUBNET_A
-PrivateSubnetB=$BRIEFCASE_PRIVATE_SUBNET_B
-AlbSecurityGroupId=$BRIEFCASE_ALB_SECURITY_GROUP_ID
-HttpsListenerArn=$BRIEFCASE_HTTPS_LISTENER_ARN
-CertificateArn=$BRIEFCASE_CERTIFICATE_ARN
-AppSecretArn=$BRIEFCASE_APP_SECRET_ARN
-BackendImageUri=$(image_uri)
-PublicHostName=$PUBLIC_HOST
-ListenerRulePriority=$LISTENER_RULE_PRIORITY
-PARAMS
-}
-
 deploy_stack() {
-  local extra=("$@")
   step "Deploying stack $STACK_NAME"
-  # shellcheck disable=SC2046
+  local parameters=(
+    "VpcId=$BRIEFCASE_VPC_ID"
+    "PrivateSubnetA=$BRIEFCASE_PRIVATE_SUBNET_A"
+    "PrivateSubnetB=$BRIEFCASE_PRIVATE_SUBNET_B"
+    "AlbSecurityGroupId=$BRIEFCASE_ALB_SECURITY_GROUP_ID"
+    "HttpsListenerArn=$BRIEFCASE_HTTPS_LISTENER_ARN"
+    "CertificateArn=$BRIEFCASE_CERTIFICATE_ARN"
+    "AppSecretArn=$BRIEFCASE_APP_SECRET_ARN"
+    "BackendImageUri=$(image_uri)"
+    "PublicHostName=$PUBLIC_HOST"
+    "ListenerRulePriority=$LISTENER_RULE_PRIORITY"
+  )
+  [ -n "${BRIEFCASE_PUBLIC_SITE_BASE_URL:-}" ] &&
+    parameters+=("PublicSiteBaseUrl=$BRIEFCASE_PUBLIC_SITE_BASE_URL")
+  [ -n "${BRIEFCASE_IAM_BASE_URL:-}" ] &&
+    parameters+=("IamBaseUrl=$BRIEFCASE_IAM_BASE_URL")
+
   aws cloudformation deploy \
     --region "$AWS_REGION" \
     --stack-name "$STACK_NAME" \
     --template-file "$TEMPLATE" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides $(stack_parameters | tr '\n' ' ') \
+    --parameter-overrides "${parameters[@]}" \
     --tags Service=silicon-briefcase Environment=production \
-    "${extra[@]}"
+    ${1+"$@"}
 }
 
 # The image tag is baked into the launch template's user data, so a new build
