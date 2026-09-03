@@ -1,4 +1,10 @@
 //! Upload limits, multipart sizing, completion validation, and state policy.
+//!
+//! Part sizing follows the written formula in the product contract: divide the
+//! declared size by a thousand parts, round up to a whole mebibyte, clamp to
+//! 8 MiB and 5 GiB, then take as many parts as that size needs. Callers never
+//! see any of it: one upload endpoint takes the whole file and this module
+//! decides whether the bytes travel as a single request or as parts.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

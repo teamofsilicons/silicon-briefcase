@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         content::{
-            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand,
+            ClientCompletedPart, CompleteMultipartCommand, ConfigureStorageCommand, ContentIntent,
             ContentRepository, DownloadTarget, InitiateMultipartCommand, MultipartAbortTarget,
             MultipartCompletionPreparation, MultipartPartTarget, MultipartPreparation,
             MultipartReceipt, Prepared, RESTORE_LEASE_DURATION, RestorePreparation,
@@ -43,6 +43,7 @@ use super::{
         IdempotencyClaim, actor_kind, begin, boundary_columns, claim_idempotency,
         complete_idempotency, load_entry, map_sql, record_change,
     },
+    quota,
 };
 
 const SMALL_UPLOAD_OPERATION: &str = "upload_file";
@@ -88,9 +89,10 @@ impl ContentRepository for PostgresContentRepository {
         &self,
         context: &ExecutionContext,
         command: &SmallUploadCommand,
-        _content: &StagedContent<'_>,
+        staged: &StagedContent<'_>,
     ) -> std::result::Result<Prepared<SmallUploadPreparation, EntryId>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
+        quota::check_upload(&mut request.transaction, staged.size).await?;
         let parent = require_parent(
             &mut request.transaction,
             context,
@@ -122,7 +124,7 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        ensure_available_name(
+        ensure_name_is_versionable(
             &mut request.transaction,
             command.parent_id,
             command.name.as_str(),
@@ -181,7 +183,7 @@ impl ContentRepository for PostgresContentRepository {
             &self.platform,
         )
         .await?;
-        publish_initial_file(
+        let published = publish_file_content(
             &mut request.transaction,
             context,
             &request.context,
@@ -198,12 +200,15 @@ impl ContentRepository for PostgresContentRepository {
         )
         .await?;
         let metadata = keyed_metadata(&command.idempotency_key, command.request_hash);
+        // An upload over an existing file publishes a new version of that
+        // file, so the published identifier — not the reserved one — is what a
+        // replay of this key must return.
         complete_idempotency(
             &mut request.transaction,
             &request.context,
             SMALL_UPLOAD_OPERATION,
             &metadata,
-            Some(preparation.entry_id.as_uuid()),
+            Some(published.as_uuid()),
         )
         .await
         .map_err(map_metadata)?;
@@ -212,7 +217,7 @@ impl ContentRepository for PostgresContentRepository {
             .commit()
             .await
             .map_err(|error| unknown_commit_error(error, SMALL_UPLOAD_OPERATION))?;
-        Ok(preparation.entry_id)
+        Ok(published)
     }
 
     async fn release_operation(
@@ -251,6 +256,7 @@ impl ContentRepository for PostgresContentRepository {
         expires_at: OffsetDateTime,
     ) -> std::result::Result<Prepared<MultipartPreparation, MultipartReceipt>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
+        quota::check_upload(&mut request.transaction, command.size).await?;
         require_parent(
             &mut request.transaction,
             context,
@@ -285,7 +291,7 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        ensure_available_name(
+        ensure_name_is_versionable(
             &mut request.transaction,
             command.parent_id,
             command.name.as_str(),
@@ -640,7 +646,7 @@ impl ContentRepository for PostgresContentRepository {
             backend: row.storage_backend.as_str(),
             configuration_id: row.storage_config_id,
         };
-        publish_initial_file(
+        let published = publish_file_content(
             &mut request.transaction,
             context,
             &request.context,
@@ -662,7 +668,7 @@ impl ContentRepository for PostgresContentRepository {
               WHERE org_id = briefcase.current_org_id() AND upload_id = $1 AND status = 'completing'",
         )
         .bind(command.upload_id.as_uuid())
-        .bind(preparation.entry_id.as_uuid())
+        .bind(published.as_uuid())
         .execute(&mut *request.transaction)
         .await
         .map_err(database_error)?;
@@ -672,12 +678,12 @@ impl ContentRepository for PostgresContentRepository {
             &request.context,
             MULTIPART_COMPLETE_OPERATION,
             &metadata,
-            Some(preparation.entry_id.as_uuid()),
+            Some(published.as_uuid()),
         )
         .await
         .map_err(map_metadata)?;
         request.transaction.commit().await.map_err(database_error)?;
-        Ok(preparation.entry_id)
+        Ok(published)
     }
 
     async fn abort_multipart(
@@ -766,6 +772,8 @@ impl ContentRepository for PostgresContentRepository {
         let result = DownloadTarget {
             entry_id,
             filename: entry.entry.name.as_str().to_owned(),
+            content_type: version.content_type.clone(),
+            size: u64::try_from(version.size_bytes).map_err(|_| internal_integrity())?,
             target,
             key: object_key(version.object_key)?,
             provider_version_id: version.object_version_id,
@@ -774,11 +782,11 @@ impl ContentRepository for PostgresContentRepository {
         Ok(result)
     }
 
-    async fn record_download_url(
+    async fn record_content_access(
         &self,
         context: &ExecutionContext,
         entry_id: EntryId,
-        expires_at: OffsetDateTime,
+        intent: ContentIntent,
     ) -> std::result::Result<(), AppError> {
         let mut request = content_begin(&self.repository, context).await?;
         let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
@@ -792,8 +800,8 @@ impl ContentRepository for PostgresContentRepository {
             &super::NewAuditEvent {
                 audit_id: Uuid::now_v7(),
                 entry_id: Some(entry_id.as_uuid()),
-                action: "entry.download_url_issued.v1".to_owned(),
-                metadata: json!({"expires_at": expires_at}),
+                action: intent.audit_action().to_owned(),
+                metadata: json!({}),
             },
         )
         .await
@@ -830,6 +838,9 @@ impl ContentRepository for PostgresContentRepository {
         )
         .await?
         .ok_or(AppError::NotFound)?;
+        // A restore uploads nothing but stores a second copy, so the storage
+        // ceiling applies while the daily upload allowance does not.
+        quota::check_storage(&mut request.transaction, to_u64(source.size_bytes)?).await?;
         let proposed_version_id = VersionId::new();
         let metadata = keyed_metadata(&command.idempotency_key, command.request_hash);
         let new_version_id = match claim_idempotency(
@@ -950,6 +961,7 @@ impl ContentRepository for PostgresContentRepository {
             &self.platform,
         )
         .await?;
+        quota::charge_storage(&mut request.transaction, preparation.size).await?;
         let next_number = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version_number), 0) + 1 FROM briefcase.entry_versions \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
@@ -1356,27 +1368,56 @@ fn require_administrator(context: &ExecutionContext) -> std::result::Result<(), 
     }
 }
 
-async fn ensure_available_name(
+/// Finds the active entry that already carries a name inside a folder.
+///
+/// Uploading over an existing file is an update, not a collision: it publishes
+/// the next version of that file. A folder with the same name is still a
+/// collision, because a folder has no content to version.
+async fn find_named_child(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_id: EntryId,
+    name: &str,
+    lock: bool,
+) -> std::result::Result<Option<(EntryId, String)>, AppError> {
+    #[derive(sqlx::FromRow)]
+    struct NamedChild {
+        entry_id: Uuid,
+        entry_type: String,
+    }
+
+    let statement = if lock {
+        "SELECT entry_id, entry_type FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() AND parent_id = $1 \
+            AND name = $2 AND deleted_at IS NULL \
+          FOR UPDATE"
+    } else {
+        "SELECT entry_id, entry_type FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() AND parent_id = $1 \
+            AND name = $2 AND deleted_at IS NULL"
+    };
+    let row = sqlx::query_as::<_, NamedChild>(statement)
+        .bind(parent_id.as_uuid())
+        .bind(name)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    row.map(|row| {
+        EntryId::from_uuid(row.entry_id)
+            .map_err(internal_error)
+            .map(|entry_id| (entry_id, row.entry_type))
+    })
+    .transpose()
+}
+
+/// Rejects an upload whose name is taken by something that cannot be versioned.
+async fn ensure_name_is_versionable(
     transaction: &mut Transaction<'_, Postgres>,
     parent_id: EntryId,
     name: &str,
 ) -> std::result::Result<(), AppError> {
-    let occupied = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS ( \
-             SELECT 1 FROM briefcase.entries \
-              WHERE org_id = briefcase.current_org_id() AND parent_id = $1 \
-                AND name = $2 AND deleted_at IS NULL \
-         )",
-    )
-    .bind(parent_id.as_uuid())
-    .bind(name)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(database_error)?;
-    if occupied {
-        Err(conflict("entry_name_exists"))
-    } else {
-        Ok(())
+    match find_named_child(transaction, parent_id, name, false).await? {
+        Some((_, kind)) if kind != "file" => Err(conflict("entry_name_exists")),
+        Some(_) | None => Ok(()),
     }
 }
 
@@ -1649,8 +1690,14 @@ async fn find_version(
         .map_err(database_error)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn publish_initial_file(
+/// Publishes uploaded bytes as a file, creating it or versioning it.
+///
+/// Uploading over an existing file is how a file is updated, so the bytes
+/// become that file's next version and its history keeps the previous ones.
+/// Replacing content requires update authority on the file itself; creating a
+/// new one required create authority on the folder.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn publish_file_content(
     transaction: &mut Transaction<'_, Postgres>,
     execution: &ExecutionContext,
     tenant: &super::TenantContext,
@@ -1664,8 +1711,33 @@ async fn publish_initial_file(
     key: &ObjectKey,
     stored: &StoredObject,
     storage: StorageReference<'_>,
-) -> std::result::Result<(), AppError> {
-    ensure_available_name(transaction, parent.entry.id, name).await?;
+) -> std::result::Result<EntryId, AppError> {
+    // The day's allowance is charged here rather than at reservation time:
+    // this is the one statement every upload reaches, exactly once, and the
+    // charge rolls back with the publication it belongs to. Stored bytes move
+    // with the version row itself, under a trigger.
+    quota::charge_upload(transaction, size).await?;
+    if let Some((existing_id, kind)) =
+        find_named_child(transaction, parent.entry.id, name, true).await?
+    {
+        if kind != "file" {
+            return Err(conflict("entry_name_exists"));
+        }
+        return publish_next_version(
+            transaction,
+            execution,
+            tenant,
+            existing_id,
+            content_type,
+            size,
+            checksum,
+            target,
+            key,
+            stored,
+            storage,
+        )
+        .await;
+    }
     let actor = execution.authorization().actor();
     let (root_type, _) = boundary_columns(&parent.entry.boundary);
     let version_id = VersionId::new();
@@ -1752,7 +1824,120 @@ async fn publish_initial_file(
         json!({"parent_id": parent.entry.id, "version_id": version_id, "size": size}),
     )
     .await
-    .map_err(map_metadata)
+    .map_err(map_metadata)?;
+    Ok(entry_id)
+}
+
+/// Adds the next immutable version to an existing file and makes it current.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn publish_next_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution: &ExecutionContext,
+    tenant: &super::TenantContext,
+    entry_id: EntryId,
+    content_type: &str,
+    size: u64,
+    checksum: &ObjectChecksum,
+    target: &StorageTarget,
+    key: &ObjectKey,
+    stored: &StoredObject,
+    storage: StorageReference<'_>,
+) -> std::result::Result<EntryId, AppError> {
+    let entry = load_entry(transaction, execution, entry_id, false, false)
+        .await
+        .map_err(map_metadata)?
+        .ok_or(AppError::NotFound)?;
+    require_entry_capability(&entry, execution, Capability::WriteContent)?;
+
+    let actor = execution.authorization().actor();
+    let version_id = VersionId::new();
+    let version_number = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM briefcase.entry_versions \
+          WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
+    )
+    .bind(entry_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    sqlx::query(
+        "INSERT INTO briefcase.entry_versions ( \
+                org_id, entry_id, version_id, version_number, source, storage_backend, \
+                storage_config_id, bucket_name, storage_region, storage_prefix, \
+                storage_encryption_mode, storage_kms_key_arn, object_key, object_version_id, etag, \
+                checksum_algorithm, checksum_type, checksum_value, size_bytes, content_type, \
+                created_by_type, created_by_id \
+         ) VALUES (briefcase.current_org_id(), $1, $2, $3, 'upload', $4, $5, $6, $7, $8, \
+                   $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+    )
+    .bind(entry_id.as_uuid())
+    .bind(version_id.as_uuid())
+    .bind(version_number)
+    .bind(storage.backend)
+    .bind(storage.configuration_id)
+    .bind(&target.bucket)
+    .bind(&target.region)
+    .bind(&target.prefix)
+    .bind(encryption_name(target.encryption))
+    .bind(target.kms_key_arn.as_deref())
+    .bind(key.as_str())
+    .bind(stored.provider_version_id.as_deref())
+    .bind(stored.etag.as_deref())
+    .bind(checksum_algorithm(checksum))
+    .bind(checksum_type(checksum))
+    .bind(checksum.encoded_value())
+    .bind(to_i64(size)?)
+    .bind(content_type)
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+
+    let updated = sqlx::query(
+        "UPDATE briefcase.entries \
+            SET current_version_id = $2, content_type = $3, size_bytes = $4, \
+                updated_by_type = $5, updated_by_id = $6 \
+          WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+            AND entry_type = 'file' AND deleted_at IS NULL",
+    )
+    .bind(entry_id.as_uuid())
+    .bind(version_id.as_uuid())
+    .bind(content_type)
+    .bind(to_i64(size)?)
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::NotFound);
+    }
+
+    // The indexed content belongs to the previous version, so it is retired
+    // and the worker re-extracts from the new one.
+    sqlx::query(
+        "UPDATE briefcase.search_documents \
+            SET extracted_content = NULL, extraction_status = 'pending', \
+                extraction_error_code = NULL, indexed_at = NULL \
+          WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
+    )
+    .bind(entry_id.as_uuid())
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+
+    record_change(
+        transaction,
+        tenant,
+        Some(entry_id.as_uuid()),
+        "entry.version_created.v1",
+        "entry",
+        &entry_id.to_string(),
+        json!({"version_id": version_id, "version_number": version_number, "size": size}),
+    )
+    .await
+    .map_err(map_metadata)?;
+    Ok(entry_id)
 }
 
 fn keyed_metadata(key: &IdempotencyKey, hash: [u8; 32]) -> MutationMetadata {

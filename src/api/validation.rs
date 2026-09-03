@@ -5,19 +5,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::domain::filter::MAX_FILTER_LENGTH;
+
 use super::dto::{
     AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
-    BucketConfigurationDto, CompletedPartDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
-    ListEntriesQuery, MultipartCompleteDto, MultipartUploadCreateDto, PermissionGrantCreateDto,
-    RootTypeDto, SearchQueryDto,
+    BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto, GrantAccessDto,
+    ListEntriesQuery, PageQuery, PermissionGrantCreateDto, PermissionInspectionDto, RootTypeDto,
+    SearchQueryDto,
 };
 
-const MIB: u64 = 1_048_576;
-const SMALL_UPLOAD_LIMIT: u64 = 100 * MIB;
-const MAXIMUM_FILE_SIZE: u64 = 5 * 1_024 * 1_024 * 1_024 * 1_024;
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
 const MAXIMUM_SEARCH_LENGTH: usize = 512;
 const MAXIMUM_INVITEES: usize = 100;
+const MAXIMUM_INSPECTED_TARGETS: usize = 100;
 const MAXIMUM_EXTERNAL_IDENTIFIER_BYTES: usize = 255;
 const MAXIMUM_ARN_BYTES: usize = 2_048;
 
@@ -63,6 +63,44 @@ pub fn list_entries(query: &ListEntriesQuery) -> Result<(), ValidationErrors> {
     if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
         errors.push("limit", "must be between 1 and 100");
     }
+    if query.parent_id.is_some() && query.path.is_some() {
+        errors.push("path", "must not be combined with parent_id");
+    }
+    if query
+        .path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        errors.push("path", "must not be blank when provided");
+    }
+    if let Some(filter) = query.filter.as_deref() {
+        if filter.trim().is_empty() {
+            errors.push("filter", "must not be blank when provided");
+        }
+        if filter.len() > MAX_FILTER_LENGTH {
+            errors.push("filter", "is too long");
+        }
+    }
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > MAXIMUM_CURSOR_LENGTH)
+    {
+        errors.push("cursor", "is too long");
+    }
+    errors.finish()
+}
+
+/// Validates cursor pagination for a simple listing.
+///
+/// # Errors
+///
+/// Returns all invalid pagination fields.
+pub fn page(query: &PageQuery) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+        errors.push("limit", "must be between 1 and 100");
+    }
     if query
         .cursor
         .as_ref()
@@ -82,12 +120,26 @@ pub fn create_folder(request: &FolderCreateDto) -> Result<(), ValidationErrors> 
     let mut errors = ValidationErrors::default();
     validate_name(&request.name, "name", &mut errors);
 
-    match (request.parent_id, request.root_type, request.tag.as_deref()) {
-        (None, None, _) => errors.push("root_type", "is required when parent_id is omitted"),
-        (Some(_), Some(_), _) => {
+    if request.parent_id.is_some() && request.parent_path.is_some() {
+        errors.push("parent_path", "must not be combined with parent_id");
+    }
+    if request
+        .parent_path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        errors.push("parent_path", "must not be blank when provided");
+    }
+    let parent = request
+        .parent_id
+        .map(|_| ())
+        .or_else(|| request.parent_path.as_ref().map(|_| ()));
+    match (parent, request.root_type, request.tag.as_deref()) {
+        (None, None, _) => errors.push("root_type", "is required when no parent is named"),
+        (Some(()), Some(_), _) => {
             errors.push("root_type", "must be omitted when creating below a parent");
         }
-        (Some(_), None, Some(_)) => {
+        (Some(()), None, Some(_)) => {
             errors.push("tag", "must be omitted when creating below a parent");
         }
         (_, Some(RootTypeDto::Tag), None) => {
@@ -135,43 +187,6 @@ pub fn patch_entry(request: &EntryPatchDto) -> Result<(), ValidationErrors> {
     errors.finish()
 }
 
-/// Validates multipart initialization boundaries.
-///
-/// # Errors
-///
-/// Returns all invalid multipart initialization fields.
-pub fn create_multipart(request: &MultipartUploadCreateDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    validate_name(&request.name, "name", &mut errors);
-    if !(SMALL_UPLOAD_LIMIT + 1..=MAXIMUM_FILE_SIZE).contains(&request.size) {
-        errors.push("size", "must be greater than 100 MiB and at most 5 TiB");
-    }
-    let media_type = request.content_type.trim();
-    if media_type.is_empty() || media_type.len() > 255 || media_type.parse::<mime::Mime>().is_err()
-    {
-        errors.push("content_type", "must be a valid media type");
-    }
-    errors.finish()
-}
-
-/// Validates that completion parts are strictly ordered and syntactically safe.
-///
-/// # Errors
-///
-/// Returns all invalid completion fields and parts.
-pub fn complete_multipart(request: &MultipartCompleteDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    if request.parts.is_empty() {
-        errors.push("parts", "must contain at least one part");
-    }
-    let mut previous = 0;
-    for (index, part) in request.parts.iter().enumerate() {
-        validate_completed_part(part, index, previous, &mut errors);
-        previous = part.part_number;
-    }
-    errors.finish()
-}
-
 /// Validates a permission grant request.
 ///
 /// # Errors
@@ -183,6 +198,26 @@ pub fn grant_permission(request: &PermissionGrantCreateDto) -> Result<(), Valida
     errors.finish()
 }
 
+/// Validates a batch permission inspection.
+///
+/// # Errors
+///
+/// Returns all invalid inspection fields.
+pub fn inspect_permissions(request: &PermissionInspectionDto) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    let total = request.entry_ids.len().saturating_add(request.paths.len());
+    if total == 0 {
+        errors.push("targets", "must name at least one entry or path");
+    }
+    if total > MAXIMUM_INSPECTED_TARGETS {
+        errors.push("targets", "must name at most 100 entries and paths");
+    }
+    if request.paths.iter().any(|path| path.trim().is_empty()) {
+        errors.push("paths", "must not contain a blank path");
+    }
+    errors.finish()
+}
+
 /// Validates an access request.
 ///
 /// # Errors
@@ -190,6 +225,7 @@ pub fn grant_permission(request: &PermissionGrantCreateDto) -> Result<(), Valida
 /// Returns all invalid access-request fields.
 pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
+    validate_access_rights(&request.access, "access", &mut errors);
     if let Some(reason) = request.reason.as_deref() {
         if reason.trim().is_empty() {
             errors.push("reason", "must not be blank when provided");
@@ -208,14 +244,17 @@ pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), Validation
 /// Returns all inconsistent access-decision fields.
 pub fn decide_access(request: &AccessRequestDecisionDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
-    match (request.decision, request.access) {
+    match (request.decision, request.access.as_deref()) {
         (AccessDecisionDto::Approve, None) => {
             errors.push("access", "is required when approving");
+        }
+        (AccessDecisionDto::Approve, Some(access)) => {
+            validate_access_rights(access, "access", &mut errors);
         }
         (AccessDecisionDto::Deny, Some(_)) => {
             errors.push("access", "must be omitted when denying");
         }
-        _ => {}
+        (AccessDecisionDto::Deny, None) => {}
     }
     errors.finish()
 }
@@ -314,44 +353,16 @@ fn validate_grant(request: &PermissionGrantCreateDto, prefix: &str, errors: &mut
             "must be carbon or silicon",
         );
     }
-    if request.access.is_empty() {
-        errors.push(format!("{prefix}.access"), "must not be empty");
-    }
-    let unique = request.access.iter().copied().collect::<BTreeSet<_>>();
-    if unique.len() != request.access.len() {
-        errors.push(
-            format!("{prefix}.access"),
-            "must not contain duplicate levels",
-        );
-    }
+    validate_access_rights(&request.access, &format!("{prefix}.access"), errors);
 }
 
-fn validate_completed_part(
-    part: &CompletedPartDto,
-    index: usize,
-    previous: u32,
-    errors: &mut ValidationErrors,
-) {
-    if !(1..=10_000).contains(&part.part_number) {
-        errors.push(
-            format!("parts[{index}].part_number"),
-            "must be between 1 and 10000",
-        );
+fn validate_access_rights(access: &[GrantAccessDto], field: &str, errors: &mut ValidationErrors) {
+    if access.is_empty() {
+        errors.push(field.to_owned(), "must not be empty");
     }
-    if part.part_number <= previous {
-        errors.push(
-            format!("parts[{index}].part_number"),
-            "must be strictly increasing",
-        );
-    }
-    if part.etag.trim().is_empty()
-        || part.etag.len() > 1_024
-        || part.etag.chars().any(char::is_control)
-    {
-        errors.push(
-            format!("parts[{index}].etag"),
-            "must be a non-empty printable value of at most 1024 bytes",
-        );
+    let unique = access.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != access.len() {
+        errors.push(field.to_owned(), "must not contain duplicate rights");
     }
 }
 
@@ -424,15 +435,16 @@ fn valid_kms_key_arn(value: &str, region: &str, account_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bucket_configuration, complete_multipart, create_folder, decide_access};
+    use super::{bucket_configuration, create_folder, decide_access};
     use crate::api::dto::{
-        AccessDecisionDto, AccessRequestDecisionDto, BucketConfigurationDto, CompletedPartDto,
-        EncryptionModeDto, FolderCreateDto, MultipartCompleteDto, RootTypeDto,
+        AccessDecisionDto, AccessRequestDecisionDto, BucketConfigurationDto, EncryptionModeDto,
+        FolderCreateDto, RootTypeDto,
     };
 
     #[test]
     fn tag_root_requires_a_tag() {
         let result = create_folder(&FolderCreateDto {
+            parent_path: None,
             name: "Engineering".to_owned(),
             parent_id: None,
             root_type: Some(RootTypeDto::Tag),
@@ -445,28 +457,12 @@ mod tests {
     #[test]
     fn inherited_folder_rejects_an_ignored_tag() {
         let result = create_folder(&FolderCreateDto {
+            parent_path: None,
             name: "Engineering".to_owned(),
             parent_id: Some(uuid::Uuid::now_v7()),
             root_type: None,
             tag: Some("engineering".to_owned()),
             invitees: Vec::new(),
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn multipart_parts_must_be_ordered() {
-        let result = complete_multipart(&MultipartCompleteDto {
-            parts: vec![
-                CompletedPartDto {
-                    part_number: 2,
-                    etag: "second".to_owned(),
-                },
-                CompletedPartDto {
-                    part_number: 1,
-                    etag: "first".to_owned(),
-                },
-            ],
         });
         assert!(result.is_err());
     }

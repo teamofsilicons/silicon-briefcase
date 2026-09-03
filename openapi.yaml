@@ -4,30 +4,109 @@ info:
   version: 0.1.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
 servers:
-  - url: https://briefcase.teamofsilicons.com/api/v1
+  - url: https://backend.briefcase.teamofsilicons.com/api/v1
+    description: >-
+      The API is served by the backend host. Permanent entry URLs are minted on
+      the application host instead, always organization-scoped as
+      https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
 security:
   - bearerAuth: []
-  - oboAccess: []
-    appId: []
 tags:
   - name: Entries
+  - name: Applications
   - name: Uploads
   - name: Permissions
+  - name: Notifications
   - name: Search
   - name: Versions
   - name: Bin
   - name: Storage
 paths:
+  /version:
+    get:
+      tags: [Storage]
+      operationId: readApiVersion
+      summary: Report the API version and per-operation contract revisions
+      security: []
+      description: >-
+        The compatibility document a client reads before its first real call.
+        It names the API majors this build serves, the one selected for the
+        caller, and every operation with the revision of its request and
+        response shape.
+
+
+        A client advertises the majors it supports, newest first, in
+        `Briefcase-Supported-API-Versions`. The server answers with the newest
+        both sides support in `Briefcase-API-Version`, and `406` when there is
+        none. `Vary` names the request header, so a cache never serves one
+        client's selection to another.
+
+
+        An operation's `version` changes whenever its request or response shape
+        changes observably; adding an operation leaves the others alone. A
+        client that verifies its own operations against this list fails at
+        startup rather than at the first call that no longer means what it did.
+
+
+        Also served unversioned at `/api/version`, so a client can negotiate
+        before it knows which base path to use.
+      parameters:
+        - name: Briefcase-Supported-API-Versions
+          in: header
+          required: false
+          schema: { type: string }
+          description: API majors the client supports, newest first, comma separated
+      responses:
+        '200':
+          description: Compatibility document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiVersionDocument' }
+        '406': { description: The client supports no API version this build serves }
+        default: { $ref: '#/components/responses/Error' }
   /entries:
     get:
       tags: [Entries]
       operationId: listEntries
-      summary: List visible children of a folder
+      summary: List folder contents, or filter everything the caller can reach
+      description: >-
+        Returns the hundred most recently changed visible entries per page,
+        newest first. Without `filter`, the listing browses one level: the
+        organization roots, or the contents of `parent_id`/`path`. With
+        `filter` and no parent, it searches every entry the caller may reach,
+        which is how a `location:` predicate selects a subtree.
+
+
+        The filter language combines freely. Terms are ANDed; `or` introduces
+        an alternative; `not` or a leading `-` negates; parentheses group.
+        Supported keys:
+
+
+        `last:N` / `first:N` take N entries chronologically (1-100, single
+        page); `sort:newest` / `sort:oldest` order the result, newest first by
+        default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with
+        both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound
+        one side; `from:@{carbon:id}` matches the creator; `to:@{silicon:id}`
+        matches an explicit share; `for:@{id}` matches what that member can
+        reach; `contains:'term'` matches names and extracted content, with `*`
+        as a wildcard; `has:'term'` matches extracted content only;
+        `name:'term'` matches names only; `location:'private/cos:tos'` matches
+        a path prefix; `is:` takes `file`, `folder`, a renderer
+        (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`,
+        `archive`, `code`, `unsupported`), or an extension such as `md`;
+        `permissions:` takes `read`, `write`, `update`, `delete`, or
+        `manage_permissions` and matches the caller's effective access. A bare
+        word is shorthand for `contains:`.
+
+
+        Filtering only ever returns entries the caller can already see.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - { name: parent_id, in: query, schema: { type: string, format: uuid }, description: Omit for the organization root }
+        - { name: path, in: query, schema: { type: string, maxLength: 2048 }, description: Parent folder addressed by path instead of identifier }
+        - { name: filter, in: query, schema: { type: string, maxLength: 1024 }, description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md" }
         - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ContentsLimit'
       responses:
         '200':
           description: Visible entries
@@ -82,114 +161,88 @@ paths:
       responses:
         '204': { description: Entry moved to the 45-day bin }
         default: { $ref: '#/components/responses/Error' }
-  /entries/{entry_id}/download-url:
-    post:
+  /entries/{entry_id}/content:
+    get:
       tags: [Entries]
-      operationId: createTemporaryDownloadUrl
+      operationId: readEntryContent
+      summary: Stream current file bytes for sandboxed in-place rendering
+      description: >-
+        Briefcase relays the bytes itself, so the response is always bound to a
+        current IAM identity and is never cacheable. Responses are sandboxed by
+        Content-Security-Policy and served with `X-Content-Type-Options:
+        nosniff`. Byte ranges are supported for media playback.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/EntryId'
+        - $ref: '#/components/parameters/Range'
       responses:
-        '201':
-          description: Twelve-hour provider-signed URL
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TemporaryUrl' }
+        '200': { $ref: '#/components/responses/FileContent' }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/download:
+    get:
+      tags: [Entries]
+      operationId: downloadEntry
+      summary: Download current file bytes as an attachment
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+        - $ref: '#/components/parameters/Range'
+      responses:
+        '200': { $ref: '#/components/responses/FileContent' }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
         default: { $ref: '#/components/responses/Error' }
   /uploads:
     post:
       tags: [Uploads]
       operationId: uploadFile
-      summary: Upload a file up to and including 100 MiB
+      summary: Upload a file of any supported size
+      description: >-
+        One request carries the whole file. Briefcase stages the bytes, then
+        decides internally whether they fit a single provider request or need a
+        multipart transfer, so a client never drives parts. Files up to 5 TiB
+        are accepted; operators size the upload deadline and temporary disk for
+        the sizes they expect.
+
+
+        The destination folder is named either by `parent_id` or by `path`,
+        never both. A path is resolved from the organization base, so
+        `private/cos:tos/reports` addresses the same folder its permanent URL
+        shows.
+
+
+        Uploading a name that an active file already carries is how a file is
+        updated: the bytes become that file's next version, the response is
+        that same entry, and its history keeps the previous fifty versions.
+        Creating a file needs `write` on the folder; replacing one needs
+        `update` on the file. A folder with the same name is a conflict.
+
+
+        Two organization limits apply: 100 GiB of uploads per UTC day, and
+        1 PiB of storage. The daily figure counts uploaded bytes and returns at
+        midnight UTC; the storage figure counts what is currently kept, so
+        deleting content returns capacity once the bytes are gone. Either limit
+        may be configured per organization. An upload that does not fit is
+        refused before its bytes are stored, and `GET /usage` reports both.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
-        description: For OBO Access, clients must serialize the `parent_id` part before the binary `file` part so IAM can verify the proof's exact destination binding before Briefcase accepts file bytes.
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [parent_id, file]
+              required: [file]
               properties:
-                parent_id: { type: string, format: uuid }
+                parent_id: { type: string, format: uuid, description: Destination folder identifier }
+                path: { type: string, maxLength: 2048, description: Destination folder path, as an alternative to parent_id }
                 file: { type: string, format: binary }
-                app_id: { type: string, description: Originating application when using OBO Access }
       responses:
-        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
-        '413': { description: Use multipart upload for files larger than 100 MiB }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads:
-    post:
-      tags: [Uploads]
-      operationId: initiateMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [parent_id, name, size, content_type]
-              properties:
-                parent_id: { type: string, format: uuid }
-                name: { type: string }
-                size: { type: integer, minimum: 104857601, maximum: 5497558138880 }
-                content_type: { type: string }
-      responses:
-        '201':
-          description: Upload initialized with calculated part size
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MultipartUpload' }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}/parts/{part_number}:
-    put:
-      tags: [Uploads]
-      operationId: uploadPart
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-        - { name: part_number, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 10000 } }
-      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
-      responses:
-        '200': { description: Part accepted, headers: { ETag: { schema: { type: string } } } }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}/complete:
-    post:
-      tags: [Uploads]
-      operationId: completeMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [parts]
-              properties:
-                parts:
-                  type: array
-                  minItems: 1
-                  items: { type: object, required: [part_number, etag], properties: { part_number: { type: integer }, etag: { type: string } } }
-      responses:
-        '201': { description: File created, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
-        default: { $ref: '#/components/responses/Error' }
-  /multipart-uploads/{upload_id}:
-    delete:
-      tags: [Uploads]
-      operationId: abortMultipartUpload
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: upload_id, in: path, required: true, schema: { type: string } }
-      responses:
-        '204': { description: Upload aborted }
+        '201': { description: File created, or a new version published on the existing file, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: The file exceeds the 5 TiB maximum }
+        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '507': { description: The organization has no storage capacity left }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/permissions:
     parameters:
@@ -219,6 +272,28 @@ paths:
       responses:
         '204': { description: Grant revoked }
         default: { $ref: '#/components/responses/Error' }
+  /permissions/effective:
+    post:
+      tags: [Permissions]
+      operationId: inspectEffectivePermissions
+      summary: Report what the caller may do on named files and folders
+      description: >-
+        Names up to 100 targets by identifier, path, or both. A target that
+        does not exist and one the caller cannot read are both reported as
+        unresolved, so the answer never confirms a hidden entry.
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PermissionInspection' }
+      responses:
+        '200':
+          description: Effective access per readable target
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionInspectionResult' }
+        default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/access-requests:
     post:
       tags: [Permissions]
@@ -226,7 +301,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/EntryId'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [access], properties: { access: { type: string, enum: [read, write] }, reason: { type: string, maxLength: 1000 } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [access], properties: { access: { $ref: '#/components/schemas/AccessRights' }, reason: { type: string, maxLength: 1000 } } } } } }
       responses:
         '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
         default: { $ref: '#/components/responses/Error' }
@@ -237,7 +312,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - { name: request_id, in: path, required: true, schema: { type: string, format: uuid } }
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { type: string, enum: [approve, deny] }, access: { type: string, enum: [read, write] } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { type: string, enum: [approve, deny] }, access: { $ref: '#/components/schemas/AccessRights' } } } } } }
       responses:
         '200': { description: Decision recorded, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
         default: { $ref: '#/components/responses/Error' }
@@ -251,6 +326,95 @@ paths:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
       responses:
         '200': { description: Permission-filtered results, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/SearchResult' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: Read the central notification inbox
+      description: >-
+        Returns the twenty newest notifications for the authenticated Carbon or
+        Silicon together with the unread count used for the badge.
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Newest notifications and unread badge count
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationInbox' }
+        default: { $ref: '#/components/responses/Error' }
+  /notifications/read:
+    post:
+      tags: [Notifications]
+      operationId: readNotifications
+      summary: Mark the entire notification inbox read
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Inbox after every notification was marked read
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationInbox' }
+        default: { $ref: '#/components/responses/Error' }
+  /entries/{entry_id}/activity:
+    get:
+      tags: [Entries]
+      operationId: listEntryActivity
+      summary: Read the retained action history of an entry
+      description: >-
+        Returns up to the last hundred recorded actions on the entry — who
+        created, read, updated, downloaded, deleted, or restored it, and when.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Newest-first action history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivityPage' }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/files:
+    post:
+      tags: [Applications]
+      operationId: createFileOnBehalfOfMember
+      summary: Create a file for a member on behalf of another application
+      description: >-
+        The only operation Briefcase exposes to other applications. The request
+        body is the raw file bytes, and everything else — the destination
+        folder path, the file name, and the media type — travels as metadata
+        bound into the IAM OBO proof, so an application cannot redirect a proof
+        it legitimately obtained to another destination.
+
+
+        Register the endpoint in IAM as `briefcase.files.create` at the path
+        `/api/v1/obo/files` with metadata keys `path` (empty selects the
+        application's own folder under `private/{actor}/apps/{app_id}`), `name`,
+        and `content_type`. Exchange the proof over the SHA-256 digest of the
+        exact bytes, then send those bytes here. Verification consumes the
+        proof exactly once and is never retried.
+
+
+        The represented member's own permissions still apply: the file is only
+        created where that member may add content, and a name that an active
+        file already carries publishes that file's next version. Any supported
+        size is accepted; Briefcase picks the storage route internally, and the
+        organization's daily and total upload allowances apply as usual.
+      security:
+        - oboAccess: []
+          appId: []
+      parameters:
+        - { name: X-Org-ID, in: header, required: false, schema: { type: string }, description: Optional; IAM derives the tenant and the header must agree with it }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '201': { description: File created, or a new version published, for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '413': { description: The file exceeds the 5 TiB maximum }
+        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '507': { description: The organization has no storage capacity left }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
@@ -274,11 +438,44 @@ paths:
       responses:
         '200': { description: Version restored as a new current version, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         default: { $ref: '#/components/responses/Error' }
+  /usage:
+    get:
+      tags: [Storage]
+      operationId: readOrganizationUsage
+      summary: Report the organization's consumption and limits, in bytes
+      description: >-
+        Answers how much space the organization is actually consuming — exact
+        byte counts, never percentages, so a client renders whichever unit or
+        proportion it prefers.
+
+
+        `storage.used_bytes` is what every retained version currently weighs,
+        including versions of entries sitting in the bin, because those bytes
+        are still stored. It falls as soon as content is really deleted.
+        `daily_uploads.used_bytes` is what has been uploaded since the last
+        midnight UTC, and `resets_at` is the next one.
+
+
+        Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage,
+        and either may be raised or lowered per organization, so the figures
+        reported here are the ones actually in force.
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200':
+          description: Consumption and limits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrganizationUsage' }
+        default: { $ref: '#/components/responses/Error' }
   /bin:
     get:
       tags: [Bin]
       operationId: listBin
-      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      summary: List recoverable entries, newest deletion first
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/ContentsLimit'
       responses:
         '200': { description: Deleted entries visible to the actor, content: { application/json: { schema: { $ref: '#/components/schemas/EntryPage' } } } }
         default: { $ref: '#/components/responses/Error' }
@@ -303,6 +500,35 @@ paths:
       responses:
         '200': { description: Configuration saved after CRUD validation, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfigurationStatus' } } } }
         default: { $ref: '#/components/responses/Error' }
+  /org/{org_id}/{path}:
+    servers:
+      - url: https://backend.briefcase.teamofsilicons.com
+    get:
+      tags: [Entries]
+      operationId: resolvePermanentUrl
+      summary: Resolve the clean permanent URL of an entry
+      description: >-
+        The path segment mirrors the folder structure exactly, for example
+        `/org/tos/private/cos:tos/top_secret/this_secret.md`. The organization
+        segment must match `X-Org-ID`. Without `disposition` the entry and its
+        effective access are returned; with `disposition` the file bytes are
+        streamed. Anything the caller cannot read answers `404`.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: org_id, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string, maxLength: 2048 }, description: Organization-relative entry path }
+        - { name: disposition, in: query, schema: { type: string, enum: [inline, attachment] }, description: Omit to receive entry metadata }
+        - $ref: '#/components/parameters/Range'
+      responses:
+        '200':
+          description: Entry metadata, or complete file bytes when a disposition is requested
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
@@ -314,8 +540,34 @@ components:
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
     Cursor: { name: cursor, in: query, schema: { type: string } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+    ContentsLimit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+    Range:
+      name: Range
+      in: header
+      description: Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned.
+      schema: { type: string, pattern: '^bytes=(\d+-\d*|-\d+)$' }
   responses:
     Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    FileContent:
+      description: Complete file bytes
+      headers:
+        Content-Disposition: { schema: { type: string }, description: '`inline` for content reads and `attachment` for downloads, with both the quoted and RFC 5987 file name' }
+        Content-Security-Policy: { schema: { const: "sandbox; default-src 'none'; frame-ancestors 'none'" } }
+        X-Content-Type-Options: { schema: { const: nosniff } }
+        Cache-Control: { schema: { const: private, no-store } }
+        Accept-Ranges: { schema: { const: bytes } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
+    PartialFileContent:
+      description: Requested byte range of the file
+      headers:
+        Content-Range: { schema: { type: string }, description: 'bytes {first}-{last}/{complete size}' }
+        Content-Disposition: { schema: { type: string } }
+        Accept-Ranges: { schema: { const: bytes } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
   schemas:
     ActorRef:
       type: object
@@ -330,42 +582,127 @@ components:
         root_type: { type: string, enum: [public, private, tag], description: Required only when creating at organization root }
         tag: { type: string, description: Required for a tag root }
         invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
+    ApiVersionDocument:
+      type: object
+      required: [service, selected_api_version, supported_api_versions, contract_version, build, operations]
+      properties:
+        service: { type: string, const: silicon-briefcase }
+        selected_api_version: { type: string, examples: [v1] }
+        supported_api_versions: { type: array, items: { type: string }, description: Served majors, newest first }
+        contract_version: { type: string, description: Version of this document }
+        build: { type: string, description: Running backend package version }
+        operations:
+          type: array
+          items:
+            type: object
+            required: [id, version, method, path]
+            properties:
+              id: { type: string, description: operationId from this document }
+              version: { type: string, description: Revision of the request and response shape }
+              method: { type: string }
+              path: { type: string, description: Path below the versioned API base }
+    OrganizationUsage:
+      type: object
+      required: [storage, daily_uploads]
+      properties:
+        storage: { $ref: '#/components/schemas/UsageMeasure' }
+        daily_uploads:
+          allOf:
+            - $ref: '#/components/schemas/UsageMeasure'
+            - type: object
+              required: [resets_at]
+              properties:
+                resets_at:
+                  type: string
+                  format: date-time
+                  description: The next midnight UTC, when the day's allowance returns
+    UsageMeasure:
+      type: object
+      required: [used_bytes, limit_bytes, remaining_bytes]
+      properties:
+        used_bytes: { type: integer, format: int64, minimum: 0 }
+        limit_bytes: { type: integer, format: int64, minimum: 0 }
+        remaining_bytes: { type: integer, format: int64, minimum: 0 }
     Entry:
       type: object
-      required: [id, org_id, type, name, permanent_url, owner, effective_access, created_at, updated_at]
+      required: [id, org_id, type, visibility, name, path, permanent_url, effective_access]
+      description: >-
+        A `traversal` entry is a folder the caller reaches only because
+        something inside it was shared. It can be opened and lists what was
+        shared; its owner, timestamps, and effective access are withheld.
       properties:
         id: { type: string, format: uuid }
         org_id: { type: string }
         type: { type: string, enum: [file, folder] }
+        visibility: { type: string, enum: [full, traversal] }
         name: { type: string }
+        path: { type: string, maxLength: 2048, description: Organization-relative path without a leading separator }
         parent_id: { type: [string, 'null'], format: uuid }
         root_type: { type: string, enum: [public, private, tag] }
         tag: { type: [string, 'null'] }
         content_type: { type: [string, 'null'] }
         size: { type: [integer, 'null'], minimum: 0 }
-        permanent_url: { type: string, format: uri }
-        owner: { $ref: '#/components/schemas/ActorRef' }
+        render:
+          description: Renderer a client should open for a file; `unsupported` means metadata and CRUD only.
+          oneOf:
+            - type: 'null'
+            - { type: string, enum: [image, video, document, spreadsheet, presentation, audio, archive, code, unsupported] }
+        permanent_url: { type: string, format: uri, description: Clean permanent URL that shows the folder structure }
+        content_url: { type: [string, 'null'], format: uri, description: Authenticated sandboxed content URL for a file }
+        download_url: { type: [string, 'null'], format: uri, description: Authenticated attachment URL for a file }
+        owner:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ActorRef'
         origin_app_id: { type: [string, 'null'] }
-        effective_access: { type: array, items: { type: string, enum: [read, write, delete, manage_permissions] } }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        effective_access: { type: array, items: { type: string, enum: [read, write, update, delete, manage_permissions] } }
+        created_at: { type: [string, 'null'], format: date-time }
+        updated_at: { type: [string, 'null'], format: date-time }
         deleted_at: { type: [string, 'null'], format: date-time }
     EntryPage:
       type: object
       required: [items]
       properties: { items: { type: array, items: { $ref: '#/components/schemas/Entry' } }, next_cursor: { type: [string, 'null'] } }
-    TemporaryUrl:
-      type: object
-      required: [url, expires_at]
-      properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } }
     MultipartUpload:
       type: object
       required: [upload_id, part_size, part_count, expires_at]
       properties: { upload_id: { type: string }, part_size: { type: integer, minimum: 8388608, maximum: 5368709120 }, part_count: { type: integer, minimum: 1, maximum: 10000 }, expires_at: { type: string, format: date-time } }
+    AccessRight:
+      type: string
+      description: >-
+        One independent right. `update` never implies `delete`, `write` never
+        implies `update`, and every set implicitly includes `read`.
+      enum: [read, write, update, delete]
+    AccessRights:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items: { $ref: '#/components/schemas/AccessRight' }
+    PermissionInspection:
+      type: object
+      description: Names at least one and at most 100 targets in total.
+      properties:
+        entry_ids: { type: array, maxItems: 100, items: { type: string, format: uuid } }
+        paths: { type: array, maxItems: 100, items: { type: string, maxLength: 2048 } }
+    EffectivePermission:
+      type: object
+      required: [entry_id, path, type, effective_access]
+      properties:
+        entry_id: { type: string, format: uuid }
+        path: { type: string }
+        type: { type: string, enum: [file, folder] }
+        effective_access: { type: array, items: { type: string, enum: [read, write, update, delete, manage_permissions] } }
+    PermissionInspectionResult:
+      type: object
+      required: [items, unresolved_entry_ids, unresolved_paths]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/EffectivePermission' } }
+        unresolved_entry_ids: { type: array, items: { type: string, format: uuid } }
+        unresolved_paths: { type: array, items: { type: string } }
     PermissionGrantCreate:
       type: object
       required: [principal, access]
-      properties: { principal: { $ref: '#/components/schemas/ActorRef' }, access: { type: array, uniqueItems: true, items: { type: string, enum: [read, write] } }, inherit: { type: boolean, default: true } }
+      properties: { principal: { $ref: '#/components/schemas/ActorRef' }, access: { $ref: '#/components/schemas/AccessRights' }, inherit: { type: boolean, default: true } }
     PermissionGrant:
       allOf:
         - $ref: '#/components/schemas/PermissionGrantCreate'
@@ -375,7 +712,58 @@ components:
     AccessRequest:
       type: object
       required: [id, entry_id, requested_by, access, status, created_at]
-      properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { type: string, enum: [read, write] }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
+      properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { $ref: '#/components/schemas/AccessRights' }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
+    ActivityEvent:
+      type: object
+      required: [action, actor, occurred_at]
+      properties:
+        action: { type: string, description: 'Stable versioned action name, for example entry.downloaded.v1' }
+        actor: { $ref: '#/components/schemas/ActorRef' }
+        app_id: { type: [string, 'null'], description: Application that acted on the actor's behalf }
+        occurred_at: { type: string, format: date-time }
+    ActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ActivityEvent' } }
+    NotificationSubject:
+      type: object
+      required: [entry_id, name, path, type, permanent_url]
+      description: The entry as it was when the notification was created.
+      properties:
+        entry_id: { type: string, format: uuid }
+        name: { type: string }
+        path: { type: string }
+        type: { type: string, enum: [file, folder] }
+        permanent_url: { type: string, format: uri }
+    Notification:
+      type: object
+      required: [id, kind, read, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [access_granted, access_revoked, access_requested, access_request_decided] }
+        read: { type: boolean }
+        actor:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ActorRef'
+        subject:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/NotificationSubject'
+        access:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/AccessRights'
+        access_request_id: { type: [string, 'null'], format: uuid }
+        decision: { type: [string, 'null'], enum: [approved, denied, null] }
+        created_at: { type: string, format: date-time }
+    NotificationInbox:
+      type: object
+      required: [items, unread_count]
+      properties:
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/Notification' } }
+        unread_count: { type: integer, minimum: 0 }
     SearchResult:
       type: object
       required: [entry, score, filename_match, content_hits]

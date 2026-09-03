@@ -79,8 +79,8 @@ pub struct ServerSettings {
     pub bind_addr: SocketAddr,
     /// Canonical externally visible API base URL.
     pub public_base_url: Url,
-    /// Canonical temporary-delivery host URL.
-    pub cdn_base_url: Url,
+    /// Canonical application base URL that serves clean permanent entry URLs.
+    pub public_site_base_url: Url,
     /// Deadline for ordinary JSON requests.
     pub request_timeout: Duration,
     /// Deadline for streaming upload requests.
@@ -312,11 +312,11 @@ fn server_settings() -> Result<ServerSettings, SettingsError> {
         bind_addr: parse_or("BRIEFCASE_BIND_ADDR", "127.0.0.1:8080")?,
         public_base_url: parse_or(
             "BRIEFCASE_PUBLIC_BASE_URL",
-            "https://briefcase.teamofsilicons.com/api/v1/",
+            "https://backend.briefcase.teamofsilicons.com/api/v1/",
         )?,
-        cdn_base_url: parse_or(
-            "BRIEFCASE_CDN_BASE_URL",
-            "https://cdn.briefcase.teamofsilicons.com/",
+        public_site_base_url: parse_or(
+            "BRIEFCASE_PUBLIC_SITE_BASE_URL",
+            "https://briefcase.teamofsilicons.com/",
         )?,
         request_timeout: duration_secs("BRIEFCASE_REQUEST_TIMEOUT_SECONDS", 15)?,
         upload_timeout: duration_secs("BRIEFCASE_UPLOAD_TIMEOUT_SECONDS", 900)?,
@@ -350,7 +350,11 @@ fn server_settings() -> Result<ServerSettings, SettingsError> {
         &settings.public_base_url,
         false,
     )?;
-    validate_service_url("BRIEFCASE_CDN_BASE_URL", &settings.cdn_base_url, false)?;
+    validate_service_url(
+        "BRIEFCASE_PUBLIC_SITE_BASE_URL",
+        &settings.public_site_base_url,
+        false,
+    )?;
     Ok(settings)
 }
 
@@ -619,7 +623,10 @@ fn validate_environment_safety(
     validate_database_transport(environment, database, "BRIEFCASE_DATABASE_URL")?;
     for (name, url) in [
         ("BRIEFCASE_PUBLIC_BASE_URL", &server.public_base_url),
-        ("BRIEFCASE_CDN_BASE_URL", &server.cdn_base_url),
+        (
+            "BRIEFCASE_PUBLIC_SITE_BASE_URL",
+            &server.public_site_base_url,
+        ),
         ("BRIEFCASE_IAM_BASE_URL", &iam.base_url),
     ] {
         require_https(name, url)?;

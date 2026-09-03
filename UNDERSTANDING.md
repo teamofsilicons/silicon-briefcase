@@ -16,6 +16,8 @@ Both Silicons and carbons would be using this system.
 
 For each organisation there would be an organisation directory under which we are gonna manage all the files and manage their systems. For each file there would be CRUD operations and who can perform each of these C, R, U, D operations. 
 
+The client just needs to upload internall we decide:
+
 Files up to and including 100 MiB should be uploaded in a single request.
 
 Files larger than 100 MiB should use S3 multipart upload.
@@ -40,20 +42,23 @@ Example:
 |     1 GiB |         8 MiB |   128 |
 |    10 GiB |        11 MiB |   931 |
 |   100 GiB |       103 MiB |   995 |
-|     1 TiB |         1 GiB | 1,024 |
-|     5 TiB |         5 GiB | 1,024 |
 
+Each organisation has an upload limit of 100gb per day (resets at 12:00am utc), and an organisation wide maximum total storage of 1 peta byte. The total storage limit and upload limit should be configurable per organisation by a variable in the database itself, so by default it's gonna be 100gb and 1 petabyte but can be configured per organisation. 
+
+For every upload it should be possible to define the exact path and folder where i wanna store this file, this path would be defined from the base. 
+
+It shouldn't be possible to save files in:
+1) the base directory where private and public exist.
+2) directly inside the private directory
+3) inside folders assigned to other carbons/silicons/tags. Basically places where i dont have the access to. 
+
+There should also be endpoints that shows how much are they currently using not in percent but actual space they are currently consuming. 
 
 # How Does login/signup work
 
-Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [[../silicon-iam/UNDERSTANDING.md]]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
+Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [https://backend.iam.teamofsilicons.com/docs/client/]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
 
-The webhook endpoint you have would give you information whenever someone logs out, kicked from org, anything changes you would know.
-
-
-# Webhook Endpoint
-
-You have a webhook endpoint at: briefcase.teamofsilicons.com/webhook/
+The webhook endpoint ([backend.briefcase.teamofsilicons.com/webhook/]) you have would give you information whenever someone logs out, kicked from org, anything changes you would know.
 
 # How organisations are defined
 
@@ -95,6 +100,8 @@ any audio type (mp3, wav, m4a, aac, flac, ogg, opus, wma, aiff, amr, etc.)
 any archive type (zip, rar, 7z, tar, gz, gzip, bz2, xz, tgz, iso, etc.)  
 any code or data type (json, xml, yaml, yml, html, css, js, ts, py, java, sql, log, etc.) 
 
+Ensure to render them all in a sandboxed enviorment. 
+
 For images open a detailed view, for videos they should have a good player, for documents it should be correctly rendered in place, for spreadsheets they should be visible in the correct format and well organised, for presentations also render them, for audio create an audio player, for any archives, dont unarchive it but let them be able to view the contents, for code or data type render in the correct syntax. 
 
 For any other file types that are not recognised just dont render but CRUD operations can still be done on them, just display Unsupported file type for them all. 
@@ -106,7 +113,7 @@ For any other file types that are not recognised just dont render but CRUD opera
 
 `Private`: For Private folder, it means that all the files inside this folder can't be viewed without the explicit permission to view. 
 
-`Tag`: For the tags in the organisation, each tag would have it's own folder and everyone with that tag should be able to view the files inside that folder. 
+`Tag`: For the tags in the organisation, each tag would have it's own folder and everyone with that tag should be able to view the files inside that folder, or create files inside that folder.  
 
 These are folder types and names have nothing to do with them
 
@@ -125,7 +132,9 @@ All the files and folders inside public are public and can be viewed by all the 
 
 Inside the private folder for all the files and folders there would be permissions assigned accordingly, who can read, who can update. 
 
-Inside private there would be a folder for all the carbons and silicons. One for each carbon and silicon id. Only display to users a folder of another carbon/silicon only if they have a file/folder shared with the logged in user. Otherwise keep such folders hidden.
+Inside private there would be a folder for all the carbons and silicons. One for each carbon and silicon id. Only display to users a folder of another carbon/silicon only if they have a file/folder shared with the logged in user. Otherwise keep such folders hidden. 
+
+For if a file is shared inside a folder, then fetching that folder directly as an user should return the files they have access to. If their access to all the files inside a directory is lost it should then start returning 404 on fetching the folder. 
 
 `Frontend note: For all the private folders except the user's own carbon_id/silicon_id add a small i box at the bottom most - You might not be seeing all the contents of this folder. This is a permission based folder.
 
@@ -176,23 +185,38 @@ For private folders, you can also explictly state the carbon_id's or silicon_id'
 
 Similar to how linux_filesystem works, we would also have a very similar workflow. For each private or tag based file or folder it would be possible to invite someone, while inviting the invite could either be just read access or also update access or also write access. So the scope of the invited person would be defined there. Based on the scope it should appear accordingly in the user's directory. 
 
-
 Each carbon/silicon that gets access to the permanent url and still don't have the access to the file, would see a button to request access clicking on request access would create a request for the owner of the file/org_admin/org_owner which they can approve and would give that carbon/silicon a view access or update access based on the request. 
 
+I should be able to request permissions of file(s) or folder(s) so that it's clear what all actions can be performed on this. 
+
+Just because someone has update permissions to a file doesn't mean they can delete it. They explicitly need the delete access to be able to delete it, same goes for update and write. Read just let's them view/download the file. 
 
 # Notifications
 
-There should be a centeral notification system where they would be able to approve/deny an access for a file/folder. 
+There should be a centeral notification system where it would contain all the information regarding when any carbon or silicon recieves access to the any new file or folder or added to a new file, or change in permissions for something, all of it should be reflected here. There should be endpoints to make the entire notification inbox mark as read. It should return the 20 latest notifications when fetched along with how many new notifications in a number that will be used to display the badge. 
 
 
 # Url
 
-For each file there would be a permanent url, this won't be a cdn url, hence only the ones with the proper access should be able to view the contents. 
+For each file there would be a permanent url, this is the url that would request the authenticated user's token to check if the person has access to the file and is rendered only if they have access to the file, otherwise it returns file not found. 
 
-### Temporary url
+The said url is gonna be a clean url so it's gonna show the folder structure very clearly, for eg for a file shared from org tos from private folder of cos:tos with the folder name top_secret and file name this_secret.md. The url of the stored file would look like:
+`briefcase.teamofsilicons.com/org/tos/private/cos:tos/top_secret/this_secret.md/`
 
-For the one's with the permanent url and also the read access to the file, they should be able to generate a temporary cdn url hosted at [cdn.briefcase.teamofsilicons.com] this cdn url would have a ttl of 12 hours. 
+Whenever someone requests from this url it should only be rendered if the user has the permissions to view the file. Or see the options accordingly for when they can perform other CRUD operations.
 
+For all permanent url it should always have the org in it, so the base url would be per organisation: `briefcase.teamofsilicons.com/org/{org_id}/` and configured further accordingly. 
+
+The backend is served on backend.briefcase.teamofsilicons.com but the permanent url is servered from briefcase.teamofsilicons.com. 
+
+# Download
+
+Anyone with read access to the file should be able to download the file locally. 
+
+
+# No access
+
+For the files and folders the user doesen't have access to they should return 404 to the user like the file doesen't exist, it should never say you don't have access to it, it should just return like that file/folder doesen't exist.
 
 # Search
 
@@ -210,20 +234,91 @@ For all the updates in a file, a version history should be maintained for it for
 
 # Bin 
 
-For any file deleted, they should be stored in the bin for 45 days before being permanently discarded.
+For any file deleted, they should be stored in the bin for 45 days before being permanently discarded. When a file is permnanently deleted the space should return to the the total availaible space. 
 
+# Contents
+
+I should be able to navigate and also request for every file inside that folder if i have access to it, i should be able to print all the contents. 
+
+For each content return the latest 100 entries, it's paginated so should be possible to ask for the next batch in case of more results. 
+
+
+# Filter
+
+For filtering the following options should be possible:
+
+```
+last:N / first:N                  take N, chronologically
+between:DD-MM-YYYY=DD-MM-YYYY     both ends inclusive
+after:DD-MM-YYYY / before:DD-MM-YYYY
+from:@{...} / to:@{...} / for:@{...}
+contains:'...'                    `*` is a glob: contains:'confirm*'
+sort:newest / sort:oldest         oldest last by default
+is:X / has:X                      is could define file types, has can define                                       content
+permissions
+location
+```
+
+created-by / shared-with / accessible-to = from:@{...} / to:@{...} / for:@{...}
+
+There can be any possible PnC for the filters, i should be able to combine multiple filters. Filters should be super powerful, it should be possible to filter anything out, i should be able to filter niche things, for eg: filter out the most recent 5 files in the last 10 days or between 12 june 2026 and 12 july 2026 from the '/private/' folder that contain the word "apple" or "cat" and it must be in an .md file. 
+
+FIltering should only happen with the files i have access to.
+
+is: takes three vocabularies at once. Entry kind — is:file, is:folder (is:directory aliased). Renderer category — is:image, video, document, spreadsheet, presentation, audio, archive, code, unsupported, i.e. the nine buckets from §Files supported. Anything else alphanumeric and ≤16 chars falls through to a file extension, leading dot stripped (src/domain/filter.rs:727). So is:document is any file that opens in the document renderer — pdf, docx, md; is:md is literally .md.
+
+has: is content-only, matched against extracted document text.
+
+contains: is name or content. The contract mentioned contains: separately with the glob note but never said what it searches, so it became the union.
+
+name: is name-only — not in the contract at all. It exists to complete the trio: name-only / content-only / either.
+
+location: as an anchored path prefix with `*`;
+
+the permissions:/permission: value set (read, write, update, delete, manage_permissions/manage);
+
+the boolean grammar (implicit AND, or, not, leading -, parentheses); last:/first:/sort: being top-level only; and the limits — take ≤ 100, expression ≤ 1,024 bytes, ≤ 32 predicates.
 
 # How other apps would use Briefcase
 
-For other apps configured in IAm they should also be able to use Briefcase, for that the app would send a request to you to perform as a specific carbon or silicon user, for the said request it would send you app_id and an proof_token. You can send an request to IAm to verify this proof_token by sending it the app_id and the proof_token if it verifies let the application perform the requested action, otherwise deny it. Until the verification is held keep the request alive.  
-
-These authenticated apps should be able to perform all actions on behalf of the user. Except for the delete actions for the files they haven't created. 
-
+Refer to the OBO access on [https://backend.iam.teamofsilicons.com/docs/client/], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
+1) create a new file at any location for that user.
 
 ### How to store app specific data
 
 For everything created by a specific application inside the authenticated silicon/carbon folder  create an apps folder where based on the app_id you create a folder and store everything there by default.
 
 
-
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
+
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+---
+
+Only above this line is what the IAm backend would hold, below this would be the users of the backend, the client, the frontend, the cli, etc. 
+
+# Rust Package & CLI
+
+The Rust package & cli using that rust package are first hand client with an always running deamon if needed in the background. the UI will be a subset of the cli. make sure everything works via the CLI first, and then we'll make the UI. Everyone should be able to use the CLI/Rust Package (carbons, silicons, org, access keys, api keys, read, write, patch, delete, everything).
+
+The rust package would be stateless whereas the cli would be statefull. CLI built on top of the rust package.
+
+For how this CLI is built, rust as the programming language, but can use anything under the hood that is needed. Maybe rust, or node, or shell, as and when the work comes. That is decided by the implementor based on the work. If something requirs a UI (like graph, live, video, images etc). for that the UI has an endpoint that can be viewed/used/downloaded and the cli gives the link to that.
+
+The primary Interface is the Rust Package. CLI is built using the Rust Package only and doesn't have any feature that the Rust package does not.
+
+if you need a local store for auth or something else, use ~/.{appname}/ dir.
+
+For both package and the cli write detailed docs on how to use the package and how to use the cli, and also another doc on how to use the package. 
+
+Package and CLI must only expose the client side actions, and not the internal actions performed by the backend. For the CLI follow the standard command line grammar rules, and also include a -h command that shows all the possible commands.

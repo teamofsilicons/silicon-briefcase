@@ -3,6 +3,7 @@
 mod content;
 mod metadata;
 mod models;
+mod quota;
 mod repository;
 mod roots;
 mod webhook;
@@ -63,6 +64,31 @@ impl TenantContext {
         }
     }
 
+    /// Creates database context for reading one member's own projection.
+    ///
+    /// An application request has an IAM-verified organization and actor but no
+    /// request authority yet, so this constructor exists to read that member's
+    /// projected role and tags under row-level security before authority is
+    /// constructed. It grants nothing by itself.
+    #[must_use]
+    pub fn for_projection(
+        org_id: String,
+        actor: &crate::domain::actor::ActorRef,
+        request_id: String,
+    ) -> Self {
+        let actor_type = match actor.kind() {
+            ActorKind::Carbon => "carbon",
+            ActorKind::Silicon => "silicon",
+        };
+        Self {
+            org_id,
+            actor_type,
+            actor_id: actor.id().as_str().to_owned(),
+            origin_app_id: None,
+            request_id,
+        }
+    }
+
     /// Returns the authoritative organization identifier.
     #[must_use]
     pub fn org_id(&self) -> &str {
@@ -117,6 +143,16 @@ pub async fn connect(
         .test_before_acquire(true)
         .after_connect(move |connection, _metadata| {
             Box::pin(async move {
+                // PostgreSQL's default search path starts with a schema named
+                // after the connecting role, and one runtime role is named
+                // `briefcase` — the same name as the application schema. Every
+                // statement Briefcase issues is schema-qualified, so the path
+                // is pinned to `public` to keep unqualified names (notably the
+                // migration bookkeeping table) resolving to one fixed schema
+                // no matter which role connects.
+                sqlx::query("SELECT set_config('search_path', 'public', false)")
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query("SELECT set_config('timezone', 'UTC', false)")
                     .execute(&mut *connection)
                     .await?;

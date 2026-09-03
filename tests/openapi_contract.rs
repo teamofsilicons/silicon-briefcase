@@ -4,29 +4,34 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 22] = [
-    "abortMultipartUpload",
-    "completeMultipartUpload",
+const EXPECTED_OPERATIONS: [&str; 27] = [
     "configureOrganizationBucket",
+    "createFileOnBehalfOfMember",
     "createFolder",
-    "createTemporaryDownloadUrl",
     "decideAccessRequest",
+    "downloadEntry",
     "getEntry",
     "grantPermission",
-    "initiateMultipartUpload",
+    "inspectEffectivePermissions",
     "listBin",
+    "listEntryActivity",
     "listEntries",
+    "listNotifications",
     "listPermissions",
     "listVersions",
     "moveEntryToBin",
+    "readApiVersion",
+    "readEntryContent",
+    "readOrganizationUsage",
+    "readNotifications",
     "requestAccess",
+    "resolvePermanentUrl",
     "restoreEntry",
     "restoreVersion",
     "revokePermission",
     "searchFiles",
     "updateEntry",
     "uploadFile",
-    "uploadPart",
 ];
 
 #[test]
@@ -78,4 +83,20 @@ fn string_field<'a>(mapping: &'a Mapping, field: &str) -> anyhow::Result<&'a str
         .get(Value::String(field.to_owned()))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("{field} must be a string"))
+}
+
+/// The version document must describe exactly the operations that exist.
+///
+/// A client checks its own operations against the registry the backend serves,
+/// so an operation published in the contract but missing from the registry
+/// would be unverifiable, and one in the registry but not the contract would
+/// promise a revision for something a client cannot call.
+#[test]
+fn the_served_operation_registry_matches_the_published_contract() {
+    let registry: BTreeSet<&str> = silicon_briefcase::api::versioning::OPERATIONS
+        .iter()
+        .map(|operation| operation.id)
+        .collect();
+    let published = EXPECTED_OPERATIONS.into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(registry, published);
 }

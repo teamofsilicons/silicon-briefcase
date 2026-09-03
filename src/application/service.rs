@@ -4,13 +4,16 @@
 //! storage details behind explicit ports.
 
 mod access_requests;
+mod applications;
 mod bin;
 mod entries;
 mod error;
 mod model;
+mod notifications;
 mod permissions;
 mod repository;
 mod search;
+mod usage;
 mod versions;
 
 use std::sync::Arc;

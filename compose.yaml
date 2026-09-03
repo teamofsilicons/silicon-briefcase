@@ -22,6 +22,10 @@ services:
     environment:
       MINIO_ROOT_USER: briefcase-local
       MINIO_ROOT_PASSWORD: briefcase-local-secret
+      # Briefcase always stores objects encrypted. MinIO refuses SSE-S3 with
+      # "KMS not configured" unless a key is present, so local development
+      # carries an obviously-local one.
+      MINIO_KMS_SECRET_KEY: briefcase-local-key:bJ3Zqzv8p1S5m0aBcDeFgHiJkLmNoPqRsTuVwXyZ012=
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 2s

@@ -6,17 +6,21 @@ use thiserror::Error;
 use crate::{
     application::context::ExecutionContext,
     domain::{
+        actor::{ActorRef, OrganizationId},
+        entry::EntryPath,
         ids::{AccessRequestId, EntryId, GrantId},
+        notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
+        quota::OrganizationUsage,
     },
 };
 
 use super::model::{
-    AccessRequestView, AuthorizableAccessRequest, AuthorizableEntry, CreateFolderMutation,
-    DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand, ListBinQuery,
-    ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata, Page,
-    RequestAccessCommand, RevokePermissionCommand, SearchCandidate, SearchQuery,
-    UpdateEntryCommand,
+    AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
+    CreateFolderMutation, DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand,
+    ListBinQuery, ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata,
+    Page, ProjectedMembership, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
+    SearchQuery, UpdateEntryCommand,
 };
 
 /// Persistence failures classified without exposing SQL or tenant details.
@@ -51,6 +55,27 @@ pub trait MetadataRepository: Send + Sync {
         context: &ExecutionContext,
         entry_id: EntryId,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
+
+    /// Loads an active entry addressed by its organization-relative path.
+    ///
+    /// Path resolution is a lookup, not an authorization decision: the caller
+    /// still evaluates domain policy and answers not-found for a hidden entry.
+    async fn find_active_entry_by_path(
+        &self,
+        context: &ExecutionContext,
+        path: &EntryPath,
+    ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
+
+    /// Loads every active entry addressed by an identifier or a path.
+    ///
+    /// Resolving a batch in one transaction keeps a permission inspection of
+    /// many targets to a single consistent snapshot.
+    async fn find_active_entries(
+        &self,
+        context: &ExecutionContext,
+        entry_ids: &[EntryId],
+        paths: &[EntryPath],
+    ) -> Result<Vec<AuthorizableEntry>, MetadataRepositoryError>;
 
     /// Lists tenant-local active child candidates in stable cursor order.
     async fn list_active_children(
@@ -171,6 +196,50 @@ pub trait MetadataRepository: Send + Sync {
         metadata: &MutationMetadata,
         required_capability: Capability,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
+
+    /// Reads the projected organization role and tags of one member.
+    ///
+    /// IAM's OBO result names the represented actor but carries no role or
+    /// tags, so an application request derives them from Briefcase's own IAM
+    /// projection instead of assuming them.
+    async fn project_member_authorization(
+        &self,
+        organization_id: &OrganizationId,
+        actor: &ActorRef,
+        request_id: &str,
+    ) -> Result<Option<ProjectedMembership>, MetadataRepositoryError>;
+
+    /// Materializes the calling application's folder for the represented actor.
+    async fn ensure_application_folder(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
+
+    /// Lists the retained action history of one entry, newest first.
+    async fn list_entry_activity(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Vec<ActivityEvent>, MetadataRepositoryError>;
+
+    /// Loads the caller's newest notifications and unread badge count.
+    async fn load_notification_inbox(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<NotificationInbox, MetadataRepositoryError>;
+
+    /// Reads what the organization consumes and the limits it consumes against.
+    async fn load_organization_usage(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<OrganizationUsage, MetadataRepositoryError>;
+
+    /// Marks the caller's complete inbox read and returns it afterwards.
+    async fn mark_notifications_read(
+        &self,
+        context: &ExecutionContext,
+        metadata: &MutationMetadata,
+    ) -> Result<NotificationInbox, MetadataRepositoryError>;
 
     /// Records successful metadata reads for the required audit history.
     async fn record_metadata_access(

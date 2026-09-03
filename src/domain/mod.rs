@@ -7,8 +7,12 @@
 pub mod access;
 pub mod actor;
 pub mod entry;
+pub mod filter;
 pub mod ids;
+pub mod media;
 pub mod multipart;
+pub mod notification;
 pub mod permission;
+pub mod quota;
 pub mod storage;
 pub mod version;

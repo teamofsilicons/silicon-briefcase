@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     AuditEventRow, EntryRow, MultipartPartRow, OutboxEventRow, TenantContext,
-    begin_tenant_transaction,
+    begin_tenant_transaction, models::entry_columns,
 };
 
 /// Inputs for an audit record written in the current tenant transaction.
@@ -86,15 +86,12 @@ impl PostgresRepository {
         transaction: &mut Transaction<'_, Postgres>,
         entry_id: Uuid,
     ) -> Result<Option<EntryRow>, sqlx::Error> {
-        sqlx::query_as::<_, EntryRow>(
-            "SELECT org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, \
-                    system_kind, owner_type, owner_id, origin_app_id, content_type, \
-                    size_bytes, current_version_id, created_by_type, created_by_id, \
-                    updated_by_type, updated_by_id, deletion_batch_id, deleted_at, \
-                    purge_after, created_at, updated_at \
-               FROM briefcase.entries \
+        sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
-        )
+        ))
         .bind(entry_id)
         .fetch_optional(&mut **transaction)
         .await
@@ -109,16 +106,13 @@ impl PostgresRepository {
         transaction: &mut Transaction<'_, Postgres>,
         entry_id: Uuid,
     ) -> Result<Option<EntryRow>, sqlx::Error> {
-        sqlx::query_as::<_, EntryRow>(
-            "SELECT org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, \
-                    system_kind, owner_type, owner_id, origin_app_id, content_type, \
-                    size_bytes, current_version_id, created_by_type, created_by_id, \
-                    updated_by_type, updated_by_id, deletion_batch_id, deleted_at, \
-                    purge_after, created_at, updated_at \
-               FROM briefcase.entries \
+        sqlx::query_as::<_, EntryRow>(concat!(
+            "SELECT ",
+            entry_columns!(),
+            " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
               FOR UPDATE",
-        )
+        ))
         .bind(entry_id)
         .fetch_optional(&mut **transaction)
         .await

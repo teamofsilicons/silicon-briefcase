@@ -1,11 +1,12 @@
 //! Interfaces implemented by infrastructure adapters.
 
-use std::{path::Path, time::Duration};
+use std::{fmt, path::Path};
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use thiserror::Error;
-use url::Url;
 
 use crate::domain::storage::EncryptionMode;
 
@@ -206,9 +207,11 @@ pub struct UploadPartRequest<'a> {
     pub provider_upload_id: &'a str,
     /// One-based part number.
     pub part_number: u32,
-    /// Private staged part path.
+    /// Private staged path holding the part's bytes.
     pub path: &'a Path,
-    /// Exact staged byte count.
+    /// First byte of that file belonging to this part.
+    pub offset: u64,
+    /// Exact part byte count.
     pub size: u64,
     /// SHA-256 calculated while staging.
     pub checksum_sha256: &'a [u8; 32],
@@ -252,6 +255,69 @@ pub struct CopyObjectRequest<'a> {
     pub expected_checksum: &'a ObjectChecksum,
 }
 
+/// An inclusive byte range of one object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteRange {
+    /// First byte offset, inclusive.
+    pub start: u64,
+    /// Last byte offset, inclusive.
+    pub end: u64,
+}
+
+impl ByteRange {
+    /// Returns the number of bytes covered by the range.
+    #[must_use]
+    pub const fn length(self) -> u64 {
+        self.end.saturating_sub(self.start).saturating_add(1)
+    }
+}
+
+/// An unresolved client range request, before the exact size is known.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RangeRequest {
+    /// Everything from an offset to the end of the object.
+    From(u64),
+    /// An inclusive offset pair.
+    Between(u64, u64),
+    /// The final N bytes of the object.
+    Last(u64),
+}
+
+/// Request to open an object for direct relay to an authorized client.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenObjectRequest<'a> {
+    /// Resolved storage destination.
+    pub target: &'a StorageTarget,
+    /// Immutable object key.
+    pub key: &'a ObjectKey,
+    /// Exact provider object version, when bucket versioning is enabled.
+    pub provider_version_id: Option<&'a str>,
+    /// Requested inclusive byte range, or the complete object when absent.
+    pub range: Option<ByteRange>,
+}
+
+/// An object opened for streaming, without buffering it in the process.
+pub struct OpenObject {
+    /// Complete object size, independent of the served range.
+    pub total_size: u64,
+    /// Range actually served, present only for a partial read.
+    pub range: Option<ByteRange>,
+    /// Provider entity tag, when supplied.
+    pub etag: Option<String>,
+    /// Provider byte stream in object order.
+    pub body: BoxStream<'static, std::io::Result<Bytes>>,
+}
+
+impl fmt::Debug for OpenObject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenObject")
+            .field("total_size", &self.total_size)
+            .field("range", &self.range)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Result of a BYO bucket CRUD probe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageValidation {
@@ -292,6 +358,12 @@ pub trait ObjectStore: Send + Sync {
         size: u64,
         checksum_sha256: &[u8; 32],
     ) -> Result<StoredObject, ObjectStoreError>;
+
+    /// Opens an object, or one exact range of it, as a relayable byte stream.
+    async fn open_object(
+        &self,
+        request: OpenObjectRequest<'_>,
+    ) -> Result<OpenObject, ObjectStoreError>;
 
     /// Streams an object into a local temporary file.
     async fn get_to_file(
@@ -357,16 +429,6 @@ pub trait ObjectStore: Send + Sync {
         key: &ObjectKey,
         provider_upload_id: &str,
     ) -> Result<(), ObjectStoreError>;
-
-    /// Generates a provider-signed read URL.
-    async fn presign_get(
-        &self,
-        target: &StorageTarget,
-        key: &ObjectKey,
-        provider_version_id: Option<&str>,
-        lifetime: Duration,
-        download_name: &str,
-    ) -> Result<Url, ObjectStoreError>;
 
     /// Performs create/read/overwrite/delete and identity validation.
     async fn validate_configuration(

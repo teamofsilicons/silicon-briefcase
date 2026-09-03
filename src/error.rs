@@ -8,6 +8,8 @@ use thiserror::Error;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::domain::quota::UploadLimit;
+
 /// Error returned by a Briefcase use case or transport boundary.
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -41,6 +43,20 @@ pub enum AppError {
     /// The body exceeds the route-specific byte limit.
     #[error("request body is too large")]
     PayloadTooLarge,
+    /// The requested byte range lies outside the file.
+    #[error("requested range is not satisfiable")]
+    RangeNotSatisfiable {
+        /// Complete size of the addressed content.
+        total_size: u64,
+    },
+    /// The organization reached its daily upload allowance or storage ceiling.
+    #[error("organization limit exhausted: {limit}")]
+    UploadLimitExhausted {
+        /// Which limit stopped the write.
+        limit: UploadLimit,
+        /// Seconds until the capacity returns, when waiting alone restores it.
+        retry_after_seconds: Option<u64>,
+    },
     /// A caller exceeded an abuse or capacity limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -50,6 +66,9 @@ pub enum AppError {
     /// Request processing exceeded its deadline.
     #[error("request processing deadline exceeded")]
     Timeout,
+    /// The caller supports no API version this build serves.
+    #[error("no mutually supported API version")]
+    UnsupportedApiVersion,
     /// The route exists but does not accept this method.
     #[error("method is not allowed for this route")]
     MethodNotAllowed,
@@ -150,6 +169,25 @@ impl AppError {
                 Cow::Borrowed("payload_too_large"),
                 Cow::Borrowed("The request body exceeds the allowed size."),
             ),
+            Self::RangeNotSatisfiable { .. } => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Cow::Borrowed("range_not_satisfiable"),
+                Cow::Borrowed("The requested byte range is outside the content."),
+            ),
+            Self::UploadLimitExhausted { limit, .. } => match limit {
+                UploadLimit::DailyUpload => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Cow::Borrowed(UploadLimit::DailyUpload.code()),
+                    Cow::Borrowed(
+                        "The organization's daily upload allowance is spent. It resets at 00:00 UTC.",
+                    ),
+                ),
+                UploadLimit::Storage => (
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    Cow::Borrowed(UploadLimit::Storage.code()),
+                    Cow::Borrowed("The organization has no storage capacity left."),
+                ),
+            },
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Cow::Borrowed("rate_limited"),
@@ -159,6 +197,11 @@ impl AppError {
                 StatusCode::GATEWAY_TIMEOUT,
                 Cow::Borrowed("request_timeout"),
                 Cow::Borrowed("The request exceeded its processing deadline."),
+            ),
+            Self::UnsupportedApiVersion => (
+                StatusCode::NOT_ACCEPTABLE,
+                Cow::Borrowed("unsupported_api_version"),
+                Cow::Borrowed("This build serves no API version the caller supports."),
             ),
             Self::MethodNotAllowed => (
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -213,6 +256,14 @@ impl IntoResponse for AppError {
             Self::RateLimited {
                 retry_after_seconds,
             } => Some(*retry_after_seconds),
+            Self::UploadLimitExhausted {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            _ => None,
+        };
+        let unsatisfiable_total_size = match &self {
+            Self::RangeNotSatisfiable { total_size } => Some(*total_size),
             _ => None,
         };
         let (status, code, message) = self.public_parts();
@@ -234,6 +285,13 @@ impl IntoResponse for AppError {
             response
                 .headers_mut()
                 .insert(http::header::RETRY_AFTER, value);
+        }
+        if let Some(total_size) = unsatisfiable_total_size
+            && let Ok(value) = format!("bytes */{total_size}").parse()
+        {
+            response
+                .headers_mut()
+                .insert(http::header::CONTENT_RANGE, value);
         }
         response
     }

@@ -5,10 +5,10 @@ Silicons, and IAM-authorized applications. The backend is written in Rust and
 keeps filesystem metadata and authorization state in PostgreSQL while storing
 file bytes in S3-compatible object storage.
 
-The product contract lives in [UNDERSTANDING.md](./UNDERSTANDING.md), the public
-API in [openapi.yaml](./openapi.yaml), and implementation interpretations in
-[decisions.md](./decisions.md). Contract gaps are deliberately documented rather
-than filled by undocumented endpoints.
+The product contract lives in [UNDERSTANDING.md](./UNDERSTANDING.md) and the
+public API in [openapi.yaml](./openapi.yaml), with the operational reference in
+[API_DOCS.md](./API_DOCS.md). UNDERSTANDING.md is the single source of truth;
+the implementation follows it and does not add undocumented behavior.
 
 ## Process layout
 
@@ -33,6 +33,56 @@ objects and assume every retained organization-storage role. Briefcase derives
 the organization-specific STS External ID itself; it is never loaded from a job
 or accepted from a client.
 
+## What the service exposes
+
+- **Clean permanent URLs.** Every entry carries a materialized
+  organization-relative path, so `GET /org/{org_id}/{path}` resolves in one
+  indexed lookup and shows the folder structure exactly as the contract does.
+  Anything the caller cannot read answers `404`.
+- **Proxied, sandboxed content.** File bytes are relayed by Briefcase, never by
+  a signed provider URL, so a permanent URL is never a bearer capability. Reads
+  are sandboxed by Content-Security-Policy, never sniffed, never cached, and
+  support byte ranges for media playback.
+- **One upload endpoint.** `POST /uploads` takes a whole file of any supported
+  size and decides internally whether the bytes travel as a single provider
+  request or as a durable multipart transfer, so a client never drives parts.
+  Uploading over an existing file name is how a file is updated: the bytes
+  become that file's next version and the history keeps the previous fifty.
+- **Bounded volume, reported in bytes.** Every organization may upload 100 GiB
+  per UTC day and store 1 PiB, both configurable per organization in the
+  database. The daily counter is charged in the same transaction that publishes
+  a file, and stored bytes are maintained by a trigger on the version rows
+  themselves, so retention, purges, and cascading deletes all account for
+  storage without knowing the counter exists. `GET /usage` reports exact byte
+  counts rather than percentages.
+- **Independent access rights.** A grant conveys any set of `read`, `write`,
+  `update`, and `delete`. Update never implies deletion, write never implies
+  update, and `POST /permissions/effective` answers what the caller may
+  actually do on up to a hundred named targets at once. Tag members share
+  create, read, and update inside a tag folder while deletion stays with the
+  creator; organization owners and admins hold every operation everywhere.
+- **A central inbox.** Grants, revocations, access requests, and decisions each
+  write a notification in the same transaction as the change, so the inbox
+  cannot disagree with the permissions it describes.
+- **A filter language.** Folder contents page a hundred newest-first, and a
+  filter expression combines every documented predicate with `and`, `or`,
+  `not`, and grouping. It is parsed in the domain, compiled to parameterized
+  SQL, and its `permissions:` predicate is decided by domain policy.
+- **One application endpoint.** `POST /obo/files` creates a file for a
+  represented member, taking its destination from IAM-bound proof metadata and
+  defaulting to `private/{actor}/apps/{app_id}`.
+
+## Clients
+
+- **Rust:** [`briefcase-client`](../briefcase-client-rust) is the official
+  client crate. It negotiates the API version and verifies every operation's
+  revision against this build before its first call, so an incompatible pairing
+  fails at startup rather than mid-request.
+
+Any client can do the same by reading `GET /api/version`, which names the
+served API majors and every operation with the revision of its request and
+response shape.
+
 ## Local development
 
 Prerequisites are Rust 1.98, PostgreSQL 16 or newer, and an S3-compatible service
@@ -47,6 +97,12 @@ cargo run --bin briefcase-migrate
 cargo run --bin briefcase-api
 cargo run --bin briefcase-worker
 ```
+
+The Compose MinIO service carries an obviously-local `MINIO_KMS_SECRET_KEY`
+because Briefcase always stores objects encrypted, and MinIO answers
+`501 NotImplemented` to an SSE-S3 upload when no key is configured. A MinIO
+volume created before that setting existed will keep refusing uploads until the
+service is recreated.
 
 The PostgreSQL initialization directory creates the two local runtime roles on
 a new Compose volume. If the volume predates those role definitions, create a
@@ -101,16 +157,58 @@ cargo test --all-targets --all-features
 cargo deny check
 ```
 
+`tests/postgres_metadata.rs` exercises the SQL the repository actually builds —
+root reconciliation, path resolution, the compiled filter language, the
+notification inbox, the membership projection, and the application folder — and
+skips itself unless a database is named:
+
+```bash
+docker compose up -d postgres
+cargo run --bin briefcase-migrate
+BRIEFCASE_TEST_DATABASE_URL=postgres://briefcase:briefcase-local-only@127.0.0.1:5433/briefcase \
+  cargo test --test postgres_metadata
+```
+
+Each run uses a fresh organization identifier, so it is repeatable without
+deleting anything.
+
+`tests/s3_object_store.rs` does the same for object delivery — a stored object
+streams back whole, and one exact range comes back as the bytes a media player
+asked for:
+
+```bash
+docker compose up -d minio minio-init
+BRIEFCASE_TEST_S3_BUCKET=briefcase-local cargo test --test s3_object_store
+```
+
 ## Security model
 
 Every protected request is bound to a current IAM membership and an
-`X-Org-ID`. OBO requests are additionally bound to their verified application,
-action, resource, and represented actor. Entry IDs and permanent URLs are not
-capabilities. Authorization is reevaluated for browsing, direct reads, search,
-versions, bin access, and temporary URL generation.
+`X-Org-ID`. The contracted API is a bearer surface; an application acts only
+through `POST /obo/files`, where IAM binds the proof to the exact method,
+registered path, and body digest, consumes it once, and is never retried.
+Entry IDs and permanent URLs are not capabilities: authorization is reevaluated
+for browsing, filtering, direct reads, downloads, search, versions, and bin
+access, and an entry the caller may not read is reported as missing.
+
+The published OBO result carries no role or tags, so an application request
+pairs it with Briefcase's own IAM membership projection and falls back to the
+least authority any member has rather than assuming more.
+
+Every connection pins `search_path` to `public`. PostgreSQL's default path
+starts with a schema named after the connecting role, and one runtime role is
+named `briefcase` — the same name as the application schema — so an unqualified
+name would otherwise resolve differently depending on who connected.
 
 Do not place access tokens, OBO proofs, IAM application secrets, webhook
-secrets, signed URLs, filenames, or object keys in logs or metrics.
+secrets, filenames, or object keys in logs or metrics.
+
+Frontend note: the API supplies what the contract's interface notes need. An
+entry response carries `render` so a client knows which renderer to open (and
+when to say "unsupported file type"), and a folder the caller can navigate but
+not fully read is omitted from listings rather than half-described — which is
+the signal to show the "you might not be seeing all the contents of this
+folder" note on a permission-based folder.
 
 Historical-version restore is synchronous in the v1 API. It has an independent
 `BRIEFCASE_RESTORE_TIMEOUT_SECONDS` deadline and

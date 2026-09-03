@@ -1,6 +1,7 @@
 //! Additive entry authorization and explicit permission grants.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use time::OffsetDateTime;
 
 use super::{
@@ -9,15 +10,122 @@ use super::{
     ids::{EntryId, GrantId},
 };
 
-/// The v1 access level accepted when granting or requesting access.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+/// One right that an invitation or an access request can convey.
+///
+/// The rights are independent, exactly as the product contract requires:
+/// update authority never implies deletion, and write authority never implies
+/// update. Read is the only right every grant carries, because nobody can act
+/// on an entry they may not see.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AccessLevel {
-    /// Read access only.
+pub enum AccessRight {
+    /// View and download the entry.
     Read,
-    /// Read and mutation access, excluding permission management.
+    /// Add new content: children in a folder, or bytes in a file.
     Write,
+    /// Change what already exists: rename, move, or replace content.
+    Update,
+    /// Move the entry to the recoverable bin.
+    Delete,
 }
+
+/// Every right in a stable order.
+pub const ALL_ACCESS_RIGHTS: [AccessRight; 4] = [
+    AccessRight::Read,
+    AccessRight::Write,
+    AccessRight::Update,
+    AccessRight::Delete,
+];
+
+impl AccessRight {
+    /// Returns the effective-access label that already satisfies this right.
+    ///
+    /// The labels are entry-kind aware, so comparing against them is how a
+    /// service decides whether a request would add anything at all.
+    #[must_use]
+    pub const fn satisfied_by(self) -> EffectiveAccess {
+        match self {
+            Self::Read => EffectiveAccess::Read,
+            Self::Write => EffectiveAccess::Write,
+            Self::Update => EffectiveAccess::Update,
+            Self::Delete => EffectiveAccess::Delete,
+        }
+    }
+
+    const fn mask(self) -> u8 {
+        match self {
+            Self::Read => 1 << 0,
+            Self::Write => 1 << 1,
+            Self::Update => 1 << 2,
+            Self::Delete => 1 << 3,
+        }
+    }
+}
+
+/// A non-empty set of rights conveyed by one grant or request.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GrantedAccess(u8);
+
+impl GrantedAccess {
+    /// Read-only access.
+    pub const READ_ONLY: Self = Self(AccessRight::Read.mask());
+
+    /// Builds an access set from requested rights, always including read.
+    #[must_use]
+    pub fn new(rights: impl IntoIterator<Item = AccessRight>) -> Self {
+        let bits = rights
+            .into_iter()
+            .fold(AccessRight::Read.mask(), |bits, right| bits | right.mask());
+        Self(bits)
+    }
+
+    /// Rehydrates an access set from its persisted bit representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GrantedAccessError`] when the value has unknown bits or does
+    /// not include read.
+    pub const fn from_bits(bits: u8) -> Result<Self, GrantedAccessError> {
+        let known = AccessRight::Read.mask()
+            | AccessRight::Write.mask()
+            | AccessRight::Update.mask()
+            | AccessRight::Delete.mask();
+        if bits & !known != 0 || bits & AccessRight::Read.mask() == 0 {
+            return Err(GrantedAccessError);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Returns the persisted bit representation.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Returns whether the set conveys a right.
+    #[must_use]
+    pub const fn contains(self, right: AccessRight) -> bool {
+        self.0 & right.mask() != 0
+    }
+
+    /// Returns whether the set conveys nothing beyond read.
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        self.0 == AccessRight::Read.mask()
+    }
+
+    /// Iterates over conveyed rights in a stable order.
+    pub fn rights(self) -> impl Iterator<Item = AccessRight> {
+        ALL_ACCESS_RIGHTS
+            .into_iter()
+            .filter(move |right| self.contains(*right))
+    }
+}
+
+/// An invalid persisted or transported access set.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("granted access must include read and only known rights")]
+pub struct GrantedAccessError;
 
 /// Whether an explicit grant applies only to its entry or also descendants.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -58,8 +166,8 @@ pub struct PermissionGrantParts {
     pub entry_id: EntryId,
     /// Current organization member receiving the grant.
     pub principal: ActorRef,
-    /// Granted v1 access level.
-    pub access: AccessLevel,
+    /// Rights conveyed by the grant.
+    pub access: GrantedAccess,
     /// Whether the grant flows to descendants.
     pub inheritance: PermissionInheritance,
     /// Actor who created the grant.
@@ -105,9 +213,9 @@ impl PermissionGrant {
         &self.parts.principal
     }
 
-    /// Returns the granted access level.
+    /// Returns the rights conveyed by the grant.
     #[must_use]
-    pub const fn access(&self) -> AccessLevel {
+    pub const fn access(&self) -> GrantedAccess {
         self.parts.access
     }
 
@@ -217,19 +325,26 @@ impl CapabilitySet {
         Self((1 << ALL_CAPABILITIES.len()) - 1)
     }
 
-    /// Returns the capabilities derived by a v1 access level.
+    /// Returns the capabilities conveyed by an explicit access set.
+    ///
+    /// Write adds content that does not exist yet, update changes content that
+    /// does, and delete stands alone. A grant never conveys permission
+    /// management: only ownership and organization administration do.
     #[must_use]
-    pub const fn from_access_level(access: AccessLevel) -> Self {
-        match access {
-            AccessLevel::Read => Self(Capability::Read.mask()),
-            AccessLevel::Write => Self(
-                Capability::Read.mask()
-                    | Capability::CreateChild.mask()
-                    | Capability::UpdateMetadata.mask()
-                    | Capability::WriteContent.mask()
-                    | Capability::Delete.mask(),
-            ),
+    pub fn from_granted_access(access: GrantedAccess) -> Self {
+        let mut capabilities = Self(Capability::Read.mask());
+        if access.contains(AccessRight::Write) {
+            capabilities.insert(Capability::CreateChild);
+            capabilities.insert(Capability::WriteContent);
         }
+        if access.contains(AccessRight::Update) {
+            capabilities.insert(Capability::UpdateMetadata);
+            capabilities.insert(Capability::WriteContent);
+        }
+        if access.contains(AccessRight::Delete) {
+            capabilities.insert(Capability::Delete);
+        }
+        capabilities
     }
 
     /// Returns whether the set includes a capability.
@@ -266,18 +381,22 @@ impl CapabilitySet {
             .filter(move |capability| self.contains(*capability))
     }
 
-    /// Maps fine-grained policy to the stable v1 effective-access vocabulary.
+    /// Maps fine-grained policy to the API's effective-access vocabulary.
+    ///
+    /// The labels answer the product question "what can I do here?", so they
+    /// distinguish adding new content from changing existing content and keep
+    /// deletion separate from both.
     #[must_use]
     pub fn effective_access(self) -> Vec<EffectiveAccess> {
-        let mut access = Vec::with_capacity(4);
+        let mut access = Vec::with_capacity(5);
         if self.contains(Capability::Read) {
             access.push(EffectiveAccess::Read);
         }
-        if self.contains(Capability::CreateChild)
-            || self.contains(Capability::UpdateMetadata)
-            || self.contains(Capability::WriteContent)
-        {
+        if self.contains(Capability::CreateChild) || self.contains(Capability::WriteContent) {
             access.push(EffectiveAccess::Write);
+        }
+        if self.contains(Capability::UpdateMetadata) {
+            access.push(EffectiveAccess::Update);
         }
         if self.contains(Capability::Delete) {
             access.push(EffectiveAccess::Delete);
@@ -293,10 +412,12 @@ impl CapabilitySet {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveAccess {
-    /// Read access.
+    /// Read and download access.
     Read,
-    /// At least one context-appropriate write operation.
+    /// Adding content that does not exist yet.
     Write,
+    /// Changing an entry that already exists.
+    Update,
     /// Recoverable deletion.
     Delete,
     /// Explicit permission management.
@@ -403,7 +524,13 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
             }
         }
         EntryBoundary::Tag { tag } if input.context.has_tag(tag) => {
+            // Everyone carrying the tag may create, read, and update inside the
+            // tag's tree. Deletion is deliberately absent: it belongs to
+            // whoever created the entry and to organization administrators.
             capabilities.insert(Capability::Read);
+            capabilities.insert(Capability::CreateChild);
+            capabilities.insert(Capability::UpdateMetadata);
+            capabilities.insert(Capability::WriteContent);
         }
         EntryBoundary::Private | EntryBoundary::Tag { .. } => {}
     }
@@ -417,7 +544,7 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
                 && grant.principal() == input.context.actor()
                 && application.applies_to(input.entry_id)
             {
-                capabilities.union_with(CapabilitySet::from_access_level(grant.access()));
+                capabilities.union_with(CapabilitySet::from_granted_access(grant.access()));
             }
         }
     }
@@ -439,15 +566,32 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
     }
 
     if input.system_kind.is_some() {
+        // Reserved containers are structure, not content: IAM reconciliation
+        // owns their existence, name, and place, so nobody renames, moves,
+        // deletes, or shares them — an administrator included. Everything
+        // inside them is ordinary content and is administered normally.
         capabilities.remove(Capability::UpdateMetadata);
         capabilities.remove(Capability::WriteContent);
         capabilities.remove(Capability::Delete);
         capabilities.remove(Capability::ManagePermissions);
+    } else if is_administrator {
+        // Organization owners and admins hold every operation on every piece
+        // of content in their organization. Restating it here keeps a boundary
+        // rule from quietly narrowing administrative authority.
+        capabilities = CapabilitySet::all();
+        if !input.entry_kind.can_contain_children() {
+            capabilities.remove(Capability::CreateChild);
+        }
+        if input.entry_kind == EntryKind::Folder {
+            capabilities.remove(Capability::WriteContent);
+        }
     }
 
     if let Some(application_id) = input.context.originating_application()
         && input.origin_application_id != Some(application_id)
     {
+        // An application acts with its own authority as well as the member's,
+        // and it may only delete what it created — even for an administrator.
         capabilities.remove(Capability::Delete);
     }
 
@@ -470,8 +614,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        AccessLevel, Capability, EffectiveAuthorizationInput, EntryVisibility, GrantApplication,
-        PermissionGrant, PermissionGrantParts, PermissionInheritance, evaluate_authorization,
+        AccessRight, Capability, EffectiveAccess, EffectiveAuthorizationInput, EntryVisibility,
+        GrantApplication, GrantedAccess, PermissionGrant, PermissionGrantParts,
+        PermissionInheritance, evaluate_authorization,
     };
     use crate::domain::{
         actor::{
@@ -500,7 +645,7 @@ mod tests {
         external_id(OrganizationId::new("tos"))
     }
 
-    fn context(
+    fn request_context(
         represented_actor: ActorRef,
         role: OrganizationRole,
         tags: Vec<TagName>,
@@ -519,7 +664,7 @@ mod tests {
     fn public_members_can_create_children_without_mutating_the_folder() {
         let caller = actor("carbon-a");
         let owner = actor("carbon-b");
-        let context = context(
+        let context = request_context(
             caller,
             OrganizationRole::Member,
             Vec::new(),
@@ -545,9 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn matching_tag_derives_read_only() {
+    fn a_matching_tag_conveys_create_read_and_update_but_never_deletion() {
         let finance = external_id(TagName::new("finance"));
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Member,
             vec![finance.clone()],
@@ -559,7 +704,9 @@ mod tests {
             entry_id: EntryId::new(),
             entry_kind: EntryKind::File,
             system_kind: None,
-            boundary: &EntryBoundary::Tag { tag: finance },
+            boundary: &EntryBoundary::Tag {
+                tag: finance.clone(),
+            },
             owner: &actor("carbon-b"),
             origin_application_id: None,
             grants: &[],
@@ -568,13 +715,98 @@ mod tests {
 
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
         assert!(authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::WriteContent));
+        assert!(authorization.allows(Capability::WriteContent));
+        assert!(authorization.allows(Capability::UpdateMetadata));
+        // Deletion belongs to whoever created the entry, and to admins.
+        assert!(!authorization.allows(Capability::Delete));
+        assert!(!authorization.allows(Capability::ManagePermissions));
+
+        // The member who created the entry may delete their own.
+        let creator = request_context(
+            actor("carbon-b"),
+            OrganizationRole::Member,
+            vec![finance.clone()],
+            AuthenticationMode::Bearer,
+        );
+        let own = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &creator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Tag {
+                tag: finance.clone(),
+            },
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+        assert!(own.allows(Capability::Delete));
+
+        // So may an organization administrator without the tag at all.
+        let administrator = request_context(
+            actor("carbon-admin"),
+            OrganizationRole::Admin,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let administered = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &administrator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Tag { tag: finance },
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+        assert!(administered.allows(Capability::Delete));
+        assert!(administered.allows(Capability::ManagePermissions));
     }
 
     #[test]
-    fn inheritable_write_grants_add_write_and_delete_but_not_management() {
+    fn administrators_hold_every_operation_on_content_anywhere() {
+        let administrator = request_context(
+            actor("carbon-owner"),
+            OrganizationRole::Owner,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        // Another member's private folder, which the owner does not own and has
+        // never been granted.
+        let folder = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &administrator,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::Folder,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+
+        assert_eq!(folder.visibility(), EntryVisibility::Full);
+        assert_eq!(
+            folder.capabilities().effective_access(),
+            vec![
+                EffectiveAccess::Read,
+                EffectiveAccess::Write,
+                EffectiveAccess::Update,
+                EffectiveAccess::Delete,
+                EffectiveAccess::ManagePermissions,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inherited_update_grant_conveys_neither_deletion_nor_management() {
         let caller = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -587,7 +819,7 @@ mod tests {
             organization_id: organization(),
             entry_id: source_entry_id,
             principal: caller,
-            access: AccessLevel::Write,
+            access: GrantedAccess::new([AccessRight::Update]),
             inheritance: PermissionInheritance::Descendants,
             granted_by: actor("carbon-owner"),
             created_at: OffsetDateTime::UNIX_EPOCH,
@@ -609,14 +841,101 @@ mod tests {
         assert!(authorization.allows(Capability::Read));
         assert!(authorization.allows(Capability::WriteContent));
         assert!(authorization.allows(Capability::UpdateMetadata));
-        assert!(authorization.allows(Capability::Delete));
+        // Deletion is an independent right and was never granted here.
+        assert!(!authorization.allows(Capability::Delete));
         assert!(!authorization.allows(Capability::ManagePermissions));
+        assert_eq!(
+            authorization.capabilities().effective_access(),
+            vec![
+                EffectiveAccess::Read,
+                EffectiveAccess::Write,
+                EffectiveAccess::Update
+            ]
+        );
+    }
+
+    #[test]
+    fn deletion_requires_its_own_right_even_alongside_update() {
+        let caller = actor("carbon-a");
+        let context = request_context(
+            caller.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let entry_id = EntryId::new();
+        let grant = PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: organization(),
+            entry_id,
+            principal: caller,
+            access: GrantedAccess::new([AccessRight::Update, AccessRight::Delete]),
+            inheritance: PermissionInheritance::EntryOnly,
+            granted_by: actor("carbon-owner"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let grants = [GrantApplication::Direct(&grant)];
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id,
+            entry_kind: EntryKind::File,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &grants,
+            required_for_traversal: false,
+        });
+
+        assert!(authorization.allows(Capability::Delete));
+        assert!(authorization.allows(Capability::UpdateMetadata));
+        assert!(!authorization.allows(Capability::ManagePermissions));
+    }
+
+    #[test]
+    fn a_write_grant_adds_children_without_renaming_or_deleting() {
+        let caller = actor("silicon-a");
+        let context = request_context(
+            caller.clone(),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let entry_id = EntryId::new();
+        let grant = PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: organization(),
+            entry_id,
+            principal: caller,
+            access: GrantedAccess::new([AccessRight::Write]),
+            inheritance: PermissionInheritance::EntryOnly,
+            granted_by: actor("carbon-owner"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let grants = [GrantApplication::Direct(&grant)];
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id,
+            entry_kind: EntryKind::Folder,
+            system_kind: None,
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &grants,
+            required_for_traversal: false,
+        });
+
+        assert!(authorization.allows(Capability::CreateChild));
+        assert!(!authorization.allows(Capability::UpdateMetadata));
+        assert!(!authorization.allows(Capability::Delete));
     }
 
     #[test]
     fn non_inheritable_grants_do_not_flow_to_descendants() {
         let caller = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             caller.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -627,7 +946,7 @@ mod tests {
             organization_id: organization(),
             entry_id: EntryId::new(),
             principal: caller,
-            access: AccessLevel::Read,
+            access: GrantedAccess::READ_ONLY,
             inheritance: PermissionInheritance::EntryOnly,
             granted_by: actor("carbon-owner"),
             created_at: OffsetDateTime::UNIX_EPOCH,
@@ -652,7 +971,7 @@ mod tests {
 
     #[test]
     fn canonical_private_container_is_navigation_visible_to_every_member() {
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Member,
             Vec::new(),
@@ -679,7 +998,7 @@ mod tests {
     #[test]
     fn private_container_custodial_owner_cannot_create_arbitrary_children() {
         let custodian = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             custodian.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -704,9 +1023,38 @@ mod tests {
     }
 
     #[test]
+    fn another_members_private_folder_is_hidden_and_unwritable() {
+        // The contract forbids saving into a folder assigned to someone else,
+        // and such a folder must not even be visible.
+        let context = request_context(
+            actor("carbon-a"),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::Folder,
+            system_kind: Some(SystemEntryKind::PrivateActorFolder),
+            boundary: &EntryBoundary::Private,
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            required_for_traversal: false,
+        });
+
+        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
+        assert!(!authorization.allows(Capability::Read));
+        assert!(!authorization.allows(Capability::CreateChild));
+        assert!(authorization.capabilities().effective_access().is_empty());
+    }
+
+    #[test]
     fn tag_root_custodian_does_not_bypass_current_iam_tags() {
         let custodian = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             custodian.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -734,7 +1082,7 @@ mod tests {
     #[test]
     fn system_entries_remain_immutable_even_for_administrators() {
         let administrator = actor("carbon-admin");
-        let context = context(
+        let context = request_context(
             administrator.clone(),
             OrganizationRole::Admin,
             Vec::new(),
@@ -765,7 +1113,7 @@ mod tests {
         let application_id = external_id(ApplicationId::new("silicon-dm"));
         let other_application_id = external_id(ApplicationId::new("silicon-remind"));
         let represented_actor = actor("carbon-a");
-        let context = context(
+        let context = request_context(
             represented_actor.clone(),
             OrganizationRole::Member,
             Vec::new(),
@@ -793,7 +1141,7 @@ mod tests {
 
     #[test]
     fn tenant_mismatch_fails_closed() {
-        let context = context(
+        let context = request_context(
             actor("carbon-a"),
             OrganizationRole::Owner,
             Vec::new(),

@@ -20,7 +20,10 @@ use crate::{
         idempotency::{IdempotencyKey, bytes_fingerprint},
         service::MutationMetadata,
     },
-    domain::ids::{AccessRequestId, EntryId, GrantId, MultipartUploadId, VersionId},
+    domain::{
+        entry::EntryPath,
+        ids::{AccessRequestId, EntryId, GrantId, VersionId},
+    },
     error::AppError,
     request_context,
 };
@@ -155,6 +158,21 @@ where
     Ok(bytes_fingerprint(operation, &canonical))
 }
 
+/// Validates a permanent-URL location against the authenticated tenant header.
+///
+/// A mismatched organization or an unparsable path is reported as not found:
+/// the permanent URL must never confirm that an inaccessible entry exists.
+pub(crate) fn entry_location(
+    (organization, path): (String, String),
+    headers: &HeaderMap,
+) -> Result<(String, EntryPath), AppError> {
+    if auth::organization_resource(headers)? != organization {
+        return Err(AppError::NotFound);
+    }
+    let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
+    Ok((organization, path))
+}
+
 pub(crate) fn entry_id(value: Uuid) -> Result<EntryId, AppError> {
     EntryId::from_uuid(value).map_err(|_| AppError::NotFound)
 }
@@ -165,12 +183,6 @@ pub(crate) fn grant_id(value: Uuid) -> Result<GrantId, AppError> {
 
 pub(crate) fn access_request_id(value: Uuid) -> Result<AccessRequestId, AppError> {
     AccessRequestId::from_uuid(value).map_err(|_| AppError::NotFound)
-}
-
-pub(crate) fn multipart_upload_id(value: &str) -> Result<MultipartUploadId, AppError> {
-    value
-        .parse()
-        .map_err(|_| AppError::bad_request("invalid_upload_id"))
 }
 
 pub(crate) fn version_id(value: &str) -> Result<VersionId, AppError> {

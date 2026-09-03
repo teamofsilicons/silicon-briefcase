@@ -12,10 +12,10 @@ use uuid::Uuid;
 
 use crate::{
     application::service::{
-        DecideAccessRequestCommand, GrantPermissionCommand, ListPermissionsQuery, PageRequest,
-        RequestAccessCommand, RevokePermissionCommand,
+        DecideAccessRequestCommand, GrantPermissionCommand, InspectPermissionsQuery,
+        ListPermissionsQuery, PageRequest, RequestAccessCommand, RevokePermissionCommand,
     },
-    domain::{access::AccessDecision, permission::AccessLevel},
+    domain::{access::AccessDecision, entry::EntryPath},
     error::AppError,
 };
 
@@ -25,14 +25,14 @@ use super::{
         dto::{
             AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, AccessRequestDto,
             PermissionGrantCreateDto, PermissionGrantDto, PermissionGrantPageDto,
-            RequestedAccessDto,
+            PermissionInspectionDto, PermissionInspectionResultDto,
         },
         extract,
         mapping::metadata_error,
         state::AppState,
         validation,
     },
-    entries::{access_level, actor},
+    entries::{actor, granted_access},
 };
 
 pub(crate) async fn list_permissions(
@@ -61,6 +61,41 @@ pub(crate) async fn list_permissions(
     )))
 }
 
+/// Reports the caller's effective access on a batch of files and folders.
+pub(crate) async fn inspect_permissions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<PermissionInspectionDto>, JsonRejection>,
+) -> Result<Json<PermissionInspectionResultDto>, AppError> {
+    let body = extract::json(body)?;
+    extract::validation(validation::inspect_permissions(&body))?;
+    let resource = extract::organization_resource(&headers)?;
+    let context =
+        extract::authenticate(&state, &headers, IamAction::InspectPermissions, &resource).await?;
+    let entry_ids = body
+        .entry_ids
+        .iter()
+        .copied()
+        .map(extract::entry_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    let paths = body
+        .paths
+        .iter()
+        .map(|path| EntryPath::new(path).map_err(|_| AppError::validation("invalid_path")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let query = InspectPermissionsQuery::new(entry_ids.clone(), paths.clone())
+        .map_err(|_| AppError::validation("invalid_targets"))?;
+    let visible = extract::scoped(
+        &context,
+        state.metadata.inspect_permissions(&context, &query),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok(Json(super::super::mapping::ResponseMapper::inspection(
+        &entry_ids, &paths, visible,
+    )))
+}
+
 pub(crate) async fn grant_permission(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -77,7 +112,7 @@ pub(crate) async fn grant_permission(
     let command = GrantPermissionCommand {
         entry_id,
         principal: actor(body.principal)?,
-        access: access_level(&body.access)?,
+        access: granted_access(&body.access)?,
         inherits_to_descendants: body.inherit,
     };
     let grant = extract::scoped(
@@ -132,7 +167,8 @@ pub(crate) async fn request_access(
     let context =
         extract::authenticate(&state, &headers, IamAction::CreateAccessRequest, &resource).await?;
     let metadata = extract::mutation(&headers, "request_access", &resource, &body, false)?;
-    let command = RequestAccessCommand::new(entry_id, requested_access(body.access), body.reason)
+    let access = granted_access(&body.access)?;
+    let command = RequestAccessCommand::new(entry_id, access, body.reason)
         .map_err(|_| AppError::validation("invalid_access_request"))?;
     let request = extract::scoped(
         &context,
@@ -163,10 +199,11 @@ pub(crate) async fn decide_access_request(
     let metadata = extract::mutation(&headers, "decide_access_request", &resource, &body, false)?;
     let decision = match body.decision {
         AccessDecisionDto::Approve => AccessDecision::Approve {
-            access: requested_access(
+            access: granted_access(
                 body.access
+                    .as_deref()
                     .ok_or_else(|| AppError::validation("missing_approved_access"))?,
-            ),
+            )?,
         },
         AccessDecisionDto::Deny => AccessDecision::Deny,
     };
@@ -186,11 +223,4 @@ pub(crate) async fn decide_access_request(
     Ok(Json(super::super::mapping::ResponseMapper::access_request(
         &request,
     )))
-}
-
-const fn requested_access(value: RequestedAccessDto) -> AccessLevel {
-    match value {
-        RequestedAccessDto::Read => AccessLevel::Read,
-        RequestedAccessDto::Write => AccessLevel::Write,
-    }
 }

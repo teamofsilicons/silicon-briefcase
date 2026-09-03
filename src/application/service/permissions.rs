@@ -4,14 +4,14 @@ use crate::{
     application::context::ExecutionContext,
     domain::{
         ids::EntryId,
-        permission::{Capability, PermissionGrant},
+        permission::{Capability, EntryVisibility, PermissionGrant},
     },
 };
 
 use super::{
-    GrantPermissionCommand, ListPermissionsQuery, MetadataService, MetadataServiceError,
-    MutationMetadata, Page, RevokePermissionCommand, ValidationError, require_capability,
-    validate_context,
+    AuthorizedEntryView, GrantPermissionCommand, InspectPermissionsQuery, ListPermissionsQuery,
+    MetadataService, MetadataServiceError, MutationMetadata, Page, RevokePermissionCommand,
+    ValidationError, require_capability, validate_context,
 };
 
 impl MetadataService {
@@ -38,6 +38,46 @@ impl MetadataService {
             .record_metadata_access(context, &[query.entry_id])
             .await?;
         Ok(page)
+    }
+
+    /// Reports what the caller may do on each requested file or folder.
+    ///
+    /// Targets the caller cannot read are simply absent from the result, so
+    /// the answer never distinguishes "hidden" from "does not exist".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid or
+    /// repository access or auditing fails.
+    pub async fn inspect_permissions(
+        &self,
+        context: &ExecutionContext,
+        query: &InspectPermissionsQuery,
+    ) -> Result<Vec<AuthorizedEntryView>, MetadataServiceError> {
+        validate_context(context)?;
+        let candidates = self
+            .repository
+            .find_active_entries(context, &query.entry_ids, &query.paths)
+            .await?;
+        let mut visible = Vec::with_capacity(candidates.len());
+        let mut accessed = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let authorization = candidate.authorization(context.authorization());
+            if authorization.visibility() != EntryVisibility::Full {
+                continue;
+            }
+            accessed.push(candidate.entry.id);
+            visible.push(AuthorizedEntryView {
+                entry: candidate.entry,
+                effective_access: authorization.capabilities().effective_access(),
+            });
+        }
+        if !accessed.is_empty() {
+            self.repository
+                .record_metadata_access(context, &accessed)
+                .await?;
+        }
+        Ok(visible)
     }
 
     /// Grants a current organization member read or write access.

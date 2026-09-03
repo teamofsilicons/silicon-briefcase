@@ -2,10 +2,7 @@
 
 use crate::{
     application::context::ExecutionContext,
-    domain::{
-        access::AccessRequestStatus,
-        permission::{AccessLevel, Capability},
-    },
+    domain::{access::AccessRequestStatus, permission::Capability},
 };
 
 use super::{
@@ -34,10 +31,14 @@ impl MetadataService {
             .await?
             .ok_or(MetadataServiceError::NotFound)?;
         let authorization = entry.authorization(context.authorization());
-        let already_satisfied = match command.access {
-            AccessLevel::Read => authorization.allows(Capability::Read),
-            AccessLevel::Write => authorization.allows(Capability::UpdateMetadata),
-        };
+        // Requesting access the caller already has would create a request
+        // nobody needs to decide. Effective access is entry-kind aware, so it
+        // is the honest comparison for "would this add anything?".
+        let effective = authorization.capabilities().effective_access();
+        let already_satisfied = command
+            .access
+            .rights()
+            .all(|right| effective.contains(&right.satisfied_by()));
         if already_satisfied {
             return Err(MetadataServiceError::Conflict);
         }

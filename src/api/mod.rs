@@ -32,6 +32,7 @@ use crate::{
 
 mod auth;
 pub mod cursor;
+mod delivery;
 pub mod dto;
 mod extract;
 mod handlers;
@@ -40,12 +41,11 @@ mod middleware;
 mod state;
 pub mod upload;
 pub mod validation;
+pub mod versioning;
 mod webhook;
 
-use handlers::{content, entries, permissions, system};
+use handlers::{content, entries, notifications, obo, permissions, system, usage};
 use state::{AppState, ContentUseCases};
-
-const SMALL_MULTIPART_BODY_LIMIT: usize = 101 * 1_048_576;
 
 /// Builds the dependency graph, binds the configured listener, and serves the
 /// complete HTTP contract until graceful shutdown.
@@ -77,7 +77,10 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         content,
         webhook_repository,
         database: database.clone(),
-        mapper: mapping::ResponseMapper::new(settings.server.public_base_url.clone()),
+        mapper: mapping::ResponseMapper::new(
+            &settings.server.public_base_url,
+            settings.server.public_site_base_url.clone(),
+        ),
         temporary_directory: settings.s3.temporary_directory.clone(),
         webhook_settings: settings.webhook.clone(),
     };
@@ -157,18 +160,13 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         server.max_concurrent_restores.get(),
     ));
 
-    let small_upload = with_deadline(
+    // One upload route accepts a file of any supported size and decides
+    // internally how to store it, so the body limit is the staging ceiling
+    // rather than an HTTP one.
+    let uploads = with_deadline(
         Router::new()
-            .route("/api/v1/uploads", post(content::upload_small))
-            .layer(DefaultBodyLimit::max(SMALL_MULTIPART_BODY_LIMIT)),
-        server.upload_timeout,
-    );
-    let part_upload = with_deadline(
-        Router::new()
-            .route(
-                "/api/v1/multipart-uploads/{upload_id}/parts/{part_number}",
-                put(content::upload_part),
-            )
+            .route("/api/v1/uploads", post(content::upload))
+            .route(obo::CREATE_FILE_PATH, post(obo::create_file))
             .layer(DefaultBodyLimit::disable()),
         server.upload_timeout,
     );
@@ -182,8 +180,7 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
     ordinary
         .merge(upload_control)
         .merge(restore)
-        .merge(small_upload)
-        .merge(part_upload)
+        .merge(uploads)
         .merge(webhook)
         .fallback(not_found)
         .layer(ConcurrencyLimitLayer::new(
@@ -202,6 +199,7 @@ fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(system::health))
         .route("/readyz", get(system::ready))
+        .route("/api/version", get(system::version))
         .route("/api/v1/version", get(system::version))
         .route(
             "/api/v1/entries",
@@ -222,6 +220,10 @@ fn ordinary_routes() -> Router<AppState> {
             delete(permissions::revoke_permission),
         )
         .route(
+            "/api/v1/permissions/effective",
+            post(permissions::inspect_permissions),
+        )
+        .route(
             "/api/v1/entries/{entry_id}/access-requests",
             post(permissions::request_access),
         )
@@ -231,9 +233,31 @@ fn ordinary_routes() -> Router<AppState> {
         )
         .route("/api/v1/search", get(entries::search))
         .route(
+            "/api/v1/notifications",
+            get(notifications::list_notifications),
+        )
+        .route(
+            "/api/v1/notifications/read",
+            post(notifications::read_notifications),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/content",
+            get(content::read_content),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/download",
+            get(content::download_content),
+        )
+        .route("/org/{org_id}/{*path}", get(entries::resolve_path))
+        .route(
+            "/api/v1/entries/{entry_id}/activity",
+            get(entries::entry_activity),
+        )
+        .route(
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
         )
+        .route("/api/v1/usage", get(usage::organization_usage))
         .route("/api/v1/bin", get(entries::list_bin))
         .route(
             "/api/v1/bin/{entry_id}/restore",
@@ -242,27 +266,10 @@ fn ordinary_routes() -> Router<AppState> {
 }
 
 fn upload_control_routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/api/v1/entries/{entry_id}/download-url",
-            post(content::temporary_download_url),
-        )
-        .route(
-            "/api/v1/multipart-uploads",
-            post(content::initiate_multipart),
-        )
-        .route(
-            "/api/v1/multipart-uploads/{upload_id}/complete",
-            post(content::complete_multipart),
-        )
-        .route(
-            "/api/v1/multipart-uploads/{upload_id}",
-            delete(content::abort_multipart),
-        )
-        .route(
-            "/api/v1/storage/configuration",
-            put(content::configure_storage),
-        )
+    Router::new().route(
+        "/api/v1/storage/configuration",
+        put(content::configure_storage),
+    )
 }
 
 fn with_deadline(routes: Router<AppState>, timeout: Duration) -> Router<AppState> {
@@ -322,22 +329,18 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 22] = [
+    const CONTRACT: [(&str, &str, &str); 27] = [
+        ("/version", "get", "200"),
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
         ("/entries/{entry_id}", "patch", "200"),
         ("/entries/{entry_id}", "delete", "204"),
-        ("/entries/{entry_id}/download-url", "post", "201"),
+        ("/entries/{entry_id}/content", "get", "200"),
+        ("/entries/{entry_id}/download", "get", "200"),
+        ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
-        ("/multipart-uploads", "post", "201"),
-        (
-            "/multipart-uploads/{upload_id}/parts/{part_number}",
-            "put",
-            "200",
-        ),
-        ("/multipart-uploads/{upload_id}/complete", "post", "201"),
-        ("/multipart-uploads/{upload_id}", "delete", "204"),
+        ("/obo/files", "post", "201"),
         ("/entries/{entry_id}/permissions", "get", "200"),
         ("/entries/{entry_id}/permissions", "post", "201"),
         (
@@ -345,9 +348,14 @@ mod tests {
             "delete",
             "204",
         ),
+        ("/permissions/effective", "post", "200"),
         ("/entries/{entry_id}/access-requests", "post", "201"),
         ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),
+        ("/usage", "get", "200"),
+        ("/notifications", "get", "200"),
+        ("/notifications/read", "post", "200"),
+        ("/entries/{entry_id}/activity", "get", "200"),
         ("/entries/{entry_id}/versions", "get", "200"),
         (
             "/entries/{entry_id}/versions/{version_id}/restore",
@@ -390,26 +398,33 @@ mod tests {
     }
 
     #[test]
-    fn openapi_requires_complete_obo_credentials_and_bearer_for_storage_configuration()
-    -> anyhow::Result<()> {
+    fn openapi_keeps_the_api_bearer_only_and_obo_to_its_own_endpoint() -> anyhow::Result<()> {
         let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
         let global_security = document["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("OpenAPI security must be a sequence"))?;
 
-        assert!(global_security.iter().any(|requirement| {
-            requirement["bearerAuth"].is_sequence()
-                && requirement
-                    .as_mapping()
-                    .is_some_and(|mapping| mapping.len() == 1)
-        }));
-        assert!(global_security.iter().any(|requirement| {
-            requirement["oboAccess"].is_sequence()
-                && requirement["appId"].is_sequence()
-                && requirement
-                    .as_mapping()
-                    .is_some_and(|mapping| mapping.len() == 2)
-        }));
+        // The contracted surface is a bearer surface, and nothing else.
+        assert_eq!(global_security.len(), 1);
+        assert!(global_security[0]["bearerAuth"].is_sequence());
+        assert_eq!(
+            global_security[0]
+                .as_mapping()
+                .map(serde_yaml::Mapping::len),
+            Some(1)
+        );
+
+        // The one application endpoint requires both OBO credentials together.
+        let obo_security = document["paths"]["/obo/files"]["post"]["security"]
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("OBO security must be a sequence"))?;
+        assert_eq!(obo_security.len(), 1);
+        assert!(obo_security[0]["oboAccess"].is_sequence());
+        assert!(obo_security[0]["appId"].is_sequence());
+        assert_eq!(
+            obo_security[0].as_mapping().map(serde_yaml::Mapping::len),
+            Some(2)
+        );
 
         let storage_security = document["paths"]["/storage/configuration"]["put"]["security"]
             .as_sequence()
@@ -438,10 +453,11 @@ mod tests {
                 .replace("{upload_id}", &identifier)
                 .replace("{version_id}", &identifier)
                 .replace("{part_number}", "1");
-            let path = if path == "/search" {
-                format!("/api/v1{path}?q=registered")
-            } else {
-                format!("/api/v1{path}")
+            let path = match path.as_str() {
+                "/search" => format!("/api/v1{path}?q=registered"),
+                // The permanent URL is served outside the versioned API base.
+                "/org/{org_id}/{path}" => "/org/tos/private/cos:tos/notes.md".to_owned(),
+                _ => format!("/api/v1{path}"),
             };
             let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())?;
             let mut request = Request::builder()
@@ -554,7 +570,7 @@ mod tests {
         let server = ServerSettings {
             bind_addr: ([127, 0, 0, 1], 0).into(),
             public_base_url: Url::parse("https://briefcase.example/api/v1/")?,
-            cdn_base_url: Url::parse("https://cdn.briefcase.example/")?,
+            public_site_base_url: Url::parse("https://briefcase.example/")?,
             request_timeout: Duration::from_secs(1),
             upload_timeout: Duration::from_secs(1),
             restore_timeout: Duration::from_secs(1),
@@ -569,7 +585,10 @@ mod tests {
             content,
             webhook_repository,
             database,
-            mapper: ResponseMapper::new(server.public_base_url.clone()),
+            mapper: ResponseMapper::new(
+                &server.public_base_url,
+                server.public_site_base_url.clone(),
+            ),
             temporary_directory: s3.temporary_directory,
             webhook_settings: webhook.clone(),
         };

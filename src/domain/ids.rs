@@ -111,6 +111,10 @@ domain_id!(
     /// An organization storage-configuration identifier.
     StorageConfigurationId
 );
+domain_id!(
+    /// A notification-inbox entry identifier.
+    NotificationId
+);
 
 #[cfg(test)]
 mod tests {

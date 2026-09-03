@@ -72,6 +72,8 @@ pub struct EntryRow {
     pub entry_type: String,
     /// User-visible name.
     pub name: String,
+    /// Materialized organization-relative path, maintained by the schema.
+    pub path: String,
     /// Inherited `public`, `private`, or `tag` boundary.
     pub root_type: String,
     /// IAM tag identifier for a tag boundary.
@@ -176,8 +178,8 @@ pub struct PermissionGrantRow {
     pub principal_type: String,
     /// Granted principal identifier.
     pub principal_id: String,
-    /// `read` or `write` base access.
-    pub access_level: String,
+    /// Bitmask of conveyed read/write/update/delete rights.
+    pub access_mask: i16,
     /// Whether the grant flows to descendants.
     pub inherits_to_descendants: bool,
     /// Granting actor kind.
@@ -207,14 +209,14 @@ pub struct AccessRequestRow {
     pub requested_by_type: String,
     /// Requesting actor identifier.
     pub requested_by_id: String,
-    /// Requested base access.
-    pub requested_access: String,
+    /// Bitmask of requested rights.
+    pub requested_access_mask: i16,
     /// Optional user-supplied reason.
     pub reason: Option<String>,
     /// Pending, approved, or denied state.
     pub status: String,
-    /// Access actually granted on approval.
-    pub granted_access: Option<String>,
+    /// Bitmask of rights actually granted on approval.
+    pub granted_access_mask: Option<i16>,
     /// Decision actor kind.
     pub decided_by_type: Option<String>,
     /// Decision actor identifier.
@@ -500,3 +502,16 @@ pub struct WebhookReceiptRow {
     /// Last state-change timestamp.
     pub updated_at: OffsetDateTime,
 }
+
+/// Expands to the exact `briefcase.entries` column list decoded into
+/// [`EntryRow`], so every projection stays in sync with the row type.
+macro_rules! entry_columns {
+    () => {
+        "org_id, entry_id, parent_id, entry_type, name, path, root_type, tag_id, \
+         system_kind, owner_type, owner_id, origin_app_id, content_type, size_bytes, \
+         current_version_id, created_by_type, created_by_id, updated_by_type, \
+         updated_by_id, deletion_batch_id, deleted_at, purge_after, created_at, updated_at"
+    };
+}
+
+pub(super) use entry_columns;

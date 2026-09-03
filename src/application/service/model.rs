@@ -1,17 +1,22 @@
 //! Commands, repository snapshots, and safe service views.
 
+use std::collections::BTreeSet;
+
 use time::OffsetDateTime;
 
 use crate::{
     application::idempotency::IdempotencyKey,
     domain::{
         access::{AccessDecision, AccessRequestStatus},
-        actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
-        entry::{EntryBoundary, EntryKind, EntryName, RootType, SystemEntryKind},
+        actor::{
+            ActorRef, ApplicationId, OrganizationId, OrganizationRole, RequestAuthContext, TagName,
+        },
+        entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
+        filter::FilterQuery,
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
         permission::{
-            AccessLevel, EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput,
-            EntryVisibility, GrantApplication, PermissionGrant,
+            EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput, EntryVisibility,
+            GrantApplication, GrantedAccess, PermissionGrant,
         },
         version::{VersionNumber, VersionSource},
     },
@@ -23,6 +28,8 @@ use super::{MetadataServiceError, ValidationError};
 pub const MAX_PAGE_SIZE: u16 = 100;
 /// Default page size from the `OpenAPI` contract.
 pub const DEFAULT_PAGE_SIZE: u16 = 50;
+/// Contents are returned in pages of a hundred, newest first.
+pub const CONTENTS_PAGE_SIZE: u16 = 100;
 /// Maximum search result count.
 pub const MAX_SEARCH_RESULTS: u8 = 20;
 
@@ -116,6 +123,8 @@ pub struct EntryView {
     pub kind: EntryKind,
     /// Validated display name.
     pub name: EntryName,
+    /// Materialized organization-relative path used by the permanent URL.
+    pub path: EntryPath,
     /// Parent folder, or organization root.
     pub parent_id: Option<EntryId>,
     /// Inherited access boundary.
@@ -206,6 +215,10 @@ pub struct AuthorizedEntryView {
 }
 
 /// Minimal metadata safe for traversing to a visible descendant.
+///
+/// A folder shared only through its contents is real to the caller: they can
+/// open it and see the entries they were given. Nothing else about it is
+/// disclosed — not its owner, not its timestamps, not its other children.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraversalEntryView {
     /// Folder identifier.
@@ -214,6 +227,8 @@ pub struct TraversalEntryView {
     pub parent_id: Option<EntryId>,
     /// Folder display name.
     pub name: EntryName,
+    /// Organization-relative path used by the permanent URL.
+    pub path: EntryPath,
     /// Inherited API boundary discriminator.
     pub root_type: RootType,
 }
@@ -223,8 +238,28 @@ pub struct TraversalEntryView {
 pub enum EntryListItem {
     /// Caller has normal read visibility.
     Full(Box<AuthorizedEntryView>),
-    /// Caller may navigate through the folder but not inspect its contents.
+    /// Caller may open the folder but sees only what was shared inside it.
     Traversal(TraversalEntryView),
+}
+
+impl EntryListItem {
+    /// Returns the entry identifier, whichever visibility applies.
+    #[must_use]
+    pub const fn id(&self) -> EntryId {
+        match self {
+            Self::Full(view) => view.entry.id,
+            Self::Traversal(view) => view.id,
+        }
+    }
+
+    /// Returns whether the entry is a folder.
+    #[must_use]
+    pub const fn is_folder(&self) -> bool {
+        match self {
+            Self::Full(view) => matches!(view.entry.kind, EntryKind::Folder),
+            Self::Traversal(_) => true,
+        }
+    }
 }
 
 impl AuthorizableEntry {
@@ -238,6 +273,7 @@ impl AuthorizableEntry {
                     id: self.entry.id,
                     parent_id: self.entry.parent_id,
                     name: self.entry.name,
+                    path: self.entry.path,
                     root_type: self.entry.boundary.root_type(),
                 }))
             }
@@ -266,11 +302,18 @@ impl AuthorizableEntry {
     }
 }
 
-/// Query for visible children of an organization root or folder.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Query for the contents of a folder, or for a filtered organization view.
+///
+/// Without a filter the query browses one level: the organization roots, or
+/// the direct children of `parent_id`. With a filter and no `parent_id` it
+/// scans everything the caller may reach, which is what a `location:`
+/// predicate needs in order to select a subtree.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListEntriesQuery {
-    /// Parent folder; omission means organization root.
+    /// Parent folder; omission means organization root or the whole tree.
     pub parent_id: Option<EntryId>,
+    /// Parsed filter expression, ordering, and chronological cap.
+    pub filter: Option<FilterQuery>,
     /// Cursor pagination.
     pub page: PageRequest,
 }
@@ -280,8 +323,8 @@ pub struct ListEntriesQuery {
 pub struct InitialPermission {
     /// Current organization member.
     pub principal: ActorRef,
-    /// Read or write access.
-    pub access: AccessLevel,
+    /// Rights conveyed to the invitee.
+    pub access: GrantedAccess,
     /// Whether access flows to descendants.
     pub inherits_to_descendants: bool,
 }
@@ -386,8 +429,8 @@ pub struct GrantPermissionCommand {
     pub entry_id: EntryId,
     /// Current organization member.
     pub principal: ActorRef,
-    /// Access level.
-    pub access: AccessLevel,
+    /// Rights conveyed by the grant.
+    pub access: GrantedAccess,
     /// Whether access flows to descendants.
     pub inherits_to_descendants: bool,
 }
@@ -406,8 +449,8 @@ pub struct RevokePermissionCommand {
 pub struct RequestAccessCommand {
     /// Target entry from a permanent URL.
     pub entry_id: EntryId,
-    /// Requested access level.
-    pub access: AccessLevel,
+    /// Requested rights.
+    pub access: GrantedAccess,
     /// Optional user-supplied reason.
     pub reason: Option<String>,
 }
@@ -421,7 +464,7 @@ impl RequestAccessCommand {
     /// 1,000 Unicode scalar values after trimming.
     pub fn new(
         entry_id: EntryId,
-        access: AccessLevel,
+        access: GrantedAccess,
         reason: Option<String>,
     ) -> Result<Self, ValidationError> {
         let reason = reason.map(|value| value.trim().to_owned());
@@ -451,14 +494,14 @@ pub struct AccessRequestView {
     pub entry_id: EntryId,
     /// Requesting member.
     pub requested_by: ActorRef,
-    /// Requested access.
-    pub requested_access: AccessLevel,
+    /// Requested rights.
+    pub requested_access: GrantedAccess,
     /// Optional reason.
     pub reason: Option<String>,
     /// Current state.
     pub status: AccessRequestStatus,
-    /// Access actually granted.
-    pub granted_access: Option<AccessLevel>,
+    /// Rights actually granted.
+    pub granted_access: Option<GrantedAccess>,
     /// Decision actor.
     pub decided_by: Option<ActorRef>,
     /// Decision time.
@@ -487,6 +530,42 @@ pub struct DecideAccessRequestCommand {
     pub request_id: AccessRequestId,
     /// Terminal decision.
     pub decision: AccessDecision,
+}
+
+/// Maximum number of targets one permission inspection may name.
+pub const MAX_INSPECTED_TARGETS: usize = 100;
+
+/// A batch request for the caller's effective access on named targets.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InspectPermissionsQuery {
+    /// Targets addressed by identifier.
+    pub entry_ids: Vec<EntryId>,
+    /// Targets addressed by organization-relative path.
+    pub paths: Vec<EntryPath>,
+}
+
+impl InspectPermissionsQuery {
+    /// Validates that the batch names at least one and at most 100 targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] for an empty or oversized batch.
+    pub fn new(entry_ids: Vec<EntryId>, paths: Vec<EntryPath>) -> Result<Self, ValidationError> {
+        let total = entry_ids.len().saturating_add(paths.len());
+        if total == 0 {
+            return Err(ValidationError::new(
+                "targets",
+                "must name at least one entry or path",
+            ));
+        }
+        if total > MAX_INSPECTED_TARGETS {
+            return Err(ValidationError::new(
+                "targets",
+                "must name at most 100 entries and paths",
+            ));
+        }
+        Ok(Self { entry_ids, paths })
+    }
 }
 
 /// Permission page query.
@@ -582,6 +661,31 @@ pub struct ListVersionsQuery {
     pub page: PageRequest,
 }
 
+/// The projected organization standing of one member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedMembership {
+    /// Current organization role.
+    pub role: OrganizationRole,
+    /// Current IAM tags.
+    pub tags: BTreeSet<TagName>,
+}
+
+/// Number of history entries retained and returned for one entry.
+pub const ENTRY_ACTIVITY_HISTORY_SIZE: u16 = 100;
+
+/// One recorded action in an entry's history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivityEvent {
+    /// Stable, versioned action name.
+    pub action: String,
+    /// Actor who performed the action.
+    pub actor: ActorRef,
+    /// Application that acted on the actor's behalf.
+    pub application_id: Option<ApplicationId>,
+    /// When the action happened.
+    pub occurred_at: OffsetDateTime,
+}
+
 /// Query for recoverable entries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListBinQuery {
@@ -603,7 +707,7 @@ mod tests {
     use crate::domain::{
         entry::{EntryBoundary, EntryName},
         ids::EntryId,
-        permission::AccessLevel,
+        permission::{AccessRight, GrantedAccess},
     };
 
     use super::{CreateFolderCommand, PageRequest, RequestAccessCommand, SearchQuery};
@@ -637,12 +741,19 @@ mod tests {
 
     #[test]
     fn access_request_normalizes_and_limits_reason() -> Result<(), Box<dyn Error>> {
-        let command =
-            RequestAccessCommand::new(EntryId::new(), AccessLevel::Read, Some("  ".to_owned()))?;
+        let command = RequestAccessCommand::new(
+            EntryId::new(),
+            GrantedAccess::READ_ONLY,
+            Some("  ".to_owned()),
+        )?;
         assert_eq!(command.reason, None);
         assert!(
-            RequestAccessCommand::new(EntryId::new(), AccessLevel::Write, Some("x".repeat(1_001)),)
-                .is_err()
+            RequestAccessCommand::new(
+                EntryId::new(),
+                GrantedAccess::new([AccessRight::Update]),
+                Some("x".repeat(1_001)),
+            )
+            .is_err()
         );
         Ok(())
     }

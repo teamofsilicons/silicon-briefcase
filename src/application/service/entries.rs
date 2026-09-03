@@ -3,14 +3,14 @@
 use crate::{
     application::context::ExecutionContext,
     domain::{
-        entry::EntryKind,
+        entry::{EntryKind, EntryPath},
         ids::EntryId,
         permission::{Capability, EntryVisibility},
     },
 };
 
 use super::{
-    AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
+    ActivityEvent, AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
     ListEntriesQuery, MetadataService, MetadataServiceError, MutationMetadata, Page,
     UpdateEntryCommand, require_capability, validate_context,
 };
@@ -45,12 +45,25 @@ impl MetadataService {
         }
 
         let candidates = self.repository.list_active_children(context, query).await?;
+        // A `permissions:` predicate is not a column: persistence returns the
+        // candidates and policy decides them here, against the same effective
+        // access the response reports.
+        let permission_filter = query
+            .filter
+            .as_ref()
+            .and_then(|filter| filter.expression.as_ref())
+            .filter(|expression| expression.requires_policy_evaluation());
         let mut accessed = Vec::with_capacity(candidates.items.len());
         let items = candidates
             .items
             .into_iter()
             .filter_map(|entry| {
                 let authorization = entry.authorization(context.authorization());
+                if let Some(expression) = permission_filter
+                    && !expression.permits(&authorization.capabilities().effective_access())
+                {
+                    return None;
+                }
                 let item = entry.clone().into_list_item(authorization);
                 if item.is_some() {
                     accessed.push(entry.entry.id);
@@ -97,11 +110,8 @@ impl MetadataService {
             require_capability(&parent, context, Capability::CreateChild)?;
             (parent.entry.boundary, Some(Capability::CreateChild))
         } else {
-            if !context.authorization().role().has_administrative_access() {
-                return Err(MetadataServiceError::Forbidden {
-                    required: Capability::CreateChild,
-                });
-            }
+            // Any current member may create a folder at the organization base,
+            // declaring which kind of folder it is.
             let boundary =
                 command
                     .root_boundary
@@ -164,6 +174,94 @@ impl MetadataService {
             .record_metadata_access(context, &[entry_id])
             .await?;
         entry.into_full_view(authorization)
+    }
+
+    /// Resolves the entry addressed by a permanent URL path.
+    ///
+    /// A folder that is shared only through its contents resolves as a
+    /// traversal view: the caller opens it and sees exactly the entries they
+    /// were given. When nothing inside it remains accessible, the folder
+    /// answers not found, like anything else the caller may not see.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// nothing visible exists at the path, or repository access fails.
+    pub async fn get_entry_by_path(
+        &self,
+        context: &ExecutionContext,
+        path: &EntryPath,
+    ) -> Result<EntryListItem, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry_by_path(context, path)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        self.visible_view(context, entry).await
+    }
+
+    /// Returns one visible entry by identifier, traversal folders included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// the entry is not visible, or repository access fails.
+    pub async fn visible_entry(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<EntryListItem, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry(context, entry_id)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        self.visible_view(context, entry).await
+    }
+
+    async fn visible_view(
+        &self,
+        context: &ExecutionContext,
+        entry: super::AuthorizableEntry,
+    ) -> Result<EntryListItem, MetadataServiceError> {
+        let entry_id = entry.entry.id;
+        let authorization = entry.authorization(context.authorization());
+        let item = entry
+            .into_list_item(authorization)
+            .ok_or(MetadataServiceError::NotFound)?;
+        self.repository
+            .record_metadata_access(context, &[entry_id])
+            .await?;
+        Ok(item)
+    }
+
+    /// Returns the retained action history of one readable entry.
+    ///
+    /// The history answers "who did what, and when" for the last hundred
+    /// recorded actions, which is exactly what the product contract retains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// the entry is unavailable or unreadable, or repository access fails.
+    pub async fn entry_activity(
+        &self,
+        context: &ExecutionContext,
+        entry_id: EntryId,
+    ) -> Result<Vec<ActivityEvent>, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry(context, entry_id)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        require_capability(&entry, context, Capability::Read)?;
+        self.repository
+            .list_entry_activity(context, entry_id)
+            .await
+            .map_err(Into::into)
     }
 
     /// Renames and/or moves an active entry without crossing permission boundaries.
