@@ -14,7 +14,7 @@ services:
       - "127.0.0.1:5433:5432"
     volumes:
       - briefcase-postgres:/var/lib/postgresql/data
-      - ./ops/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
 
   minio:
     image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z

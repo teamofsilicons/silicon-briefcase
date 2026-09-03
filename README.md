@@ -112,7 +112,7 @@ because Briefcase always stores objects encrypted, and MinIO answers
 volume created before that setting existed will keep refusing uploads until the
 service is recreated.
 
-The PostgreSQL initialization directory creates the two local runtime roles on
+`deploy/postgres/001_runtime_roles.sql` creates the two local runtime roles on
 a new Compose volume. If the volume predates those role definitions, create a
 fresh development database volume or provision equivalent roles before running
 the API and worker. Production role names may differ from the local canonical
@@ -123,6 +123,23 @@ migration. For `object_cleanup_jobs`, that specifically means tenant-scoped
 
 Local IAM fixtures are not accepted by the production profile. Integration
 tests use an explicit mock IAM server and isolated credentials.
+
+## Deploying
+
+Production runs on private EC2 behind the shared Team of Silicons load
+balancer, with RDS and S3, defined as one CloudFormation stack and shipped by
+one script:
+
+```bash
+cp deploy/aws/production.env.example deploy/aws/production.env   # once
+./deploy/deploy.sh                                               # build, push, deploy, replace
+./deploy/dns.sh --value <alb-dns-name> --apply                   # point Namecheap at it
+```
+
+[deploy/README.md](./deploy/README.md) has the runbook: the secret the instance
+reads, what a first deploy needs, how to roll back, and the two things that
+make Briefcase different from its neighbours — the worker's `BYPASSRLS` role
+and the local disk uploads are staged on.
 
 ## Object cleanup and retention
 

@@ -1,0 +1,664 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Silicon Briefcase backend on private EC2, RDS, and S3 behind the shared Team of Silicons ALB.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  HttpsListenerArn:
+    Type: String
+  CertificateArn:
+    Type: String
+  AppSecretArn:
+    Type: String
+    Description: Secrets Manager secret holding the IAM application and webhook credentials.
+  BackendImageUri:
+    Type: String
+    Description: Immutable ECR image URI, tagged with the commit it was built from.
+  PublicHostName:
+    Type: String
+    Default: backend.briefcase.teamofsilicons.com
+  PublicSiteBaseUrl:
+    Type: String
+    Default: https://briefcase.teamofsilicons.com/
+    Description: Where permanent URLs are served to people; it appears in every entry response.
+  IamBaseUrl:
+    Type: String
+    Default: https://backend.iam.teamofsilicons.com/api/v1/
+  ListenerRulePriority:
+    Type: Number
+    Default: 30
+    Description: Must not collide with another service's rule on the shared listener.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.micro, t4g.small, t4g.medium, t4g.large]
+  # A whole file is staged on local disk before it reaches S3, so this volume
+  # is sized for the largest upload the deployment expects rather than for the
+  # binaries.
+  StagingVolumeSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 32
+    MaxValue: 16384
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.small
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon Briefcase production instance; application ports are ALB-only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroupId
+          Description: Shared ALB to Briefcase API
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-briefcase-production-instance
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  AlbToInstanceEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !GetAtt InstanceSecurityGroup.GroupId
+      Description: Shared ALB to Silicon Briefcase production API
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Silicon Briefcase production PostgreSQL; Briefcase instances only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+          Description: Briefcase production instances
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: silicon-briefcase-production-database
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for Silicon Briefcase production
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: silicon-briefcase-production
+      Engine: postgres
+      EngineVersion: "17.9"
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: briefcase
+      MasterUsername: briefcase_migrator
+      ManageMasterUserPassword: true
+      Port: 5432
+      AllocatedStorage: "30"
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      StorageEncrypted: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: silicon-briefcase-production
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  # File bytes. Briefcase keeps its own version history in PostgreSQL and
+  # deletes exact object versions when it purges, so the bucket itself is
+  # unversioned; the lifecycle rule is a backstop for multipart uploads the
+  # worker never got to abort.
+  ObjectStore:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub silicon-briefcase-production-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: abandon-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  ObjectStorePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ObjectStore
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ObjectStore.Arn
+              - !Sub ${ObjectStore.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-briefcase/production/api
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /silicon-briefcase/production/worker
+      RetentionInDays: 30
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: silicon-briefcase-production-instance
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: silicon-briefcase-production-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/silicon-briefcase-production
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AppSecretArn
+                  - !GetAtt Database.MasterUserSecret.SecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !GetAtt ApiLogGroup.Arn
+                  - !Sub ${ApiLogGroup.Arn}:*
+                  - !GetAtt WorkerLogGroup.Arn
+                  - !Sub ${WorkerLogGroup.Arn}:*
+              # The platform bucket, and nothing else. Organization-owned
+              # storage is reached by assuming the role that organization
+              # registers, which is deliberately not granted here until the
+              # first one exists.
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:GetBucketLocation
+                Resource: !GetAtt ObjectStore.Arn
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub ${ObjectStore.Arn}/*
+      Tags:
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: silicon-briefcase-prod-api
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /readyz
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        # A whole file travels in one request, so a draining target is given
+        # long enough to finish an upload rather than cut it off.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "900"
+      Tags:
+        - Key: Service
+          Value: silicon-briefcase
+        - Key: Environment
+          Value: production
+
+  ListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListenerArn
+      Priority: !Ref ListenerRulePriority
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Ref PublicHostName]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: silicon-briefcase-production
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt InstanceSecurityGroup.GroupId
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          # The API and worker read S3 with the instance role, so their
+          # containers must be able to reach the metadata service.
+          HttpPutResponseHopLimit: 2
+          InstanceMetadataTags: enabled
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeSize: !Ref StagingVolumeSizeGiB
+              VolumeType: gp3
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: silicon-briefcase-production
+              - Key: Service
+                Value: silicon-briefcase
+              - Key: Environment
+                Value: production
+          - ResourceType: volume
+            Tags:
+              - Key: Service
+                Value: silicon-briefcase
+              - Key: Environment
+                Value: production
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            umask 077
+
+            REGION='${AWS::Region}'
+            ACCOUNT_ID='${AWS::AccountId}'
+            APP_SECRET_ARN='${AppSecretArn}'
+            DB_SECRET_ARN='${Database.MasterUserSecret.SecretArn}'
+            DB_HOST='${Database.Endpoint.Address}'
+            BACKEND_IMAGE='${BackendImageUri}'
+            BUCKET='${ObjectStore}'
+            PUBLIC_HOST='${PublicHostName}'
+            PUBLIC_SITE_BASE_URL='${PublicSiteBaseUrl}'
+            IAM_BASE_URL='${IamBaseUrl}'
+
+            dnf install --assumeyes docker jq postgresql15
+            systemctl enable --now docker
+            systemctl enable --now amazon-ssm-agent
+
+            install -d -m 0700 /etc/silicon-briefcase /opt/silicon-briefcase
+            # Uploads are staged whole on local disk before they reach S3, so
+            # this is a real directory on the data volume rather than a tmpfs.
+            install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/staging
+
+            curl --fail --silent --show-error --location \
+              https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+              --output /opt/silicon-briefcase/aws-rds-global-bundle.pem
+            chmod 0644 /opt/silicon-briefcase/aws-rds-global-bundle.pem
+
+            aws ecr get-login-password --region "$REGION" \
+              | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+            docker pull "$BACKEND_IMAGE"
+
+            APP_SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" \
+              --secret-id "$APP_SECRET_ARN" --query SecretString --output text)
+            DB_SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" \
+              --secret-id "$DB_SECRET_ARN" --query SecretString --output text)
+
+            if ! printf '%s' "$APP_SECRET_JSON" | jq -e '
+              [ .BRIEFCASE_IAM_APP_SECRET, .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET,
+                .BRIEFCASE_API_DATABASE_PASSWORD, .BRIEFCASE_WORKER_DATABASE_PASSWORD ]
+              | all(type == "string" and length > 0 and . != "REPLACE_IN_AWS_CONSOLE")
+            ' >/dev/null; then
+              echo 'Briefcase credentials have not been completed in Secrets Manager.' >&2
+              exit 1
+            fi
+
+            DB_MASTER_USER=$(printf '%s' "$DB_SECRET_JSON" | jq -r .username)
+            DB_MASTER_PASSWORD=$(printf '%s' "$DB_SECRET_JSON" | jq -r .password)
+            API_DB_PASSWORD=$(printf '%s' "$APP_SECRET_JSON" | jq -r .BRIEFCASE_API_DATABASE_PASSWORD)
+            WORKER_DB_PASSWORD=$(printf '%s' "$APP_SECRET_JSON" | jq -r .BRIEFCASE_WORKER_DATABASE_PASSWORD)
+            IAM_APP_ID=$(printf '%s' "$APP_SECRET_JSON" | jq -r '.BRIEFCASE_IAM_APP_ID // "silicon-briefcase"')
+            IAM_AUDIENCE=$(printf '%s' "$APP_SECRET_JSON" | jq -r '.BRIEFCASE_IAM_AUDIENCE // "silicon-briefcase"')
+
+            export PGHOST="$DB_HOST" PGPORT=5432 PGDATABASE=briefcase
+            export PGUSER="$DB_MASTER_USER" PGPASSWORD="$DB_MASTER_PASSWORD"
+            export PGSSLMODE=verify-full PGSSLROOTCERT=/opt/silicon-briefcase/aws-rds-global-bundle.pem
+
+            for attempt in $(seq 1 90); do
+              if pg_isready --timeout=5 >/dev/null 2>&1; then
+                break
+              fi
+              if [ "$attempt" -eq 90 ]; then
+                echo 'RDS did not become ready in time.' >&2
+                exit 1
+              fi
+              sleep 5
+            done
+
+            # The two runtime roles differ in exactly one attribute, and the
+            # processes refuse to start if it is wrong: the API must not be
+            # able to see across tenants, and the worker must.
+            psql --set=ON_ERROR_STOP=1 \
+              --set=api_password="$API_DB_PASSWORD" \
+              --set=worker_password="$WORKER_DB_PASSWORD" <<'SQL'
+            DO $roles$
+            BEGIN
+              IF pg_catalog.to_regrole('briefcase_api') IS NULL THEN
+                CREATE ROLE briefcase_api LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+                                          NOREPLICATION NOINHERIT NOBYPASSRLS;
+              END IF;
+              IF pg_catalog.to_regrole('briefcase_worker') IS NULL THEN
+                CREATE ROLE briefcase_worker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+                                             NOREPLICATION NOINHERIT BYPASSRLS;
+              END IF;
+            END;
+            $roles$;
+            ALTER ROLE briefcase_api PASSWORD :'api_password' NOBYPASSRLS;
+            ALTER ROLE briefcase_worker PASSWORD :'worker_password' BYPASSRLS;
+            SQL
+
+            # Every migration grants the roles it needs to, so they exist
+            # before the schema does. Migrations are the only thing that ever
+            # runs as the master principal.
+            DB_MASTER_PASSWORD_URI=$(printf '%s' "$DB_MASTER_PASSWORD" | jq -sRr @uri)
+            SSL='sslmode=verify-full&sslrootcert=/opt/silicon-briefcase/aws-rds-global-bundle.pem'
+            MIGRATOR_DATABASE_URL="postgresql://$DB_MASTER_USER:$DB_MASTER_PASSWORD_URI@$DB_HOST:5432/briefcase?$SSL"
+            docker run --rm --network host --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 \
+              --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro \
+              --env BRIEFCASE_ENVIRONMENT=production \
+              --env BRIEFCASE_LOG_FILTER=silicon_briefcase=info \
+              --env BRIEFCASE_MIGRATOR_DATABASE_URL="$MIGRATOR_DATABASE_URL" \
+              --env BRIEFCASE_MIGRATOR_DATABASE_MAX_CONNECTIONS=2 \
+              --env BRIEFCASE_MIGRATOR_DATABASE_ACQUIRE_TIMEOUT_SECONDS=10 \
+              --env BRIEFCASE_MIGRATOR_DATABASE_STATEMENT_TIMEOUT_SECONDS=300 \
+              "$BACKEND_IMAGE" briefcase-migrate
+
+            API_DB_PASSWORD_URI=$(printf '%s' "$API_DB_PASSWORD" | jq -sRr @uri)
+            WORKER_DB_PASSWORD_URI=$(printf '%s' "$WORKER_DB_PASSWORD" | jq -sRr @uri)
+            API_DB_URL="postgresql://briefcase_api:$API_DB_PASSWORD_URI@$DB_HOST:5432/briefcase?$SSL"
+            WORKER_DB_URL="postgresql://briefcase_worker:$WORKER_DB_PASSWORD_URI@$DB_HOST:5432/briefcase?$SSL"
+
+            cat > /etc/silicon-briefcase/api.env <<EOF
+            BRIEFCASE_ENVIRONMENT=production
+            BRIEFCASE_BIND_ADDR=0.0.0.0:8080
+            BRIEFCASE_PUBLIC_BASE_URL=https://$PUBLIC_HOST/api/v1/
+            BRIEFCASE_PUBLIC_SITE_BASE_URL=$PUBLIC_SITE_BASE_URL
+            BRIEFCASE_REQUEST_TIMEOUT_SECONDS=15
+            BRIEFCASE_UPLOAD_TIMEOUT_SECONDS=900
+            BRIEFCASE_RESTORE_TIMEOUT_SECONDS=172800
+            BRIEFCASE_MAX_JSON_BODY_BYTES=1048576
+            BRIEFCASE_MAX_CONCURRENT_REQUESTS=1024
+            BRIEFCASE_MAX_CONCURRENT_RESTORES=2
+            BRIEFCASE_SHUTDOWN_TIMEOUT_SECONDS=30
+            BRIEFCASE_DATABASE_URL=$API_DB_URL
+            BRIEFCASE_DATABASE_MAX_CONNECTIONS=24
+            BRIEFCASE_DATABASE_MIN_CONNECTIONS=1
+            BRIEFCASE_DATABASE_ACQUIRE_TIMEOUT_SECONDS=3
+            BRIEFCASE_DATABASE_STATEMENT_TIMEOUT_SECONDS=10
+            BRIEFCASE_IAM_BASE_URL=$IAM_BASE_URL
+            BRIEFCASE_IAM_BEARER_INTROSPECTION_PATH=auth/tokens/introspect
+            BRIEFCASE_IAM_USERINFO_PATH=oauth/userinfo
+            BRIEFCASE_IAM_OBO_VERIFICATION_PATH=obo-access/verify
+            BRIEFCASE_IAM_APP_ID=$IAM_APP_ID
+            BRIEFCASE_IAM_AUDIENCE=$IAM_AUDIENCE
+            BRIEFCASE_IAM_CONNECT_TIMEOUT_MS=500
+            BRIEFCASE_IAM_REQUEST_TIMEOUT_MS=2000
+            BRIEFCASE_IAM_MAX_RESPONSE_BYTES=1048576
+            BRIEFCASE_IAM_WEBHOOK_KEY_VERSION=1
+            BRIEFCASE_IAM_WEBHOOK_REPLAY_WINDOW_SECONDS=300
+            BRIEFCASE_IAM_WEBHOOK_MAX_BODY_BYTES=262144
+            BRIEFCASE_S3_REGION=$REGION
+            BRIEFCASE_S3_BUCKET=$BUCKET
+            BRIEFCASE_S3_KEY_PREFIX=organizations
+            BRIEFCASE_S3_FORCE_PATH_STYLE=false
+            BRIEFCASE_S3_ENCRYPTION_MODE=sse_s3
+            BRIEFCASE_S3_OPERATION_TIMEOUT_SECONDS=1800
+            BRIEFCASE_TEMPORARY_DIRECTORY=/var/lib/silicon-briefcase/staging
+            BRIEFCASE_LOG_FILTER=silicon_briefcase=info,tower_http=info
+            AWS_REGION=$REGION
+            EOF
+            printf '%s' "$APP_SECRET_JSON" | jq -r '
+              [ "BRIEFCASE_IAM_APP_SECRET=" + .BRIEFCASE_IAM_APP_SECRET,
+                "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET=" + .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET ] | .[]
+            ' >> /etc/silicon-briefcase/api.env
+
+            cat > /etc/silicon-briefcase/worker.env <<EOF
+            BRIEFCASE_ENVIRONMENT=production
+            BRIEFCASE_WORKER_DATABASE_URL=$WORKER_DB_URL
+            BRIEFCASE_DATABASE_MAX_CONNECTIONS=8
+            BRIEFCASE_DATABASE_MIN_CONNECTIONS=1
+            BRIEFCASE_DATABASE_ACQUIRE_TIMEOUT_SECONDS=3
+            BRIEFCASE_DATABASE_STATEMENT_TIMEOUT_SECONDS=10
+            BRIEFCASE_S3_REGION=$REGION
+            BRIEFCASE_S3_BUCKET=$BUCKET
+            BRIEFCASE_S3_KEY_PREFIX=organizations
+            BRIEFCASE_S3_FORCE_PATH_STYLE=false
+            BRIEFCASE_S3_ENCRYPTION_MODE=sse_s3
+            BRIEFCASE_S3_OPERATION_TIMEOUT_SECONDS=1800
+            BRIEFCASE_TEMPORARY_DIRECTORY=/var/lib/silicon-briefcase/staging
+            BRIEFCASE_WORKER_BATCH_SIZE=100
+            BRIEFCASE_WORKER_CLEANUP_CONCURRENCY=4
+            BRIEFCASE_WORKER_POLL_INTERVAL_MS=500
+            BRIEFCASE_WORKER_LEASE_SECONDS=60
+            BRIEFCASE_WORKER_MAX_ATTEMPTS=20
+            BRIEFCASE_WORKER_MAX_RETRY_DELAY_SECONDS=300
+            BRIEFCASE_WORKER_MAINTENANCE_INTERVAL_SECONDS=60
+            BRIEFCASE_LOG_FILTER=silicon_briefcase=info
+            AWS_REGION=$REGION
+            EOF
+            chmod 0600 /etc/silicon-briefcase/api.env /etc/silicon-briefcase/worker.env
+
+            # Host networking keeps the instance role reachable from inside the
+            # container, which both processes need in order to read and write S3.
+            cat > /etc/systemd/system/silicon-briefcase-api.service <<EOF
+            [Unit]
+            Description=Silicon Briefcase production API
+            Requires=docker.service
+            After=docker.service network-online.target
+
+            [Service]
+            Restart=always
+            RestartSec=5
+            TimeoutStopSec=45
+            ExecStartPre=-/usr/bin/docker rm -f silicon-briefcase-api
+            ExecStart=/usr/bin/docker run --name silicon-briefcase-api --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --env-file /etc/silicon-briefcase/api.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/api --log-opt tag=api "$BACKEND_IMAGE" briefcase-api
+            ExecStop=/usr/bin/docker stop --time 35 silicon-briefcase-api
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            cat > /etc/systemd/system/silicon-briefcase-worker.service <<EOF
+            [Unit]
+            Description=Silicon Briefcase production worker
+            Requires=docker.service
+            After=docker.service network-online.target silicon-briefcase-api.service
+
+            [Service]
+            Restart=always
+            RestartSec=5
+            TimeoutStopSec=315
+            ExecStartPre=-/usr/bin/docker rm -f silicon-briefcase-worker
+            ExecStart=/usr/bin/docker run --name silicon-briefcase-worker --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --env-file /etc/silicon-briefcase/worker.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/worker --log-opt tag=worker "$BACKEND_IMAGE" briefcase-worker
+            ExecStop=/usr/bin/docker stop --time 310 silicon-briefcase-worker
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            systemctl daemon-reload
+            systemctl enable --now silicon-briefcase-api silicon-briefcase-worker
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - ApiListenerRule
+    Properties:
+      AutoScalingGroupName: silicon-briefcase-production
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref ApiTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 1200
+      NewInstancesProtectedFromScaleIn: false
+      Tags:
+        - Key: Service
+          Value: silicon-briefcase
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: production
+          PropagateAtLaunch: true
+
+Outputs:
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  ObjectStoreBucket:
+    Value: !Ref ObjectStore
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+  PublicHostName:
+    Value: !Ref PublicHostName
