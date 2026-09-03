@@ -41,6 +41,7 @@ mod middleware;
 mod state;
 pub mod upload;
 pub mod validation;
+pub mod versioning;
 mod webhook;
 
 use handlers::{content, entries, notifications, obo, permissions, system, usage};
@@ -198,6 +199,7 @@ fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(system::health))
         .route("/readyz", get(system::ready))
+        .route("/api/version", get(system::version))
         .route("/api/v1/version", get(system::version))
         .route(
             "/api/v1/entries",
@@ -327,7 +329,8 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 26] = [
+    const CONTRACT: [(&str, &str, &str); 27] = [
+        ("/version", "get", "200"),
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),

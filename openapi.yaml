@@ -22,6 +22,48 @@ tags:
   - name: Bin
   - name: Storage
 paths:
+  /version:
+    get:
+      tags: [Storage]
+      operationId: readApiVersion
+      summary: Report the API version and per-operation contract revisions
+      security: []
+      description: >-
+        The compatibility document a client reads before its first real call.
+        It names the API majors this build serves, the one selected for the
+        caller, and every operation with the revision of its request and
+        response shape.
+
+
+        A client advertises the majors it supports, newest first, in
+        `Briefcase-Supported-API-Versions`. The server answers with the newest
+        both sides support in `Briefcase-API-Version`, and `406` when there is
+        none. `Vary` names the request header, so a cache never serves one
+        client's selection to another.
+
+
+        An operation's `version` changes whenever its request or response shape
+        changes observably; adding an operation leaves the others alone. A
+        client that verifies its own operations against this list fails at
+        startup rather than at the first call that no longer means what it did.
+
+
+        Also served unversioned at `/api/version`, so a client can negotiate
+        before it knows which base path to use.
+      parameters:
+        - name: Briefcase-Supported-API-Versions
+          in: header
+          required: false
+          schema: { type: string }
+          description: API majors the client supports, newest first, comma separated
+      responses:
+        '200':
+          description: Compatibility document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiVersionDocument' }
+        '406': { description: The client supports no API version this build serves }
+        default: { $ref: '#/components/responses/Error' }
   /entries:
     get:
       tags: [Entries]
@@ -540,6 +582,25 @@ components:
         root_type: { type: string, enum: [public, private, tag], description: Required only when creating at organization root }
         tag: { type: string, description: Required for a tag root }
         invitees: { type: array, items: { $ref: '#/components/schemas/PermissionGrantCreate' } }
+    ApiVersionDocument:
+      type: object
+      required: [service, selected_api_version, supported_api_versions, contract_version, build, operations]
+      properties:
+        service: { type: string, const: silicon-briefcase }
+        selected_api_version: { type: string, examples: [v1] }
+        supported_api_versions: { type: array, items: { type: string }, description: Served majors, newest first }
+        contract_version: { type: string, description: Version of this document }
+        build: { type: string, description: Running backend package version }
+        operations:
+          type: array
+          items:
+            type: object
+            required: [id, version, method, path]
+            properties:
+              id: { type: string, description: operationId from this document }
+              version: { type: string, description: Revision of the request and response shape }
+              method: { type: string }
+              path: { type: string, description: Path below the versioned API base }
     OrganizationUsage:
       type: object
       required: [storage, daily_uploads]

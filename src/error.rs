@@ -66,6 +66,9 @@ pub enum AppError {
     /// Request processing exceeded its deadline.
     #[error("request processing deadline exceeded")]
     Timeout,
+    /// The caller supports no API version this build serves.
+    #[error("no mutually supported API version")]
+    UnsupportedApiVersion,
     /// The route exists but does not accept this method.
     #[error("method is not allowed for this route")]
     MethodNotAllowed,
@@ -194,6 +197,11 @@ impl AppError {
                 StatusCode::GATEWAY_TIMEOUT,
                 Cow::Borrowed("request_timeout"),
                 Cow::Borrowed("The request exceeded its processing deadline."),
+            ),
+            Self::UnsupportedApiVersion => (
+                StatusCode::NOT_ACCEPTABLE,
+                Cow::Borrowed("unsupported_api_version"),
+                Cow::Borrowed("This build serves no API version the caller supports."),
             ),
             Self::MethodNotAllowed => (
                 StatusCode::METHOD_NOT_ALLOWED,
