@@ -120,6 +120,19 @@ pub async fn run(cli: Cli) -> Result<()> {
 
 // ---- session ------------------------------------------------------------
 
+/// Hosted deployment used when no explicit or saved deployment is selected.
+const DEFAULT_API_URL: &str = "https://backend.briefcase.teamofsilicons.com/api/v1/";
+
+fn deployment_url(global: &GlobalArgs, saved: Option<&Profile>) -> String {
+    // Resolve the default here, not in clap: a parser default would override
+    // a saved local/private deployment and change where credentials are sent.
+    global
+        .url
+        .clone()
+        .or_else(|| saved.map(|profile| profile.url.clone()))
+        .unwrap_or_else(|| DEFAULT_API_URL.to_owned())
+}
+
 /// Resolved deployment, plane, and authentication for one invocation.
 struct ResolvedSession {
     profile_name: String,
@@ -150,15 +163,7 @@ fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<Resolved
         .clone()
         .unwrap_or(configuration.current_profile.clone());
     let saved = configuration.profiles.get(&profile_name);
-    let url = global
-        .url
-        .clone()
-        .or_else(|| saved.map(|profile| profile.url.clone()))
-        .ok_or_else(|| {
-            CliError::usage(
-                "no deployment configured: run `briefcase login` or pass --url and --org",
-            )
-        })?;
+    let url = deployment_url(global, saved);
     let org = global
         .org
         .clone()
@@ -410,10 +415,6 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         ));
     }
     let state = StateDirectory::locate()?;
-    let url = global
-        .url
-        .clone()
-        .ok_or_else(|| CliError::usage("--url is required to log in"))?;
     let org = global
         .org
         .clone()
@@ -441,6 +442,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         .clone()
         .or_else(|| global.profile.clone())
         .unwrap_or_else(|| configuration.current_profile.clone());
+    let url = deployment_url(global, configuration.profiles.get(&profile_name));
     let mut credentials = state.credentials()?;
     if let Some(previous) = configuration.profiles.get(&profile_name) {
         let previous_scope = scope_for(&previous.url, &previous.org)?;

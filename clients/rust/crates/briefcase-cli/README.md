@@ -6,8 +6,8 @@ download, and share organization files.
 ```bash
 cargo install briefcase-cli
 # First ask IAM for an organization-bound SLT for the canonical app:
-iam --org tos login --app-id 'tos>silicon-briefcase'
-briefcase login --url https://backend.briefcase.teamofsilicons.com/api/v1/ --org tos
+iam --org tos login --app-id 'tos>briefcase'
+briefcase login --org tos
 
 briefcase ls private/cos:tos/notes --long
 briefcase put ./report.pdf private/cos:tos/notes
@@ -22,6 +22,11 @@ rotating session and test root keys stored with owner-only permissions under
 `~/.briefcase/`, readable tables,
 `--json` for scripts, and exit codes that separate "not found, or not yours to
 see" (`3`) from "signed in, but not allowed" (`4`).
+
+The hosted Briefcase URL is automatic, including on first login. URL selection
+uses an explicit `--url`, then `BRIEFCASE_URL`, then the saved profile URL,
+then `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the optional
+override only for local development or another deployment.
 
 Paginated `ls`, `find`, and `bin list` commands return `items` plus the opaque
 `next_cursor` in JSON. Continue with `--cursor`, or use `--all` to follow every

@@ -27,18 +27,17 @@ terminal login:
 
 ```bash
 iam --org tos login --email you@example.com --app-id 'tos>briefcase'
-briefcase login \
-  --url https://backend.briefcase.teamofsilicons.com/api/v1/ \
-  --org tos
+briefcase login --org tos
 # Paste only the IAM short-lived token at the hidden prompt.
 ```
+
+The CLI connects to the hosted Briefcase service automatically. You do not
+need to find or enter a backend URL for normal use.
 
 For automation, pipe that one-use SLT instead of putting it in argv:
 
 ```bash
-printf '%s\n' "$BRIEFCASE_SLT" | briefcase login \
-  --url https://backend.briefcase.teamofsilicons.com/api/v1/ \
-  --org tos --slt-stdin
+printf '%s\n' "$BRIEFCASE_SLT" | briefcase login --org tos --slt-stdin
 ```
 
 The deployment and organization are saved in `~/.briefcase/config.json`.
@@ -51,8 +50,13 @@ sending the requested command. It records a refresh idempotency key before the
 network call, so an uncertain outcome reuses the exact token/key pair. A
 successful refresh invalidates the previous refresh token.
 
-The URL must be the exact `/api/v1/` base. HTTPS is required except on
-`localhost` or a loopback IP. Before presenting a single-use refresh token,
+For local development or a separate deployment, `--url` is an optional
+override. URL selection is, in order: an explicit `--url`, `BRIEFCASE_URL`,
+the saved profile URL, then `https://backend.briefcase.teamofsilicons.com/api/v1/`.
+This default also applies to commands in a fresh, unconfigured profile;
+organization and authentication requirements still apply. An override must
+use the exact `/api/v1/` base. HTTPS is required except on `localhost` or a
+loopback IP. Before presenting a single-use refresh token,
 the CLI performs the anonymous contract handshake unless `--no-verify` was
 explicitly selected, so an incompatible deployment cannot consume it.
 
@@ -74,11 +78,12 @@ profile's existing saved destination. An explicit `--token` authorizes its own
 production destination override; it never authorizes forwarding a stored test
 root.
 
-Several deployments at once:
+Save a named hosted profile, or explicitly select a local deployment:
 
 ```bash
-briefcase login --url … --org tos --save-as work
+briefcase login --org tos --save-as work
 briefcase --profile work ls
+briefcase login --url http://127.0.0.1:8080/api/v1/ --org tos --save-as local
 ```
 
 `--url`, `--org`, `--token`, and `--profile` also read `BRIEFCASE_URL`,
@@ -120,8 +125,7 @@ briefcase env create checkout-e2e \
 IAM 1.2 online authorization snapshots now bootstrap the caller's projection on first use. Do not change profile metadata to force a webhook. Obtain an organization-bound SLT inside the paired IAM test plane, then:
 
 ```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login \
-  --url https://backend.briefcase.teamofsilicons.com/api/v1/ --org tos
+briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
 briefcase --test "$BRIEFCASE_TEST_ID" ls
 ```
 
@@ -137,7 +141,7 @@ file.
 Every production command then works unchanged in the isolated plane:
 
 ```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login --url … --org tos
+briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
 briefcase --test "$BRIEFCASE_TEST_ID" mkdir reports --type private
 briefcase --test "$BRIEFCASE_TEST_ID" put report.pdf private/cos:test/reports
 briefcase --test "$BRIEFCASE_TEST_ID" ls --all
