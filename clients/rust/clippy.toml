@@ -1,0 +1,4 @@
+# Tests are allowed to unwrap: a failed assumption in a test should panic with
+# the line that made it, not be threaded through an error type.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
