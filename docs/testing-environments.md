@@ -194,10 +194,20 @@ briefcase env pair-iam "$BRIEFCASE_TEST_ID" \
 ```
 
 Re-pairing validates and replaces the complete IAM UUID/root/app-ID/app-secret
-tuple while preserving Briefcase UUID, root and data. It fences old in-flight
-configuration; the CLI discards the obsolete test session. Obtain a fresh SLT
-from the newly paired IAM plane. Rotating an IAM root or app secret without
-updating the pairing makes outbound IAM requests fail; there is no prod fallback.
+tuple while preserving Briefcase UUID, root and data. Once the sandbox has an
+IAM organization projection, keep the same IAM environment UUID when updating
+its root or Application secret. To use a different IAM environment, create a
+new Briefcase sandbox. A used sandbox rejects that switch with HTTP409
+`testing_environment_iam_rebind_requires_new_environment`; its existing pairing
+and data remain unchanged. Cleaning does not remove the IAM projection.
+
+A different UUID can be selected before the first IAM projection is created.
+This restriction prevents identical public handles in different IAM planes
+from silently inheriting existing file ownership and grants. Accepted pairing
+updates fence old in-flight configuration; the CLI discards the obsolete test
+session. Obtain a fresh SLT from the paired IAM plane. Rotating an IAM root or
+app secret without updating the pairing makes outbound IAM requests fail;
+there is no production fallback.
 
 Destructive actions below are for disposable test data only:
 

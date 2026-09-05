@@ -158,6 +158,13 @@ The management surface is:
 | Retire/restore | `delete_testing_environment`, `restore_testing_environment` |
 | Root-key-only self service | `current_testing_environment`, `clean_current_testing_environment` |
 
+IAM pairing updates may rotate credentials for the existing IAM environment.
+After the sandbox has an IAM organization projection, switching to a different
+IAM environment returns HTTP409
+`testing_environment_iam_rebind_requires_new_environment`; use a new Briefcase
+sandbox for that plane. The rejected update leaves existing data and pairing
+unchanged.
+
 Every environment mutation also has a `_with_key` form: create, update,
 delete, restore, root-key rotation, IAM re-pairing, managed cleaning, and
 root-key-only cleaning. The short convenience forms generate a new

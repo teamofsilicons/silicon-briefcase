@@ -165,7 +165,7 @@ impl AppError {
             Self::Conflict { code } => (
                 StatusCode::CONFLICT,
                 code.clone(),
-                Cow::Borrowed("The request conflicts with the current resource state."),
+                Cow::Borrowed(conflict_message(code)),
             ),
             Self::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -228,6 +228,14 @@ impl AppError {
                 Cow::Borrowed("An internal service error occurred."),
             ),
         }
+    }
+}
+
+fn conflict_message(code: &str) -> &'static str {
+    if code == "testing_environment_iam_rebind_requires_new_environment" {
+        "This sandbox already uses identities from its paired IAM environment. Create a new Briefcase sandbox to use a different IAM environment."
+    } else {
+        "The request conflicts with the current resource state."
     }
 }
 

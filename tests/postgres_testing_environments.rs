@@ -909,6 +909,258 @@ async fn hard_cleanup(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::manual_assert_eq,
+    reason = "credential comparisons must not include plaintext values in panic output"
+)]
+async fn assert_initialized_pairing_is_preserved(
+    store: &TestingEnvironmentStore,
+    repository: &PostgresRepository,
+    control_context: &ExecutionContext,
+    owner_context: &ExecutionContext,
+    environment: &TestingEnvironmentWithKey,
+    entry_id: EntryId,
+) -> anyhow::Result<()> {
+    let environment_id = environment.environment.id;
+    let existing = store
+        .resolve_root_key(&SecretString::from(environment.key.clone()))
+        .await?;
+    let different_realm = TestingEnvironmentIamPairing {
+        iam_environment_id: Uuid::now_v7(),
+        iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
+        iam_app_id: existing.iam_app_id.clone(),
+        iam_app_secret: SecretString::from(REPLACEMENT_IAM_APPLICATION_SECRET),
+    };
+    let rejected_mutation = mutation(format!("reject-realm-{environment_id}"), b"reject-realm")?;
+    let rejected = store
+        .replace_iam_pairing(
+            control_context,
+            environment_id,
+            &different_realm,
+            &rejected_mutation,
+        )
+        .await;
+    let Err(error) = rejected else {
+        panic!("an initialized plane must not switch immutable IAM identities");
+    };
+    assert_conflict(
+        error,
+        "testing_environment_iam_rebind_requires_new_environment",
+    );
+    assert!(
+        store
+            .replay_iam_pairing(control_context, environment_id, &rejected_mutation)
+            .await?
+            .is_none()
+    );
+    let unchanged = store
+        .resolve_root_key(&SecretString::from(environment.key.clone()))
+        .await?;
+    assert_eq!(unchanged.control_version, existing.control_version);
+    assert_eq!(unchanged.iam_environment_id, existing.iam_environment_id);
+    assert_eq!(unchanged.key_generation, existing.key_generation);
+    assert!(
+        unchanged.iam_environment_key.expose_secret()
+            == existing.iam_environment_key.expose_secret()
+    );
+    assert!(unchanged.iam_app_secret.expose_secret() == existing.iam_app_secret.expose_secret());
+    assert!(
+        repository
+            .find_active_entry(owner_context, entry_id)
+            .await?
+            .is_some()
+    );
+
+    let rotated_input = TestingEnvironmentIamPairing {
+        iam_environment_id: existing.iam_environment_id,
+        ..different_realm
+    };
+    let rotation = mutation(format!("rotate-realm-{environment_id}"), b"rotate-realm")?;
+    let rotated = store
+        .replace_iam_pairing(control_context, environment_id, &rotated_input, &rotation)
+        .await?;
+    assert_eq!(rotated.version, existing.control_version + 1);
+    assert_eq!(rotated.iam_environment_id, existing.iam_environment_id);
+    assert_eq!(rotated.key_generation, existing.key_generation);
+    let replayed = store
+        .replace_iam_pairing(control_context, environment_id, &rotated_input, &rotation)
+        .await?;
+    assert_eq!(replayed.version, rotated.version);
+    let fresh = execution(
+        owner_context.authorization().organization_id().as_str(),
+        owner_context.authorization().actor().id().as_str(),
+        Some(TestingEnvironmentContext::new(
+            environment_id,
+            rotated.version,
+        )),
+    )?;
+    assert!(
+        repository
+            .find_active_entry(&fresh, entry_id)
+            .await?
+            .is_some()
+    );
+    let grants = repository
+        .list_permission_grants(
+            &fresh,
+            &ListPermissionsQuery {
+                entry_id,
+                page: PageRequest::new(None, 100)?,
+            },
+        )
+        .await?;
+    assert_eq!(
+        grants.items.len(),
+        1,
+        "same-realm rotation must preserve grants"
+    );
+    Ok(())
+}
+
+async fn identity_probe_under_rls(
+    data: &PgPool,
+    context: &ExecutionContext,
+) -> anyhow::Result<(bool, i64)> {
+    let tenant = TenantContext::from_execution(context);
+    let mut transaction = begin_tenant_transaction(data, &tenant).await?;
+    sqlx::query("SET LOCAL ROLE briefcase_api")
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query_as::<_, (bool, i64)>(
+        "SELECT briefcase.current_testing_environment_has_iam_projection(), \
+                (SELECT count(*) FROM briefcase.organizations)",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn assert_identity_probe_rejects_context(
+    data: &PgPool,
+    context: &ExecutionContext,
+    mismatched_namespace: bool,
+) -> anyhow::Result<()> {
+    let tenant = TenantContext::from_execution(context);
+    let mut transaction = begin_tenant_transaction(data, &tenant).await?;
+    sqlx::query("SET LOCAL ROLE briefcase_api")
+        .execute(&mut *transaction)
+        .await?;
+    if mismatched_namespace {
+        sqlx::query("SELECT set_config('briefcase.org_id', 'wrong-namespace', true)")
+            .execute(&mut *transaction)
+            .await?;
+    }
+    let result = sqlx::query_scalar::<_, bool>(
+        "SELECT briefcase.current_testing_environment_has_iam_projection()",
+    )
+    .fetch_one(&mut *transaction)
+    .await;
+    transaction.rollback().await?;
+    let Err(error) = result else {
+        panic!("the projection probe must reject missing or mismatched sandbox context");
+    };
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("42501")
+    );
+    Ok(())
+}
+
+async fn set_identity_probe_fixture(
+    data: &PgPool,
+    context: &ExecutionContext,
+    present: bool,
+) -> anyhow::Result<()> {
+    let tenant = TenantContext::from_execution(context);
+    let mut transaction = begin_tenant_transaction(data, &tenant).await?;
+    let statement = if present {
+        "INSERT INTO briefcase.organizations (org_id) VALUES (briefcase.current_org_id())"
+    } else {
+        "DELETE FROM briefcase.organizations WHERE org_id = briefcase.current_org_id()"
+    };
+    sqlx::query(statement).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn assert_foreign_projection_prevents_rebinding(
+    data: &PgPool,
+    store: &TestingEnvironmentStore,
+    control_context: &ExecutionContext,
+    environment: &TestingEnvironmentWithKey,
+) -> anyhow::Result<()> {
+    let environment_id = environment.environment.id;
+    let selector = TestingEnvironmentContext::new(environment_id, environment.environment.version);
+    let owner_org = control_context.authorization().organization_id().as_str();
+    let actor = control_context.authorization().actor().id().as_str();
+    let owner_context = execution(owner_org, actor, Some(selector))?;
+    let foreign_org = format!("foreign-{}", Uuid::new_v4().simple());
+    let foreign_context = execution(&foreign_org, actor, Some(selector))?;
+    let other_context = execution(
+        &foreign_org,
+        actor,
+        Some(TestingEnvironmentContext::new(Uuid::now_v7(), 1)),
+    )?;
+    let outcome = AssertUnwindSafe(async {
+        assert_identity_probe_rejects_context(data, control_context, false).await?;
+        assert_identity_probe_rejects_context(data, &owner_context, true).await?;
+        set_identity_probe_fixture(data, &other_context, true).await?;
+        assert_eq!(
+            identity_probe_under_rls(data, &owner_context).await?,
+            (false, 0),
+            "another environment must not block a genuinely empty plane"
+        );
+        set_identity_probe_fixture(data, &foreign_context, true).await?;
+        assert_eq!(
+            identity_probe_under_rls(data, &owner_context).await?,
+            (true, 0),
+            "the boolean probe must see foreign projections without exposing their rows"
+        );
+        let pairing = TestingEnvironmentIamPairing {
+            iam_environment_id: Uuid::now_v7(),
+            iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
+            iam_app_id: environment.environment.iam_app_id.clone(),
+            iam_app_secret: SecretString::from(REPLACEMENT_IAM_APPLICATION_SECRET),
+        };
+        let metadata = mutation(format!("foreign-realm-{environment_id}"), b"foreign-realm")?;
+        let Err(error) = store
+            .replace_iam_pairing(control_context, environment_id, &pairing, &metadata)
+            .await
+        else {
+            panic!("a non-owner organization projection must block IAM realm replacement");
+        };
+        assert_conflict(
+            error,
+            "testing_environment_iam_rebind_requires_new_environment",
+        );
+        let unchanged = store.get(control_context, environment_id).await?;
+        assert_eq!(unchanged.version, environment.environment.version);
+        assert_eq!(
+            unchanged.iam_environment_id,
+            environment.environment.iam_environment_id
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+    let foreign_cleanup = set_identity_probe_fixture(data, &foreign_context, false).await;
+    let other_cleanup = set_identity_probe_fixture(data, &other_context, false).await;
+    match outcome {
+        Ok(result) => {
+            foreign_cleanup?;
+            other_cleanup?;
+            result
+        }
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
 async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Result<()> {
@@ -1024,6 +1276,15 @@ async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Res
         let authorization = visible_to_peer.authorization(peer_context.authorization());
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
         assert!(authorization.allows(Capability::Read));
+        assert_initialized_pairing_is_preserved(
+            &store,
+            &repository,
+            &control_context,
+            &owner_context,
+            &environment,
+            entry_id,
+        )
+        .await?;
         Ok(())
     })
     .catch_unwind()
@@ -1164,6 +1425,13 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
             "a replayable one-time root key must also be encrypted at rest"
         );
 
+        Box::pin(assert_foreign_projection_prevents_rebinding(
+            &data,
+            &store,
+            &control_context,
+            &environment_a,
+        ))
+        .await?;
         let replacement_pairing = TestingEnvironmentIamPairing {
             iam_environment_id: Uuid::now_v7(),
             iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
