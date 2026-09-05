@@ -15,6 +15,7 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use crate::{
+    application::testing::TESTING_ENVIRONMENT_STORAGE_LIMIT_BYTES,
     domain::quota::{OrganizationUsage, UploadLimit},
     error::AppError,
 };
@@ -26,6 +27,29 @@ macro_rules! utc_today {
     () => {
         "(clock_timestamp() AT TIME ZONE 'UTC')::date"
     };
+}
+
+/// Pins every sandbox organization to the product's exact storage ceiling.
+///
+/// Both webhook projection and online IAM reconciliation call this after the
+/// namespaced organization exists. That makes the limit independent of event
+/// delivery order and repairs any missing or stale sandbox usage row before a
+/// data-plane operation can spend storage.
+pub(super) async fn ensure_testing_environment_storage_limit(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(concat!(
+        "INSERT INTO briefcase.organization_usage (",
+        "org_id, daily_window, storage_limit_bytes) VALUES (",
+        "briefcase.current_org_id(), ",
+        utc_today!(),
+        ", $1) ON CONFLICT (org_id) DO UPDATE ",
+        "SET storage_limit_bytes = EXCLUDED.storage_limit_bytes"
+    ))
+    .bind(TESTING_ENVIRONMENT_STORAGE_LIMIT_BYTES)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 /// Reads what the organization currently consumes and the ceilings in force.
@@ -60,10 +84,8 @@ pub(super) async fn check_upload(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    read_usage(transaction)
-        .await?
-        .admits_upload(bytes)
-        .map_err(exhausted)
+    let result = read_usage(transaction).await?.admits_upload(bytes);
+    map_exhaustion(transaction, result).await
 }
 
 /// Refuses bytes the organization has no room to store.
@@ -76,10 +98,8 @@ pub(super) async fn check_storage(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    read_usage(transaction)
-        .await?
-        .admits_storage(bytes)
-        .map_err(exhausted)
+    let result = read_usage(transaction).await?.admits_storage(bytes);
+    map_exhaustion(transaction, result).await
 }
 
 /// Charges an upload against the daily allowance and the storage ceiling.
@@ -97,10 +117,10 @@ pub(super) async fn charge_upload(
     // not: the version row that moves it is inserted next. Asking whether the
     // organization still admits these bytes therefore answers both questions
     // at once — did the day have room, and does the storage.
-    usage
+    let result = usage
         .admits_upload(0)
-        .and_then(|()| usage.admits_storage(bytes))
-        .map_err(exhausted)
+        .and_then(|()| usage.admits_storage(bytes));
+    map_exhaustion(transaction, result).await
 }
 
 /// Claims storage for bytes that are copied rather than uploaded.
@@ -116,10 +136,8 @@ pub(super) async fn charge_storage(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    lock_usage(transaction, 0)
-        .await?
-        .admits_storage(bytes)
-        .map_err(exhausted)
+    let result = lock_usage(transaction, 0).await?.admits_storage(bytes);
+    map_exhaustion(transaction, result).await
 }
 
 /// Adds `daily_charge` to the day's counter and returns the locked row.
@@ -188,6 +206,27 @@ fn exhausted(limit: UploadLimit) -> AppError {
         limit,
         retry_after_seconds: limit.resets().then(seconds_until_utc_midnight),
     }
+}
+
+async fn map_exhaustion(
+    transaction: &mut Transaction<'_, Postgres>,
+    result: Result<(), UploadLimit>,
+) -> Result<(), AppError> {
+    let Err(limit) = result else {
+        return Ok(());
+    };
+    if limit == UploadLimit::Storage {
+        let testing = sqlx::query_scalar::<_, bool>(
+            "SELECT NULLIF(current_setting('briefcase.testing_environment_id', true), '') IS NOT NULL",
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+        if testing {
+            return Err(AppError::TestingEnvironmentStorageLimit);
+        }
+    }
+    Err(exhausted(limit))
 }
 
 fn seconds_until_utc_midnight() -> u64 {

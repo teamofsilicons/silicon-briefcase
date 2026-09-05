@@ -57,6 +57,9 @@ pub enum AppError {
         /// Seconds until the capacity returns, when waiting alone restores it.
         retry_after_seconds: Option<u64>,
     },
+    /// A sandbox reached its fixed two-GiB storage ceiling.
+    #[error("In test enviorment you are limited to a total storage of 2gb per enviorment.")]
+    TestingEnvironmentStorageLimit,
     /// A caller exceeded an abuse or capacity limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -174,20 +177,14 @@ impl AppError {
                 Cow::Borrowed("range_not_satisfiable"),
                 Cow::Borrowed("The requested byte range is outside the content."),
             ),
-            Self::UploadLimitExhausted { limit, .. } => match limit {
-                UploadLimit::DailyUpload => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Cow::Borrowed(UploadLimit::DailyUpload.code()),
-                    Cow::Borrowed(
-                        "The organization's daily upload allowance is spent. It resets at 00:00 UTC.",
-                    ),
+            Self::UploadLimitExhausted { limit, .. } => upload_limit_public_parts(*limit),
+            Self::TestingEnvironmentStorageLimit => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                Cow::Borrowed("testing_environment_storage_limit_exhausted"),
+                Cow::Borrowed(
+                    "In test enviorment you are limited to a total storage of 2gb per enviorment.",
                 ),
-                UploadLimit::Storage => (
-                    StatusCode::INSUFFICIENT_STORAGE,
-                    Cow::Borrowed(UploadLimit::Storage.code()),
-                    Cow::Borrowed("The organization has no storage capacity left."),
-                ),
-            },
+            ),
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Cow::Borrowed("rate_limited"),
@@ -231,6 +228,25 @@ impl AppError {
                 Cow::Borrowed("An internal service error occurred."),
             ),
         }
+    }
+}
+
+fn upload_limit_public_parts(
+    limit: UploadLimit,
+) -> (StatusCode, Cow<'static, str>, Cow<'static, str>) {
+    match limit {
+        UploadLimit::DailyUpload => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Cow::Borrowed(UploadLimit::DailyUpload.code()),
+            Cow::Borrowed(
+                "The organization's daily upload allowance is spent. It resets at 00:00 UTC.",
+            ),
+        ),
+        UploadLimit::Storage => (
+            StatusCode::INSUFFICIENT_STORAGE,
+            Cow::Borrowed(UploadLimit::Storage.code()),
+            Cow::Borrowed("The organization has no storage capacity left."),
+        ),
     }
 }
 

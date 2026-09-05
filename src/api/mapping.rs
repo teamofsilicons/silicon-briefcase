@@ -48,6 +48,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'#')
     .add(b'%')
     .add(b'/')
+    .add(b'\\')
     .add(b'<')
     .add(b'>')
     .add(b'?')
@@ -65,6 +66,36 @@ fn with_directory_path(mut base: Url) -> Url {
 
 fn encode_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT).to_string()
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_characters_remain_in_their_entry_segment() -> anyhow::Result<()> {
+        let base = Url::parse("https://briefcase.example/api/v1/")?;
+        let mapper = ResponseMapper::new(&base, Url::parse("https://site.example/")?);
+        let name = "résumé 猫 #1 %\\.md";
+        let path = EntryPath::new(format!("public/{name}"))?;
+        for url in [
+            mapper.permanent_url("example", &path)?,
+            mapper.content_url("example", &path, "inline")?,
+            mapper.content_url("example", &path, "attachment")?,
+        ] {
+            let segments = url
+                .path_segments()
+                .ok_or_else(|| anyhow::anyhow!("URL must have path segments"))?
+                .collect::<Vec<_>>();
+            assert_eq!(segments.len(), 4);
+            assert!(segments[3].contains("%5C"));
+            assert_eq!(
+                percent_encoding::percent_decode_str(segments[3]).decode_utf8()?,
+                name
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Builds public response representations with the configured canonical URLs.

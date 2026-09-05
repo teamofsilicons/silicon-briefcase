@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     application::{
-        context::ExecutionContext,
+        context::{ExecutionContext, TestingEnvironmentContext},
         idempotency::{IdempotencyKey, bytes_fingerprint},
         service::MutationMetadata,
     },
@@ -25,6 +25,10 @@ use crate::{
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
     },
     error::AppError,
+    infrastructure::{
+        iam::IamEnvironmentCredential,
+        testing::{TestingEnvironmentAccess, TestingEnvironmentUseFence},
+    },
     request_context,
 };
 
@@ -43,11 +47,31 @@ pub(crate) async fn authenticate(
     action: IamAction,
     resource: &str,
 ) -> Result<ExecutionContext, AppError> {
-    let authenticated = auth::authenticate(&state.iam, headers, action, resource).await?;
-    Ok(ExecutionContext::new(
-        authenticated.authorization().clone(),
-        authenticated.request_id(),
-    ))
+    let access = optional_testing_access(state, headers).await?;
+    if access.as_ref().is_some_and(|access| {
+        auth::organization_resource(headers).ok().as_deref() != Some(&access.owner_org_id)
+    }) {
+        return Err(AppError::NotFound);
+    }
+    let credential = access
+        .as_ref()
+        .map(iam_environment_credential)
+        .transpose()?;
+    let testing_environment = access.as_ref().map(|access| {
+        TestingEnvironmentContext::new(access.environment_id, access.control_version)
+    });
+    let authenticated = auth::authenticate(
+        &state.iam,
+        &state.metadata,
+        headers,
+        action,
+        resource,
+        credential.as_ref(),
+        testing_environment,
+    )
+    .await?;
+    touch_testing_access(state, access.as_ref()).await?;
+    Ok(execution_context(&authenticated, testing_environment))
 }
 
 pub(crate) async fn authenticate_bearer(
@@ -55,11 +79,151 @@ pub(crate) async fn authenticate_bearer(
     headers: &HeaderMap,
     action: IamAction,
 ) -> Result<ExecutionContext, AppError> {
-    let authenticated = auth::authenticate_bearer(&state.iam, headers, action).await?;
+    let access = optional_testing_access(state, headers).await?;
+    if access.as_ref().is_some_and(|access| {
+        auth::organization_resource(headers).ok().as_deref() != Some(&access.owner_org_id)
+    }) {
+        return Err(AppError::NotFound);
+    }
+    let credential = access
+        .as_ref()
+        .map(iam_environment_credential)
+        .transpose()?;
+    let testing_environment = access.as_ref().map(|access| {
+        TestingEnvironmentContext::new(access.environment_id, access.control_version)
+    });
+    let authenticated = auth::authenticate_bearer(
+        &state.iam,
+        &state.metadata,
+        headers,
+        action,
+        credential.as_ref(),
+        testing_environment,
+    )
+    .await?;
+    touch_testing_access(state, access.as_ref()).await?;
+    Ok(execution_context(&authenticated, testing_environment))
+}
+
+/// Authenticates lifecycle management strictly on the production plane.
+pub(crate) async fn production_authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ExecutionContext, AppError> {
+    if auth::testing_environment_key(headers)?.is_some() {
+        return Err(AppError::bad_request("production_control_plane_required"));
+    }
+    let authenticated = auth::authenticate_bearer(
+        &state.iam,
+        &state.metadata,
+        headers,
+        IamAction::ManageTestingEnvironments,
+        None,
+        None,
+    )
+    .await?;
     Ok(ExecutionContext::new(
         authenticated.authorization().clone(),
         authenticated.request_id(),
     ))
+}
+
+/// Resolves the required test-plane root key without treating it as actor auth.
+pub(crate) async fn testing_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<TestingEnvironmentAccess, AppError> {
+    optional_testing_access(state, headers)
+        .await?
+        .ok_or_else(|| AppError::bad_request("testing_environment_required"))
+}
+
+/// Resolves an optional sandbox selector for ordinary/auth-broker routes.
+pub(crate) async fn optional_testing_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<TestingEnvironmentAccess>, AppError> {
+    let Some(key) = auth::testing_environment_key(headers)? else {
+        return Ok(None);
+    };
+    let store = state
+        .testing
+        .as_ref()
+        .ok_or(AppError::DependencyUnavailable {
+            dependency: "testing_database",
+        })?;
+    store.resolve_root_key(&key).await.map(Some)
+}
+
+pub(crate) fn iam_environment_credential(
+    access: &TestingEnvironmentAccess,
+) -> Result<IamEnvironmentCredential, AppError> {
+    IamEnvironmentCredential::new(
+        access.iam_environment_key.clone(),
+        access.iam_app_id.clone(),
+        access.iam_app_secret.clone(),
+    )
+    .map(|credential| credential.with_environment_id(access.iam_environment_id))
+    .map_err(|_| AppError::Internal {
+        category: "testing_environment_iam_credential",
+    })
+}
+
+pub(crate) async fn touch_testing_access(
+    state: &AppState,
+    access: Option<&TestingEnvironmentAccess>,
+) -> Result<(), AppError> {
+    if let Some(access) = access {
+        state
+            .testing
+            .as_ref()
+            .ok_or(AppError::DependencyUnavailable {
+                dependency: "testing_database",
+            })?
+            .touch(access)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Acquires a shared lifecycle fence and revalidates the exact root generation.
+pub(crate) async fn testing_use_fence(
+    state: &AppState,
+    access: Option<&TestingEnvironmentAccess>,
+) -> Result<Option<TestingEnvironmentUseFence>, AppError> {
+    let Some(access) = access else {
+        return Ok(None);
+    };
+    let fence = state
+        .testing
+        .as_ref()
+        .ok_or(AppError::DependencyUnavailable {
+            dependency: "testing_database",
+        })?
+        .acquire_use_fence(access)
+        .await?;
+    Ok(Some(fence))
+}
+
+fn execution_context(
+    authenticated: &auth::AuthenticatedRequest,
+    testing_environment: Option<TestingEnvironmentContext>,
+) -> ExecutionContext {
+    testing_environment.map_or_else(
+        || {
+            ExecutionContext::new(
+                authenticated.authorization().clone(),
+                authenticated.request_id(),
+            )
+        },
+        |testing_environment| {
+            ExecutionContext::in_testing_environment(
+                authenticated.authorization().clone(),
+                authenticated.request_id(),
+                testing_environment,
+            )
+        },
+    )
 }
 
 pub(crate) async fn scoped<T>(context: &ExecutionContext, future: impl Future<Output = T>) -> T {

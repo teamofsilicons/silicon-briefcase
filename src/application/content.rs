@@ -944,9 +944,21 @@ where
             })
             .await
             .map_err(|error| map_object_error(&error))?;
-        self.repository
+        if let Err(error) = self
+            .repository
             .record_multipart_part(execution, upload_id, part_number, &etag, &staged)
-            .await?;
+            .await
+        {
+            // A clean can advance the environment generation after provider
+            // upload authorization but before this publication transaction.
+            // Abort again after a failed publication because S3 permits an
+            // already-in-flight part upload to finish after an earlier abort.
+            let _ = self
+                .objects
+                .abort_multipart(&target.target, &target.key, &target.provider_upload_id)
+                .await;
+            return Err(error);
+        }
         Ok(etag)
     }
 
@@ -1002,9 +1014,33 @@ where
                 }
             }
         };
-        self.repository
+        let mut cleanup = UnpublishedObjectGuard::destination(
+            Arc::clone(&self.objects),
+            preparation.target.clone(),
+            preparation.key.clone(),
+        );
+        cleanup.record_stored_object(&stored);
+        match self
+            .repository
             .commit_multipart_completion(context, command, &preparation, &stored)
             .await
+        {
+            Ok(entry_id) => {
+                cleanup.disarm();
+                Ok(entry_id)
+            }
+            Err(error)
+                if publication_failure_disposition(&error)
+                    == PublicationFailureDisposition::PreserveProviderState =>
+            {
+                cleanup.disarm();
+                Err(error)
+            }
+            Err(error) => {
+                cleanup.cleanup_now().await;
+                Err(error)
+            }
+        }
     }
 
     /// Aborts a multipart session and releases provider parts.

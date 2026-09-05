@@ -75,10 +75,7 @@ impl PostgresContentRepository {
     }
 
     fn platform_target(&self, context: &ExecutionContext) -> StorageTarget {
-        crate::infrastructure::s3::platform_storage_target(
-            &self.platform,
-            context.authorization().organization_id(),
-        )
+        platform_target_for_context(&self.platform, context)
     }
 }
 
@@ -1464,10 +1461,11 @@ async fn identify_storage_target<'a>(
     target: &StorageTarget,
     platform: &S3Settings,
 ) -> std::result::Result<StorageReference<'a>, AppError> {
-    let platform_target = crate::infrastructure::s3::platform_storage_target(
-        platform,
-        context.authorization().organization_id(),
-    );
+    // Preparation and commit must derive the platform namespace from the same
+    // authenticated plane. In a sandbox, comparing against the production
+    // organization prefix would misclassify a valid platform target as BYO
+    // storage after its object had already been written.
+    let platform_target = platform_target_for_context(platform, context);
     if target == &platform_target {
         return Ok(StorageReference {
             backend: "platform",
@@ -1495,6 +1493,15 @@ async fn identify_storage_target<'a>(
         backend: "organization",
         configuration_id: Some(configuration_id),
     })
+}
+
+fn platform_target_for_context(platform: &S3Settings, context: &ExecutionContext) -> StorageTarget {
+    let organization = context.authorization().organization_id().as_str();
+    let scope = context.testing_environment().map_or_else(
+        || organization.to_owned(),
+        |environment| format!("{}:{organization}", environment.id()),
+    );
+    crate::infrastructure::s3::platform_storage_target_for_scope(platform, &scope)
 }
 
 fn target_from_configuration(

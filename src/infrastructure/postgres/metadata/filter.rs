@@ -2,8 +2,9 @@
 //!
 //! Every user-supplied value is bound as a parameter; nothing from the filter
 //! text is ever concatenated into the statement. Permission predicates are
-//! compiled to `TRUE` here and decided by domain policy afterwards, because
-//! effective access is not a column.
+//! decided by domain policy because effective access is not a column. For a
+//! mixed expression, persistence projects each database predicate as a
+//! non-null boolean so policy can evaluate the original tree exactly.
 
 use sqlx::{Postgres, QueryBuilder};
 use time::Date;
@@ -15,6 +16,8 @@ use crate::domain::{
     media::{ALL_RENDER_KINDS, RenderKind},
 };
 
+use super::common::{OwnedAncestorPrincipal, push_owned_ancestor_access};
+
 /// The lowercase extension of an entry name, or `NULL` when it has none.
 const EXTENSION: &str = r"lower(substring(entry.name from '\.([^.]+)$'))";
 
@@ -23,6 +26,10 @@ pub(in crate::infrastructure::postgres) fn push_expression(
     builder: &mut QueryBuilder<Postgres>,
     expression: &FilterExpression,
 ) {
+    debug_assert!(
+        !expression.requires_policy_evaluation(),
+        "permission predicates require service-side exact evaluation"
+    );
     match expression {
         FilterExpression::All(children) => push_group(builder, children, " AND "),
         FilterExpression::Any(children) => push_group(builder, children, " OR "),
@@ -32,6 +39,52 @@ pub(in crate::infrastructure::postgres) fn push_expression(
             builder.push(")");
         }
         FilterExpression::Predicate(predicate) => push_predicate(builder, predicate),
+    }
+}
+
+/// Appends a boolean array containing every database-backed predicate result
+/// in depth-first source order.
+///
+/// When an expression mixes persistence facts with effective permissions, the
+/// complete expression cannot be weakened independently in SQL and Rust: `or`
+/// and `not` would change meaning. Persistence therefore returns its atomic
+/// truth values and the service evaluates the original tree once domain policy
+/// has supplied the permission truth values.
+pub(in crate::infrastructure::postgres) fn push_database_predicate_matches(
+    builder: &mut QueryBuilder<Postgres>,
+    expression: &FilterExpression,
+) {
+    builder.push("ARRAY[");
+    let mut count = 0_usize;
+    push_database_predicates(builder, expression, &mut count);
+    builder.push("]::boolean[]");
+}
+
+fn push_database_predicates(
+    builder: &mut QueryBuilder<Postgres>,
+    expression: &FilterExpression,
+    count: &mut usize,
+) {
+    match expression {
+        FilterExpression::Predicate(FilterPredicate::HasPermission(_)) => {}
+        FilterExpression::Predicate(predicate) => {
+            if *count > 0 {
+                builder.push(", ");
+            }
+            // SQL WHERE treats UNKNOWN like false. Preserve that behavior in
+            // the projected array and keep nullable facts (for example, an
+            // extensionless file's suffix) decodable as `Vec<bool>`.
+            builder.push("COALESCE((");
+            push_predicate(builder, predicate);
+            builder.push("), FALSE)");
+            *count += 1;
+        }
+        FilterExpression::Not(inner) => push_database_predicates(builder, inner, count),
+        FilterExpression::All(children) | FilterExpression::Any(children) => {
+            for child in children {
+                push_database_predicates(builder, child, count);
+            }
+        }
     }
 }
 
@@ -114,8 +167,7 @@ fn push_predicate(builder: &mut QueryBuilder<Postgres>, predicate: &FilterPredic
             builder.push(r" ESCAPE '\'");
         }
         FilterPredicate::HasPermission(_) => {
-            // Decided by domain policy once the candidate is authorized.
-            builder.push("TRUE");
+            unreachable!("permission predicates are evaluated by domain policy")
         }
     }
 }
@@ -177,8 +229,8 @@ fn push_shared_with(builder: &mut QueryBuilder<Postgres>, selector: &ActorSelect
 
 fn push_accessible_to(builder: &mut QueryBuilder<Postgres>, selector: &ActorSelector) {
     // Reachability for another member is evaluated exactly like the caller's
-    // own: ownership, the Public boundary, a matching tag, an administrative
-    // role, or an explicit grant.
+    // own: ownership (including an owned containing folder), the Public
+    // boundary, a matching tag, an administrative role, or an explicit grant.
     builder.push(
         "EXISTS (SELECT 1 FROM briefcase.organization_members AS reader \
                   WHERE reader.org_id = entry.org_id \
@@ -209,8 +261,10 @@ fn push_accessible_to(builder: &mut QueryBuilder<Postgres>, selector: &ActorSele
                        AND reader_grant.principal_id = reader.actor_id \
                        AND reader_grant.revoked_at IS NULL \
                        AND (reader_path.depth = 0 OR reader_grant.inherits_to_descendants)) \
-         ))",
+             OR ",
     );
+    push_owned_ancestor_access(builder, OwnedAncestorPrincipal::Reader);
+    builder.push("))");
 }
 
 fn push_render_match(builder: &mut QueryBuilder<Postgres>, kind: RenderKind) {

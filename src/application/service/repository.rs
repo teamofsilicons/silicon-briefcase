@@ -2,11 +2,12 @@
 
 use async_trait::async_trait;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
-    application::context::ExecutionContext,
+    application::context::{ExecutionContext, TestingEnvironmentContext},
     domain::{
-        actor::{ActorRef, OrganizationId},
+        actor::{ActorKind, OrganizationId},
         entry::{EntryBoundary, EntryPath},
         ids::{AccessRequestId, EntryId, GrantId},
         notification::NotificationInbox,
@@ -19,7 +20,7 @@ use super::model::{
     AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
     CreateFolderMutation, DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand,
     ListBinQuery, ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata,
-    Page, ProjectedMembership, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
+    Page, ProjectedIdentity, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
     SearchQuery, UpdateEntryCommand,
 };
 
@@ -41,6 +42,28 @@ pub enum MetadataRepositoryError {
     /// Unexpected adapter failure retained as a source for internal telemetry.
     #[error("internal metadata repository failure")]
     Internal(#[source] anyhow::Error),
+}
+
+/// IAM introspection facts used to resolve one webhook-projected identity.
+///
+/// Keeping the cross-bound identity tuple together makes it harder for an
+/// adapter to accidentally omit one of the values that must match.
+#[derive(Clone, Copy, Debug)]
+pub struct TokenAuthorizationQuery<'a> {
+    /// Organization selected and verified by IAM.
+    pub organization_id: &'a OrganizationId,
+    /// IAM actor namespace for the principal.
+    pub actor_kind: ActorKind,
+    /// Immutable IAM principal identifier.
+    pub principal_id: Uuid,
+    /// Current organization-membership identifier.
+    pub membership_id: Uuid,
+    /// Current authorization epoch carried by the token.
+    pub authorization_epoch: i64,
+    /// Correlation identifier for the database transaction.
+    pub request_id: &'a str,
+    /// Selected Briefcase sandbox, when the token came from an IAM test plane.
+    pub testing_environment: Option<TestingEnvironmentContext>,
 }
 
 /// Metadata persistence required by contracted application use cases.
@@ -212,17 +235,12 @@ pub trait MetadataRepository: Send + Sync {
         required_capability: Capability,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
 
-    /// Reads the projected organization role and tags of one member.
-    ///
-    /// IAM's OBO result names the represented actor but carries no role or
-    /// tags, so an application request derives them from Briefcase's own IAM
-    /// projection instead of assuming them.
-    async fn project_member_authorization(
+    /// Resolves an introspected principal and membership UUID to its current
+    /// public actor identity, role, and tags from IAM webhook snapshots.
+    async fn project_token_authorization(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-        request_id: &str,
-    ) -> Result<Option<ProjectedMembership>, MetadataRepositoryError>;
+        query: &TokenAuthorizationQuery<'_>,
+    ) -> Result<Option<ProjectedIdentity>, MetadataRepositoryError>;
 
     /// Materializes the calling application's folder for the represented actor.
     async fn ensure_application_folder(

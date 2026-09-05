@@ -11,6 +11,7 @@ use crate::{
     },
     config::WebhookSettings,
     infrastructure::iam::IamClient,
+    infrastructure::testing::TestingEnvironmentStore,
 };
 use sqlx::PgPool;
 
@@ -29,4 +30,5 @@ pub(crate) struct AppState {
     pub(crate) mapper: ResponseMapper,
     pub(crate) temporary_directory: PathBuf,
     pub(crate) webhook_settings: WebhookSettings,
+    pub(crate) testing: Option<Arc<TestingEnvironmentStore>>,
 }

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::anyhow;
 use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, QueryBuilder, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -30,6 +30,18 @@ use super::super::{
 
 pub(in crate::infrastructure::postgres) type Result<T> =
     std::result::Result<T, MetadataRepositoryError>;
+
+/// Trusted actor expression used by the shared owned-ancestor SQL predicate.
+#[derive(Clone, Copy)]
+pub(in crate::infrastructure::postgres) enum OwnedAncestorPrincipal<'a> {
+    /// Bind a concrete actor, optionally matching either principal kind.
+    Bound {
+        kind: Option<ActorKind>,
+        id: &'a str,
+    },
+    /// Correlate with the `reader` membership alias used by `accessible-to`.
+    Reader,
+}
 
 pub(in crate::infrastructure::postgres) struct RequestTransaction<'pool> {
     pub(in crate::infrastructure::postgres) context: TenantContext,
@@ -61,12 +73,17 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     repository: &'pool PostgresRepository,
     execution: &ExecutionContext,
 ) -> Result<RequestTransaction<'pool>> {
-    let context =
-        TenantContext::from_auth(execution.authorization(), execution.request_id().to_owned());
+    let context = TenantContext::from_execution(execution);
     let mut transaction = repository.begin(&context).await.map_err(map_sql)?;
     let authorization = execution.authorization();
     let actor = authorization.actor();
     let caller = (actor_kind(actor.kind()), actor.id().as_str());
+    if let Some(binding) = authorization.iam_binding() {
+        super::super::roots::lock_organization_reconciliation(&mut transaction)
+            .await
+            .map_err(map_sql)?;
+        synchronize_iam_snapshot(&mut transaction, authorization, binding).await?;
+    }
     let caller_is_current = caller_projection_is_current(&mut transaction, authorization).await?;
     let roots_are_consistent = caller_is_current
         && super::super::roots::system_roots_are_consistent(&mut transaction, caller)
@@ -91,10 +108,77 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
                 .map_err(map_sql)?;
         }
     }
+    if execution.testing_environment().is_some() {
+        super::super::quota::ensure_testing_environment_storage_limit(&mut transaction)
+            .await
+            .map_err(map_sql)?;
+    }
     Ok(RequestTransaction {
         context,
         transaction,
     })
+}
+
+/// Only complete online snapshots enter here. Serialize with signed webhooks
+/// and reject older membership versions/epochs instead of rolling back access.
+async fn synchronize_iam_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    authorization: &crate::domain::actor::RequestAuthContext,
+    binding: &crate::domain::actor::IamMembershipBinding,
+) -> Result<()> {
+    let organization = sqlx::query_scalar::<_, String>(
+        "INSERT INTO briefcase.organizations (org_id, iam_organization_id, iam_version, lifecycle_status) \
+         VALUES (briefcase.current_org_id(), $1, 0, 'active') \
+         ON CONFLICT (org_id) DO UPDATE SET iam_organization_id = EXCLUDED.iam_organization_id \
+         WHERE (organizations.iam_organization_id IS NULL OR organizations.iam_organization_id = $1) \
+           AND organizations.lifecycle_status = 'active' RETURNING org_id",
+    ).bind(binding.organization_id).fetch_optional(&mut **transaction).await.map_err(map_sql)?;
+    if organization.is_none() {
+        return Err(MetadataRepositoryError::NotFound);
+    }
+    let actor = authorization.actor();
+    let member = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO briefcase.organization_members \
+         (org_id, actor_type, actor_id, org_role, membership_status, iam_version, principal_id, membership_id, authorization_epoch) \
+         VALUES (briefcase.current_org_id(), $1, $2, $3, 'active', $4, $5, $6, $7) \
+         ON CONFLICT (org_id, actor_type, actor_id) DO UPDATE SET \
+           org_role = EXCLUDED.org_role, membership_status = 'active', iam_version = EXCLUDED.iam_version, \
+           principal_id = EXCLUDED.principal_id, membership_id = EXCLUDED.membership_id, authorization_epoch = EXCLUDED.authorization_epoch \
+         WHERE organization_members.iam_version <= EXCLUDED.iam_version \
+           AND (organization_members.authorization_epoch IS NULL OR organization_members.authorization_epoch <= EXCLUDED.authorization_epoch) \
+           AND (organization_members.principal_id IS NULL OR organization_members.principal_id = EXCLUDED.principal_id) \
+           AND (organization_members.membership_id IS NULL OR organization_members.membership_id = EXCLUDED.membership_id) \
+           AND (organization_members.membership_status = 'active' OR organization_members.iam_version < EXCLUDED.iam_version) \
+         RETURNING iam_version",
+    ).bind(actor_kind(actor.kind())).bind(actor.id().as_str()).bind(organization_role(authorization.role()))
+        .bind(binding.membership_version).bind(binding.principal_id).bind(binding.membership_id)
+        .bind(binding.authorization_epoch).fetch_optional(&mut **transaction).await.map_err(map_sql)?;
+    if member.is_none() {
+        return Err(MetadataRepositoryError::NotFound);
+    }
+    // Online authority contains tag IDs but not tag aggregate versions. Seed
+    // missing tags at zero; never rename/reactivate an existing tag from an
+    // unversioned name. Even two online snapshots can arrive out of order.
+    for (id, name) in &binding.tags {
+        let tag = sqlx::query_scalar::<_, String>(
+            "INSERT INTO briefcase.organization_tags (org_id, tag_id, name, lifecycle_status, iam_version) \
+             VALUES (briefcase.current_org_id(), $1, $2, 'active', 0) \
+             ON CONFLICT (org_id, tag_id) DO UPDATE SET name = EXCLUDED.name, lifecycle_status = 'active' \
+             WHERE organization_tags.name = EXCLUDED.name AND organization_tags.lifecycle_status = 'active' \
+             RETURNING tag_id",
+        ).bind(id.to_string()).bind(name.as_str()).fetch_optional(&mut **transaction).await.map_err(map_sql)?;
+        if tag.is_none() {
+            return Err(MetadataRepositoryError::NotFound);
+        }
+    }
+    sqlx::query("DELETE FROM briefcase.organization_member_tags WHERE org_id = briefcase.current_org_id() AND actor_type = $1 AND actor_id = $2")
+        .bind(actor_kind(actor.kind())).bind(actor.id().as_str()).execute(&mut **transaction).await.map_err(map_sql)?;
+    for (id, _) in &binding.tags {
+        sqlx::query("INSERT INTO briefcase.organization_member_tags (org_id, actor_type, actor_id, tag_id, iam_version) VALUES (briefcase.current_org_id(), $1, $2, $3, $4)")
+            .bind(actor_kind(actor.kind())).bind(actor.id().as_str()).bind(id.to_string()).bind(binding.membership_version)
+            .execute(&mut **transaction).await.map_err(map_sql)?;
+    }
+    Ok(())
 }
 
 async fn caller_projection_is_current(
@@ -130,7 +214,17 @@ async fn caller_projection_is_current(
     .map_err(map_sql)?;
 
     Ok(projected.as_ref().is_some_and(|projected| {
-        caller_projection_matches(projected, authorization.role(), authorization.tags())
+        // OBO carries deliberately attenuated role/tag authority, not a new
+        // directory snapshot. Its request must never downgrade that snapshot.
+        if authorization
+            .authentication()
+            .originating_application()
+            .is_some()
+        {
+            projected.membership_status == "active"
+        } else {
+            caller_projection_matches(projected, authorization.role(), authorization.tags())
+        }
     }))
 }
 
@@ -171,22 +265,37 @@ async fn refresh_caller_projection(
     .execute(&mut **transaction)
     .await
     .map_err(map_sql)?;
-    // Online IAM supplies current authorization facts but no aggregate version.
-    // Refresh those facts without lowering the webhook high-water mark.
+    // Request authority is not a directory update. Only unsigned bootstrap
+    // rows may be refreshed; a concurrent signed snapshot always wins.
+    let is_obo = authorization
+        .authentication()
+        .originating_application()
+        .is_some();
     let member_version = sqlx::query_scalar::<_, i64>(
         "INSERT INTO briefcase.organization_members ( \
                 org_id, actor_type, actor_id, org_role, membership_status, iam_version \
          ) VALUES (briefcase.current_org_id(), $1, $2, $3, 'active', 0) \
          ON CONFLICT (org_id, actor_type, actor_id) DO UPDATE \
              SET org_role = EXCLUDED.org_role, membership_status = 'active' \
+             WHERE NOT $4 AND organization_members.iam_version = 0 \
          RETURNING iam_version",
     )
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
     .bind(organization_role(authorization.role()))
-    .fetch_one(&mut **transaction)
+    .bind(is_obo)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sql)?;
+
+    // Insert a baseline only for a previously unseen represented actor. In
+    // particular, preserve a webhook arriving between the read and insert.
+    if is_obo {
+        return Ok(());
+    }
+    let Some(member_version) = member_version else {
+        return Ok(());
+    };
 
     let mut tag_ids = BTreeSet::new();
     for tag in authorization.tags() {
@@ -308,11 +417,12 @@ pub(in crate::infrastructure::postgres) async fn build_authorizable(
         has_visible_descendant(transaction, execution, row.entry_id).await?
     };
     Ok(AuthorizableEntry {
-        entry: entry_view(&row, tag_name.as_deref())?,
+        entry: entry_view(&row, tag_name.as_deref(), execution)?,
         system_kind: system_kind(row.system_kind.as_deref())?,
         grants,
         owns_ancestor,
         required_for_traversal,
+        database_filter_matches: Vec::new(),
     })
 }
 
@@ -328,29 +438,67 @@ async fn owns_containing_folder(
     entry_id: Uuid,
 ) -> Result<bool> {
     let actor = execution.authorization().actor();
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS ( \
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
+    push_owned_ancestor_access(
+        &mut builder,
+        OwnedAncestorPrincipal::Bound {
+            kind: Some(actor.kind()),
+            id: actor.id().as_str(),
+        },
+    );
+    // The shared predicate is correlated on `entry`; provide the target row
+    // exactly as the listing/search queries do.
+    builder.push(" FROM briefcase.entries AS entry WHERE entry.org_id = briefcase.current_org_id() AND entry.entry_id = ");
+    builder.push_bind(entry_id);
+    builder
+        .build_query_scalar::<bool>()
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_sql)
+}
+
+/// Appends the SQL equivalent of the domain's owned-ancestor read rule.
+///
+/// Both search and `accessible-to` filtering must use this predicate before
+/// their result limits are applied. Otherwise a peer-created descendant that
+/// policy permits its containing-folder owner to read is discarded before
+/// domain authorization gets a chance to confirm it.
+pub(in crate::infrastructure::postgres) fn push_owned_ancestor_access(
+    builder: &mut QueryBuilder<Postgres>,
+    principal: OwnedAncestorPrincipal<'_>,
+) {
+    builder.push(
+        "EXISTS ( \
              SELECT 1 \
-               FROM briefcase.entry_closure AS path \
-               JOIN briefcase.entries AS ancestor \
-                 ON ancestor.org_id = path.org_id AND ancestor.entry_id = path.ancestor_id \
-              WHERE path.org_id = briefcase.current_org_id() \
-                AND path.descendant_id = $1 \
-                AND path.depth > 0 \
-                AND ancestor.entry_type = 'folder' \
-                AND ancestor.owner_type = $2 AND ancestor.owner_id = $3 \
-                AND ( \
-                    ancestor.system_kind IS NULL \
-                    OR ancestor.system_kind = 'actor_root' \
+               FROM briefcase.entry_closure AS owned_path \
+               JOIN briefcase.entries AS owned_ancestor \
+                 ON owned_ancestor.org_id = owned_path.org_id \
+                AND owned_ancestor.entry_id = owned_path.ancestor_id \
+              WHERE owned_path.org_id = entry.org_id \
+                AND owned_path.descendant_id = entry.entry_id \
+                AND owned_path.depth > 0 \
+                AND owned_ancestor.entry_type = 'folder' \
+                AND owned_ancestor.owner_id = ",
+    );
+    match principal {
+        OwnedAncestorPrincipal::Bound { kind, id } => {
+            builder.push_bind(id.to_owned());
+            if let Some(kind) = kind {
+                builder.push(" AND owned_ancestor.owner_type = ");
+                builder.push_bind(actor_kind(kind));
+            }
+        }
+        OwnedAncestorPrincipal::Reader => {
+            builder.push("reader.actor_id AND owned_ancestor.owner_type = reader.actor_type");
+        }
+    }
+    builder.push(
+        " AND ( \
+                    owned_ancestor.system_kind IS NULL \
+                    OR owned_ancestor.system_kind = 'actor_root' \
                 ) \
          )",
-    )
-    .bind(entry_id)
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sql)
+    );
 }
 
 async fn load_relevant_grants(
@@ -417,7 +565,7 @@ async fn load_relevant_grants(
                 created_at: row.created_at,
             };
             Ok(ResolvedPermissionGrant {
-                grant: permission_grant(grant_row)?,
+                grant: permission_grant(&grant_row, execution)?,
                 scope: if row.depth == 0 {
                     ResolvedGrantScope::Direct
                 } else {
@@ -485,8 +633,9 @@ async fn has_visible_descendant(
 pub(in crate::infrastructure::postgres) fn entry_view(
     row: &EntryRow,
     tag_name: Option<&str>,
+    execution: &ExecutionContext,
 ) -> Result<EntryView> {
-    let organization_id = OrganizationId::new(row.org_id.clone()).map_err(invalid_data)?;
+    let organization_id = public_organization_id(&row.org_id, execution)?;
     let boundary = match row.root_type.as_str() {
         "public" => EntryBoundary::Public,
         "private" => EntryBoundary::Private,
@@ -537,11 +686,13 @@ pub(in crate::infrastructure::postgres) fn entry_view(
 }
 
 pub(in crate::infrastructure::postgres) fn permission_grant(
-    row: PermissionGrantRow,
+    row: &PermissionGrantRow,
+    execution: &ExecutionContext,
 ) -> Result<PermissionGrant> {
+    let organization_id = public_organization_id(&row.org_id, execution)?;
     Ok(PermissionGrant::from_parts(PermissionGrantParts {
         id: GrantId::from_uuid(row.grant_id).map_err(invalid_data)?,
-        organization_id: OrganizationId::new(row.org_id).map_err(invalid_data)?,
+        organization_id,
         entry_id: EntryId::from_uuid(row.entry_id).map_err(invalid_data)?,
         principal: actor_ref(&row.principal_type, &row.principal_id)?,
         access: decode_access(row.access_mask)?,
@@ -549,6 +700,25 @@ pub(in crate::infrastructure::postgres) fn permission_grant(
         granted_by: actor_ref(&row.granted_by_type, &row.granted_by_id)?,
         created_at: row.created_at,
     }))
+}
+
+/// Converts the database tenant key back to IAM's public organization ID.
+///
+/// Testing environments deliberately namespace the persisted tenant key. That
+/// storage-only value must neither escape through the API nor enter domain
+/// policy, while a row outside the authenticated storage tenant must still be
+/// rejected even if a query or RLS invariant regresses.
+fn public_organization_id(
+    stored_organization_id: &str,
+    execution: &ExecutionContext,
+) -> Result<OrganizationId> {
+    let tenant = TenantContext::from_execution(execution);
+    if stored_organization_id != tenant.org_id() {
+        return Err(internal(
+            "persisted row belongs to a different storage tenant",
+        ));
+    }
+    Ok(execution.authorization().organization_id().clone())
 }
 
 pub(in crate::infrastructure::postgres) fn actor_ref(kind: &str, id: &str) -> Result<ActorRef> {
@@ -830,6 +1000,11 @@ pub(in crate::infrastructure::postgres) fn retention_deadline() -> OffsetDateTim
 pub(in crate::infrastructure::postgres) fn map_sql(error: sqlx::Error) -> MetadataRepositoryError {
     match &error {
         sqlx::Error::RowNotFound => MetadataRepositoryError::NotFound,
+        sqlx::Error::Protocol(message)
+            if message == super::super::repository::STALE_TESTING_ENVIRONMENT_CONTEXT =>
+        {
+            MetadataRepositoryError::Conflict
+        }
         sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => {
             MetadataRepositoryError::Unavailable
         }
@@ -859,9 +1034,17 @@ fn invalid_data(error: impl std::error::Error + Send + Sync + 'static) -> Metada
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::domain::actor::{OrganizationRole, TagName};
+    use uuid::Uuid;
 
-    use super::{ProjectedCaller, caller_projection_matches};
+    use crate::{
+        application::context::{ExecutionContext, TestingEnvironmentContext},
+        domain::actor::{
+            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
+            RequestAuthContext, TagName,
+        },
+    };
+
+    use super::{ProjectedCaller, caller_projection_matches, public_organization_id};
 
     fn tag(value: &str) -> TagName {
         match TagName::new(value) {
@@ -919,5 +1102,42 @@ mod tests {
             OrganizationRole::Member,
             &[tag("finance"), tag("research")].into_iter().collect()
         ));
+    }
+
+    #[test]
+    fn storage_tenant_projection_returns_public_org_and_rejects_mismatches() -> anyhow::Result<()> {
+        let public_org = OrganizationId::new("test-org")?;
+        let authorization = RequestAuthContext::new(
+            public_org.clone(),
+            ActorRef::new(ActorKind::Carbon, ActorId::new("tester")?),
+            OrganizationRole::Member,
+            Vec::new(),
+            AuthenticationMode::Bearer,
+        );
+        let production = ExecutionContext::new(
+            authorization.clone(),
+            "production-storage-tenant-projection-test",
+        );
+        assert_eq!(public_organization_id("test-org", &production)?, public_org);
+        assert!(public_organization_id("another-tenant", &production).is_err());
+
+        let environment = TestingEnvironmentContext::new(Uuid::now_v7(), 7);
+        let execution = ExecutionContext::in_testing_environment(
+            authorization,
+            "storage-tenant-projection-test",
+            environment,
+        );
+        let stored_organization_id = format!("{}:test-org", environment.id());
+
+        assert_eq!(
+            public_organization_id(&stored_organization_id, &execution)?,
+            public_org
+        );
+        assert!(public_organization_id("test-org", &execution).is_err());
+        assert!(public_organization_id("another-tenant", &execution).is_err());
+        assert!(
+            public_organization_id(&format!("{}:test-org", Uuid::now_v7()), &execution).is_err()
+        );
+        Ok(())
     }
 }

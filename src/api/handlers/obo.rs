@@ -12,16 +12,17 @@ use serde::Deserialize;
 use crate::{
     application::{
         content::{StagedContent, UploadCommand},
-        context::ExecutionContext,
+        context::{ExecutionContext, TestingEnvironmentContext},
         idempotency::{IdempotencyKey, upload_fingerprint},
     },
     domain::{
+        actor::RequestAuthContext,
         entry::{EntryName, EntryPath},
         ids::EntryId,
         multipart::MAX_UPLOAD_BYTES,
     },
     error::AppError,
-    infrastructure::iam::OboRequestBinding,
+    infrastructure::{iam::OboRequestBinding, testing::TestingEnvironmentAccess},
     request_context,
 };
 
@@ -61,13 +62,21 @@ pub(crate) async fn create_file(
 ) -> Result<(StatusCode, Json<EntryDto>), AppError> {
     let (application, proof) = auth::obo_credentials(&headers)?;
     let declared_organization = auth::optional_organization(&headers)?;
+    let testing_access = extract::optional_testing_access(&state, &headers).await?;
+    let iam_environment = testing_access
+        .as_ref()
+        .map(extract::iam_environment_credential)
+        .transpose()?;
 
-    // The proof commits to the digest of the exact bytes, so they are staged
-    // and hashed before IAM is asked to consume it.
     let file = upload::stage_body(body, state.temporary_directory.clone(), MAX_UPLOAD_BYTES)
         .await
         .map_err(extract::map_staging_error)?;
     let body_sha256 = hex::encode(file.sha256());
+    // Do not hold the lifecycle fence while an untrusted caller streams its
+    // body. Once staged, acquire it through single-use IAM proof verification
+    // and exact activity touch. Repository transactions take their own shared
+    // fence, avoiding a second simultaneous test-pool connection here.
+    let fence = extract::testing_use_fence(&state, testing_access.as_ref()).await?;
 
     let verified = state
         .iam
@@ -80,10 +89,20 @@ pub(crate) async fn create_file(
                 path: CREATE_FILE_PATH,
                 body_sha256: &body_sha256,
             },
+            iam_environment.as_ref(),
         )
         .await?;
     if verified.endpoint_id != CREATE_FILE_ENDPOINT_ID {
         return Err(AppError::Forbidden);
+    }
+    accept_testing_access(
+        &state,
+        testing_access.as_ref(),
+        verified.organization_id.as_str(),
+    )
+    .await?;
+    if let Some(fence) = fence {
+        fence.release().await?;
     }
 
     let metadata: CreateFileMetadata = serde_json::from_value(verified.metadata.clone())
@@ -99,17 +118,8 @@ pub(crate) async fn create_file(
     let request_id = request_context::current_request_id().ok_or(AppError::Internal {
         category: "request_scope_missing",
     })?;
-    let authorization = state
-        .metadata
-        .represented_authority(
-            &verified.organization_id,
-            &verified.actor,
-            verified.issuer.clone(),
-            &request_id,
-        )
-        .await
-        .map_err(metadata_error)?;
-    let context = ExecutionContext::new(authorization, request_id);
+    let authorization = verified.authorization.clone().ok_or(AppError::Forbidden)?;
+    let context = represented_context(authorization, request_id, testing_access.as_ref());
 
     let parent_id = destination_folder(&state, &context, destination.as_ref()).await?;
     let resource = parent_id.to_string();
@@ -142,14 +152,38 @@ pub(crate) async fn create_file(
         size: file.size(),
         sha256: *file.sha256(),
     };
-    // The size decides the storage route, so an application uploads a file of
-    // any supported size through this one endpoint.
     let entry_id =
         extract::scoped(&context, state.content.upload(&context, &command, staged)).await?;
     let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
     Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
+}
+
+async fn accept_testing_access(
+    state: &AppState,
+    access: Option<&TestingEnvironmentAccess>,
+    verified_org_id: &str,
+) -> Result<(), AppError> {
+    if access.is_some_and(|access| access.owner_org_id != verified_org_id) {
+        return Err(AppError::NotFound);
+    }
+    extract::touch_testing_access(state, access).await
+}
+
+fn represented_context(
+    authorization: RequestAuthContext,
+    request_id: String,
+    access: Option<&TestingEnvironmentAccess>,
+) -> ExecutionContext {
+    match access {
+        Some(access) => ExecutionContext::in_testing_environment(
+            authorization,
+            request_id,
+            TestingEnvironmentContext::new(access.environment_id, access.control_version),
+        ),
+        None => ExecutionContext::new(authorization, request_id),
+    }
 }
 
 /// Resolves the bound destination, defaulting to the application's own folder.

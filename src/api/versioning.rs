@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "0.1.0";
+pub const CONTRACT_VERSION: &str = "0.3.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,8 +44,87 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 27] = [
+pub const OPERATIONS: [OperationVersion; 42] = [
     operation("readApiVersion", "1.0.0", "GET", "/version"),
+    operation("exchangeShortLivedToken", "1.0.0", "POST", "/auth/slt"),
+    operation(
+        "refreshApplicationSession",
+        "1.0.0",
+        "POST",
+        "/auth/refresh",
+    ),
+    operation(
+        "listTestingEnvironments",
+        "1.0.0",
+        "GET",
+        "/organizations/{org_id}/testing-environments",
+    ),
+    operation(
+        "createTestingEnvironment",
+        "1.0.0",
+        "POST",
+        "/organizations/{org_id}/testing-environments",
+    ),
+    operation(
+        "getTestingEnvironment",
+        "1.0.0",
+        "GET",
+        "/organizations/{org_id}/testing-environments/{environment_id}",
+    ),
+    operation(
+        "updateTestingEnvironment",
+        "1.0.0",
+        "PATCH",
+        "/organizations/{org_id}/testing-environments/{environment_id}",
+    ),
+    operation(
+        "deleteTestingEnvironment",
+        "1.0.0",
+        "DELETE",
+        "/organizations/{org_id}/testing-environments/{environment_id}",
+    ),
+    operation(
+        "getTestingEnvironmentKey",
+        "1.0.0",
+        "GET",
+        "/organizations/{org_id}/testing-environments/{environment_id}/key",
+    ),
+    operation(
+        "rotateTestingEnvironmentKey",
+        "1.0.0",
+        "POST",
+        "/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
+    ),
+    operation(
+        "replaceTestingEnvironmentIamPairing",
+        "1.0.0",
+        "POST",
+        "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
+    ),
+    operation(
+        "cleanTestingEnvironment",
+        "1.0.0",
+        "POST",
+        "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
+    ),
+    operation(
+        "restoreTestingEnvironment",
+        "1.0.0",
+        "POST",
+        "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
+    ),
+    operation(
+        "describeCurrentTestingEnvironment",
+        "1.0.0",
+        "GET",
+        "/testing-environment",
+    ),
+    operation(
+        "cleanCurrentTestingEnvironment",
+        "1.0.0",
+        "POST",
+        "/testing-environment/cleanings",
+    ),
     operation("listEntries", "1.1.0", "GET", "/entries"),
     operation("createFolder", "1.1.0", "POST", "/entries"),
     operation("getEntry", "1.1.0", "GET", "/entries/{entry_id}"),
@@ -101,6 +180,7 @@ pub const OPERATIONS: [OperationVersion; 27] = [
         "POST",
         "/entries/{entry_id}/access-requests",
     ),
+    operation("requestAccessByPath", "1.0.0", "POST", "/access-requests"),
     operation(
         "decideAccessRequest",
         "1.0.0",
