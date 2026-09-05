@@ -152,6 +152,9 @@ deploy_stack() {
 
 # The image tag is baked into the launch template's user data, so a new build
 # reaches production by replacing the instance rather than by restarting it.
+# Keep the existing instance healthy until its replacement is ready and warm.
+# An explicit 200% ceiling permits one surge instance for the singleton group;
+# the target group's separate 900-second drain still protects in-flight uploads.
 refresh_instances() {
   local asg
   asg=$(stack_output AutoScalingGroupName)
@@ -162,7 +165,7 @@ refresh_instances() {
   refresh_id=$(aws autoscaling start-instance-refresh \
     --region "$AWS_REGION" \
     --auto-scaling-group-name "$asg" \
-    --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":600,"SkipMatching":false}' \
+    --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200,"InstanceWarmup":600,"SkipMatching":true}' \
     --query InstanceRefreshId --output text)
   printf 'instance refresh %s started\n' "$refresh_id"
 

@@ -79,9 +79,6 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     let actor = authorization.actor();
     let caller = (actor_kind(actor.kind()), actor.id().as_str());
     if let Some(binding) = authorization.iam_binding() {
-        super::super::roots::lock_organization_reconciliation(&mut transaction)
-            .await
-            .map_err(map_sql)?;
         synchronize_iam_snapshot(&mut transaction, authorization, binding).await?;
     }
     let caller_is_current = caller_projection_is_current(&mut transaction, authorization).await?;
@@ -121,11 +118,14 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
 
 /// Only complete online snapshots enter here. Serialize with signed webhooks
 /// and reject older membership versions/epochs instead of rolling back access.
-async fn synchronize_iam_snapshot(
+pub(crate) async fn synchronize_iam_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
     authorization: &crate::domain::actor::RequestAuthContext,
     binding: &crate::domain::actor::IamMembershipBinding,
 ) -> Result<()> {
+    super::super::roots::lock_organization_reconciliation(transaction)
+        .await
+        .map_err(map_sql)?;
     let organization = sqlx::query_scalar::<_, String>(
         "INSERT INTO briefcase.organizations (org_id, iam_organization_id, iam_version, lifecycle_status) \
          VALUES (briefcase.current_org_id(), $1, 0, 'active') \

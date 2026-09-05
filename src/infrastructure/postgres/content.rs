@@ -90,11 +90,11 @@ impl ContentRepository for PostgresContentRepository {
     ) -> std::result::Result<Prepared<SmallUploadPreparation, EntryId>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
         quota::check_upload(&mut request.transaction, staged.size).await?;
-        let parent = require_parent(
+        let parent = require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
-            Capability::CreateChild,
+            command.name.as_str(),
         )
         .await?;
         let proposed_entry_id = EntryId::new();
@@ -121,12 +121,6 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        ensure_name_is_versionable(
-            &mut request.transaction,
-            command.parent_id,
-            command.name.as_str(),
-        )
-        .await?;
         let (target, _, _) = resolve_write_target(
             &mut request.transaction,
             context,
@@ -158,11 +152,11 @@ impl ContentRepository for PostgresContentRepository {
             return Err(conflict("stored_object_checksum_mismatch"));
         }
         let mut request = content_begin(&self.repository, context).await?;
-        let parent = require_parent(
+        let parent = require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
-            Capability::CreateChild,
+            command.name.as_str(),
         )
         .await?;
         ensure_idempotency_in_progress(
@@ -254,11 +248,11 @@ impl ContentRepository for PostgresContentRepository {
     ) -> std::result::Result<Prepared<MultipartPreparation, MultipartReceipt>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
         quota::check_upload(&mut request.transaction, command.size).await?;
-        require_parent(
+        require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
-            Capability::CreateChild,
+            command.name.as_str(),
         )
         .await?;
         let proposed_upload_id = MultipartUploadId::new();
@@ -288,12 +282,6 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        ensure_name_is_versionable(
-            &mut request.transaction,
-            command.parent_id,
-            command.name.as_str(),
-        )
-        .await?;
         let (target, _, _) = resolve_write_target(
             &mut request.transaction,
             context,
@@ -322,11 +310,11 @@ impl ContentRepository for PostgresContentRepository {
             return Err(AppError::validation("invalid_provider_upload_id"));
         }
         let mut request = content_begin(&self.repository, context).await?;
-        require_parent(
+        require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
-            Capability::CreateChild,
+            command.name.as_str(),
         )
         .await?;
         ensure_idempotency_in_progress(
@@ -437,11 +425,11 @@ impl ContentRepository for PostgresContentRepository {
         let plan = multipart_plan(&row)?;
         plan.expected_part_size(part_number)
             .map_err(|_| AppError::validation("invalid_part_number"))?;
-        require_parent(
+        require_upload_parent(
             &mut request.transaction,
             context,
             EntryId::from_uuid(row.parent_entry_id).map_err(internal_error)?,
-            Capability::CreateChild,
+            &row.name,
         )
         .await?;
         let target =
@@ -485,11 +473,11 @@ impl ContentRepository for PostgresContentRepository {
         {
             return Err(AppError::validation("invalid_part_size"));
         }
-        require_parent(
+        require_upload_parent(
             &mut request.transaction,
             context,
             EntryId::from_uuid(row.parent_entry_id).map_err(internal_error)?,
-            Capability::CreateChild,
+            &row.name,
         )
         .await?;
         PostgresRepository::upsert_multipart_part(
@@ -528,11 +516,11 @@ impl ContentRepository for PostgresContentRepository {
         if multipart_completion_expired(&row.status, row.expires_at, OffsetDateTime::now_utc()) {
             return Err(conflict("multipart_expired"));
         }
-        require_parent(
+        require_upload_parent(
             &mut request.transaction,
             context,
             EntryId::from_uuid(row.parent_entry_id).map_err(internal_error)?,
-            Capability::CreateChild,
+            &row.name,
         )
         .await?;
         let proposed_entry_id = EntryId::new();
@@ -619,13 +607,8 @@ impl ContentRepository for PostgresContentRepository {
             return Err(conflict("multipart_state"));
         }
         let parent_id = EntryId::from_uuid(row.parent_entry_id).map_err(internal_error)?;
-        let parent = require_parent(
-            &mut request.transaction,
-            context,
-            parent_id,
-            Capability::CreateChild,
-        )
-        .await?;
+        let parent =
+            require_upload_parent(&mut request.transaction, context, parent_id, &row.name).await?;
         ensure_idempotency_in_progress(
             &mut request.transaction,
             &request.context,
@@ -1325,11 +1308,19 @@ async fn content_begin<'pool>(
     begin(repository, context).await.map_err(map_metadata)
 }
 
-async fn require_parent(
+/// Locks an upload destination and checks the operation it would perform now.
+///
+/// Replacing a shared file requires update authority on that file, not write
+/// authority on its folder. A new name still requires folder write authority.
+/// Every upload phase repeats this check: a removed or renamed target must not
+/// let an update-only grant create a new file, and a newly occupied name must
+/// not let a folder-write grant replace somebody else's file. Parent and child
+/// locks stay held through the phase's transaction.
+async fn require_upload_parent(
     transaction: &mut Transaction<'_, Postgres>,
     context: &ExecutionContext,
     parent_id: EntryId,
-    capability: Capability,
+    name: &str,
 ) -> std::result::Result<AuthorizableEntry, AppError> {
     let parent = load_entry(transaction, context, parent_id, false, true)
         .await
@@ -1338,7 +1329,21 @@ async fn require_parent(
     if parent.entry.kind != EntryKind::Folder {
         return Err(AppError::NotFound);
     }
-    require_entry_capability(&parent, context, capability)?;
+    if let Some((entry_id, kind)) = find_named_child(transaction, parent_id, name, true).await? {
+        if kind != "file" {
+            // Preserve the normal parent visibility/creation checks before
+            // revealing a collision at a name that cannot be versioned.
+            require_entry_capability(&parent, context, Capability::CreateChild)?;
+            return Err(conflict("entry_name_exists"));
+        }
+        let entry = load_entry(transaction, context, entry_id, false, false)
+            .await
+            .map_err(map_metadata)?
+            .ok_or(AppError::NotFound)?;
+        require_entry_capability(&entry, context, Capability::WriteContent)?;
+    } else {
+        require_entry_capability(&parent, context, Capability::CreateChild)?;
+    }
     Ok(parent)
 }
 
@@ -1411,18 +1416,6 @@ async fn find_named_child(
             .map(|entry_id| (entry_id, row.entry_type))
     })
     .transpose()
-}
-
-/// Rejects an upload whose name is taken by something that cannot be versioned.
-async fn ensure_name_is_versionable(
-    transaction: &mut Transaction<'_, Postgres>,
-    parent_id: EntryId,
-    name: &str,
-) -> std::result::Result<(), AppError> {
-    match find_named_child(transaction, parent_id, name, false).await? {
-        Some((_, kind)) if kind != "file" => Err(conflict("entry_name_exists")),
-        Some(_) | None => Ok(()),
-    }
 }
 
 async fn resolve_write_target(
@@ -1709,7 +1702,7 @@ async fn find_version(
 /// Uploading over an existing file is how a file is updated, so the bytes
 /// become that file's next version and its history keeps the previous ones.
 /// Replacing content requires update authority on the file itself; creating a
-/// new one required create authority on the folder.
+/// new one requires create authority on the folder.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn publish_file_content(
     transaction: &mut Transaction<'_, Postgres>,
@@ -1752,6 +1745,7 @@ async fn publish_file_content(
         )
         .await;
     }
+    require_entry_capability(parent, execution, Capability::CreateChild)?;
     let actor = execution.authorization().actor();
     let (root_type, _) = boundary_columns(&parent.entry.boundary);
     let version_id = VersionId::new();

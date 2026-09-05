@@ -21,7 +21,7 @@ use super::{
 pub enum AccessRight {
     /// View and download the entry.
     Read,
-    /// Add new content: children in a folder, or bytes in a file.
+    /// Add new content by creating children in a folder.
     Write,
     /// Change what already exists: rename, move, or replace content.
     Update,
@@ -267,7 +267,7 @@ impl<'a> GrantApplication<'a> {
 
 /// A fine-grained operation checked by domain policy.
 ///
-/// The public API still exposes only `read`, `write`, `delete`, and
+/// The public API exposes `read`, `write`, `update`, `delete`, and
 /// `manage_permissions`. Separating child creation and existing-entry mutation
 /// prevents Public upload rights from broadening into rename or delete rights.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -395,10 +395,10 @@ impl CapabilitySet {
         if self.contains(Capability::Read) {
             access.push(EffectiveAccess::Read);
         }
-        if self.contains(Capability::CreateChild) || self.contains(Capability::WriteContent) {
+        if self.contains(Capability::CreateChild) {
             access.push(EffectiveAccess::Write);
         }
-        if self.contains(Capability::UpdateMetadata) {
+        if self.contains(Capability::UpdateMetadata) || self.contains(Capability::WriteContent) {
             access.push(EffectiveAccess::Update);
         }
         if self.contains(Capability::Delete) {
@@ -890,11 +890,7 @@ mod tests {
         assert!(!authorization.allows(Capability::ManagePermissions));
         assert_eq!(
             authorization.capabilities().effective_access(),
-            vec![
-                EffectiveAccess::Read,
-                EffectiveAccess::Write,
-                EffectiveAccess::Update
-            ]
+            vec![EffectiveAccess::Read, EffectiveAccess::Update]
         );
     }
 

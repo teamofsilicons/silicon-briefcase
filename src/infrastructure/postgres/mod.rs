@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub use content::PostgresContentRepository;
+pub(crate) use metadata::common::synchronize_iam_snapshot;
 pub use models::{
     AccessRequestRow, AuditEventRow, EntryRow, EntryVersionRow, IdempotencyRecordRow,
     MultipartPartRow, MultipartUploadRow, OrganizationMemberRow, OrganizationRow,
