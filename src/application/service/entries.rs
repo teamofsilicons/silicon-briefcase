@@ -394,7 +394,12 @@ impl MetadataService {
             .ok_or(MetadataServiceError::NotFound)?;
         require_capability(&source, context, Capability::UpdateMetadata)?;
 
-        if let Some(parent_id) = command.parent_id {
+        // Supplying the existing parent is still a rename, not a move. File
+        // update authority must not require creating children in its parent.
+        if let Some(parent_id) = command
+            .parent_id
+            .filter(|parent_id| Some(*parent_id) != source.entry.parent_id)
+        {
             let destination = self
                 .repository
                 .find_active_entry(context, parent_id)

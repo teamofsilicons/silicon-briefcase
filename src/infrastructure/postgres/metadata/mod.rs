@@ -468,7 +468,13 @@ impl MetadataRepository for PostgresRepository {
         if current.system_kind.is_some() {
             return Err(MetadataRepositoryError::Conflict);
         }
-        if let Some(parent_id) = command.parent_id {
+        // Recompute under the source row lock: a concurrent move can turn a
+        // previously same-parent rename into a real move requiring destination
+        // and subtree authority. Keep the original command/idempotency binding.
+        let destination_parent_id = command
+            .parent_id
+            .filter(|parent_id| Some(*parent_id) != current.entry.parent_id);
+        if let Some(parent_id) = destination_parent_id {
             let parent = load_entry(&mut request.transaction, context, parent_id, false, true)
                 .await?
                 .ok_or(MetadataRepositoryError::NotFound)?;
@@ -479,7 +485,7 @@ impl MetadataRepository for PostgresRepository {
             }
             require_capability(&parent, context, Capability::CreateChild)?;
         }
-        if command.parent_id.is_some() && current.entry.kind == EntryKind::Folder {
+        if destination_parent_id.is_some() && current.entry.kind == EntryKind::Folder {
             lock_and_require_subtree_capability(
                 &mut request.transaction,
                 context,
@@ -529,7 +535,7 @@ impl MetadataRepository for PostgresRepository {
             &command.entry_id.to_string(),
             json!({
                 "renamed": command.name.is_some(),
-                "moved": command.parent_id.is_some(),
+                "moved": destination_parent_id.is_some(),
             }),
         )
         .await?;

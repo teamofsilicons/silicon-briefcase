@@ -11,6 +11,10 @@ briefcase --help                 # every command, every option
 briefcase ls --help              # one command in detail
 ```
 
+The SLT/session login and paired testing-environment commands require CLI
+0.1.2 or newer. Use 0.1.3 or newer for renaming and replacing individually
+shared files without needing independent access to their parent folder.
+
 See the [documentation index](../README.md) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
 
 Set uppercase shell variables such as `VERSION_ID`, `ENTRY_ID`, `GRANT_ID`,

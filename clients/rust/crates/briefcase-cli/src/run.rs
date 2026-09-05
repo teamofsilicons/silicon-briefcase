@@ -628,6 +628,40 @@ async fn stable_destination_id(
     }
 }
 
+async fn stable_upload_destination_id(
+    client: &Client,
+    upload: &Upload,
+    recovered: Option<&PendingMutation>,
+) -> Result<Uuid> {
+    match stable_destination_id(client, &upload.destination, recovered).await {
+        Err(CliError::Client(parent_error)) if parent_error.is_not_found() => {
+            let Destination::Path(parent_path) = &upload.destination else {
+                return Err(parent_error.into());
+            };
+            let file_name = upload.file_name.trim();
+            if file_name.is_empty()
+                || file_name.contains(['/', '\0'])
+                || matches!(file_name, "." | "..")
+            {
+                return Err(parent_error.into());
+            }
+            // A shared file may be readable/updatable while its parent is not
+            // independently readable. Its metadata supplies the same stable
+            // parent UUID without granting access to new sibling files. The
+            // backend still authorizes replacement versus creation atomically.
+            let path = format!("{}/{file_name}", parent_path.trim_matches('/'));
+            let existing = match client.entry_at(&path).await {
+                Ok(existing) if !existing.is_folder() => existing,
+                Ok(_) => return Err(parent_error.into()),
+                Err(error) if error.is_not_found() => return Err(parent_error.into()),
+                Err(error) => return Err(error.into()),
+            };
+            existing.parent_id.ok_or_else(|| parent_error.into())
+        }
+        result => result,
+    }
+}
+
 async fn file_identity(path: &std::path::Path) -> Result<(String, String)> {
     let canonical = tokio::fs::canonicalize(path)
         .await
@@ -977,7 +1011,7 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
         }))?;
         let recovered = durable_pending(&scope, &fingerprint)?;
         let destination_id =
-            stable_destination_id(&client, &upload.destination, recovered.as_ref()).await?;
+            stable_upload_destination_id(&client, &upload, recovered.as_ref()).await?;
         let pending = prepare_durable_mutation(&scope, &fingerprint, None, Some(destination_id))?;
         upload.destination =
             Destination::Id(pending.destination_id.ok_or_else(|| {
@@ -1066,14 +1100,23 @@ async fn move_entry(global: &GlobalArgs, args: &MvArgs, output: Output) -> Resul
         "destination": &args.destination,
     }))?;
     let recovered = durable_pending(&scope, &fingerprint)?;
-    let (resource_id, original_path) =
+    let (resource_id, original_path, original_parent_id) =
         if let Some(id) = recovered.as_ref().and_then(|pending| pending.resource_id) {
-            (id, args.target.to_string())
+            (id, args.target.to_string(), None)
         } else {
             let entry = resolve_entry(&client, &args.target).await?;
-            (entry.id, entry.path)
+            (entry.id, entry.path, entry.parent_id)
         };
+    // Reading a shared file does not imply that its parent is independently
+    // readable. A same-parent rename already has the destination UUID in the
+    // source metadata, so do not resolve that ancestor again. Persist/reuse
+    // the UUID exactly like a move so an uncertain retry keeps the same body.
+    let known_destination_id = recovered
+        .as_ref()
+        .and_then(|pending| pending.destination_id)
+        .or_else(|| original_parent_id.filter(|_| split_path(&original_path).0 == parent_path));
     let destination_id = match parent_path {
+        Some(_) if known_destination_id.is_some() => known_destination_id,
         Some(parent_path) => {
             let destination = Destination::path(parent_path);
             Some(stable_destination_id(&client, &destination, recovered.as_ref()).await?)

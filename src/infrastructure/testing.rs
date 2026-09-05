@@ -19,7 +19,7 @@ use crate::{
     application::{
         context::{ExecutionContext, TestingEnvironmentContext},
         ports::{ObjectKey, ObjectStore, ObjectStoreError, StorageTarget},
-        service::MutationMetadata,
+        service::{MetadataRepositoryError, MutationMetadata},
         testing::{
             MAX_ACTIVE_TESTING_ENVIRONMENTS, TestingEnvironment, TestingEnvironmentCleaning,
             TestingEnvironmentCreate, TestingEnvironmentCreator, TestingEnvironmentIamPairing,
@@ -36,7 +36,7 @@ use crate::{
         TenantContext, acquire_testing_environment_exclusive_lock,
         acquire_testing_environment_shared_session_lock, begin_tenant_transaction,
         begin_testing_environment_cleanup_transaction, release_testing_environment_exclusive_lock,
-        release_testing_environment_shared_session_lock,
+        release_testing_environment_shared_session_lock, synchronize_iam_snapshot,
     },
 };
 
@@ -671,8 +671,7 @@ impl TestingEnvironmentStore {
         let prepared = self.prepare_create(input)?;
         let environment_id = prepared.environment_id;
 
-        let tenant = TenantContext::from_execution(execution);
-        let mut transaction = begin_tenant_transaction(&self.production, &tenant).await?;
+        let mut transaction = self.management_transaction(execution).await?;
         let auth = execution.authorization();
         let actor = auth.actor();
         let actor_type = actor_type(actor.kind());
@@ -1557,8 +1556,20 @@ impl TestingEnvironmentStore {
         &'a self,
         execution: &ExecutionContext,
     ) -> Result<Transaction<'a, Postgres>, AppError> {
+        require_environment_admin(execution)?;
         let tenant = TenantContext::from_execution(execution);
-        Ok(begin_tenant_transaction(&self.production, &tenant).await?)
+        let mut transaction = begin_tenant_transaction(&self.production, &tenant).await?;
+        let authorization = execution.authorization();
+        if let Some(binding) = authorization.iam_binding() {
+            // A member's first Briefcase operation may create a sandbox. Apply
+            // the same current, versioned IAM identity used by file requests
+            // before control rows reference it; no directory listing or prior
+            // webhook is required. Keep this inside the tenant/RLS transaction.
+            synchronize_iam_snapshot(&mut transaction, authorization, binding)
+                .await
+                .map_err(|error| map_iam_projection_error(&error))?;
+        }
+        Ok(transaction)
     }
 
     async fn completed_mutation<T>(
@@ -2192,6 +2203,21 @@ fn map_environment_sql(error: sqlx::Error) -> AppError {
         }
     }
     AppError::from(error)
+}
+
+fn map_iam_projection_error(error: &MetadataRepositoryError) -> AppError {
+    match error {
+        MetadataRepositoryError::NotFound => AppError::NotFound,
+        MetadataRepositoryError::Conflict => AppError::conflict("iam_projection_conflict"),
+        MetadataRepositoryError::Unavailable => AppError::DependencyUnavailable {
+            dependency: "database",
+        },
+        MetadataRepositoryError::InvalidCursor | MetadataRepositoryError::Internal(_) => {
+            AppError::Internal {
+                category: "iam_projection",
+            }
+        }
+    }
 }
 
 /// Retires idle environments and destroys control/data rows past retention.
