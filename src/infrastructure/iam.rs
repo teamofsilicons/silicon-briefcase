@@ -107,6 +107,7 @@ impl fmt::Debug for IamEnvironmentCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("IamEnvironmentCredential")
+            .field("environment_id", &self.environment_id)
             .field("environment_key", &"<redacted>")
             .field("app_id", &self.app_id)
             .field("app_secret", &"<redacted>")
