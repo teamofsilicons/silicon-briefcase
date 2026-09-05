@@ -21,3 +21,21 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
+
+  rust-client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/rust
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo build --locked --workspace

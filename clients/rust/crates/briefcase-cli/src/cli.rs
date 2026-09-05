@@ -34,7 +34,10 @@ pub struct Cli {
 /// Options accepted by every command.
 #[derive(Args, Clone)]
 pub struct GlobalArgs {
-    /// Versioned API base URL, overriding the saved profile.
+    /// Optional API URL override for local or private deployments.
+    ///
+    /// Uses the saved profile, or <https://backend.briefcase.teamofsilicons.com/api/v1/>
+    /// automatically. Normal hosted use does not need this option.
     #[arg(long, global = true, env = "BRIEFCASE_URL", value_name = "URL")]
     pub url: Option<String>,
 
@@ -79,6 +82,12 @@ pub struct GlobalArgs {
 #[derive(Subcommand)]
 pub enum Command {
     /// Exchange an IAM short-lived token and save the rotating session.
+    #[command(
+        long_about = "Sign in to Silicon Briefcase with an IAM short-lived token.\n\n\
+        The hosted backend is selected automatically; --url is only needed to override it \
+        for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
+        Start with `briefcase login --org <organization>` and paste the IAM token at the hidden prompt."
+    )]
     Login(LoginArgs),
     /// Forget the saved session for this profile and plane.
     Logout,

@@ -34,10 +34,15 @@ println!("{}", entry.permanent_url);
 ```bash
 # Ask IAM for an organization-bound SLT for the canonical Application first.
 iam --org tos login --app-id 'tos>briefcase'
-briefcase login --url https://backend.briefcase.teamofsilicons.com/api/v1/ --org tos
+briefcase login --org tos
 briefcase put ./report.pdf private/cos:tos/notes
 briefcase share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
 ```
+
+The CLI selects the hosted Briefcase service automatically; `--url` is only
+needed to override the destination for a separate or local deployment. An
+explicit `--url` takes precedence over `BRIEFCASE_URL`, then the saved profile
+URL, then `https://backend.briefcase.teamofsilicons.com/api/v1/`.
 
 The CLI stores the resulting rotating access/refresh session and renews it
 before expiry. It never asks for an IAM password, OTP, or Application secret.

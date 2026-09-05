@@ -5,7 +5,7 @@ resolver = "3"
 # The two crates are published separately, so every shared choice lives here
 # and each crate declares only what it actually adds.
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ homepage = "https://briefcase.teamofsilicons.com"
 authors = ["Team of Silicons"]
 
 [workspace.dependencies]
-briefcase-client = { version = "0.1.1", path = "crates/briefcase-client" }
+briefcase-client = { version = "0.1.2", path = "crates/briefcase-client" }
 
 reqwest = { version = "0.13.4", default-features = false, features = ["http2", "json", "multipart", "rustls", "stream"] }
 secrecy = { version = "0.10.3", features = ["serde"] }

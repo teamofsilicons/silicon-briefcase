@@ -92,8 +92,7 @@ organization and the member whose permissions you want to exercise:
 ```bash
 iam --url https://backend.iam.teamofsilicons.com --test "$IAM_TEST_ID" \
   --org tos login --app-id 'tos>briefcase'
-briefcase --test "$BRIEFCASE_TEST_ID" login \
-  --url https://backend.briefcase.teamofsilicons.com/api/v1/ --org tos
+briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
 # Paste the test SLT at the hidden prompt.
 briefcase --test "$BRIEFCASE_TEST_ID" env current
 briefcase --test "$BRIEFCASE_TEST_ID" ls
@@ -101,6 +100,9 @@ briefcase --test "$BRIEFCASE_TEST_ID" ls
 
 `env current` proves root-key selection only. `ls` also exercises the test
 bearer and current IAM authorization. Neither proves that webhooks work.
+The CLI uses the hosted Briefcase URL automatically unless a saved profile or
+an explicit URL override selects another deployment; the test UUID selects
+the isolated dataset on that deployment.
 Do not use the old profile-photo mutation workaround: it is obsolete.
 
 ## The same setup through HTTP
