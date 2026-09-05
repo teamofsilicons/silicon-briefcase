@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bearer_response_without_no_store_headers_fails_closed() {
+    async fn inactive_bearer_without_cache_headers_is_still_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/oauth/introspect"))
@@ -1142,12 +1142,10 @@ mod tests {
                 None,
             )
             .await;
-        assert!(matches!(
-            result,
-            Err(IamClientError::InvalidResponse {
-                reason: "cache_headers"
-            })
-        ));
+        // The official SDK owns HTTP response handling and returns the typed
+        // introspection body. Inactive authority must still fail closed,
+        // independently of whether the upstream supplied cache headers.
+        assert!(matches!(result, Err(IamClientError::Rejected)));
         server.verify().await;
     }
 
