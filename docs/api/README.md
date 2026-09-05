@@ -168,6 +168,14 @@ secret. The Briefcase root key and sandbox data remain intact. The operation is
 idempotent, and advancing the control version fences requests that had loaded
 the prior IAM credentials.
 
+After an IAM organization projection exists in the Briefcase sandbox, the IAM
+environment UUID cannot change. A different UUID returns HTTP409 with code
+`testing_environment_iam_rebind_requires_new_environment`, leaving the pairing,
+control version, and data unchanged. Create a new Briefcase sandbox for a
+different IAM plane. Same-UUID root/Application-secret updates remain allowed;
+changing UUID is also allowed before the first projection. Cleaning retains
+the projection and therefore does not enable a different-plane switch.
+
 Briefcase returns its own independent 32-character alphanumeric root key. That
 key selects the Briefcase sandbox and is root authority for it, but ordinary
 file operations still require a bearer or OBO proof issued inside the paired

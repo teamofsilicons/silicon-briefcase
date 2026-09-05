@@ -184,8 +184,13 @@ erases its disposable contents.
 All UUID-addressed management commands run only from the production plane and
 fail locally when combined with `--test`. `pair-iam` atomically replaces the
 IAM environment UUID/root key and imported Application ID/secret while keeping
-the Briefcase UUID, root key, and data. After pairing a new IAM plane, obtain a new test SLT and verify a test bearer request; complete online snapshots populate current authority. The CLI removes the obsolete saved session from the old IAM
-plane when re-pairing succeeds.
+the Briefcase UUID, root key, and data. Once an IAM organization projection
+exists, keep the same IAM UUID for credential updates; create a new Briefcase
+sandbox to use another IAM plane. A different UUID on a used sandbox returns
+`testing_environment_iam_rebind_requires_new_environment` without changing its
+pairing or data. After an accepted update, obtain a fresh test SLT and verify a
+test bearer request. The CLI removes the obsolete saved session only when
+re-pairing succeeds.
 
 The CLI persists an idempotency key plus a SHA-256 fingerprint before every
 environment mutation. Environment updates also persist the original optimistic

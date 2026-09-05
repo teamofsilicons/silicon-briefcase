@@ -324,6 +324,31 @@ impl TestingEnvironmentExclusiveFence {
         Ok(())
     }
 
+    async fn has_identity_projection(
+        &mut self,
+        owner_org_id: &str,
+        control_version: i64,
+        request_id: &str,
+    ) -> Result<bool, AppError> {
+        let selected = TestingEnvironmentContext::new(self.environment_id, control_version);
+        let tenant =
+            TenantContext::for_testing_environment_service(owner_org_id, selected, request_id);
+        // Reuse the session holding the exclusive fence: acquiring a shared
+        // fence on a different pooled connection would wait on ourselves.
+        let mut transaction =
+            begin_testing_environment_cleanup_transaction(&mut self.connection, &tenant).await?;
+        // Signed webhooks can project another organization into this plane.
+        // The restricted boolean probe covers the entire environment without
+        // exposing its other tenants, including inactive and legacy rows.
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT briefcase.current_testing_environment_has_iam_projection()",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(exists)
+    }
+
     async fn clean(
         &mut self,
         owner_org_id: &str,
@@ -881,7 +906,8 @@ impl TestingEnvironmentStore {
     /// # Errors
     ///
     /// Fails for invalid input, insufficient authority, a missing environment,
-    /// duplicate IAM binding, idempotency conflict, or persistence error.
+    /// duplicate IAM binding, changing an initialized plane's IAM identity,
+    /// idempotency conflict, or persistence error.
     pub async fn replace_iam_pairing(
         &self,
         execution: &ExecutionContext,
@@ -892,7 +918,8 @@ impl TestingEnvironmentStore {
         validate_iam_pairing(pairing)?;
         require_environment_admin(execution)?;
         let prepared = self.prepare_iam_pairing(environment_id, pairing)?;
-        let fence = TestingEnvironmentExclusiveFence::acquire(&self.test, environment_id).await?;
+        let mut fence =
+            TestingEnvironmentExclusiveFence::acquire(&self.test, environment_id).await?;
         let mut transaction = self.management_transaction(execution).await?;
         ensure_creator_or_admin(&mut transaction, execution, environment_id).await?;
         let authorization = execution.authorization();
@@ -919,6 +946,31 @@ impl TestingEnvironmentStore {
                 return Err(idempotency_error());
             }
             EnvironmentMutationClaim::Acquired(_) => {}
+        }
+        let (current_iam_environment_id, current_version) = sqlx::query_as::<_, (Uuid, i64)>(
+            "SELECT iam_environment_id, version FROM briefcase.testing_environments \
+              WHERE org_id = briefcase.current_org_id() AND environment_id = $1 \
+                AND status IN ('active', 'deleted') FOR UPDATE",
+        )
+        .bind(environment_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(AppError::NotFound)?;
+        if current_iam_environment_id != pairing.iam_environment_id
+            && fence
+                .has_identity_projection(
+                    authorization.organization_id().as_str(),
+                    current_version,
+                    execution.request_id(),
+                )
+                .await?
+        {
+            // Matching public handles in another IAM environment are not the
+            // same principals. Do not strand the existing immutable bindings
+            // or silently transfer file ownership/grants to those identities.
+            return Err(AppError::conflict(
+                "testing_environment_iam_rebind_requires_new_environment",
+            ));
         }
         let row = sqlx::query_as::<_, EnvironmentRow>(concat!(
             "UPDATE briefcase.testing_environments SET ",
