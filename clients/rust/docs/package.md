@@ -7,7 +7,7 @@ product documentation contract:
 - [Paired testing environments](https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/testing-environments.md)
 - [Documentation index](https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/README.md)
 
-For sibling local checkouts, open
-[the local Rust guide](../../silicon-briefcase/docs/client/README.md).
+Within this repository, open
+[the local Rust guide](../../../docs/client/README.md).
 Crate API signatures remain documented in Rustdoc. This page keeps old links
 working; maintain the integration guide in one place rather than duplicating it.

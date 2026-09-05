@@ -50,4 +50,4 @@ single-use IAM credential is sent immediately.
 
 [service]: https://briefcase.teamofsilicons.com
 [package]: https://crates.io/crates/briefcase-client
-[guide]: https://github.com/teamofsilicons/briefcase-client-rust/blob/main/docs/cli.md
+[guide]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/cli/README.md

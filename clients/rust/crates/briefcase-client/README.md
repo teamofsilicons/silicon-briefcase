@@ -65,4 +65,4 @@ Full guide: [docs/package.md][guide]. The `briefcase` command-line client is
 built on this package and lives in the same repository.
 
 [service]: https://briefcase.teamofsilicons.com
-[guide]: https://github.com/teamofsilicons/briefcase-client-rust/blob/main/docs/package.md
+[guide]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/client/README.md

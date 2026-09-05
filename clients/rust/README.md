@@ -64,6 +64,9 @@ deliberately.
 
 ## Working on these crates
 
+From the repository root, first run `cd clients/rust`. This is a separate
+Cargo workspace from the backend.
+
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
