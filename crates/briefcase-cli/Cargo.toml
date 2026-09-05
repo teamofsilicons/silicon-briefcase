@@ -1,0 +1,46 @@
+[package]
+name = "briefcase-cli"
+description = "Command-line client for the Silicon Briefcase file service."
+categories = ["command-line-utilities", "filesystem"]
+keywords = ["briefcase", "silicon", "files", "storage", "cli"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "briefcase"
+path = "src/main.rs"
+
+[dependencies]
+briefcase-client.workspace = true
+clap = { version = "4.5.51", features = ["derive", "env", "wrap_help"] }
+fs2 = "0.4.3"
+rpassword = "7.4.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tempfile = "3.23.0"
+thiserror.workspace = true
+time = { workspace = true, features = ["local-offset", "macros"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+wiremock = "0.6.5"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
