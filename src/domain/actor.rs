@@ -130,6 +130,33 @@ external_identifier!(
     TagName
 );
 
+/// Returns whether a string is IAM's canonical public Application ID.
+#[must_use]
+pub fn is_canonical_iam_application_id(value: &str) -> bool {
+    let Some((organization, local_id)) = value.split_once('>') else {
+        return false;
+    };
+    value.bytes().filter(|byte| *byte == b'>').count() == 1
+        && is_canonical_iam_organization_id(organization)
+        && (3..=80).contains(&local_id.len())
+        && local_id
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+        && local_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+/// Returns whether a string is IAM's canonical public organization handle.
+#[must_use]
+pub fn is_canonical_iam_organization_id(value: &str) -> bool {
+    (3..=50).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
 /// A represented account type accepted by Briefcase.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +245,7 @@ impl AuthenticationMode {
 /// tags, and any OBO proof should construct it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuthContext {
+    iam_binding: Option<IamMembershipBinding>,
     organization_id: OrganizationId,
     actor: ActorRef,
     role: OrganizationRole,
@@ -236,12 +264,27 @@ impl RequestAuthContext {
         authentication: AuthenticationMode,
     ) -> Self {
         Self {
+            iam_binding: None,
             organization_id,
             actor,
             role,
             tags: tags.into_iter().collect(),
             authentication,
         }
+    }
+
+    /// Attaches an online, scope-complete IAM snapshot already cross-validated
+    /// by the adapter. It is never reconstructed from cached authority.
+    #[must_use]
+    pub fn with_iam_binding(mut self, binding: IamMembershipBinding) -> Self {
+        self.iam_binding = Some(binding);
+        self
+    }
+
+    /// Returns the online IAM membership version and canonical tag identities.
+    #[must_use]
+    pub const fn iam_binding(&self) -> Option<&IamMembershipBinding> {
+        self.iam_binding.as_ref()
     }
 
     /// Returns the verified organization.
@@ -287,11 +330,29 @@ impl RequestAuthContext {
     }
 }
 
+/// Scope-complete membership facts from an online IAM authorization snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IamMembershipBinding {
+    /// Immutable IAM organization.
+    pub organization_id: uuid::Uuid,
+    /// Immutable IAM principal.
+    pub principal_id: uuid::Uuid,
+    /// Immutable organization membership.
+    pub membership_id: uuid::Uuid,
+    /// IAM membership aggregate version.
+    pub membership_version: i64,
+    /// Current authorization epoch.
+    pub authorization_epoch: i64,
+    /// Canonical tag identities and display names.
+    pub tags: Vec<(uuid::Uuid, TagName)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ActorId, ApplicationId, ExternalIdentifierError, MAX_EXTERNAL_IDENTIFIER_BYTES,
-        OrganizationId, OrganizationRole, TagName,
+        OrganizationId, OrganizationRole, TagName, is_canonical_iam_application_id,
+        is_canonical_iam_organization_id,
     };
 
     #[test]
@@ -301,6 +362,20 @@ mod tests {
             ActorId::new(" carbon-a"),
             Err(ExternalIdentifierError::SurroundingWhitespace)
         );
+    }
+
+    #[test]
+    fn iam_application_and_organization_ids_are_canonical() {
+        assert!(is_canonical_iam_application_id("tos>briefcase"));
+        assert!(is_canonical_iam_application_id("team-2>briefcase_api-1"));
+        assert!(!is_canonical_iam_application_id("silicon-briefcase"));
+        assert!(!is_canonical_iam_application_id("tos>2briefcase"));
+        assert!(!is_canonical_iam_application_id("tos>Briefcase"));
+        assert!(!is_canonical_iam_application_id("tos>briefcase>other"));
+        assert!(!is_canonical_iam_application_id("to>briefcase"));
+        assert!(!is_canonical_iam_application_id("tos>ab"));
+        assert!(is_canonical_iam_organization_id("team-of-silicons"));
+        assert!(!is_canonical_iam_organization_id("Team"));
     }
 
     #[test]

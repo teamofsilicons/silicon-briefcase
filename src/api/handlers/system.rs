@@ -10,7 +10,11 @@ use axum::{
 use serde::Serialize;
 use tracing::info;
 
-use crate::{application::webhook::WebhookApplyOutcome, error::AppError, infrastructure::postgres};
+use crate::{
+    application::{context::TestingEnvironmentContext, webhook::WebhookApplyOutcome},
+    error::AppError,
+    infrastructure::postgres,
+};
 
 use super::super::versioning;
 
@@ -40,6 +44,13 @@ pub(crate) async fn ready(State(state): State<AppState>) -> Result<Json<StatusBo
     if !postgres::ready(&state.database).await {
         return Err(AppError::DependencyUnavailable {
             dependency: "database",
+        });
+    }
+    if let Some(testing) = &state.testing
+        && !postgres::ready(testing.test_pool()).await
+    {
+        return Err(AppError::DependencyUnavailable {
+            dependency: "testing_database",
         });
     }
     Ok(Json(StatusBody { status: "ready" }))
@@ -88,9 +99,27 @@ pub(crate) async fn iam_webhook(
         }
     })?;
     let verified = webhook::verify(&headers, &body, &state.webhook_settings)?;
+    let testing_environment = if verified.is_testing() {
+        let testing = state
+            .testing
+            .as_ref()
+            .ok_or(AppError::DependencyUnavailable {
+                dependency: "testing_database",
+            })?;
+        let matched = testing
+            .resolve_iam_webhook(|candidate| verified.testing_key_matches(candidate))
+            .await?;
+        Some(matched.ok_or(AppError::Unauthenticated)?.0)
+    } else {
+        None
+    };
     let event_id = verified.event.event_id;
-    let outcome = state.webhook_repository.apply_iam_event(&verified).await?;
-    info!(%event_id, ?outcome, "IAM webhook processed");
+    let outcome = state
+        .webhook_repository
+        .apply_iam_event(&verified, testing_environment)
+        .await?;
+    let testing_environment_id = testing_environment.map(TestingEnvironmentContext::id);
+    info!(%event_id, ?testing_environment_id, ?outcome, "IAM webhook processed");
 
     let status = match outcome {
         WebhookApplyOutcome::Applied

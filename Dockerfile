@@ -1,9 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.98-bookworm AS builder
+FROM rust:1.98.0-bookworm AS builder
+ARG CARGO_BUILD_JOBS=2
 WORKDIR /workspace
 COPY . .
-RUN cargo build --locked --release --bins
+RUN --mount=type=cache,id=silicon-iam-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=silicon-briefcase-target,target=/workspace/target,sharing=locked \
+    cargo build --locked --release --bins --jobs "$CARGO_BUILD_JOBS" \
+    && install -D -m 0755 target/release/briefcase-api /opt/silicon-briefcase/briefcase-api \
+    && install -D -m 0755 target/release/briefcase-worker /opt/silicon-briefcase/briefcase-worker \
+    && install -D -m 0755 target/release/briefcase-migrate /opt/silicon-briefcase/briefcase-migrate
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
@@ -12,9 +18,9 @@ RUN apt-get update \
     && groupadd --system --gid 10001 briefcase \
     && useradd --system --uid 10001 --gid briefcase --no-create-home --home-dir /nonexistent briefcase
 
-COPY --from=builder /workspace/target/release/briefcase-api /usr/local/bin/briefcase-api
-COPY --from=builder /workspace/target/release/briefcase-worker /usr/local/bin/briefcase-worker
-COPY --from=builder /workspace/target/release/briefcase-migrate /usr/local/bin/briefcase-migrate
+COPY --from=builder /opt/silicon-briefcase/briefcase-api /usr/local/bin/briefcase-api
+COPY --from=builder /opt/silicon-briefcase/briefcase-worker /usr/local/bin/briefcase-worker
+COPY --from=builder /opt/silicon-briefcase/briefcase-migrate /usr/local/bin/briefcase-migrate
 
 USER 10001:10001
 

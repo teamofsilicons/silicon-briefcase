@@ -5,10 +5,15 @@ use sqlx::{PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::application::context::TestingEnvironmentContext;
+
 use super::{
     AuditEventRow, EntryRow, MultipartPartRow, OutboxEventRow, TenantContext,
     begin_tenant_transaction, models::entry_columns,
 };
+
+pub(crate) const STALE_TESTING_ENVIRONMENT_CONTEXT: &str =
+    "testing environment changed while the request was in progress";
 
 /// Inputs for an audit record written in the current tenant transaction.
 #[derive(Clone, Debug)]
@@ -46,19 +51,49 @@ pub struct NewOutboxEvent {
 #[derive(Clone, Debug)]
 pub struct PostgresRepository {
     pool: PgPool,
+    test_pool: Option<PgPool>,
 }
 
 impl PostgresRepository {
     /// Wraps a configured runtime pool.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            test_pool: None,
+        }
+    }
+
+    /// Adds the separately configured shared sandbox database.
+    #[must_use]
+    pub fn with_test_pool(mut self, test_pool: PgPool) -> Self {
+        self.test_pool = Some(test_pool);
+        self
     }
 
     /// Borrows the underlying pool for readiness and shutdown coordination.
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Chooses the database plane named by an authenticated tenant context.
+    pub(crate) fn pool_for(&self, context: &TenantContext) -> Result<&PgPool, sqlx::Error> {
+        if context.testing_environment_id().is_some() {
+            self.test_pool.as_ref().ok_or_else(|| {
+                sqlx::Error::Configuration(
+                    "the Briefcase testing database is not configured".into(),
+                )
+            })
+        } else {
+            Ok(&self.pool)
+        }
+    }
+
+    /// Borrows the configured sandbox pool, when testing environments are enabled.
+    #[must_use]
+    pub const fn test_pool(&self) -> Option<&PgPool> {
+        self.test_pool.as_ref()
     }
 
     /// Starts a tenant-isolated transaction for one authenticated request.
@@ -71,7 +106,41 @@ impl PostgresRepository {
         &'pool self,
         context: &TenantContext,
     ) -> Result<Transaction<'pool, Postgres>, sqlx::Error> {
-        begin_tenant_transaction(&self.pool, context).await
+        let transaction = begin_tenant_transaction(self.pool_for(context)?, context).await?;
+        if let (Some(environment_id), Some(control_version)) = (
+            context.testing_environment_id(),
+            context.testing_environment_control_version(),
+        ) && !self
+            .testing_environment_is_current(TestingEnvironmentContext::new(
+                environment_id,
+                control_version,
+            ))
+            .await?
+        {
+            transaction.rollback().await?;
+            return Err(sqlx::Error::Protocol(
+                STALE_TESTING_ENVIRONMENT_CONTEXT.to_owned(),
+            ));
+        }
+        Ok(transaction)
+    }
+
+    /// Revalidates a data-plane generation through the production control DB.
+    ///
+    /// Call this only after the test transaction has acquired its shared clean
+    /// fence. A clean that won the exclusive side first advances the version
+    /// before releasing that fence, so a waiter cannot publish stale work.
+    pub(crate) async fn testing_environment_is_current(
+        &self,
+        environment: TestingEnvironmentContext,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT briefcase.testing_environment_version_matches($1, $2)",
+        )
+        .bind(environment.id())
+        .bind(environment.control_version())
+        .fetch_one(&self.pool)
+        .await
     }
 
     /// Loads an entry visible to the transaction's organization.

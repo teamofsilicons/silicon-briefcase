@@ -1,82 +1,245 @@
-//! Fail-closed HTTP adapter for Silicon IAM.
+//! Fail-closed domain adapter around official `silicon-iam-client` 1.2.
 //!
-//! IAM publishes token-introspection, userinfo, and OBO verification contracts.
+//! IAM publishes token-introspection and OBO verification contracts.
 //! This adapter keeps those wire types isolated from Briefcase domain types and
 //! cross-binds every security-relevant claim before constructing authority:
 //!
 //! - bearer introspection is `POST` form data containing `token` and
 //!   `token_type_hint=access_token`, authenticated with Briefcase application
 //!   HTTP Basic credentials and scoped with `X-Org-ID`;
-//! - the original bearer is then presented to userinfo with the same
-//!   organization, and principal, actor kind, membership, and organization must
-//!   agree across both responses;
+//! - the mandatory unversioned compatibility handshake completes before any
+//!   versioned request and every later request carries the negotiated major;
+//! - introspection returns current identity, role, tags and membership version;
+//!   the online snapshot is authoritative without waiting for webhooks;
 //! - OBO verification submits the exact method, registered path, and body
 //!   digest of the request Briefcase actually received, authenticated with
 //!   application HTTP Basic credentials alone. It accepts no organization
 //!   header and no idempotency key, and it is never retried: IAM consumes the
 //!   proof exactly once, so a retry is indistinguishable from a replay;
-//! - the published OBO result carries the represented actor and organization
-//!   but no role or tags, so the caller pairs it with Briefcase's own IAM
-//!   membership projection and never assumes more authority than that;
+//! - OBO returns scope-limited authority; role and membership disclosure scopes
+//!   are required before accepting a complete snapshot;
 //! - unknown response fields are ignored for forward compatibility, while any
 //!   missing security-relevant field on a successful response fails closed.
 
-use std::collections::BTreeSet;
+use std::fmt;
 
-use bytes::BytesMut;
-use reqwest::{StatusCode, header, redirect::Policy};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use time::OffsetDateTime;
-use tracing::warn;
-use url::Url;
 use uuid::Uuid;
 
 use crate::{
     config::IamSettings,
     domain::actor::{
-        ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, OrganizationId,
-        OrganizationRole, RequestAuthContext, TagName,
+        ActorId, ActorKind, ActorRef, ApplicationId, OrganizationId,
+        is_canonical_iam_application_id, is_canonical_iam_organization_id,
     },
     error::AppError,
 };
 
 const MAX_IDENTIFIER_BYTES: usize = 255;
-const MAX_TAGS: usize = 256;
 const MAX_RESOURCE_BYTES: usize = 2_048;
+const API_VERSION: &str = "v1";
 
 /// Online IAM verifier with bounded transport and response budgets.
 #[derive(Clone)]
 pub struct IamClient {
-    http: reqwest::Client,
-    bearer_introspection_url: Url,
-    bearer_userinfo_url: Url,
-    obo_verification_url: Url,
+    client: silicon_iam_client::Client,
     service_app_id: ApplicationId,
     service_app_secret: SecretString,
-    audience: ApplicationId,
     max_response_bytes: usize,
 }
 
-/// A complete IAM identity accepted after all expected bindings were checked.
+/// Complete IAM identity for making an ordinary request inside one test plane.
+///
+/// Plane selection and application authentication are intentionally held
+/// together. Supplying this value makes a request use all three test-plane
+/// values; no field can silently fall back to Briefcase's production
+/// application credential.
+#[derive(Clone)]
+pub struct IamEnvironmentCredential {
+    environment_id: Option<Uuid>,
+    environment_key: SecretString,
+    app_id: ApplicationId,
+    app_secret: SecretString,
+}
+
+impl IamEnvironmentCredential {
+    /// Validates a test environment root key and its test-only Application
+    /// credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IamClientBuildError::InvalidIdentifier`] unless the key is
+    /// exactly 32 alphanumeric ASCII characters, the Application ID is
+    /// canonical, and the Application secret has IAM's fixed `ask_` form.
+    pub fn new(
+        environment_key: SecretString,
+        app_id: String,
+        app_secret: SecretString,
+    ) -> Result<Self, IamClientBuildError> {
+        if !valid_environment_key(environment_key.expose_secret())
+            || !is_canonical_iam_application_id(&app_id)
+            || !valid_fixed_iam_secret(app_secret.expose_secret(), "ask_")
+        {
+            return Err(IamClientBuildError::InvalidIdentifier);
+        }
+        let app_id =
+            ApplicationId::new(app_id).map_err(|_| IamClientBuildError::InvalidIdentifier)?;
+        Ok(Self {
+            environment_id: None,
+            environment_key,
+            app_id,
+            app_secret,
+        })
+    }
+
+    /// Binds authorization snapshots to the paired public IAM environment UUID.
+    #[must_use]
+    pub const fn with_environment_id(mut self, environment_id: Uuid) -> Self {
+        self.environment_id = Some(environment_id);
+        self
+    }
+}
+
+impl fmt::Debug for IamEnvironmentCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IamEnvironmentCredential")
+            .field("environment_key", &"<redacted>")
+            .field("app_id", &self.app_id)
+            .field("app_secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Access and rotating refresh credentials returned by an IAM Application
+/// login or refresh.
+#[derive(Clone)]
+pub struct IamApplicationTokens {
+    access_token: SecretString,
+    refresh_token: SecretString,
+    expires_in_seconds: u64,
+    scope: String,
+    principal_id: Uuid,
+    actor: ActorRef,
+    organization_id: Option<OrganizationId>,
+    idempotency_replayed: Option<bool>,
+}
+
+impl IamApplicationTokens {
+    /// Returns the opaque 30-minute IAM Application access token.
+    #[must_use]
+    pub const fn access_token(&self) -> &SecretString {
+        &self.access_token
+    }
+
+    /// Returns the rotating IAM Application refresh token.
+    #[must_use]
+    pub const fn refresh_token(&self) -> &SecretString {
+        &self.refresh_token
+    }
+
+    /// Returns the advertised access-token lifetime in seconds.
+    #[must_use]
+    pub const fn expires_in_seconds(&self) -> u64 {
+        self.expires_in_seconds
+    }
+
+    /// Returns the canonical, space-separated IAM scope set.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// Returns the immutable IAM principal UUID represented by the login.
+    #[must_use]
+    pub const fn principal_id(&self) -> Uuid {
+        self.principal_id
+    }
+
+    /// Returns the represented Carbon or Silicon.
+    #[must_use]
+    pub const fn actor(&self) -> &ActorRef {
+        &self.actor
+    }
+
+    /// Returns the optional organization selected during IAM login.
+    #[must_use]
+    pub const fn organization_id(&self) -> Option<&OrganizationId> {
+        self.organization_id.as_ref()
+    }
+
+    /// Reports replay metadata when available; the official SDK returns none.
+    #[must_use]
+    pub const fn idempotency_replayed(&self) -> Option<bool> {
+        self.idempotency_replayed
+    }
+}
+
+impl fmt::Debug for IamApplicationTokens {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IamApplicationTokens")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_in_seconds", &self.expires_in_seconds)
+            .field("scope", &self.scope)
+            .field("principal_id", &self.principal_id)
+            .field("actor", &self.actor)
+            .field("organization_id", &self.organization_id)
+            .field("idempotency_replayed", &self.idempotency_replayed)
+            .finish()
+    }
+}
+
+/// IAM token identity accepted after all current-state bindings were checked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedIdentity {
-    authorization: RequestAuthContext,
+    authorization: Option<crate::domain::actor::RequestAuthContext>,
+    principal_id: Uuid,
+    actor_kind: ActorKind,
+    organization_id: OrganizationId,
+    membership_id: Uuid,
+    authorization_epoch: i64,
     expires_at: OffsetDateTime,
 }
 
 impl VerifiedIdentity {
-    /// Returns IAM-verified authorization facts.
+    /// Returns current authority obtained from the official IAM snapshot.
     #[must_use]
-    pub const fn authorization(&self) -> &RequestAuthContext {
-        &self.authorization
+    pub const fn authorization(&self) -> Option<&crate::domain::actor::RequestAuthContext> {
+        self.authorization.as_ref()
+    }
+    /// Returns the immutable principal UUID represented by the token.
+    #[must_use]
+    pub const fn principal_id(&self) -> Uuid {
+        self.principal_id
     }
 
-    /// Consumes the result and returns IAM-verified authorization facts.
+    /// Returns the represented actor category.
     #[must_use]
-    pub fn into_authorization(self) -> RequestAuthContext {
-        self.authorization
+    pub const fn actor_kind(&self) -> ActorKind {
+        self.actor_kind
+    }
+
+    /// Returns the exact organization bound to the token.
+    #[must_use]
+    pub const fn organization_id(&self) -> &OrganizationId {
+        &self.organization_id
+    }
+
+    /// Returns the current membership UUID bound to the token.
+    #[must_use]
+    pub const fn membership_id(&self) -> Uuid {
+        self.membership_id
+    }
+
+    /// Returns the membership authorization epoch checked online by IAM.
+    #[must_use]
+    pub const fn authorization_epoch(&self) -> i64 {
+        self.authorization_epoch
     }
 
     /// Returns the credential expiry checked by the adapter.
@@ -92,9 +255,9 @@ pub enum IamClientBuildError {
     /// An IAM identifier is not representable as a domain identifier.
     #[error("invalid IAM client identifier configuration")]
     InvalidIdentifier,
-    /// The bounded HTTP client could not be constructed.
-    #[error("failed to construct IAM HTTP client")]
-    HttpClient(#[source] reqwest::Error),
+    /// IAM could not negotiate the contract required by this deployment.
+    #[error("failed to negotiate a compatible IAM API version")]
+    Handshake(#[source] IamClientError),
 }
 
 /// A redacted online IAM verification failure.
@@ -123,149 +286,31 @@ pub enum IamClientError {
     },
 }
 
-impl IamClient {
-    /// Constructs the IAM verifier with redirects and ambient proxy behavior
-    /// disabled, explicit deadlines, and no response decompression features.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error for invalid identifiers or HTTP client setup.
-    pub fn new(settings: &IamSettings) -> Result<Self, IamClientBuildError> {
-        let service_app_id = ApplicationId::new(settings.app_id.clone())
-            .map_err(|_| IamClientBuildError::InvalidIdentifier)?;
-        let audience = ApplicationId::new(settings.audience.clone())
-            .map_err(|_| IamClientBuildError::InvalidIdentifier)?;
-        let mut default_headers = header::HeaderMap::new();
-        default_headers.insert(
-            header::ACCEPT,
-            header::HeaderValue::from_static("application/json"),
-        );
-        default_headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store"),
-        );
-        let http = reqwest::Client::builder()
-            .connect_timeout(settings.connect_timeout)
-            .timeout(settings.request_timeout)
-            .redirect(Policy::none())
-            .no_proxy()
-            .default_headers(default_headers)
-            .user_agent(concat!("silicon-briefcase/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(IamClientBuildError::HttpClient)?;
-
-        Ok(Self {
-            http,
-            bearer_introspection_url: settings.bearer_introspection_url.clone(),
-            bearer_userinfo_url: settings.bearer_userinfo_url.clone(),
-            obo_verification_url: settings.obo_verification_url.clone(),
-            service_app_id,
-            service_app_secret: settings.app_secret.clone(),
-            audience,
-            max_response_bytes: settings.max_response_bytes.get(),
-        })
+mod official;
+fn valid_server_version_catalog(versions: &[String]) -> bool {
+    if versions.is_empty() || versions.len() > 16 {
+        return false;
     }
+    let parsed = versions
+        .iter()
+        .map(|version| parse_api_version(version))
+        .collect::<Option<Vec<_>>>();
+    parsed.is_some_and(|numbers| {
+        numbers.windows(2).all(|pair| pair[0] > pair[1])
+            && versions.iter().any(|version| version == API_VERSION)
+    })
+}
 
-    /// Introspects an opaque IAM bearer token and verifies current membership
-    /// in the exact organization selected by the request.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`IamClientError::Rejected`] for an inactive credential and
-    /// otherwise fails closed for transport, schema, expiry, or binding errors.
-    pub async fn introspect_bearer(
-        &self,
-        token: &SecretString,
-        expected_organization: &OrganizationId,
-    ) -> Result<VerifiedIdentity, IamClientError> {
-        let form = [
-            ("token", token.expose_secret()),
-            ("token_type_hint", "access_token"),
-        ];
-        let response = self
-            .http
-            .post(self.bearer_introspection_url.clone())
-            .basic_auth(
-                self.service_app_id.as_str(),
-                Some(self.service_app_secret.expose_secret()),
-            )
-            .header("X-Org-ID", expected_organization.as_str())
-            .form(&form)
-            .send()
-            .await
-            .map_err(|error| classify_transport_error(&error))?;
-        let response = require_service_success(response, "bearer_introspection")?;
-        let wire: WireIntrospectionResponse =
-            read_json_bounded(response, self.max_response_bytes).await?;
-        let introspection = validate_introspection(wire, expected_organization)?;
-
-        let response = self
-            .http
-            .get(self.bearer_userinfo_url.clone())
-            .bearer_auth(token.expose_secret())
-            .header("X-Org-ID", expected_organization.as_str())
-            .send()
-            .await
-            .map_err(|error| classify_transport_error(&error))?;
-        let response = require_bearer_success(response, "bearer_userinfo")?;
-        let userinfo: WireUserInfoResponse =
-            read_json_bounded(response, self.max_response_bytes).await?;
-
-        validate_userinfo(&introspection, userinfo, expected_organization)
+fn parse_api_version(value: &str) -> Option<u32> {
+    let digits = value.strip_prefix('v')?;
+    if digits.is_empty()
+        || digits.len() > 9
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
     }
-
-    /// Verifies and consumes an OBO proof against the request that arrived.
-    ///
-    /// The proof commits to the method, the registered path, and the body
-    /// digest, so those are recomputed from the received request rather than
-    /// taken from anything the caller can choose freely. Verification is
-    /// single-use and must never be retried.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`IamClientError::Rejected`] when IAM reports an invalid,
-    /// consumed, or expired proof and otherwise fails closed for transport,
-    /// schema, or binding mismatches.
-    pub async fn verify_obo(
-        &self,
-        proof: &SecretString,
-        presented_application: &ApplicationId,
-        expected_organization: Option<&OrganizationId>,
-        binding: &OboRequestBinding<'_>,
-    ) -> Result<VerifiedOboAccess, IamClientError> {
-        validate_outbound_binding("request.method", binding.method, MAX_IDENTIFIER_BYTES)?;
-        validate_outbound_binding("request.path", binding.path, MAX_RESOURCE_BYTES)?;
-        validate_outbound_binding("request.body_sha256", binding.body_sha256, 64)?;
-        let request = WireOboRequest {
-            access_proof: proof.expose_secret(),
-            request: WireOboRequestBinding {
-                method: binding.method,
-                path: binding.path,
-                body_sha256: binding.body_sha256,
-            },
-        };
-        let response = self
-            .http
-            .post(self.obo_verification_url.clone())
-            .basic_auth(
-                self.service_app_id.as_str(),
-                Some(self.service_app_secret.expose_secret()),
-            )
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| classify_transport_error(&error))?;
-        let response = require_obo_success(response, "obo_verification")?;
-        let wire: WireOboResponse = read_json_bounded(response, self.max_response_bytes).await?;
-
-        validate_obo(
-            wire,
-            &self.audience,
-            presented_application,
-            expected_organization,
-            binding,
-        )
-    }
+    digits.parse().ok()
 }
 
 /// The exact downstream request an OBO proof is bound to.
@@ -282,6 +327,8 @@ pub struct OboRequestBinding<'a> {
 /// A consumed OBO proof and everything it authorizes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedOboAccess {
+    /// Current authority limited to this exact verified delegated request.
+    pub authorization: Option<crate::domain::actor::RequestAuthContext>,
     /// IAM identifier of the consumed proof, unique to this one request.
     pub proof_id: Uuid,
     /// Represented Carbon or Silicon.
@@ -317,6 +364,18 @@ struct WireActor {
 }
 
 #[derive(Debug, Deserialize)]
+struct WireApplicationTokenResponse {
+    access_token: String,
+    refresh_token: String,
+    token_type: String,
+    expires_in: i64,
+    scope: String,
+    actor: WireActor,
+    #[serde(default)]
+    org_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WireIntrospectionResponse {
     active: bool,
     #[serde(default)]
@@ -328,35 +387,35 @@ struct WireIntrospectionResponse {
     #[serde(default)]
     membership_id: Option<Uuid>,
     #[serde(default)]
+    session_id: Option<Uuid>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    authorization_epoch: Option<i64>,
+    #[serde(default)]
+    issued_at: Option<i64>,
+    #[serde(default)]
     expires_at: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct WireUserInfoResponse {
-    sub: Uuid,
-    actor_type: ActorKind,
-    public_id: String,
-    #[serde(default)]
-    org_id: Option<String>,
-    #[serde(default)]
-    membership_id: Option<Uuid>,
-    #[serde(default)]
-    org_role: Option<OrganizationRole>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-struct WireOboRequest<'a> {
-    access_proof: &'a str,
-    request: WireOboRequestBinding<'a>,
-}
-
-#[derive(Serialize)]
-struct WireOboRequestBinding<'a> {
-    method: &'a str,
-    path: &'a str,
-    body_sha256: &'a str,
+impl WireIntrospectionResponse {
+    fn has_metadata(&self) -> bool {
+        self.principal_id.is_some()
+            || self.actor_type.is_some()
+            || self.org_id.is_some()
+            || self.membership_id.is_some()
+            || self.session_id.is_some()
+            || self.scope.is_some()
+            || self.client_id.is_some()
+            || self.audience.is_some()
+            || self.authorization_epoch.is_some()
+            || self.issued_at.is_some()
+            || self.expires_at.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,75 +447,122 @@ struct WireOboResponse {
     consumed_at: Option<OffsetDateTime>,
 }
 
-#[derive(Debug)]
-struct ActiveIntrospection {
-    principal_id: Uuid,
-    actor_type: ActorKind,
-    organization_id: OrganizationId,
-    membership_id: Uuid,
-    expires_at: OffsetDateTime,
+fn validate_application_tokens(
+    wire: WireApplicationTokenResponse,
+    idempotency_replayed: Option<bool>,
+) -> Result<IamApplicationTokens, IamClientError> {
+    if wire.token_type != "Bearer" {
+        return Err(invalid_response("token_type"));
+    }
+    let expires_in_seconds =
+        u64::try_from(wire.expires_in).map_err(|_| invalid_response("expires_in"))?;
+    if expires_in_seconds != 1_800 {
+        return Err(invalid_response("expires_in"));
+    }
+    if !valid_fixed_iam_secret(&wire.access_token, "oat_") {
+        return Err(invalid_response("access_token"));
+    }
+    if !valid_fixed_iam_secret(&wire.refresh_token, "ort_") {
+        return Err(invalid_response("refresh_token"));
+    }
+    if !valid_scope_set(&wire.scope) {
+        return Err(invalid_response("scope"));
+    }
+    if wire.actor.principal_id.is_nil() {
+        return Err(invalid_response("actor.principal_id"));
+    }
+    let principal_id = wire.actor.principal_id;
+    validate_wire_text(
+        "actor.public_id",
+        &wire.actor.public_id,
+        MAX_IDENTIFIER_BYTES,
+    )?;
+    let actor_id =
+        ActorId::new(wire.actor.public_id).map_err(|_| invalid_response("actor.public_id"))?;
+    let organization_id = wire
+        .org_id
+        .map(|value| {
+            if !is_canonical_iam_organization_id(&value) {
+                return Err(invalid_response("org_id"));
+            }
+            OrganizationId::new(value).map_err(|_| invalid_response("org_id"))
+        })
+        .transpose()?;
+
+    Ok(IamApplicationTokens {
+        access_token: SecretString::from(wire.access_token),
+        refresh_token: SecretString::from(wire.refresh_token),
+        expires_in_seconds,
+        scope: wire.scope,
+        principal_id,
+        actor: ActorRef::new(wire.actor.kind, actor_id),
+        organization_id,
+        idempotency_replayed,
+    })
 }
 
 fn validate_introspection(
     wire: WireIntrospectionResponse,
     expected_organization: &OrganizationId,
-) -> Result<ActiveIntrospection, IamClientError> {
+    expected_application: &ApplicationId,
+) -> Result<VerifiedIdentity, IamClientError> {
     if !wire.active {
+        if wire.has_metadata() {
+            return Err(invalid_response("inactive_token_metadata"));
+        }
         return Err(IamClientError::Rejected);
     }
-    let organization_id = OrganizationId::new(required_wire(wire.org_id, "org_id")?)
-        .map_err(|_| invalid_response("org_id"))?;
+    let organization_value = required_wire(wire.org_id, "org_id")?;
+    if !is_canonical_iam_organization_id(&organization_value) {
+        return Err(invalid_response("org_id"));
+    }
+    let organization_id =
+        OrganizationId::new(organization_value).map_err(|_| invalid_response("org_id"))?;
     if &organization_id != expected_organization {
         return Err(binding_mismatch("org_id"));
     }
+    if required_wire(wire.client_id, "client_id")? != expected_application.as_str() {
+        return Err(binding_mismatch("client_id"));
+    }
+    if required_wire(wire.audience, "audience")? != expected_application.as_str() {
+        return Err(binding_mismatch("audience"));
+    }
+    let issued_at =
+        OffsetDateTime::from_unix_timestamp(required_wire(wire.issued_at, "issued_at")?)
+            .map_err(|_| invalid_response("issued_at"))?;
     let expires_at =
         OffsetDateTime::from_unix_timestamp(required_wire(wire.expires_at, "expires_at")?)
             .map_err(|_| invalid_response("expires_at"))?;
+    if expires_at <= issued_at {
+        return Err(invalid_response("token_lifetime"));
+    }
     if expires_at <= OffsetDateTime::now_utc() {
         return Err(IamClientError::Rejected);
     }
 
-    Ok(ActiveIntrospection {
-        principal_id: required_wire(wire.principal_id, "principal_id")?,
-        actor_type: required_wire(wire.actor_type, "actor_type")?,
+    let principal_id = required_wire(wire.principal_id, "principal_id")?;
+    let membership_id = required_wire(wire.membership_id, "membership_id")?;
+    let session_id = required_wire(wire.session_id, "session_id")?;
+    let scope = required_wire(wire.scope, "scope")?;
+    let authorization_epoch = required_wire(wire.authorization_epoch, "authorization_epoch")?;
+    if principal_id.is_nil() || membership_id.is_nil() || session_id.is_nil() {
+        return Err(invalid_response("token_identity"));
+    }
+    if !valid_scope_set(&scope) {
+        return Err(invalid_response("scope"));
+    }
+    if authorization_epoch < 1 {
+        return Err(invalid_response("authorization_epoch"));
+    }
+    Ok(VerifiedIdentity {
+        authorization: None,
+        principal_id,
+        actor_kind: required_wire(wire.actor_type, "actor_type")?,
         organization_id,
-        membership_id: required_wire(wire.membership_id, "membership_id")?,
+        membership_id,
+        authorization_epoch,
         expires_at,
     })
-}
-
-fn validate_userinfo(
-    introspection: &ActiveIntrospection,
-    wire: WireUserInfoResponse,
-    expected_organization: &OrganizationId,
-) -> Result<VerifiedIdentity, IamClientError> {
-    if wire.sub != introspection.principal_id {
-        return Err(binding_mismatch("principal_id"));
-    }
-    if wire.actor_type != introspection.actor_type {
-        return Err(binding_mismatch("actor_type"));
-    }
-    if required_wire(wire.membership_id, "membership_id")? != introspection.membership_id {
-        return Err(binding_mismatch("membership_id"));
-    }
-    let userinfo_org = required_wire(wire.org_id, "org_id")?;
-    if userinfo_org != introspection.organization_id.as_str() {
-        return Err(binding_mismatch("org_id"));
-    }
-
-    verified_identity(
-        WireActor {
-            principal_id: wire.sub,
-            kind: wire.actor_type,
-            public_id: wire.public_id,
-        },
-        userinfo_org,
-        required_wire(wire.org_role, "org_role")?,
-        required_wire(wire.tags, "tags")?,
-        introspection.expires_at,
-        expected_organization,
-        AuthenticationMode::Bearer,
-    )
 }
 
 fn validate_obo(
@@ -470,13 +576,19 @@ fn validate_obo(
         return Err(IamClientError::Rejected);
     }
 
-    let issuer = ApplicationId::new(required_wire(wire.issuer_app_id, "issuer_app_id")?)
-        .map_err(|_| invalid_response("issuer_app_id"))?;
+    let issuer_value = required_wire(wire.issuer_app_id, "issuer_app_id")?;
+    if !is_canonical_iam_application_id(&issuer_value) {
+        return Err(invalid_response("issuer_app_id"));
+    }
+    let issuer = ApplicationId::new(issuer_value).map_err(|_| invalid_response("issuer_app_id"))?;
     if &issuer != presented_application {
         return Err(binding_mismatch("issuer_app_id"));
     }
-    let audience = ApplicationId::new(required_wire(wire.audience, "audience")?)
-        .map_err(|_| invalid_response("audience"))?;
+    let audience_value = required_wire(wire.audience, "audience")?;
+    if !is_canonical_iam_application_id(&audience_value) {
+        return Err(invalid_response("audience"));
+    }
+    let audience = ApplicationId::new(audience_value).map_err(|_| invalid_response("audience"))?;
     if &audience != expected_audience {
         return Err(binding_mismatch("audience"));
     }
@@ -492,8 +604,12 @@ fn validate_obo(
     // IAM derives the tenant from the two applications and never accepts one
     // from the caller, so the response is authoritative. A request that still
     // declared an organization must agree with it.
-    let organization_id = OrganizationId::new(required_wire(wire.org_id, "org_id")?)
-        .map_err(|_| invalid_response("org_id"))?;
+    let organization_value = required_wire(wire.org_id, "org_id")?;
+    if !is_canonical_iam_organization_id(&organization_value) {
+        return Err(invalid_response("org_id"));
+    }
+    let organization_id =
+        OrganizationId::new(organization_value).map_err(|_| invalid_response("org_id"))?;
     if expected_organization.is_some_and(|expected| expected != &organization_id) {
         return Err(binding_mismatch("org_id"));
     }
@@ -518,6 +634,7 @@ fn validate_obo(
     }
 
     Ok(VerifiedOboAccess {
+        authorization: None,
         proof_id: required_wire(wire.proof_id, "proof_id")?,
         actor: ActorRef::new(actor.kind, actor_id),
         organization_id,
@@ -527,56 +644,36 @@ fn validate_obo(
     })
 }
 
-fn verified_identity(
-    wire_actor: WireActor,
-    organization_id: String,
-    role: OrganizationRole,
-    tags: Vec<String>,
-    expires_at: OffsetDateTime,
-    expected_organization: &OrganizationId,
-    authentication: AuthenticationMode,
-) -> Result<VerifiedIdentity, IamClientError> {
-    if expires_at <= OffsetDateTime::now_utc() {
-        return Err(IamClientError::Rejected);
+fn valid_scope_set(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2_000 {
+        return false;
     }
-    if wire_actor.principal_id.is_nil() {
-        return Err(invalid_response("actor.principal_id"));
-    }
-    validate_wire_text(
-        "actor.public_id",
-        &wire_actor.public_id,
-        MAX_IDENTIFIER_BYTES,
-    )?;
-    validate_wire_text("org_id", &organization_id, MAX_IDENTIFIER_BYTES)?;
-    let actor_id =
-        ActorId::new(wire_actor.public_id).map_err(|_| invalid_response("actor.public_id"))?;
-    let organization_id =
-        OrganizationId::new(organization_id).map_err(|_| invalid_response("org_id"))?;
-    if &organization_id != expected_organization {
-        return Err(binding_mismatch("org_id"));
-    }
-    if tags.len() > MAX_TAGS {
-        return Err(invalid_response("tags"));
-    }
-    let tags = tags
-        .into_iter()
-        .map(|tag| {
-            validate_wire_text("tags", &tag, MAX_IDENTIFIER_BYTES)?;
-            TagName::new(tag).map_err(|_| invalid_response("tags"))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let authorization = RequestAuthContext::new(
-        organization_id,
-        ActorRef::new(wire_actor.kind, actor_id),
-        role,
-        tags,
-        authentication,
-    );
+    let scopes = value.split(' ').collect::<Vec<_>>();
+    !scopes.is_empty()
+        && scopes.len() <= 100
+        && scopes.iter().all(|scope| valid_scope(scope))
+        && scopes.windows(2).all(|pair| pair[0] < pair[1])
+}
 
-    Ok(VerifiedIdentity {
-        authorization,
-        expires_at,
-    })
+fn valid_scope(scope: &str) -> bool {
+    (2..=128).contains(&scope.len())
+        && scope.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || (index != 0
+                    && (byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b':' | b'-')))
+        })
+}
+
+fn valid_fixed_iam_secret(value: &str, prefix: &str) -> bool {
+    value.len() == prefix.len() + 43
+        && value.starts_with(prefix)
+        && value[prefix.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_environment_key(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn validate_outbound_binding(
@@ -621,128 +718,6 @@ fn invalid_response(reason: &'static str) -> IamClientError {
     IamClientError::InvalidResponse { reason }
 }
 
-fn classify_transport_error(error: &reqwest::Error) -> IamClientError {
-    let reason = if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connection"
-    } else {
-        "transport"
-    };
-    IamClientError::Unavailable { reason }
-}
-
-fn require_service_success(
-    response: reqwest::Response,
-    operation: &'static str,
-) -> Result<reqwest::Response, IamClientError> {
-    let status = response.status();
-    if status == StatusCode::OK {
-        return Ok(response);
-    }
-
-    warn!(iam.operation = operation, %status, "IAM request was not successful");
-    let reason = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        "service_authentication"
-    } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        "upstream_status"
-    } else {
-        return Err(invalid_response("unexpected_status"));
-    };
-    Err(IamClientError::Unavailable { reason })
-}
-
-fn require_bearer_success(
-    response: reqwest::Response,
-    operation: &'static str,
-) -> Result<reqwest::Response, IamClientError> {
-    let status = response.status();
-    if status == StatusCode::OK {
-        return Ok(response);
-    }
-
-    warn!(iam.operation = operation, %status, "IAM request was not successful");
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return Err(IamClientError::Rejected);
-    }
-    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        return Err(IamClientError::Unavailable {
-            reason: "upstream_status",
-        });
-    }
-    Err(invalid_response("unexpected_status"))
-}
-
-fn require_obo_success(
-    response: reqwest::Response,
-    operation: &'static str,
-) -> Result<reqwest::Response, IamClientError> {
-    let status = response.status();
-    if status == StatusCode::OK {
-        return Ok(response);
-    }
-
-    warn!(iam.operation = operation, %status, "IAM request was not successful");
-    if matches!(
-        status,
-        StatusCode::CONFLICT | StatusCode::GONE | StatusCode::UNPROCESSABLE_ENTITY
-    ) {
-        return Err(IamClientError::Rejected);
-    }
-    let reason = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        "service_authentication"
-    } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        "upstream_status"
-    } else {
-        return Err(invalid_response("unexpected_status"));
-    };
-    Err(IamClientError::Unavailable { reason })
-}
-
-async fn read_json_bounded<T>(
-    mut response: reqwest::Response,
-    maximum_bytes: usize,
-) -> Result<T, IamClientError>
-where
-    T: DeserializeOwned,
-{
-    if response
-        .content_length()
-        .is_some_and(|length| length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX))
-    {
-        return Err(invalid_response("response_too_large"));
-    }
-    let is_json = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            let media_type = value.split(';').next().map(str::trim);
-            matches!(media_type, Some("application/json"))
-                || media_type.is_some_and(|media_type| media_type.ends_with("+json"))
-        });
-    if !is_json {
-        return Err(invalid_response("content_type"));
-    }
-
-    let mut body = BytesMut::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| classify_transport_error(&error))?
-    {
-        let new_length = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| invalid_response("response_too_large"))?;
-        if new_length > maximum_bytes {
-            return Err(invalid_response("response_too_large"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    deserialize_json(&body.freeze())
-}
-
 fn deserialize_json<T>(body: &[u8]) -> Result<T, IamClientError>
 where
     T: DeserializeOwned,
@@ -755,7 +730,7 @@ mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret as _, SecretString};
     use serde_json::json;
     use url::Url;
     use wiremock::{
@@ -766,44 +741,55 @@ mod tests {
     use crate::config::IamSettings;
 
     use super::{
-        ApplicationId, AuthenticationMode, IamClient, IamClientError, OboRequestBinding,
-        OrganizationId, WireIntrospectionResponse, WireOboResponse, WireUserInfoResponse,
-        deserialize_json, validate_introspection, validate_obo, validate_userinfo,
+        ApplicationId, IamClient, IamClientBuildError, IamClientError, IamEnvironmentCredential,
+        OboRequestBinding, OrganizationId, WireIntrospectionResponse, WireOboResponse,
+        deserialize_json, valid_server_version_catalog, validate_introspection, validate_obo,
     };
 
     const PRINCIPAL_ID: &str = "01990a9d-86f1-7000-8000-000000000001";
     const MEMBERSHIP_ID: &str = "01990a9d-86f1-7000-8000-000000000002";
-    const IAM_APP_ID: &str = "silicon-briefcase";
-    const IAM_APP_SECRET: &str = "test-secret";
+    const SESSION_ID: &str = "01990a9d-86f1-7000-8000-000000000003";
+    const IAM_APP_ID: &str = "tos>briefcase";
+    const IAM_APP_SECRET: &str = "ask_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_APP_ID: &str = IAM_APP_ID;
+    const TEST_APP_SECRET: &str = "ask_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_ENVIRONMENT_KEY: &str = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
+    const TEST_ENVIRONMENT_ID: &str = "01990a9d-86f1-7000-8000-000000000010";
     const BEARER_TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OBO_PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SHORT_LIVED_TOKEN: &str = "oac_ccccccccccccccccccccccccccccccccccccccccccc";
+    const REFRESH_TOKEN: &str = "ort_ddddddddddddddddddddddddddddddddddddddddddd";
 
     fn organization() -> OrganizationId {
         OrganizationId::new("tos").unwrap_or_else(|error| panic!("test fixture: {error}"))
     }
 
+    #[test]
+    fn version_catalog_is_ordered_unique_and_forward_compatible() {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<String>>()
+        };
+        assert!(valid_server_version_catalog(&strings(&["v3", "v2", "v1"])));
+        assert!(!valid_server_version_catalog(&strings(&["v1", "v2"])));
+        assert!(!valid_server_version_catalog(&strings(&["v1", "v1"])));
+        assert!(!valid_server_version_catalog(&strings(&["v01"])));
+        assert!(!valid_server_version_catalog(&strings(&["v2"])));
+    }
+
     fn application() -> ApplicationId {
-        ApplicationId::new("silicon-dm").unwrap_or_else(|error| panic!("test fixture: {error}"))
+        ApplicationId::new("tos>silicon-dm").unwrap_or_else(|error| panic!("test fixture: {error}"))
     }
 
     fn client_settings(server: &MockServer) -> IamSettings {
-        let base_url = Url::parse(&format!("{}/api/v1/", server.uri()))
+        let base_url = Url::parse(&format!("{}/", server.uri()))
             .unwrap_or_else(|error| panic!("test fixture: {error}"));
         IamSettings {
-            bearer_introspection_url: base_url
-                .join("auth/tokens/introspect")
-                .unwrap_or_else(|error| panic!("test fixture: {error}")),
-            bearer_userinfo_url: base_url
-                .join("oauth/userinfo")
-                .unwrap_or_else(|error| panic!("test fixture: {error}")),
-            obo_verification_url: base_url
-                .join("obo-access/verify")
-                .unwrap_or_else(|error| panic!("test fixture: {error}")),
             base_url,
             app_id: IAM_APP_ID.to_owned(),
             app_secret: SecretString::from(IAM_APP_SECRET.to_owned()),
-            audience: IAM_APP_ID.to_owned(),
-            connect_timeout: Duration::from_secs(1),
             request_timeout: Duration::from_secs(2),
             max_response_bytes: NonZeroUsize::new(65_536)
                 .unwrap_or_else(|| panic!("non-zero test fixture")),
@@ -817,56 +803,435 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn bearer_requests_match_the_published_transport_contract() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/tokens/introspect"))
-            .and(header("authorization", basic_authorization()))
-            .and(header("x-org-id", "tos"))
-            .and(header("content-type", "application/x-www-form-urlencoded"))
-            .and(body_string(format!(
-                "token={BEARER_TOKEN}&token_type_hint=access_token"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "active": true,
+    fn test_basic_authorization() -> String {
+        format!(
+            "Basic {}",
+            STANDARD.encode(format!("{TEST_APP_ID}:{TEST_APP_SECRET}"))
+        )
+    }
+
+    fn environment_credential() -> IamEnvironmentCredential {
+        IamEnvironmentCredential::new(
+            SecretString::from(TEST_ENVIRONMENT_KEY.to_owned()),
+            TEST_APP_ID.to_owned(),
+            SecretString::from(TEST_APP_SECRET.to_owned()),
+        )
+        .unwrap_or_else(|error| panic!("test fixture: {error}"))
+        .with_environment_id(
+            TEST_ENVIRONMENT_ID
+                .parse()
+                .unwrap_or_else(|error| panic!("test fixture: {error}")),
+        )
+    }
+
+    fn authorization_snapshot(audience: &str, testing: bool) -> serde_json::Value {
+        json!({
+            "principal_id": PRINCIPAL_ID,
+            "actor_type": "carbon",
+            "public_id": "carbon-a",
+            "organization_id": "01990a9d-86f1-7000-8000-000000000099",
+            "org_id": "tos",
+            "membership_id": MEMBERSHIP_ID,
+            "membership_version": 7,
+            "authorization_epoch": 7,
+            "audience": audience,
+            "testing_environment_id": if testing { Some(TEST_ENVIRONMENT_ID) } else { None },
+            "scopes": ["memberships.read", "profile", "roles.read"],
+            "org_role": "member",
+            "tags": []
+        })
+    }
+
+    fn application_token_response() -> serde_json::Value {
+        json!({
+            "access_token": "oat_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "refresh_token": "ort_fffffffffffffffffffffffffffffffffffffffffff",
+            "token_type": "Bearer",
+            "expires_in": 1800,
+            "scope": "briefcase.read profile",
+            "actor": {
                 "principal_id": PRINCIPAL_ID,
-                "actor_type": "carbon",
-                "org_id": "tos",
-                "membership_id": MEMBERSHIP_ID,
-                "expires_at": 4_070_908_800_i64
+                "type": "carbon",
+                "public_id": "carbon-a"
+            },
+            "org_id": "tos"
+        })
+    }
+
+    #[test]
+    fn environment_credentials_validate_and_redact_every_secret() {
+        let credential = environment_credential();
+        let rendered = format!("{credential:?}");
+        assert!(rendered.contains(TEST_APP_ID));
+        assert!(!rendered.contains(TEST_ENVIRONMENT_KEY));
+        assert!(!rendered.contains(TEST_APP_SECRET));
+
+        assert!(matches!(
+            IamEnvironmentCredential::new(
+                SecretString::from("short".to_owned()),
+                TEST_APP_ID.to_owned(),
+                SecretString::from(TEST_APP_SECRET.to_owned()),
+            ),
+            Err(IamClientBuildError::InvalidIdentifier)
+        ));
+        assert!(matches!(
+            IamEnvironmentCredential::new(
+                SecretString::from(TEST_ENVIRONMENT_KEY.to_owned()),
+                "briefcase".to_owned(),
+                SecretString::from(TEST_APP_SECRET.to_owned()),
+            ),
+            Err(IamClientBuildError::InvalidIdentifier)
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_negotiates_the_published_api_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/version"))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Silicon-IAM-API-Version", "v1")
+                    .insert_header("Vary", "Silicon-IAM-Supported-API-Versions")
+                    .set_body_json(json!({
+                        "service": "silicon-iam",
+                        "selected_api_version": "v1",
+                        "supported_api_versions": ["v2", "v1"],
+                        "build": "test",
+                        "commit": "test"
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        IamClient::connect(&client_settings(&server))
+            .await
+            .unwrap_or_else(|error| panic!("published handshake should negotiate: {error}"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn environment_validation_binds_the_key_id_and_test_application() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/testing-environment"))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": TEST_ENVIRONMENT_ID,
+                "name": "briefcase integration",
+                "description": null,
+                "key_generation": 1,
+                "created_at": "2026-09-04T00:00:00Z"
             })))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/oauth/userinfo"))
-            .and(header("authorization", format!("Bearer {BEARER_TOKEN}")))
-            .and(header("x-org-id", "tos"))
+            .and(path("/api/v1/application-directory/tos%3Ebriefcase"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "sub": PRINCIPAL_ID,
-                "actor_type": "carbon",
-                "public_id": "carbon-a",
-                "org_id": "tos",
-                "membership_id": MEMBERSHIP_ID,
-                "org_role": "member",
-                "tags": ["finance"]
+                "app_id": TEST_APP_ID,
+                "base_url": "https://briefcase.example.test"
             })))
             .expect(1)
             .mount(&server)
             .await;
-        let client = IamClient::new(&client_settings(&server))
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+        let environment_id = TEST_ENVIRONMENT_ID
+            .parse()
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        client
+            .validate_environment_credential(&environment_credential(), environment_id)
+            .await
+            .unwrap_or_else(|error| panic!("IAM test-plane binding should verify: {error}"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn environment_validation_stops_before_application_auth_on_id_mismatch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/testing-environment"))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "01990a9d-86f1-7000-8000-000000000011",
+                "name": "different environment",
+                "description": null,
+                "key_generation": 1,
+                "created_at": "2026-09-04T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+        let environment_id = TEST_ENVIRONMENT_ID
+            .parse()
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let result = client
+            .validate_environment_credential(&environment_credential(), environment_id)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(IamClientError::BindingMismatch {
+                binding: "testing_environment.id"
+            })
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn environment_validation_rejects_a_different_application_identity_before_io() {
+        let server = MockServer::start().await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+        let environment_id = TEST_ENVIRONMENT_ID
+            .parse()
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+        let credential = IamEnvironmentCredential::new(
+            SecretString::from(TEST_ENVIRONMENT_KEY.to_owned()),
+            "other>briefcase".to_owned(),
+            SecretString::from(TEST_APP_SECRET.to_owned()),
+        )
+        .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let result = client
+            .validate_environment_credential(&credential, environment_id)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(IamClientError::BindingMismatch {
+                binding: "testing_application.app_id"
+            })
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn bearer_requests_match_the_published_transport_contract() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .and(header("authorization", basic_authorization()))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("x-org-id", "tos"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "token={BEARER_TOKEN}&token_type_hint=access_token"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .set_body_json(json!({
+                        "active": true,
+                        "principal_id": PRINCIPAL_ID,
+                        "actor_type": "carbon",
+                        "client_id": IAM_APP_ID,
+                        "org_id": "tos",
+                        "membership_id": MEMBERSHIP_ID,
+                        "session_id": SESSION_ID,
+                        "scope": "memberships.read profile roles.read",
+                        "audience": IAM_APP_ID,
+                        "authorization": authorization_snapshot(IAM_APP_ID, false),
+                        "authorization_epoch": 7,
+                        "issued_at": 1_700_000_000_i64,
+                        "expires_at": 4_070_908_800_i64
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
             .unwrap_or_else(|error| panic!("test fixture: {error}"));
 
         let verified = client
             .introspect_bearer(
                 &SecretString::from(BEARER_TOKEN.to_owned()),
                 &organization(),
+                None,
             )
             .await
             .unwrap_or_else(|error| panic!("published bearer exchange should verify: {error}"));
 
-        assert_eq!(verified.authorization().actor().id().as_str(), "carbon-a");
+        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
+        assert_eq!(verified.membership_id().to_string(), MEMBERSHIP_ID);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn bearer_introspection_uses_only_the_selected_environment_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("x-org-id", "tos"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "token={BEARER_TOKEN}&token_type_hint=access_token"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(json!({
+                        "active": true,
+                        "principal_id": PRINCIPAL_ID,
+                        "actor_type": "carbon",
+                        "client_id": TEST_APP_ID,
+                        "org_id": "tos",
+                        "membership_id": MEMBERSHIP_ID,
+                        "session_id": SESSION_ID,
+                        "scope": "memberships.read profile roles.read",
+                        "audience": TEST_APP_ID,
+                        "authorization": authorization_snapshot(TEST_APP_ID, true),
+                        "authorization_epoch": 7,
+                        "issued_at": 1_700_000_000_i64,
+                        "expires_at": 4_070_908_800_i64
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let verified = client
+            .introspect_bearer(
+                &SecretString::from(BEARER_TOKEN.to_owned()),
+                &organization(),
+                Some(&environment_credential()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test-plane bearer should verify: {error}"));
+
+        assert_eq!(verified.organization_id().as_str(), "tos");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn bearer_response_without_no_store_headers_fails_closed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "active": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let result = client
+            .introspect_bearer(
+                &SecretString::from(BEARER_TOKEN.to_owned()),
+                &organization(),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(IamClientError::InvalidResponse {
+                reason: "cache_headers"
+            })
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn short_lived_login_uses_the_published_form_and_returns_redacted_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", basic_authorization()))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("idempotency-key", "login-operation-0001"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "app_id=tos%3Ebriefcase&slt={SHORT_LIVED_TOKEN}"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(application_token_response()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let tokens = client
+            .exchange_short_lived_token(
+                &SecretString::from(SHORT_LIVED_TOKEN.to_owned()),
+                "login-operation-0001",
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("published SLT exchange should succeed: {error}"));
+
+        assert_eq!(tokens.expires_in_seconds(), 1_800);
+        assert_eq!(tokens.principal_id().to_string(), PRINCIPAL_ID);
+        assert_eq!(tokens.actor().id().as_str(), "carbon-a");
+        assert_eq!(
+            tokens.organization_id().map(OrganizationId::as_str),
+            Some("tos")
+        );
+        let rendered = format!("{tokens:?}");
+        assert!(!rendered.contains(tokens.access_token().expose_secret()));
+        assert!(!rendered.contains(tokens.refresh_token().expose_secret()));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_form_encoding_and_only_the_test_plane_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("idempotency-key", "refresh-operation-0001"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "app_id=tos%3Ebriefcase&refresh_token={REFRESH_TOKEN}"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .insert_header("idempotency-replayed", "true")
+                    .set_body_json(application_token_response()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let tokens = client
+            .refresh_application_session(
+                &SecretString::from(REFRESH_TOKEN.to_owned()),
+                "refresh-operation-0001",
+                Some(&environment_credential()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("published refresh should succeed: {error}"));
+
+        assert_eq!(tokens.idempotency_replayed(), None);
         server.verify().await;
     }
 
@@ -878,6 +1243,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/obo-access/verify"))
             .and(header("authorization", basic_authorization()))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
             .and(body_json(json!({
                 "access_proof": OBO_PROOF,
                 "request": {
@@ -886,29 +1252,35 @@ mod tests {
                     "body_sha256": digest,
                 }
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "valid": true,
-                "proof_id": "01990a9d-86f1-7000-8000-000000000004",
-                "issuer_app_id": "silicon-dm",
-                "audience": "silicon-briefcase",
-                "actor": {
-                    "principal_id": PRINCIPAL_ID,
-                    "type": "carbon",
-                    "public_id": "carbon-a"
-                },
-                "org_id": "tos",
-                "endpoint": {
-                    "endpoint_id": "briefcase.files.create",
-                    "path": "/api/v1/obo/files"
-                },
-                "metadata": { "path": "", "name": "report.pdf" },
-                "expires_at": "2099-01-01T00:00:00Z",
-                "consumed_at": "2026-08-31T12:00:00Z"
-            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(json!({
+                        "valid": true,
+                        "proof_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "issuer_app_id": "tos>silicon-dm",
+                        "audience": IAM_APP_ID,
+                        "authorization": authorization_snapshot(IAM_APP_ID, false),
+                        "actor": {
+                            "principal_id": PRINCIPAL_ID,
+                            "type": "carbon",
+                            "public_id": "carbon-a"
+                        },
+                        "org_id": "tos",
+                        "endpoint": {
+                            "endpoint_id": "briefcase.files.create",
+                            "path": "/api/v1/obo/files"
+                        },
+                        "metadata": { "path": "", "name": "report.pdf" },
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "consumed_at": "2026-08-31T12:00:00Z"
+                    })),
+            )
             .expect(1)
             .mount(&server)
             .await;
-        let client = IamClient::new(&client_settings(&server))
+        let client = IamClient::new_without_handshake(&client_settings(&server))
             .unwrap_or_else(|error| panic!("test fixture: {error}"));
 
         let verified = client
@@ -921,54 +1293,151 @@ mod tests {
                     path: "/api/v1/obo/files",
                     body_sha256: &digest,
                 },
+                None,
             )
             .await
             .unwrap_or_else(|error| panic!("published OBO exchange should verify: {error}"));
 
         assert_eq!(verified.actor.id().as_str(), "carbon-a");
         assert_eq!(verified.endpoint_id, "briefcase.files.create");
-        assert_eq!(verified.issuer.as_str(), "silicon-dm");
+        assert_eq!(verified.issuer.as_str(), "tos>silicon-dm");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn obo_proof_refusals_are_not_reported_as_dependency_outages() {
+        for status in [403, 409, 410, 422, 401, 429, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/obo-access/verify"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "error": {"code": "rejected", "message": "Request rejected", "request_id": "fixture"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = IamClient::new_without_handshake(&client_settings(&server))
+                .unwrap_or_else(|error| panic!("test fixture: {error}"));
+            let result = client
+                .verify_obo(
+                    &SecretString::from(OBO_PROOF.to_owned()),
+                    &application(),
+                    Some(&organization()),
+                    &OboRequestBinding {
+                        method: "POST",
+                        path: "/api/v1/obo/files",
+                        body_sha256: &"a".repeat(64),
+                    },
+                    None,
+                )
+                .await;
+            if matches!(status, 403 | 409 | 410 | 422) {
+                assert!(
+                    matches!(result, Err(IamClientError::Rejected)),
+                    "status {status}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(IamClientError::Unavailable { .. })),
+                    "status {status}"
+                );
+            }
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn obo_verification_uses_only_the_selected_environment_credential() {
+        let server = MockServer::start().await;
+        let digest = "a".repeat(64);
+        Mock::given(method("POST"))
+            .and(path("/api/v1/obo-access/verify"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(body_json(json!({
+                "access_proof": OBO_PROOF,
+                "request": {
+                    "method": "POST",
+                    "path": "/api/v1/obo/files",
+                    "body_sha256": digest,
+                }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(json!({
+                        "valid": true,
+                        "proof_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "issuer_app_id": "tos>silicon-dm",
+                        "audience": TEST_APP_ID,
+                        "authorization": authorization_snapshot(TEST_APP_ID, true),
+                        "actor": {
+                            "principal_id": PRINCIPAL_ID,
+                            "type": "carbon",
+                            "public_id": "carbon-a"
+                        },
+                        "org_id": "tos",
+                        "endpoint": {
+                            "endpoint_id": "briefcase.files.create",
+                            "path": "/api/v1/obo/files"
+                        },
+                        "metadata": { "path": "", "name": "report.pdf" },
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "consumed_at": "2026-08-31T12:00:00Z"
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let verified = client
+            .verify_obo(
+                &SecretString::from(OBO_PROOF.to_owned()),
+                &application(),
+                Some(&organization()),
+                &OboRequestBinding {
+                    method: "POST",
+                    path: "/api/v1/obo/files",
+                    body_sha256: &digest,
+                },
+                Some(&environment_credential()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test-plane OBO should verify: {error}"));
+
+        assert_eq!(verified.organization_id.as_str(), "tos");
         server.verify().await;
     }
 
     #[test]
-    fn published_bearer_contract_cross_binds_introspection_and_userinfo() {
+    fn published_bearer_contract_returns_only_introspected_identity() {
         let introspection_body = serde_json::to_vec(&json!({
             "active": true,
             "principal_id": "01990a9d-86f1-7000-8000-000000000001",
             "actor_type": "carbon",
+            "client_id": IAM_APP_ID,
             "org_id": "tos",
             "membership_id": "01990a9d-86f1-7000-8000-000000000002",
+            "session_id": "01990a9d-86f1-7000-8000-000000000003",
+            "scope": "briefcase.read profile",
+            "audience": IAM_APP_ID,
+            "authorization_epoch": 7,
+            "issued_at": 1_700_000_000_i64,
             "expires_at": 4_070_908_800_i64,
             "future_iam_field": "ignored"
         }))
         .unwrap_or_else(|error| panic!("test fixture: {error}"));
-        let userinfo_body = serde_json::to_vec(&json!({
-            "sub": "01990a9d-86f1-7000-8000-000000000001",
-            "actor_type": "carbon",
-            "public_id": "carbon-a",
-            "org_id": "tos",
-            "membership_id": "01990a9d-86f1-7000-8000-000000000002",
-            "org_role": "member",
-            "tags": ["finance", "leadership"]
-        }))
-        .unwrap_or_else(|error| panic!("test fixture: {error}"));
         let introspection: WireIntrospectionResponse = deserialize_json(&introspection_body)
             .unwrap_or_else(|error| panic!("wire contract should parse: {error}"));
-        let userinfo: WireUserInfoResponse = deserialize_json(&userinfo_body)
-            .unwrap_or_else(|error| panic!("userinfo contract should parse: {error}"));
-
-        let introspection = validate_introspection(introspection, &organization())
+        let verified = validate_introspection(introspection, &organization(), &audience())
             .unwrap_or_else(|error| panic!("introspection should verify: {error}"));
-        let verified = validate_userinfo(&introspection, userinfo, &organization())
-            .unwrap_or_else(|error| panic!("wire contract should verify: {error}"));
 
-        assert_eq!(verified.authorization().organization_id().as_str(), "tos");
-        assert_eq!(verified.authorization().actor().id().as_str(), "carbon-a");
-        assert!(matches!(
-            verified.authorization().authentication(),
-            AuthenticationMode::Bearer
-        ));
+        assert_eq!(verified.organization_id().as_str(), "tos");
+        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
     }
 
     #[test]
@@ -980,7 +1449,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("inactive response should parse: {error}"));
 
         assert!(matches!(
-            validate_introspection(wire, &organization()),
+            validate_introspection(wire, &organization(), &audience()),
             Err(IamClientError::Rejected)
         ));
     }
@@ -992,7 +1461,13 @@ mod tests {
                 "active": true,
                 "principal_id": "01990a9d-86f1-7000-8000-000000000001",
                 "actor_type": "carbon",
+                "client_id": IAM_APP_ID,
                 "org_id": "tos",
+                "session_id": "01990a9d-86f1-7000-8000-000000000003",
+                "scope": "profile",
+                "audience": IAM_APP_ID,
+                "authorization_epoch": 7,
+                "issued_at": 1_700_000_000_i64,
                 "expires_at": 4_070_908_800_i64
             }))
             .unwrap_or_else(|error| panic!("test fixture: {error}")),
@@ -1000,40 +1475,25 @@ mod tests {
         .unwrap_or_else(|error| panic!("response should deserialize: {error}"));
 
         assert!(matches!(
-            validate_introspection(wire, &organization()),
+            validate_introspection(wire, &organization(), &audience()),
             Err(IamClientError::InvalidResponse { .. })
         ));
     }
 
     #[test]
-    fn userinfo_principal_mismatch_fails_closed() {
-        let introspection: WireIntrospectionResponse = serde_json::from_value(json!({
-            "active": true,
-            "principal_id": "01990a9d-86f1-7000-8000-000000000001",
-            "actor_type": "carbon",
-            "org_id": "tos",
-            "membership_id": "01990a9d-86f1-7000-8000-000000000002",
-            "expires_at": 4_070_908_800_i64
-        }))
-        .unwrap_or_else(|error| panic!("test fixture: {error}"));
-        let userinfo: WireUserInfoResponse = serde_json::from_value(json!({
-            "sub": "01990a9d-86f1-7000-8000-000000000003",
-            "actor_type": "carbon",
-            "public_id": "carbon-a",
-            "org_id": "tos",
-            "membership_id": "01990a9d-86f1-7000-8000-000000000002",
-            "org_role": "member",
-            "tags": []
-        }))
-        .unwrap_or_else(|error| panic!("test fixture: {error}"));
-        let introspection = validate_introspection(introspection, &organization())
-            .unwrap_or_else(|error| panic!("introspection should verify: {error}"));
+    fn inactive_introspection_that_discloses_metadata_fails_closed() {
+        let wire: WireIntrospectionResponse = deserialize_json(
+            &serde_json::to_vec(&json!({
+                "active": false,
+                "principal_id": PRINCIPAL_ID
+            }))
+            .unwrap_or_else(|error| panic!("test fixture: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("inactive response should parse: {error}"));
 
         assert!(matches!(
-            validate_userinfo(&introspection, userinfo, &organization()),
-            Err(IamClientError::BindingMismatch {
-                binding: "principal_id"
-            })
+            validate_introspection(wire, &organization(), &audience()),
+            Err(IamClientError::InvalidResponse { .. })
         ));
     }
 
@@ -1055,8 +1515,8 @@ mod tests {
                 "public_id": "researcher:tos"
             },
             "org_id": "tos",
-            "issuer_app_id": "silicon-dm",
-            "audience": "silicon-briefcase",
+            "issuer_app_id": "tos>silicon-dm",
+            "audience": IAM_APP_ID,
             "endpoint": {
                 "endpoint_id": "briefcase.files.create",
                 "path": "/api/v1/obo/files"
@@ -1074,8 +1534,7 @@ mod tests {
     }
 
     fn audience() -> ApplicationId {
-        ApplicationId::new("silicon-briefcase")
-            .unwrap_or_else(|error| panic!("test fixture: {error}"))
+        ApplicationId::new(IAM_APP_ID).unwrap_or_else(|error| panic!("test fixture: {error}"))
     }
 
     #[test]
@@ -1097,8 +1556,11 @@ mod tests {
     #[test]
     fn obo_issuer_audience_endpoint_and_organization_all_fail_closed() {
         let cases = [
-            (json!({ "issuer_app_id": "different-app" }), "issuer_app_id"),
-            (json!({ "audience": "someone-else" }), "audience"),
+            (
+                json!({ "issuer_app_id": "tos>different-app" }),
+                "issuer_app_id",
+            ),
+            (json!({ "audience": "tos>someone-else" }), "audience"),
             (
                 json!({
                     "endpoint": {
@@ -1156,8 +1618,8 @@ mod tests {
                 "public_id": "external-app"
             },
             "org_id": "tos",
-            "issuer_app_id": "silicon-dm",
-            "audience": "silicon-briefcase",
+            "issuer_app_id": "tos>silicon-dm",
+            "audience": "tos>briefcase",
             "endpoint": {
                 "endpoint_id": "briefcase.files.create",
                 "path": "/api/v1/obo/files"

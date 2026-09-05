@@ -339,6 +339,18 @@ pub struct AccessRequestCreateDto {
     pub reason: Option<String>,
 }
 
+/// Path-addressed access-request payload for a permanent URL.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathAccessRequestCreateDto {
+    /// Exact organization-relative path from the permanent URL.
+    pub path: String,
+    /// Non-empty set of desired rights.
+    pub access: Vec<GrantAccessDto>,
+    /// Optional human-readable context.
+    pub reason: Option<String>,
+}
+
 /// Access-request status.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

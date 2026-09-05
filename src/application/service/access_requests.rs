@@ -6,8 +6,9 @@ use crate::{
 };
 
 use super::{
-    AccessRequestView, DecideAccessRequestCommand, MetadataService, MetadataServiceError,
-    MutationMetadata, RequestAccessCommand, require_capability, validate_context,
+    AccessRequestView, AuthorizableEntry, DecideAccessRequestCommand, MetadataService,
+    MetadataServiceError, MutationMetadata, RequestAccessByPathCommand, RequestAccessCommand,
+    require_capability, validate_context,
 };
 
 impl MetadataService {
@@ -30,6 +31,50 @@ impl MetadataService {
             .find_active_entry(context, command.entry_id)
             .await?
             .ok_or(MetadataServiceError::NotFound)?;
+        self.create_access_request(context, entry, command, metadata)
+            .await
+    }
+
+    /// Requests access to the exact hidden entry named by a permanent URL path.
+    ///
+    /// This is the deliberate exception to normal path resolution: it reveals
+    /// no entry metadata and returns the same access-request record as the UUID
+    /// route. A missing path and a path in another tenant both remain opaque
+    /// not-found results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError`] when the request context is invalid,
+    /// the path is unavailable, the requested access is already effective, or
+    /// persistence fails.
+    pub async fn request_access_by_path(
+        &self,
+        context: &ExecutionContext,
+        command: &RequestAccessByPathCommand,
+        metadata: &MutationMetadata,
+    ) -> Result<AccessRequestView, MetadataServiceError> {
+        validate_context(context)?;
+        let entry = self
+            .repository
+            .find_active_entry_by_path(context, &command.path)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        let command = RequestAccessCommand {
+            entry_id: entry.entry.id,
+            access: command.access,
+            reason: command.reason.clone(),
+        };
+        self.create_access_request(context, entry, &command, metadata)
+            .await
+    }
+
+    async fn create_access_request(
+        &self,
+        context: &ExecutionContext,
+        entry: AuthorizableEntry,
+        command: &RequestAccessCommand,
+        metadata: &MutationMetadata,
+    ) -> Result<AccessRequestView, MetadataServiceError> {
         let authorization = entry.authorization(context.authorization());
         // Requesting access the caller already has would create a request
         // nobody needs to decide. Effective access is entry-kind aware, so it

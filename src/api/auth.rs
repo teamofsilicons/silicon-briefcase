@@ -4,16 +4,20 @@ use http::{HeaderMap, HeaderName, header::AUTHORIZATION};
 use secrecy::SecretString;
 
 use crate::{
-    domain::actor::{ApplicationId, OrganizationId, RequestAuthContext},
+    application::{context::TestingEnvironmentContext, service::MetadataService},
+    domain::actor::{
+        ApplicationId, OrganizationId, RequestAuthContext, is_canonical_iam_application_id,
+        is_canonical_iam_organization_id,
+    },
     error::AppError,
-    infrastructure::iam::IamClient,
+    infrastructure::iam::{IamClient, IamEnvironmentCredential},
     request_context,
 };
 
 const ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
 const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
 const APP_ID: HeaderName = HeaderName::from_static("x-app-id");
-const MAX_CREDENTIAL_BYTES: usize = 8_192;
+const TESTING_ENVIRONMENT_KEY: HeaderName = HeaderName::from_static("x-testing-environment-key");
 
 /// Stable IAM action bound to one Briefcase operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +70,8 @@ pub enum IamAction {
     ConfigureStorage,
     /// Read the organization's consumption and limits.
     ReadUsage,
+    /// Manage Briefcase testing environments on the production control plane.
+    ManageTestingEnvironments,
 }
 
 impl IamAction {
@@ -97,6 +103,7 @@ impl IamAction {
             Self::RestoreBinEntry => "briefcase.bin.restore",
             Self::ConfigureStorage => "briefcase.storage.configure",
             Self::ReadUsage => "briefcase.usage.read",
+            Self::ManageTestingEnvironments => "briefcase.testing_environments.manage",
         }
     }
 }
@@ -135,15 +142,20 @@ impl AuthenticatedRequest {
 /// mismatched, or unverifiable credentials.
 pub async fn authenticate(
     iam: &IamClient,
+    _metadata: &MetadataService,
     headers: &HeaderMap,
     action: IamAction,
     resource: &str,
+    environment: Option<&IamEnvironmentCredential>,
+    _testing_environment: Option<TestingEnvironmentContext>,
 ) -> Result<AuthenticatedRequest, AppError> {
     let organization = parse_organization(headers)?;
     let authorization = require_bearer_only(headers)?;
     let token = parse_bearer(authorization)?;
-    let verified = iam.introspect_bearer(&token, &organization).await?;
-    if verified.authorization().organization_id() != &organization {
+    let verified = iam
+        .introspect_bearer(&token, &organization, environment)
+        .await?;
+    if verified.organization_id() != &organization {
         return Err(AppError::Forbidden);
     }
     tracing::debug!(
@@ -154,9 +166,13 @@ pub async fn authenticate(
     let request_id = request_context::current_request_id().ok_or(AppError::Internal {
         category: "request_scope_missing",
     })?;
+    let authorization = verified
+        .authorization()
+        .cloned()
+        .ok_or(AppError::Forbidden)?;
 
     Ok(AuthenticatedRequest {
-        authorization: verified.into_authorization(),
+        authorization,
         request_id,
     })
 }
@@ -179,11 +195,37 @@ pub(crate) fn require_bearer_shape(headers: &HeaderMap) -> Result<(), AppError> 
 /// token, such as organization storage administration.
 pub async fn authenticate_bearer(
     iam: &IamClient,
+    metadata: &MetadataService,
     headers: &HeaderMap,
     action: IamAction,
+    environment: Option<&IamEnvironmentCredential>,
+    testing_environment: Option<TestingEnvironmentContext>,
 ) -> Result<AuthenticatedRequest, AppError> {
     let organization = parse_organization(headers)?;
-    authenticate(iam, headers, action, organization.as_str()).await
+    authenticate(
+        iam,
+        metadata,
+        headers,
+        action,
+        organization.as_str(),
+        environment,
+        testing_environment,
+    )
+    .await
+}
+
+/// Reads the optional Briefcase sandbox root key without exposing it as text.
+pub(crate) fn testing_environment_key(
+    headers: &HeaderMap,
+) -> Result<Option<SecretString>, AppError> {
+    optional_single_header(headers, &TESTING_ENVIRONMENT_KEY)?
+        .map(|value| {
+            if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                return Err(AppError::bad_request("invalid_testing_environment_key"));
+            }
+            Ok(SecretString::from(value.to_owned()))
+        })
+        .transpose()
 }
 
 /// Reads the application identity and proof presented to the OBO endpoint.
@@ -200,9 +242,12 @@ pub(crate) fn obo_credentials(
     }
     let proof = optional_single_header(headers, &OBO_PROOF)?.ok_or(AppError::Unauthenticated)?;
     let app_id = optional_single_header(headers, &APP_ID)?.ok_or(AppError::Unauthenticated)?;
+    if !is_canonical_iam_application_id(app_id) {
+        return Err(AppError::bad_request("invalid_app_id"));
+    }
     let application = ApplicationId::new(app_id.to_owned())
         .map_err(|_| AppError::bad_request("invalid_app_id"))?;
-    Ok((application, parse_secret_header(proof)?))
+    Ok((application, parse_iam_secret_header(proof, "obo_")?))
 }
 
 /// Reads an optional tenant header, for a route where IAM names the tenant.
@@ -215,6 +260,9 @@ pub(crate) fn optional_organization(
 ) -> Result<Option<OrganizationId>, AppError> {
     optional_single_header(headers, &ORG_ID)?
         .map(|value| {
+            if !is_canonical_iam_organization_id(value) {
+                return Err(AppError::bad_request("invalid_org_id"));
+            }
             OrganizationId::new(value.to_owned())
                 .map_err(|_| AppError::bad_request("invalid_org_id"))
         })
@@ -238,6 +286,9 @@ pub fn organization_resource(headers: &HeaderMap) -> Result<String, AppError> {
 
 fn parse_organization(headers: &HeaderMap) -> Result<OrganizationId, AppError> {
     let value = required_single_header(headers, &ORG_ID, "missing_org_id")?;
+    if !is_canonical_iam_organization_id(value) {
+        return Err(AppError::bad_request("invalid_org_id"));
+    }
     OrganizationId::new(value.to_owned()).map_err(|_| AppError::bad_request("invalid_org_id"))
 }
 
@@ -251,11 +302,16 @@ fn parse_bearer(value: &str) -> Result<SecretString, AppError> {
     {
         return Err(AppError::Unauthenticated);
     }
-    parse_secret_header(token.unwrap_or_default())
+    parse_iam_secret_header(token.unwrap_or_default(), "oat_")
 }
 
-fn parse_secret_header(value: &str) -> Result<SecretString, AppError> {
-    if value.is_empty() || value.len() > MAX_CREDENTIAL_BYTES {
+fn parse_iam_secret_header(value: &str, prefix: &str) -> Result<SecretString, AppError> {
+    if value.len() != prefix.len() + 43
+        || !value.starts_with(prefix)
+        || !value[prefix.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
         return Err(AppError::Unauthenticated);
     }
     Ok(SecretString::from(value.to_owned()))
@@ -292,6 +348,9 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
 
     use super::{IamAction, obo_credentials, parse_bearer, require_bearer_shape};
+
+    const ACCESS_TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OBO_PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
     fn action_names_are_stable_capabilities() {
@@ -341,7 +400,10 @@ mod tests {
         bearer.insert("x-org-id", HeaderValue::from_static("org_example"));
         bearer.insert(
             http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer opaque-token"),
+            HeaderValue::from_static(concat!(
+                "Bearer ",
+                "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )),
         );
         assert!(require_bearer_shape(&bearer).is_ok());
 
@@ -349,9 +411,12 @@ mod tests {
         proof_only.insert("x-org-id", HeaderValue::from_static("org_example"));
         proof_only.insert(
             "x-iam-obo-access-proof",
-            HeaderValue::from_static("opaque-proof"),
+            HeaderValue::from_static(OBO_PROOF),
         );
-        proof_only.insert("x-app-id", HeaderValue::from_static("app_example"));
+        proof_only.insert(
+            "x-app-id",
+            HeaderValue::from_static("org-example>app-example"),
+        );
         // An application must use the OBO endpoint, not the bearer surface.
         assert!(require_bearer_shape(&proof_only).is_err());
         assert!(obo_credentials(&proof_only).is_ok());
@@ -363,13 +428,19 @@ mod tests {
         headers.insert("x-org-id", HeaderValue::from_static("org_example"));
         headers.insert(
             http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer opaque-token"),
+            HeaderValue::from_static(concat!(
+                "Bearer ",
+                "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )),
         );
         headers.insert(
             "x-iam-obo-access-proof",
-            HeaderValue::from_static("opaque-proof"),
+            HeaderValue::from_static(OBO_PROOF),
         );
-        headers.insert("x-app-id", HeaderValue::from_static("app_example"));
+        headers.insert(
+            "x-app-id",
+            HeaderValue::from_static("org-example>app-example"),
+        );
 
         assert!(require_bearer_shape(&headers).is_err());
         assert!(obo_credentials(&headers).is_err());
@@ -379,6 +450,7 @@ mod tests {
     fn bearer_parser_rejects_ambiguous_values() {
         assert!(parse_bearer("Bearer one two").is_err());
         assert!(parse_bearer("Basic token").is_err());
-        assert!(parse_bearer("bearer token").is_ok());
+        assert!(parse_bearer(&format!("bearer {ACCESS_TOKEN}")).is_ok());
+        assert!(parse_bearer("bearer token").is_err());
     }
 }

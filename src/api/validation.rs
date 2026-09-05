@@ -10,8 +10,8 @@ use crate::domain::filter::MAX_FILTER_LENGTH;
 use super::dto::{
     AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
     BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto, GrantAccessDto,
-    ListEntriesQuery, PageQuery, PermissionGrantCreateDto, PermissionInspectionDto, RootTypeDto,
-    SearchQueryDto,
+    ListEntriesQuery, PageQuery, PathAccessRequestCreateDto, PermissionGrantCreateDto,
+    PermissionInspectionDto, RootTypeDto, SearchQueryDto,
 };
 
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
@@ -225,8 +225,36 @@ pub fn inspect_permissions(request: &PermissionInspectionDto) -> Result<(), Vali
 /// Returns all invalid access-request fields.
 pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::default();
-    validate_access_rights(&request.access, "access", &mut errors);
-    if let Some(reason) = request.reason.as_deref() {
+    validate_access_request_fields(&request.access, request.reason.as_deref(), &mut errors);
+    errors.finish()
+}
+
+/// Validates a path-addressed access request.
+///
+/// # Errors
+///
+/// Returns all invalid path and access-request fields.
+pub fn request_access_by_path(
+    request: &PathAccessRequestCreateDto,
+) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    if request.path.trim().is_empty() {
+        errors.push("path", "must not be blank");
+    }
+    if request.path.len() > 2_048 {
+        errors.push("path", "must contain at most 2048 bytes");
+    }
+    validate_access_request_fields(&request.access, request.reason.as_deref(), &mut errors);
+    errors.finish()
+}
+
+fn validate_access_request_fields(
+    access: &[GrantAccessDto],
+    reason: Option<&str>,
+    errors: &mut ValidationErrors,
+) {
+    validate_access_rights(access, "access", errors);
+    if let Some(reason) = reason {
         if reason.trim().is_empty() {
             errors.push("reason", "must not be blank when provided");
         }
@@ -234,7 +262,6 @@ pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), Validation
             errors.push("reason", "must contain at most 1000 characters");
         }
     }
-    errors.finish()
 }
 
 /// Validates the conditional decision payload.

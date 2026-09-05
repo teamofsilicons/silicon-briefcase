@@ -28,6 +28,12 @@ pub struct OrganizationMemberRow {
     pub actor_type: String,
     /// IAM actor identifier.
     pub actor_id: String,
+    /// Immutable IAM principal UUID used by OAuth introspection.
+    pub principal_id: Option<Uuid>,
+    /// Immutable IAM membership UUID used by OAuth introspection.
+    pub membership_id: Option<Uuid>,
+    /// IAM epoch invalidated whenever membership authorization changes.
+    pub authorization_epoch: Option<i64>,
     /// Current IAM organization role.
     pub org_role: String,
     /// Current membership lifecycle state.

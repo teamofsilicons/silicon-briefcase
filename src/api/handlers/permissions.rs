@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::{
     application::service::{
         DecideAccessRequestCommand, GrantPermissionCommand, InspectPermissionsQuery,
-        ListPermissionsQuery, PageRequest, RequestAccessCommand, RevokePermissionCommand,
+        ListPermissionsQuery, PageRequest, RequestAccessByPathCommand, RequestAccessCommand,
+        RevokePermissionCommand,
     },
     domain::{access::AccessDecision, entry::EntryPath},
     error::AppError,
@@ -24,8 +25,8 @@ use super::{
         auth::IamAction,
         dto::{
             AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, AccessRequestDto,
-            PermissionGrantCreateDto, PermissionGrantDto, PermissionGrantPageDto,
-            PermissionInspectionDto, PermissionInspectionResultDto,
+            PathAccessRequestCreateDto, PermissionGrantCreateDto, PermissionGrantDto,
+            PermissionGrantPageDto, PermissionInspectionDto, PermissionInspectionResultDto,
         },
         extract,
         mapping::metadata_error,
@@ -173,6 +174,37 @@ pub(crate) async fn request_access(
     let request = extract::scoped(
         &context,
         state.metadata.request_access(&context, &command, &metadata),
+    )
+    .await
+    .map_err(metadata_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(super::super::mapping::ResponseMapper::access_request(
+            &request,
+        )),
+    ))
+}
+
+/// Creates an access request from the path embedded in a permanent URL.
+pub(crate) async fn request_access_by_path(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<PathAccessRequestCreateDto>, JsonRejection>,
+) -> Result<(StatusCode, Json<AccessRequestDto>), AppError> {
+    let body = extract::json(body)?;
+    extract::validation(validation::request_access_by_path(&body))?;
+    let path = EntryPath::new(&body.path).map_err(|_| AppError::validation("invalid_path"))?;
+    let resource = path.as_str().to_owned();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::CreateAccessRequest, &resource).await?;
+    let metadata = extract::mutation(&headers, "request_access_by_path", &resource, &body, true)?;
+    let command = RequestAccessByPathCommand::new(path, granted_access(&body.access)?, body.reason)
+        .map_err(|_| AppError::validation("invalid_access_request"))?;
+    let request = extract::scoped(
+        &context,
+        state
+            .metadata
+            .request_access_by_path(&context, &command, &metadata),
     )
     .await
     .map_err(metadata_error)?;

@@ -16,6 +16,23 @@ services:
       - briefcase-postgres:/var/lib/postgresql/data
       - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
 
+  postgres-test:
+    image: postgres:16.9-bookworm
+    environment:
+      POSTGRES_DB: briefcase_test
+      POSTGRES_USER: briefcase
+      POSTGRES_PASSWORD: briefcase-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U briefcase -d briefcase_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - briefcase-test-postgres:/var/lib/postgresql/data
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
+
   minio:
     image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
     command: server /data --console-address :9001
@@ -51,4 +68,5 @@ services:
 
 volumes:
   briefcase-postgres:
+  briefcase-test-postgres:
   briefcase-minio:

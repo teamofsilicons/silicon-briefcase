@@ -27,6 +27,7 @@ use crate::{
         iam::IamClient,
         postgres::{self, PostgresContentRepository, PostgresRepository},
         s3::S3ObjectStore,
+        testing::TestingEnvironmentStore,
     },
 };
 
@@ -44,7 +45,9 @@ pub mod validation;
 pub mod versioning;
 mod webhook;
 
-use handlers::{content, entries, notifications, obo, permissions, system, usage};
+use handlers::{
+    content, entries, notifications, obo, permissions, session, system, testing, usage,
+};
 use state::{AppState, ContentUseCases};
 
 /// Builds the dependency graph, binds the configured listener, and serves the
@@ -57,22 +60,39 @@ use state::{AppState, ContentUseCases};
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let database = postgres::connect(&settings.database, "briefcase-api").await?;
     postgres::verify_tenant_isolated_role(&database).await?;
-    let repository = PostgresRepository::new(database.clone());
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(S3ObjectStore::from_settings(&settings.s3).await);
+    let (test_database, testing) = if let Some(testing) = &settings.testing {
+        let test_database =
+            postgres::connect(&testing.database, "briefcase-api-test-plane").await?;
+        postgres::verify_tenant_isolated_role(&test_database).await?;
+        postgres::verify_distinct_databases(&database, &test_database).await?;
+        let store = TestingEnvironmentStore::new(
+            database.clone(),
+            test_database.clone(),
+            &testing.encryption_key,
+        )?;
+        (Some(test_database), Some(Arc::new(store)))
+    } else {
+        (None, None)
+    };
+    let repository = test_database.as_ref().map_or_else(
+        || PostgresRepository::new(database.clone()),
+        |test| PostgresRepository::new(database.clone()).with_test_pool(test.clone()),
+    );
     let metadata_repository: Arc<dyn MetadataRepository> = Arc::new(repository.clone());
     let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
     let content_repository: Arc<dyn ContentRepository> = Arc::new(PostgresContentRepository::new(
         repository,
         settings.s3.clone(),
     ));
-    let object_store: Arc<dyn ObjectStore> =
-        Arc::new(S3ObjectStore::from_settings(&settings.s3).await);
     let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
         content_repository,
         object_store,
         settings.s3.temporary_directory.clone(),
     ));
     let state = AppState {
-        iam: Arc::new(IamClient::new(&settings.iam)?),
+        iam: Arc::new(IamClient::connect(&settings.iam).await?),
         metadata: MetadataService::new(metadata_repository),
         content,
         webhook_repository,
@@ -83,6 +103,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         ),
         temporary_directory: settings.s3.temporary_directory.clone(),
         webhook_settings: settings.webhook.clone(),
+        testing,
     };
     let application = router(state, &settings.server, &settings.webhook);
     let listener = tokio::net::TcpListener::bind(settings.server.bind_addr).await?;
@@ -92,6 +113,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         listener,
         application,
         database,
+        test_database,
         settings.server.shutdown_timeout,
     )
     .await
@@ -101,6 +123,7 @@ async fn serve_until_shutdown(
     listener: tokio::net::TcpListener,
     application: Router,
     database: sqlx::PgPool,
+    test_database: Option<sqlx::PgPool>,
     shutdown_timeout: Duration,
 ) -> anyhow::Result<()> {
     let (shutdown_sender, mut shutdown_receiver) = tokio::sync::watch::channel(false);
@@ -134,6 +157,16 @@ async fn serve_until_shutdown(
         .is_err()
     {
         tracing::warn!(?shutdown_timeout, "database pool close deadline exceeded");
+    }
+    if let Some(test_database) = test_database
+        && tokio::time::timeout(shutdown_timeout, test_database.close())
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            ?shutdown_timeout,
+            "test database pool close deadline exceeded"
+        );
     }
     server_result?;
     Ok(())
@@ -201,6 +234,9 @@ fn ordinary_routes() -> Router<AppState> {
         .route("/readyz", get(system::ready))
         .route("/api/version", get(system::version))
         .route("/api/v1/version", get(system::version))
+        .route("/api/v1/auth/slt", post(session::exchange_slt))
+        .route("/api/v1/auth/refresh", post(session::refresh))
+        .merge(testing_environment_routes())
         .route(
             "/api/v1/entries",
             get(entries::list_entries).post(entries::create_folder),
@@ -226,6 +262,10 @@ fn ordinary_routes() -> Router<AppState> {
         .route(
             "/api/v1/entries/{entry_id}/access-requests",
             post(permissions::request_access),
+        )
+        .route(
+            "/api/v1/access-requests",
+            post(permissions::request_access_by_path),
         )
         .route(
             "/api/v1/access-requests/{request_id}/decision",
@@ -265,6 +305,45 @@ fn ordinary_routes() -> Router<AppState> {
         )
 }
 
+fn testing_environment_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments",
+            get(testing::list).post(testing::create),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}",
+            get(testing::get)
+                .patch(testing::update)
+                .delete(testing::delete),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/key",
+            get(testing::key),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
+            post(testing::rotate_key),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
+            post(testing::replace_iam_pairing),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
+            post(testing::clean),
+        )
+        .route(
+            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/restorations",
+            post(testing::restore),
+        )
+        .route("/api/v1/testing-environment", get(testing::current))
+        .route(
+            "/api/v1/testing-environment/cleanings",
+            post(testing::clean_current),
+        )
+}
+
 fn upload_control_routes() -> Router<AppState> {
     Router::new().route(
         "/api/v1/storage/configuration",
@@ -278,13 +357,14 @@ fn with_deadline(routes: Router<AppState>, timeout: Duration) -> Router<AppState
     }))
 }
 
-fn sensitive_request_headers() -> [HeaderName; 5] {
+fn sensitive_request_headers() -> [HeaderName; 6] {
     [
         header::AUTHORIZATION,
         header::COOKIE,
         HeaderName::from_static("x-iam-obo-access-proof"),
         HeaderName::from_static("x-silicon-iam-signature"),
         HeaderName::from_static("idempotency-key"),
+        HeaderName::from_static("x-testing-environment-key"),
     ]
 }
 
@@ -294,11 +374,7 @@ async fn not_found() -> crate::error::AppError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::{NonZeroU32, NonZeroUsize},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     use axum::{
         Router,
@@ -329,8 +405,58 @@ mod tests {
 
     use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
 
-    const CONTRACT: [(&str, &str, &str); 27] = [
+    const CONTRACT: [(&str, &str, &str); 42] = [
         ("/version", "get", "200"),
+        ("/auth/slt", "post", "200"),
+        ("/auth/refresh", "post", "200"),
+        ("/organizations/{org_id}/testing-environments", "get", "200"),
+        (
+            "/organizations/{org_id}/testing-environments",
+            "post",
+            "201",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}",
+            "get",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}",
+            "patch",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}",
+            "delete",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}/key",
+            "get",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
+            "post",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
+            "post",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
+            "post",
+            "200",
+        ),
+        (
+            "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
+            "post",
+            "200",
+        ),
+        ("/testing-environment", "get", "200"),
+        ("/testing-environment/cleanings", "post", "200"),
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -350,6 +476,7 @@ mod tests {
         ),
         ("/permissions/effective", "post", "200"),
         ("/entries/{entry_id}/access-requests", "post", "201"),
+        ("/access-requests", "post", "201"),
         ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),
         ("/usage", "get", "200"),
@@ -398,14 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn openapi_keeps_the_api_bearer_only_and_obo_to_its_own_endpoint() -> anyhow::Result<()> {
+    fn openapi_models_production_and_test_plane_credentials_explicitly() -> anyhow::Result<()> {
         let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
         let global_security = document["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("OpenAPI security must be a sequence"))?;
 
-        // The contracted surface is a bearer surface, and nothing else.
-        assert_eq!(global_security.len(), 1);
+        // Ordinary operations accept a production bearer by itself or the
+        // same IAM actor credential plus the Briefcase root that selects a
+        // test plane. The key never replaces actor authentication.
+        assert_eq!(global_security.len(), 2);
         assert!(global_security[0]["bearerAuth"].is_sequence());
         assert_eq!(
             global_security[0]
@@ -413,29 +542,53 @@ mod tests {
                 .map(serde_yaml::Mapping::len),
             Some(1)
         );
+        assert!(global_security[1]["bearerAuth"].is_sequence());
+        assert!(global_security[1]["testingEnvironmentKey"].is_sequence());
+        assert_eq!(
+            global_security[1]
+                .as_mapping()
+                .map(serde_yaml::Mapping::len),
+            Some(2)
+        );
 
-        // The one application endpoint requires both OBO credentials together.
+        // The application endpoint likewise keeps the IAM proof and app ID
+        // together, with the root key added only for its test-plane form.
         let obo_security = document["paths"]["/obo/files"]["post"]["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("OBO security must be a sequence"))?;
-        assert_eq!(obo_security.len(), 1);
+        assert_eq!(obo_security.len(), 2);
         assert!(obo_security[0]["oboAccess"].is_sequence());
         assert!(obo_security[0]["appId"].is_sequence());
         assert_eq!(
             obo_security[0].as_mapping().map(serde_yaml::Mapping::len),
             Some(2)
         );
+        assert!(obo_security[1]["oboAccess"].is_sequence());
+        assert!(obo_security[1]["appId"].is_sequence());
+        assert!(obo_security[1]["testingEnvironmentKey"].is_sequence());
+        assert_eq!(
+            obo_security[1].as_mapping().map(serde_yaml::Mapping::len),
+            Some(3)
+        );
 
         let storage_security = document["paths"]["/storage/configuration"]["put"]["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("storage security must be a sequence"))?;
-        assert_eq!(storage_security.len(), 1);
+        assert_eq!(storage_security.len(), 2);
         assert!(storage_security[0]["bearerAuth"].is_sequence());
         assert_eq!(
             storage_security[0]
                 .as_mapping()
                 .map(serde_yaml::Mapping::len),
             Some(1)
+        );
+        assert!(storage_security[1]["bearerAuth"].is_sequence());
+        assert!(storage_security[1]["testingEnvironmentKey"].is_sequence());
+        assert_eq!(
+            storage_security[1]
+                .as_mapping()
+                .map(serde_yaml::Mapping::len),
+            Some(2)
         );
         Ok(())
     }
@@ -450,13 +603,15 @@ mod tests {
                 .replace("{entry_id}", &identifier)
                 .replace("{grant_id}", &identifier)
                 .replace("{request_id}", &identifier)
+                .replace("{environment_id}", &identifier)
+                .replace("{org_id}", "tos")
                 .replace("{upload_id}", &identifier)
                 .replace("{version_id}", &identifier)
                 .replace("{part_number}", "1");
             let path = match path.as_str() {
                 "/search" => format!("/api/v1{path}?q=registered"),
                 // The permanent URL is served outside the versioned API base.
-                "/org/{org_id}/{path}" => "/org/tos/private/cos:tos/notes.md".to_owned(),
+                "/org/tos/{path}" => "/org/tos/private/cos:tos/notes.md".to_owned(),
                 _ => format!("/api/v1{path}"),
             };
             let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())?;
@@ -549,21 +704,20 @@ mod tests {
             s3.temporary_directory.clone(),
         ));
         let iam_base = Url::parse("http://127.0.0.1:9/")?;
-        let iam = IamClient::new(&IamSettings {
-            base_url: iam_base.clone(),
-            bearer_introspection_url: iam_base.join("oauth/introspect")?,
-            bearer_userinfo_url: iam_base.join("oauth/userinfo")?,
-            obo_verification_url: iam_base.join("obo/verify")?,
-            app_id: "silicon-briefcase-test".to_owned(),
-            app_secret: SecretString::from("01234567890123456789012345678901".to_owned()),
-            audience: "silicon-briefcase-test".to_owned(),
-            connect_timeout: Duration::from_millis(10),
+        let iam = IamClient::new_without_handshake(&IamSettings {
+            base_url: iam_base,
+            app_id: "tos>briefcase".to_owned(),
+            app_secret: SecretString::from(
+                "ask_0123456789012345678901234567890123456789012".to_owned(),
+            ),
             request_timeout: Duration::from_millis(10),
             max_response_bytes: nonzero(1_048_576)?,
         })?;
         let webhook = WebhookSettings {
-            signing_secret: SecretString::from("01234567890123456789012345678901".to_owned()),
-            signing_key_version: NonZeroU32::MIN,
+            signing_secrets: std::collections::BTreeMap::from([(
+                1,
+                SecretString::from("01234567890123456789012345678901".to_owned()),
+            )]),
             replay_window: Duration::from_secs(300),
             max_body_bytes: nonzero(262_144)?,
         };
@@ -591,6 +745,7 @@ mod tests {
             ),
             temporary_directory: s3.temporary_directory,
             webhook_settings: webhook.clone(),
+            testing: None,
         };
         Ok(router(state, &server, &webhook))
     }

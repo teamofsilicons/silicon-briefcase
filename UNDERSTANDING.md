@@ -56,7 +56,9 @@ There should also be endpoints that shows how much are they currently using not 
 
 # How Does login/signup work
 
-Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [https://backend.iam.teamofsilicons.com/docs/client/]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
+Logging in and signing up are handled entirely by Silicon IAm (this is our access and authorization management layer). You would have an app_id and app_secret stored in your env that you can use to request the login and signup from Silicon IAm (read [(https://github.com/teamofsilicons/silicon-iam/tree/main/docs/client)]) you would realise how you would need to login and singup using silicon IAm. For both signing in and signing up into the system would need Silicon IAm authorization, once you have the access token from SIlicon IAm for the user logged in, render the application accordingly. 
+
+Use the oficial and latest silicon client for using IAm at all times and across everywhere. (https://crates.io/crates/silicon-iam-client/)
 
 The webhook endpoint ([backend.briefcase.teamofsilicons.com/webhook/]) you have would give you information whenever someone logs out, kicked from org, anything changes you would know.
 
@@ -281,7 +283,7 @@ the boolean grammar (implicit AND, or, not, leading -, parentheses); last:/first
 
 # How other apps would use Briefcase
 
-Refer to the OBO access on [https://backend.iam.teamofsilicons.com/docs/client/], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
+Refer to the OBO access on [https://github.com/teamofsilicons/silicon-iam/tree/main/docs/client], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
 1) create a new file at any location for that user.
 
 ### How to store app specific data
@@ -290,6 +292,55 @@ For everything created by a specific application inside the authenticated silico
 
 
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
+
+
+# Testing Enviorment
+
+We will have an test enviorment for briefcase itself, this would be an exact replica of the main application, so when the test enviorment is created it would be initiated empty, for the said test enviorment actions can be performed, as this is an exact same replica of the main prod.
+
+Refer to this to know how to create testing enviorment compatible with iam. 
+https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html
+
+For creating a test enviorment on briefcase, it would require the name of the test enviorment and also the test enviroment key of iam, this test iam key would be used in the each request it sends to the IAm as this is in test enviorment, it would in no way be possible to send request to it without attaching the test enviorment. 
+
+So briefcase testing wouldn't support briefcase testing on the prod IAm, it would only support it in the testing enviorment for briefcase. 
+
+Once the name and the test-key to silicon iam is given, the briefcase would also generate a test key, this test key can be used by any one to perform any action in silicon-briefcase. 
+
+For each testing enviorment they would be sharing a shared test database (that's not the prod database, this is just responsible for storing all the test data). For this testing enviorment each entry would be associated with the testing env id. 
+
+A test enviorment is basically the exact same briefcase with all the functions and everything else, so this is the briefcase where i can test uploading files, deleting stuff, seeing if the correct person has the correct set of permissions, etc. 
+
+
+### Creating Test Env
+
+For creating a test enviorment, it can be created by any carbon or silicon in the organisation and it would be owned by the organisation with the user marked as the creator of the test enviorment. The test enviorment is created at the silicon-briefcase level itself. For creating a test enviorment it would need the name, an optional description, and the iam test enviorment. 
+
+In return it would return the key for the test enviorment, this key is what's gonna be used to be able to access that test enviorment, anyone with this key would be able to access the test enviorment as the god of the test enviorment, this key would be stored along side with the test enviorment, and can anytime be retrieved by the said carbon/silicon/org_admin/org_owner. The key would be 32 digit alpha numeric. 
+
+### Rotate Key
+
+The creator of the test enviorment and org_admin/org_head should be able to rotate the key of the test enviroment, which would give them a new key to the test enviorment.  
+
+### Clean Test Enviorment
+
+There should be an option to clean the test enviorment, which would allow the test enviorment to be there, but would clear every signle data stored for the said test enviorment. Anyone with the key should be able to execute this action. 
+
+### Delete Test Env
+
+The org admins, owners or the creator should be able to delete the test enviorment, deleting a test enviorment would delete the key, and the instance that the test enviorment even existed. For all the logs it should also be limited to the test enviorment itself. Each deleted Test Env would have a ttl of 30 days before getting deleted permanently. From this point the test env should be recoverable.
+
+### Auto Delete Test Env
+
+If there's no new activity in the test enviorment for 1 days, auto delete the test enviorment. 
+
+### Using a Test Enviorment
+
+For using a test enviorment anyone with the key would have the god view for that test enviorment, they should be able to access briefcase as the signed in user from IAm, and now as the signed in user it should be able to perform the set of allowed actions, so this is an exact replica of how Briefcase would have worked with the actual iam, instead it has the test iam and the test briefcase, so an sandboxed enviorment to test it all out. 
+
+In the briefcase test enviorment there's only a total storage of maximum 2gb for an test enviorment. For files that exceed that just return `In test enviorment you are limited to a total storage of 2gb per enviorment.` and also a maximum of 10 possible simultaneous enviorments at silicon-briefcase level.
+
+Read [(https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html)] to understand how exactly are webhooks gonna work for this, etc. 
 
 ---
 ---
@@ -322,3 +373,36 @@ if you need a local store for auth or something else, use ~/.{appname}/ dir.
 For both package and the cli write detailed docs on how to use the package and how to use the cli, and also another doc on how to use the package. 
 
 Package and CLI must only expose the client side actions, and not the internal actions performed by the backend. For the CLI follow the standard command line grammar rules, and also include a -h command that shows all the possible commands.
+
+Testing in the test enviorment should also be possible via both cli, and the package. 
+
+Testing enviorment in cli, for testing enviorment in cli i should just be able to `briefcase --test <test_id> <command>` infront of the same command and it should treat that as a test command. Same for test only commands even they would have the same style just without specifying --test for them would return this action is only possible for test enviorment.  
+
+--- logging in via cli ---
+
+For logging in via the cli or the package for any carbon/silicon you don't ask for their credentials or redirect them anywhere, instead you just request for their short lived token. This short lived token would then be used for the same login logic, the short lived token would be compared and you will get the refresh and auth token. 
+
+For both cli and client we would also package in an auto updater, the task of this auto updater is to compare the current version to the latest version in crates for them, and if there's a new verion auto update it to the said new version. By default auto update is on, users can specifically come and opt in to stop auto update. Which would stop auto updating the package. Auto updater check runs every single hour. Updates should be checked when the command is run and should happen every hour, so check for the last update check time and if it's past 1 hour old check for update and update after the command finishes running.
+
+### Cli experience
+
+Cli is an interface on it's own, it's an interface used by our fellow dear agents, and sometimes humans. What we would want this interface to serve as is it should give the correct information at correct time, and can write texts to explain what exactly is happening. 
+
+A few things that would be needed to ensure good cli experience: the cli alone should have enough information to use Briefcase correctly! Surfacing the right set of things when needed, giving suggestions at the correct times. Like for eg: when someone runs a command then show them the exact help for it if the information is not enough, and when the app has been created, show them the other related commands that they might need to run after it. For each command a good description, the entire docs, etc. 
+
+So the overall cli experience needs to be super good. It needs to give the relevant informations, help should be detailed, and suggested commands, etc should also happen. 
+
+# Docs
+
+The API, Rust-client, CLI, IAM integration, and testing-environment guides are
+maintained in [docs/README.md](docs/README.md).
+
+For the docs keep it as detailed and mention all the details, this is the only thing the other apps can use as their source of knowledge and how they can use briefcase exactly. 
+
+Write detailed guides.
+
+Write very good detailed instructions on how test enviorment for silicon-briefcase works. Write docs on all 3 cli, api, client. Keep it segregated and clear. Write all the documentations in docs/ folder in the main directory of silicon-briefcase.  
+
+# Later to do
+
+briefcase report `<report-message>`, this should send an report message to the user. 

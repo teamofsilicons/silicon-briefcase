@@ -533,13 +533,11 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
             }
         }
         EntryBoundary::Tag { tag } if input.context.has_tag(tag) => {
-            // Everyone carrying the tag may create, read, and update inside the
-            // tag's tree. Deletion is deliberately absent: it belongs to
-            // whoever created the entry and to organization administrators.
+            // Everyone carrying the tag may read the tag's tree and create
+            // children in its folders. Mutating an existing peer-owned entry
+            // still requires ownership, administration, or an explicit grant.
             capabilities.insert(Capability::Read);
             capabilities.insert(Capability::CreateChild);
-            capabilities.insert(Capability::UpdateMetadata);
-            capabilities.insert(Capability::WriteContent);
         }
         EntryBoundary::Private | EntryBoundary::Tag { .. } => {}
     }
@@ -709,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_tag_conveys_create_read_and_update_but_never_deletion() {
+    fn a_matching_tag_conveys_read_and_folder_creation_but_not_peer_mutation() {
         let finance = external_id(TagName::new("finance"));
         let context = request_context(
             actor("carbon-a"),
@@ -735,11 +733,33 @@ mod tests {
 
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
         assert!(authorization.allows(Capability::Read));
-        assert!(authorization.allows(Capability::WriteContent));
-        assert!(authorization.allows(Capability::UpdateMetadata));
-        // Deletion belongs to whoever created the entry, and to admins.
+        assert!(!authorization.allows(Capability::CreateChild));
+        assert!(!authorization.allows(Capability::WriteContent));
+        assert!(!authorization.allows(Capability::UpdateMetadata));
+        // Peer mutation belongs to whoever created the entry, administrators,
+        // and principals carrying a matching explicit grant.
         assert!(!authorization.allows(Capability::Delete));
         assert!(!authorization.allows(Capability::ManagePermissions));
+
+        let folder = evaluate_authorization(&EffectiveAuthorizationInput {
+            context: &context,
+            entry_organization_id: &organization(),
+            entry_id: EntryId::new(),
+            entry_kind: EntryKind::Folder,
+            system_kind: None,
+            boundary: &EntryBoundary::Tag {
+                tag: finance.clone(),
+            },
+            owner: &actor("carbon-b"),
+            origin_application_id: None,
+            grants: &[],
+            owns_ancestor: false,
+            required_for_traversal: false,
+        });
+        assert!(folder.allows(Capability::Read));
+        assert!(folder.allows(Capability::CreateChild));
+        assert!(!folder.allows(Capability::UpdateMetadata));
+        assert!(!folder.allows(Capability::Delete));
 
         // The member who created the entry may delete their own.
         let creator = request_context(

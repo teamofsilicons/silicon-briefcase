@@ -184,6 +184,12 @@ pub struct AuthorizableEntry {
     pub owns_ancestor: bool,
     /// Whether a visible descendant requires this folder for navigation.
     pub required_for_traversal: bool,
+    /// Truth values for the listing filter's database-backed predicates.
+    ///
+    /// This is populated only for a filter that also contains permission
+    /// predicates. The service combines these values with domain authorization
+    /// to evaluate the original boolean expression exactly.
+    pub(crate) database_filter_matches: Vec<bool>,
 }
 
 impl AuthorizableEntry {
@@ -476,22 +482,57 @@ impl RequestAccessCommand {
         access: GrantedAccess,
         reason: Option<String>,
     ) -> Result<Self, ValidationError> {
-        let reason = reason.map(|value| value.trim().to_owned());
-        if reason
-            .as_ref()
-            .is_some_and(|value| value.chars().count() > 1_000)
-        {
-            return Err(ValidationError::new(
-                "reason",
-                "must contain at most 1000 characters",
-            ));
-        }
         Ok(Self {
             entry_id,
             access,
-            reason: reason.filter(|value| !value.is_empty()),
+            reason: access_request_reason(reason)?,
         })
     }
+}
+
+/// Command to request access using the path carried by a permanent URL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestAccessByPathCommand {
+    /// Exact organization-relative entry path.
+    pub path: EntryPath,
+    /// Requested rights.
+    pub access: GrantedAccess,
+    /// Optional user-supplied reason.
+    pub reason: Option<String>,
+}
+
+impl RequestAccessByPathCommand {
+    /// Builds a path-addressed request with the same reason rules as the UUID route.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError`] when the optional reason contains more than
+    /// 1,000 Unicode scalar values after trimming.
+    pub fn new(
+        path: EntryPath,
+        access: GrantedAccess,
+        reason: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        Ok(Self {
+            path,
+            access,
+            reason: access_request_reason(reason)?,
+        })
+    }
+}
+
+fn access_request_reason(reason: Option<String>) -> Result<Option<String>, ValidationError> {
+    let reason = reason.map(|value| value.trim().to_owned());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 1_000)
+    {
+        return Err(ValidationError::new(
+            "reason",
+            "must contain at most 1000 characters",
+        ));
+    }
+    Ok(reason.filter(|value| !value.is_empty()))
 }
 
 /// Persisted access-request view.
@@ -670,9 +711,11 @@ pub struct ListVersionsQuery {
     pub page: PageRequest,
 }
 
-/// The projected organization standing of one member.
+/// Complete public identity and authority resolved from IAM's directory projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectedMembership {
+pub struct ProjectedIdentity {
+    /// Current public Carbon or Silicon reference.
+    pub actor: ActorRef,
     /// Current organization role.
     pub role: OrganizationRole,
     /// Current IAM tags.
