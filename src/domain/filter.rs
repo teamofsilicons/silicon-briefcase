@@ -212,26 +212,56 @@ impl FilterExpression {
         }
     }
 
-    /// Evaluates the expression against one entry's effective access.
+    /// Evaluates the complete boolean expression from database predicate
+    /// results and the entry's effective access.
     ///
-    /// Only permission predicates are decided here; everything persistence
-    /// already filtered is treated as satisfied.
+    /// Persistence supplies one boolean for every non-permission predicate in
+    /// depth-first source order. Permission predicates are evaluated here,
+    /// where domain authorization is authoritative. Keeping both kinds of
+    /// truth value in the same expression evaluator preserves exact `or` and
+    /// `not` semantics instead of independently weakening each half.
     #[must_use]
-    pub fn permits(&self, effective_access: &[EffectiveAccess]) -> bool {
+    pub fn matches(
+        &self,
+        effective_access: &[EffectiveAccess],
+        database_matches: &[bool],
+    ) -> Option<bool> {
+        let mut database_matches = database_matches.iter().copied();
+        let result = self.matches_inner(effective_access, &mut database_matches)?;
+        database_matches.next().is_none().then_some(result)
+    }
+
+    fn matches_inner(
+        &self,
+        effective_access: &[EffectiveAccess],
+        database_matches: &mut impl Iterator<Item = bool>,
+    ) -> Option<bool> {
         match self {
             Self::Predicate(FilterPredicate::HasPermission(required)) => {
-                effective_access.contains(required)
+                Some(effective_access.contains(required))
             }
-            Self::Predicate(_) => true,
-            Self::Not(inner) => {
-                if inner.requires_policy_evaluation() {
-                    !inner.permits(effective_access)
-                } else {
-                    true
+            Self::Predicate(_) => database_matches.next(),
+            Self::Not(inner) => inner
+                .matches_inner(effective_access, database_matches)
+                .map(|matches| !matches),
+            Self::All(children) => {
+                let mut matches = true;
+                for child in children {
+                    // Do not short circuit: every database result belongs to a
+                    // stable predicate position and must be consumed.
+                    matches &= child.matches_inner(effective_access, database_matches)?;
                 }
+                Some(matches)
             }
-            Self::All(children) => children.iter().all(|child| child.permits(effective_access)),
-            Self::Any(children) => children.iter().any(|child| child.permits(effective_access)),
+            Self::Any(children) => {
+                let mut matches = false;
+                for child in children {
+                    // See `All`: consuming the full sequence also detects a
+                    // corrupt or mismatched adapter projection below.
+                    matches |= child.matches_inner(effective_access, database_matches)?;
+                }
+                Some(matches)
+            }
         }
     }
 }
@@ -923,12 +953,61 @@ mod tests {
         let query = FilterQuery::parse("permissions:delete")?;
         let expression = query.expression.ok_or(FilterError::Empty)?;
         assert!(expression.requires_policy_evaluation());
-        assert!(expression.permits(&[EffectiveAccess::Read, EffectiveAccess::Delete]));
-        assert!(!expression.permits(&[EffectiveAccess::Read]));
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read, EffectiveAccess::Delete], &[]),
+            Some(true)
+        );
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read], &[]),
+            Some(false)
+        );
 
         let negated = conditions("-permissions:delete")?;
-        assert!(!negated.permits(&[EffectiveAccess::Delete]));
-        assert!(negated.permits(&[EffectiveAccess::Read]));
+        assert_eq!(
+            negated.matches(&[EffectiveAccess::Delete], &[]),
+            Some(false)
+        );
+        assert_eq!(negated.matches(&[EffectiveAccess::Read], &[]), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_database_and_permission_booleans_are_evaluated_exactly() -> Result<(), FilterError> {
+        let expression = conditions("name:'apple*' or permissions:delete")?;
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read], &[true]),
+            Some(true),
+            "the database side of OR may satisfy the expression"
+        );
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read, EffectiveAccess::Delete], &[false]),
+            Some(true),
+            "the permission side of OR may satisfy the expression"
+        );
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read], &[false]),
+            Some(false)
+        );
+
+        let negated = conditions("not (name:'apple*' or permissions:delete)")?;
+        assert_eq!(
+            negated.matches(&[EffectiveAccess::Read], &[false]),
+            Some(true)
+        );
+        assert_eq!(
+            negated.matches(&[EffectiveAccess::Read], &[true]),
+            Some(false)
+        );
+        assert_eq!(
+            negated.matches(&[EffectiveAccess::Delete], &[false]),
+            Some(false)
+        );
+
+        assert_eq!(expression.matches(&[EffectiveAccess::Read], &[]), None);
+        assert_eq!(
+            expression.matches(&[EffectiveAccess::Read], &[false, true]),
+            None
+        );
         Ok(())
     }
 

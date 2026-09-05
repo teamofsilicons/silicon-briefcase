@@ -38,8 +38,7 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     "svg", "svgz", "tif", "tiff", "webp",
 ];
 const VIDEO_EXTENSIONS: &[&str] = &[
-    "3g2", "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "ts", "webm",
-    "wmv",
+    "3g2", "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "webm", "wmv",
 ];
 const DOCUMENT_EXTENSIONS: &[&str] = &[
     "doc", "docx", "epub", "md", "markdown", "odt", "pages", "pdf", "rst", "rtf", "tex", "txt",
@@ -355,6 +354,7 @@ mod tests {
             ("call.opus", RenderKind::Audio),
             ("backup.tgz", RenderKind::Archive),
             ("main.rs", RenderKind::Code),
+            ("component.ts", RenderKind::Code),
             ("firmware.bin", RenderKind::Unsupported),
         ];
         for (name, expected) in cases {
@@ -390,6 +390,11 @@ mod tests {
         );
         assert!(RenderKind::classify("report.pdf", None).is_renderable());
         assert!(!RenderKind::classify("report", None).is_renderable());
+        assert_eq!(
+            RenderKind::classify("component.ts", Some("video/mp2t")),
+            RenderKind::Code,
+            "the product contract assigns .ts to the code renderer"
+        );
     }
 
     #[test]

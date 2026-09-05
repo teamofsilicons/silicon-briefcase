@@ -58,6 +58,15 @@ pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> 
     .execute(&mut *transaction)
     .await?
     .rows_affected();
+    let expired_testing_environment_idempotency = sqlx::query(
+        "DELETE FROM briefcase.testing_environment_idempotency \
+          WHERE expires_at <= clock_timestamp()",
+    )
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    let expired_idempotency_records =
+        expired_idempotency_records + expired_testing_environment_idempotency;
 
     let pruned_notifications = sqlx::query(
         "DELETE FROM briefcase.notifications AS notification \

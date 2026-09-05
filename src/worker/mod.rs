@@ -38,10 +38,23 @@ pub async fn run(settings: WorkerProcessSettings) -> anyhow::Result<()> {
         .await
         .context("worker database connection failed")?;
     postgres::verify_cross_tenant_role(&pool).await?;
+    let test_pool = if let Some(database) = &settings.test_database {
+        let test_pool = postgres::connect(database, "silicon-briefcase-worker-test-plane")
+            .await
+            .context("test worker database connection failed")?;
+        postgres::verify_cross_tenant_role(&test_pool).await?;
+        postgres::verify_distinct_databases(&pool, &test_pool).await?;
+        Some(test_pool)
+    } else {
+        None
+    };
 
     let objects = S3ObjectStore::from_settings(&settings.s3).await;
     let runtime = WorkerRuntime::new(settings.worker, settings.s3.operation_timeout)?;
-    let result = runtime.run(&pool, &objects).await;
+    let result = runtime.run(&pool, test_pool.as_ref(), &objects).await;
+    if let Some(test_pool) = test_pool {
+        test_pool.close().await;
+    }
     pool.close().await;
     result
 }
@@ -79,7 +92,12 @@ impl WorkerRuntime {
         })
     }
 
-    async fn run<O>(self, pool: &PgPool, objects: &O) -> anyhow::Result<()>
+    async fn run<O>(
+        self,
+        pool: &PgPool,
+        test_pool: Option<&PgPool>,
+        objects: &O,
+    ) -> anyhow::Result<()>
     where
         O: ObjectStore + ?Sized,
     {
@@ -112,9 +130,43 @@ impl WorkerRuntime {
                             "outbox batch failed"
                         );
                     }
+                    if let Some(test_pool) = test_pool
+                        && let Err(error) = outbox::process_batch(
+                            test_pool,
+                            &self.settings,
+                            self.batch_size,
+                            self.lease_duration_millis,
+                        ).await
+                    {
+                        error!(
+                            event = "test_outbox_batch_failed",
+                            error_code = error.code(),
+                            "test-plane outbox batch failed"
+                        );
+                    }
                 }
                 _ = maintenance.tick() => {
                     self.run_maintenance(pool, objects).await;
+                    if let Some(test_pool) = test_pool {
+                        self.run_maintenance(test_pool, objects).await;
+                        match crate::infrastructure::testing::maintain_testing_environments(
+                            pool,
+                            test_pool,
+                            objects,
+                        ).await {
+                            Ok((retired, purged)) => info!(
+                                event = "testing_environment_maintenance_completed",
+                                retired,
+                                purged,
+                                "testing-environment lifecycle maintenance completed"
+                            ),
+                            Err(error) => error!(
+                                event = "testing_environment_maintenance_failed",
+                                error = %error,
+                                "testing-environment lifecycle maintenance failed"
+                            ),
+                        }
+                    }
                 }
             }
         }

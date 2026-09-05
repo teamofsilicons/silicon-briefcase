@@ -645,7 +645,17 @@ pub fn platform_storage_target(
     settings: &S3Settings,
     organization_id: &OrganizationId,
 ) -> StorageTarget {
-    let tenant_segment = platform_tenant_segment(organization_id);
+    platform_storage_target_for_scope(settings, organization_id.as_str())
+}
+
+/// Resolves platform storage for an internal, already authenticated scope.
+///
+/// Test scopes include the environment UUID, preventing a sandbox from ever
+/// addressing production objects even when the public IAM organization is the
+/// same.
+#[must_use]
+pub fn platform_storage_target_for_scope(settings: &S3Settings, scope: &str) -> StorageTarget {
+    let tenant_segment = hex::encode(Sha256::digest(scope.as_bytes()));
     let encryption = match &settings.encryption {
         S3Encryption::SseS3 => EncryptionMode::SseS3,
         S3Encryption::SseKms { .. } => EncryptionMode::SseKms,
@@ -678,6 +688,7 @@ pub fn organization_storage_external_id(organization_id: &str) -> String {
     hex::encode(digest.finalize())
 }
 
+#[cfg(test)]
 fn platform_tenant_segment(organization_id: &OrganizationId) -> String {
     hex::encode(Sha256::digest(organization_id.as_str().as_bytes()))
 }

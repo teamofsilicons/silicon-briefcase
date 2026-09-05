@@ -4,13 +4,21 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 27] = [
+const EXPECTED_OPERATIONS: [&str; 42] = [
+    "cleanCurrentTestingEnvironment",
+    "cleanTestingEnvironment",
     "configureOrganizationBucket",
     "createFileOnBehalfOfMember",
     "createFolder",
+    "createTestingEnvironment",
     "decideAccessRequest",
+    "deleteTestingEnvironment",
+    "describeCurrentTestingEnvironment",
     "downloadEntry",
+    "exchangeShortLivedToken",
     "getEntry",
+    "getTestingEnvironment",
+    "getTestingEnvironmentKey",
     "grantPermission",
     "inspectEffectivePermissions",
     "listBin",
@@ -18,19 +26,26 @@ const EXPECTED_OPERATIONS: [&str; 27] = [
     "listEntries",
     "listNotifications",
     "listPermissions",
+    "listTestingEnvironments",
     "listVersions",
     "moveEntryToBin",
     "readApiVersion",
     "readEntryContent",
     "readOrganizationUsage",
     "readNotifications",
+    "refreshApplicationSession",
+    "replaceTestingEnvironmentIamPairing",
     "requestAccess",
+    "requestAccessByPath",
     "resolvePermanentUrl",
     "restoreEntry",
+    "restoreTestingEnvironment",
     "restoreVersion",
     "revokePermission",
+    "rotateTestingEnvironmentKey",
     "searchFiles",
     "updateEntry",
+    "updateTestingEnvironment",
     "uploadFile",
 ];
 
@@ -99,4 +114,38 @@ fn the_served_operation_registry_matches_the_published_contract() {
         .collect();
     let published = EXPECTED_OPERATIONS.into_iter().collect::<BTreeSet<_>>();
     assert_eq!(registry, published);
+}
+
+#[test]
+fn testing_environment_listing_and_root_self_cache_contract_are_exact() -> anyhow::Result<()> {
+    let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
+    assert!(
+        document["components"]["schemas"]["TestingEnvironmentPage"]["properties"]["items"]
+            ["maxItems"]
+            .is_null(),
+        "retained deleted environments make the result larger than the active limit"
+    );
+    assert_eq!(
+        document["paths"]["/testing-environment"]["get"]["responses"]["200"]["headers"]
+            ["Cache-Control"]["schema"]["const"]
+            .as_str(),
+        Some("private, no-store")
+    );
+    Ok(())
+}
+
+#[test]
+fn path_access_requests_require_an_idempotency_key() -> anyhow::Result<()> {
+    let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
+    let parameters = document["paths"]["/access-requests"]["post"]["parameters"]
+        .as_sequence()
+        .ok_or_else(|| anyhow::anyhow!("path access-request parameters must be a sequence"))?;
+    assert!(parameters.iter().any(|parameter| {
+        parameter["$ref"].as_str() == Some("#/components/parameters/IdempotencyKey")
+    }));
+    assert_eq!(
+        document["components"]["parameters"]["IdempotencyKey"]["required"].as_bool(),
+        Some(true)
+    );
+    Ok(())
 }

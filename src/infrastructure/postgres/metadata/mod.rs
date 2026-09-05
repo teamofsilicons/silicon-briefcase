@@ -22,13 +22,13 @@ use crate::{
             CreateFolderMutation, DecideAccessRequestCommand, ENTRY_ACTIVITY_HISTORY_SIZE,
             FileVersionView, GrantPermissionCommand, ListBinQuery, ListEntriesQuery,
             ListPermissionsQuery, ListVersionsQuery, MetadataRepository, MetadataRepositoryError,
-            MutationMetadata, Page, ProjectedMembership, RequestAccessCommand,
+            MutationMetadata, Page, ProjectedIdentity, RequestAccessCommand,
             RevokePermissionCommand, SearchCandidate, SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
         access::{AccessDecision, AccessRequestStatus},
-        actor::{ActorRef, ApplicationId, OrganizationId, OrganizationRole, TagName},
+        actor::{ActorId, ActorRef, ApplicationId, OrganizationRole, TagName},
         entry::{EntryKind, EntryPath},
         filter::{FilterQuery, SortOrder},
         ids::{AccessRequestId, EntryId, GrantId, VersionId},
@@ -44,10 +44,10 @@ use super::{
     models::entry_columns, roots,
 };
 use common::{
-    IdempotencyClaim, Result, actor_kind, actor_ref, begin, boundary_columns, build_authorizable,
-    claim_idempotency, complete_idempotency, current_member, decode_access, encode_access,
-    internal, load_entry, map_sql, permission_grant, record_change, resolve_tag_id,
-    retention_deadline,
+    IdempotencyClaim, OwnedAncestorPrincipal, Result, actor_kind, actor_ref, begin,
+    boundary_columns, build_authorizable, claim_idempotency, complete_idempotency, current_member,
+    decode_access, encode_access, internal, load_entry, map_sql, permission_grant,
+    push_owned_ancestor_access, record_change, resolve_tag_id, retention_deadline,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -71,6 +71,13 @@ struct BinCursor {
 struct ChangeCursor {
     changed_at: OffsetDateTime,
     id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct FilteredEntryRow {
+    #[sqlx(flatten)]
+    entry: EntryRow,
+    database_filter_matches: Vec<bool>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -204,10 +211,18 @@ impl MetadataRepository for PostgresRepository {
         let filter = query.filter.as_ref();
         let scan = filter.map_or(SortOrder::Newest, FilterQuery::scan_order);
         let cursor = decode_optional::<ChangeCursor>(query.page.cursor.as_deref())?;
-        // A chronological cap answers in one page, so it never carries a cursor.
-        let take = filter.and_then(|filter| filter.take);
-        let page_size = take.map_or(query.page.limit, |take| take.count.min(query.page.limit));
+        let page_size = query.page.limit;
         let mut builder = QueryBuilder::<Postgres>::new(concat!("SELECT ", entry_columns!()));
+        let policy_expression = filter
+            .and_then(|filter| filter.expression.as_ref())
+            .filter(|expression| expression.requires_policy_evaluation());
+        builder.push(", ");
+        if let Some(expression) = policy_expression {
+            filter_sql::push_database_predicate_matches(&mut builder, expression);
+        } else {
+            builder.push("ARRAY[]::boolean[]");
+        }
+        builder.push(" AS database_filter_matches");
         builder.push(
             " FROM briefcase.entries AS entry \
               WHERE entry.org_id = briefcase.current_org_id() \
@@ -233,7 +248,10 @@ impl MetadataRepository for PostgresRepository {
             builder.push_bind(cursor.id);
             builder.push(")");
         }
-        if let Some(expression) = filter.and_then(|filter| filter.expression.as_ref()) {
+        if let Some(expression) = filter
+            .and_then(|filter| filter.expression.as_ref())
+            .filter(|expression| !expression.requires_policy_evaluation())
+        {
             builder.push(" AND ");
             filter_sql::push_expression(&mut builder, expression);
         }
@@ -245,14 +263,17 @@ impl MetadataRepository for PostgresRepository {
 
         let mut request = begin(self, context).await?;
         let rows = builder
-            .build_query_as::<EntryRow>()
+            .build_query_as::<FilteredEntryRow>()
             .fetch_all(&mut *request.transaction)
             .await
             .map_err(map_sql)?;
-        let has_more = take.is_none() && rows.len() > usize::from(page_size);
+        let has_more = rows.len() > usize::from(page_size);
         let mut items = Vec::with_capacity(usize::from(page_size));
         for row in rows.into_iter().take(usize::from(page_size)) {
-            items.push(build_authorizable(&mut request.transaction, context, row).await?);
+            let mut entry =
+                build_authorizable(&mut request.transaction, context, row.entry).await?;
+            entry.database_filter_matches = row.database_filter_matches;
+            items.push(entry);
         }
         let next_cursor = if has_more {
             items
@@ -267,9 +288,6 @@ impl MetadataRepository for PostgresRepository {
         } else {
             None
         };
-        if filter.is_some_and(FilterQuery::requires_reversal) {
-            items.reverse();
-        }
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(Page { items, next_cursor })
     }
@@ -649,7 +667,7 @@ impl MetadataRepository for PostgresRepository {
         let mut items = rows
             .into_iter()
             .take(usize::from(query.page.limit))
-            .map(permission_grant)
+            .map(|row| permission_grant(&row, context))
             .collect::<Result<Vec<_>>>()?;
         let next_cursor = if has_more {
             items
@@ -708,7 +726,7 @@ impl MetadataRepository for PostgresRepository {
                 let row = find_grant(&mut request.transaction, id, false)
                     .await?
                     .ok_or(MetadataRepositoryError::Conflict)?;
-                let grant = permission_grant(row)?;
+                let grant = permission_grant(&row, context)?;
                 request.transaction.commit().await.map_err(map_sql)?;
                 return Ok(grant);
             }
@@ -782,7 +800,7 @@ impl MetadataRepository for PostgresRepository {
             },
         )
         .await?;
-        let grant = permission_grant(row)?;
+        let grant = permission_grant(&row, context)?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(grant)
     }
@@ -1179,24 +1197,32 @@ impl MetadataRepository for PostgresRepository {
         let mut request = begin(self, context).await?;
         let authorization = context.authorization();
         let actor = authorization.actor();
-        let tags: Vec<&str> = authorization
+        let tags: Vec<String> = authorization
             .tags()
             .iter()
-            .map(crate::domain::actor::TagName::as_str)
+            .map(|tag| tag.as_str().to_owned())
             .collect();
-        let rows = sqlx::query_as::<_, SearchHit>(
-            // Both sides are normalized by the same function, so a term
-            // inside a filename matches the name it belongs to.
+        // Both sides are normalized by the same function, so a term inside a
+        // filename matches the name it belongs to. Visibility is narrowed
+        // before LIMIT, using the same owned-ancestor predicate as policy and
+        // `accessible-to`; otherwise valid results can never reach policy.
+        let mut builder = QueryBuilder::<Postgres>::new(
             "WITH search_query AS ( \
-                    SELECT websearch_to_tsquery( \
-                               'simple'::regconfig, briefcase.searchable_text($1) \
-                           ) AS value, \
-                           ARRAY( \
-                               SELECT term.lexeme \
-                                 FROM unnest(to_tsvector( \
-                                          'simple'::regconfig, briefcase.searchable_text($1) \
-                                      )) AS term \
-                           ) AS lexemes \
+                 SELECT websearch_to_tsquery( \
+                            'simple'::regconfig, briefcase.searchable_text(",
+        );
+        builder.push_bind(query.query.clone());
+        builder.push(
+            ")) AS value, \
+                     ARRAY( \
+                         SELECT term.lexeme \
+                           FROM unnest(to_tsvector( \
+                                    'simple'::regconfig, briefcase.searchable_text(",
+        );
+        builder.push_bind(query.query.clone());
+        builder.push(
+            "))) AS term \
+                     ) AS lexemes \
              ) \
              SELECT document.entry_id, \
                     (2.0 * ts_rank(document.filename_search, search_query.value) \
@@ -1224,32 +1250,49 @@ impl MetadataRepository for PostgresRepository {
               WHERE document.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
                 AND (document.filename_search @@ search_query.value \
                      OR document.content_search @@ search_query.value) \
-                AND ( \
-                    $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
-                    OR entry.root_type = 'public' \
-                    OR (entry.root_type = 'tag' AND tag.name = ANY($5)) \
-                    OR EXISTS ( \
-                        SELECT 1 FROM briefcase.entry_closure AS path \
-                        JOIN briefcase.permission_grants AS access_grant \
-                          ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
-                       WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
-                         AND access_grant.principal_type = $3 AND access_grant.principal_id = $4 \
-                         AND access_grant.revoked_at IS NULL \
-                         AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
-                    ) \
-                ) \
-              ORDER BY filename_match DESC, content_hits DESC, score DESC, document.entry_id \
-              LIMIT $6",
-        )
-        .bind(&query.query)
-        .bind(authorization.role().has_administrative_access())
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .bind(tags)
-        .bind(i64::from(query.limit))
-        .fetch_all(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
+                AND (",
+        );
+        builder.push_bind(authorization.role().has_administrative_access());
+        builder.push(" OR (entry.owner_type = ");
+        builder.push_bind(actor_kind(actor.kind()));
+        builder.push(" AND entry.owner_id = ");
+        builder.push_bind(actor.id().as_str().to_owned());
+        builder.push(
+            ") OR entry.root_type = 'public' OR (entry.root_type = 'tag' AND tag.name = ANY(",
+        );
+        builder.push_bind(tags);
+        builder.push(
+            ")) OR EXISTS ( \
+                 SELECT 1 FROM briefcase.entry_closure AS path \
+                   JOIN briefcase.permission_grants AS access_grant \
+                     ON access_grant.org_id = path.org_id \
+                    AND access_grant.entry_id = path.ancestor_id \
+                  WHERE path.org_id = entry.org_id \
+                    AND path.descendant_id = entry.entry_id \
+                    AND access_grant.principal_type = ",
+        );
+        builder.push_bind(actor_kind(actor.kind()));
+        builder.push(" AND access_grant.principal_id = ");
+        builder.push_bind(actor.id().as_str().to_owned());
+        builder.push(
+            " AND access_grant.revoked_at IS NULL \
+                    AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
+             ) OR ",
+        );
+        push_owned_ancestor_access(
+            &mut builder,
+            OwnedAncestorPrincipal::Bound {
+                kind: Some(actor.kind()),
+                id: actor.id().as_str(),
+            },
+        );
+        builder.push(") ORDER BY filename_match DESC, content_hits DESC, score DESC, document.entry_id LIMIT ");
+        builder.push_bind(i64::from(query.limit));
+        let rows = builder
+            .build_query_as::<SearchHit>()
+            .fetch_all(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
             let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
@@ -1598,34 +1641,30 @@ impl MetadataRepository for PostgresRepository {
         Ok(restored)
     }
 
-    async fn project_member_authorization(
+    async fn project_token_authorization(
         &self,
-        organization_id: &OrganizationId,
-        actor: &ActorRef,
-        request_id: &str,
-    ) -> Result<Option<ProjectedMembership>> {
+        query: &crate::application::service::TokenAuthorizationQuery<'_>,
+    ) -> Result<Option<ProjectedIdentity>> {
         #[derive(sqlx::FromRow)]
-        struct MembershipRow {
+        struct IdentityRow {
+            actor_id: String,
             org_role: String,
             tag_names: Vec<String>,
         }
 
-        // This read runs before any request context exists, so it opens its own
-        // tenant transaction and never reconciles anything.
-        let context = TenantContext::for_projection(
-            organization_id.as_str().to_owned(),
-            actor,
-            request_id.to_owned(),
+        let context = TenantContext::for_token_projection(
+            query.organization_id.as_str(),
+            query.actor_kind,
+            query.principal_id,
+            query.request_id.to_owned(),
+            query.testing_environment,
         );
         let mut transaction = self.begin(&context).await.map_err(map_sql)?;
-        let row = sqlx::query_as::<_, MembershipRow>(
-            "SELECT member.org_role, \
+        let row = sqlx::query_as::<_, IdentityRow>(
+            "SELECT member.actor_id, member.org_role, \
                     COALESCE( \
                         array_agg(tag.name ORDER BY tag.name COLLATE \"C\") \
-                            FILTER ( \
-                                WHERE tag.tag_id IS NOT NULL \
-                                  AND tag.lifecycle_status = 'active' \
-                            ), \
+                            FILTER (WHERE tag.tag_id IS NOT NULL AND tag.lifecycle_status = 'active'), \
                         ARRAY[]::text[] \
                     ) AS tag_names \
                FROM briefcase.organization_members AS member \
@@ -1636,12 +1675,17 @@ impl MetadataRepository for PostgresRepository {
                LEFT JOIN briefcase.organization_tags AS tag \
                  ON tag.org_id = member_tag.org_id AND tag.tag_id = member_tag.tag_id \
               WHERE member.org_id = briefcase.current_org_id() \
-                AND member.actor_type = $1 AND member.actor_id = $2 \
+                AND member.actor_type = $1 \
+                AND member.principal_id = $2 \
+                AND member.membership_id = $3 \
+                AND member.authorization_epoch = $4 \
                 AND member.membership_status = 'active' \
-              GROUP BY member.org_role",
+              GROUP BY member.actor_id, member.org_role",
         )
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
+        .bind(actor_kind(query.actor_kind))
+        .bind(query.principal_id)
+        .bind(query.membership_id)
+        .bind(query.authorization_epoch)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(map_sql)?;
@@ -1656,12 +1700,18 @@ impl MetadataRepository for PostgresRepository {
             "member" => OrganizationRole::Member,
             _ => return Err(internal("invalid persisted organization role")),
         };
+        let actor_id = ActorId::new(row.actor_id)
+            .map_err(|_| internal("invalid persisted actor identifier"))?;
         let tags = row
             .tag_names
             .into_iter()
             .map(|tag| TagName::new(tag).map_err(internal_data))
             .collect::<Result<_>>()?;
-        Ok(Some(ProjectedMembership { role, tags }))
+        Ok(Some(ProjectedIdentity {
+            actor: ActorRef::new(query.actor_kind, actor_id),
+            role,
+            tags,
+        }))
     }
 
     async fn ensure_application_folder(

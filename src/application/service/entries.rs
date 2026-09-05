@@ -1,5 +1,7 @@
 //! Entry browsing and folder metadata mutations.
 
+use std::future::Future;
+
 use crate::{
     application::context::ExecutionContext,
     domain::{
@@ -11,8 +13,8 @@ use crate::{
 
 use super::{
     ActivityEvent, AuthorizedEntryView, CreateFolderCommand, CreateFolderMutation, EntryListItem,
-    ListEntriesQuery, MetadataService, MetadataServiceError, MutationMetadata, Page, PageRequest,
-    UpdateEntryCommand, require_capability, validate_context,
+    ListEntriesQuery, MetadataRepositoryError, MetadataService, MetadataServiceError,
+    MutationMetadata, Page, PageRequest, UpdateEntryCommand, require_capability, validate_context,
 };
 
 /// How many extra keyset reads one listing may spend refilling a page.
@@ -36,35 +38,26 @@ impl MetadataService {
         query: &ListEntriesQuery,
     ) -> Result<Page<EntryListItem>, MetadataServiceError> {
         validate_context(context)?;
+        self.validate_listing_parent(context, query.parent_id)
+            .await?;
 
-        if let Some(parent_id) = query.parent_id {
-            let parent = self
-                .repository
-                .find_active_entry(context, parent_id)
-                .await?
-                .ok_or(MetadataServiceError::NotFound)?;
-            if parent.entry.kind != EntryKind::Folder {
-                return Err(MetadataServiceError::NotFound);
-            }
-            let authorization = parent.authorization(context.authorization());
-            if authorization.visibility() == EntryVisibility::Hidden {
-                return Err(MetadataServiceError::NotFound);
-            }
-        }
-
-        // A `permissions:` predicate is not a column: persistence returns the
-        // candidates and policy decides them here, against the same effective
-        // access the response reports.
-        let permission_filter = query
+        // A `permissions:` predicate is not a column. For an expression that
+        // mixes one with persisted facts, the repository returns each atomic
+        // database predicate result and policy evaluates the original boolean
+        // tree here without weakening `or` or `not`.
+        let policy_filter = query
             .filter
             .as_ref()
             .and_then(|filter| filter.expression.as_ref())
             .filter(|expression| expression.requires_policy_evaluation());
-        let wanted = usize::from(query.page.limit);
+        let take = query.filter.as_ref().and_then(|filter| filter.take);
+        let wanted =
+            usize::from(take.map_or(query.page.limit, |take| take.count.min(query.page.limit)));
         let mut items: Vec<EntryListItem> = Vec::with_capacity(wanted);
         let mut accessed = Vec::with_capacity(wanted);
         let mut page = query.page.clone();
-        let mut next_cursor: Option<String> = None;
+        let mut next_cursor: Option<String>;
+        let mut refills = 0_usize;
 
         // Candidates the caller may not see are dropped after the keyset page
         // is read, so a page can arrive with room left in it. Refill from the
@@ -72,7 +65,7 @@ impl MetadataService {
         // a page is smaller than the limit would otherwise miss the rest of
         // the folder. Each round asks only for what is still missing, so no
         // entry is fetched twice and the cursor keeps meaning what it says.
-        for _ in 0..=MAX_PAGE_REFILLS {
+        loop {
             let candidates = self
                 .repository
                 .list_active_children(
@@ -87,28 +80,70 @@ impl MetadataService {
             next_cursor = candidates.next_cursor;
             for entry in candidates.items {
                 let authorization = entry.authorization(context.authorization());
-                if let Some(expression) = permission_filter
-                    && !expression.permits(&authorization.capabilities().effective_access())
-                {
-                    continue;
+                let effective_access = authorization.capabilities().effective_access();
+                if let Some(expression) = policy_filter {
+                    let matches = expression
+                        .matches(&effective_access, &entry.database_filter_matches)
+                        .ok_or_else(|| {
+                            MetadataServiceError::Repository(MetadataRepositoryError::Internal(
+                                anyhow::anyhow!(
+                                    "database filter projection does not match its expression"
+                                ),
+                            ))
+                        })?;
+                    if !matches {
+                        continue;
+                    }
                 }
                 if let Some(item) = entry.clone().into_list_item(authorization) {
                     accessed.push(entry.entry.id);
                     items.push(item);
+                    if items.len() == wanted {
+                        break;
+                    }
                 }
             }
 
             let remaining = wanted.saturating_sub(items.len());
-            let Some(cursor) = next_cursor.clone().filter(|_| remaining > 0) else {
+            if remaining == 0 {
+                if take.is_some() {
+                    next_cursor = None;
+                }
+                break;
+            }
+            let Some(cursor) = next_cursor.clone() else {
                 break;
             };
-            let Ok(limit) = u16::try_from(remaining) else {
+            // Ordinary cursor listings have a fixed scan budget and return the
+            // raw keyset cursor when sparse authorization exhausts it. A
+            // chronological take is terminal rather than paginated, so it must
+            // continue until N authorized matches or true exhaustion.
+            if take.is_none() && refills >= MAX_PAGE_REFILLS {
                 break;
+            }
+            refills += 1;
+            let limit = if take.is_some() {
+                query.page.limit
+            } else {
+                let Ok(limit) = u16::try_from(remaining) else {
+                    break;
+                };
+                limit
             };
             page = PageRequest {
                 cursor: Some(cursor),
                 limit,
             };
+        }
+
+        if take.is_some()
+            && query
+                .filter
+                .as_ref()
+                .is_some_and(crate::domain::filter::FilterQuery::requires_reversal)
+        {
+            items.reverse();
+            accessed.reverse();
         }
 
         if !accessed.is_empty() {
@@ -117,6 +152,27 @@ impl MetadataService {
                 .await?;
         }
         Ok(Page { items, next_cursor })
+    }
+
+    async fn validate_listing_parent(
+        &self,
+        context: &ExecutionContext,
+        parent_id: Option<EntryId>,
+    ) -> Result<(), MetadataServiceError> {
+        let Some(parent_id) = parent_id else {
+            return Ok(());
+        };
+        let parent = self
+            .repository
+            .find_active_entry(context, parent_id)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        if parent.entry.kind != EntryKind::Folder
+            || parent.authorization(context.authorization()).visibility() == EntryVisibility::Hidden
+        {
+            return Err(MetadataServiceError::NotFound);
+        }
+        Ok(())
     }
 
     /// Creates a user folder after applying root or parent policy.
@@ -309,10 +365,11 @@ impl MetadataService {
             .await?
             .ok_or(MetadataServiceError::NotFound)?;
         require_capability(&entry, context, Capability::Read)?;
-        self.repository
-            .list_entry_activity(context, entry_id)
-            .await
-            .map_err(Into::into)
+        record_then_list_activity(
+            self.repository.record_metadata_access(context, &[entry_id]),
+            || self.repository.list_entry_activity(context, entry_id),
+        )
+        .await
     }
 
     /// Renames and/or moves an active entry without crossing permission boundaries.
@@ -383,6 +440,54 @@ impl MetadataService {
         self.repository
             .soft_delete_entry(context, entry_id, metadata, Capability::Delete)
             .await?;
+        Ok(())
+    }
+}
+
+async fn record_then_list_activity<RecordFuture, List, ListFuture>(
+    record: RecordFuture,
+    list: List,
+) -> Result<Vec<ActivityEvent>, MetadataServiceError>
+where
+    RecordFuture: Future<Output = Result<(), MetadataRepositoryError>>,
+    List: FnOnce() -> ListFuture,
+    ListFuture: Future<Output = Result<Vec<ActivityEvent>, MetadataRepositoryError>>,
+{
+    record.await?;
+    list().await.map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use super::{MetadataRepositoryError, record_then_list_activity};
+
+    #[tokio::test]
+    async fn activity_access_precedes_history_load() -> Result<(), super::MetadataServiceError> {
+        let recorded = Arc::new(AtomicBool::new(false));
+        let record_observation = Arc::clone(&recorded);
+        let list_observation = Arc::clone(&recorded);
+
+        let events = record_then_list_activity(
+            async move {
+                record_observation.store(true, Ordering::SeqCst);
+                Ok::<_, MetadataRepositoryError>(())
+            },
+            move || async move {
+                assert!(
+                    list_observation.load(Ordering::SeqCst),
+                    "the current metadata access must precede the history read"
+                );
+                Ok::<_, MetadataRepositoryError>(Vec::new())
+            },
+        )
+        .await?;
+
+        assert!(events.is_empty());
         Ok(())
     }
 }

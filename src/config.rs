@@ -1,6 +1,7 @@
 //! Typed, validated runtime configuration loaded from environment variables.
 
 use std::{
+    collections::BTreeMap,
     env,
     net::{IpAddr, SocketAddr},
     num::{NonZeroU32, NonZeroUsize},
@@ -9,12 +10,14 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose};
 use secrecy::{ExposeSecret as _, SecretString};
 use thiserror::Error;
 use url::Url;
 
+use crate::domain::actor::is_canonical_iam_application_id;
+
 const MAX_IAM_RESPONSE_BYTES: usize = 1_048_576;
-const MIN_SECRET_BYTES: usize = 32;
 
 /// Fully validated API process configuration.
 #[derive(Clone, Debug)]
@@ -25,6 +28,8 @@ pub struct Settings {
     pub server: ServerSettings,
     /// PostgreSQL runtime pool settings.
     pub database: DatabaseSettings,
+    /// Optional isolated testing-environment plane.
+    pub testing: Option<TestingSettings>,
     /// Silicon IAM service integration.
     pub iam: IamSettings,
     /// Platform-owned S3 storage defaults.
@@ -42,6 +47,8 @@ pub struct WorkerProcessSettings {
     pub environment: RuntimeEnvironment,
     /// Privileged PostgreSQL connection used only by the worker.
     pub database: DatabaseSettings,
+    /// Shared test database, when sandbox lifecycle processing is enabled.
+    pub test_database: Option<DatabaseSettings>,
     /// S3 client transport and credential-chain settings used for cleanup.
     pub s3: S3Settings,
     /// Durable background worker policy.
@@ -112,28 +119,27 @@ pub struct DatabaseSettings {
     pub statement_timeout: Duration,
 }
 
+/// Shared sandbox database and encryption-at-rest configuration.
+#[derive(Clone, Debug)]
+pub struct TestingSettings {
+    /// Database used only for sandbox filesystem state.
+    pub database: DatabaseSettings,
+    /// Base64-encoded 256-bit key encrypting retrievable environment secrets.
+    pub encryption_key: SecretString,
+}
+
 /// Silicon IAM endpoints, application identity, and HTTP budgets.
 #[derive(Clone, Debug)]
 pub struct IamSettings {
-    /// IAM API base URL.
+    /// IAM origin. Versioned paths are selected after the compatibility handshake.
     pub base_url: Url,
-    /// Online opaque-token introspection endpoint.
-    pub bearer_introspection_url: Url,
-    /// Current actor and organization claims endpoint.
-    pub bearer_userinfo_url: Url,
-    /// Online OBO proof verification and consumption endpoint.
-    pub obo_verification_url: Url,
     /// Briefcase IAM application identifier.
     pub app_id: String,
     /// Briefcase IAM application secret.
     pub app_secret: SecretString,
-    /// Audience required on every accepted OBO proof.
-    pub audience: String,
-    /// TCP/TLS connection establishment deadline.
-    pub connect_timeout: Duration,
     /// Complete IAM request deadline.
     pub request_timeout: Duration,
-    /// Hard upper bound for one IAM response body.
+    /// Upper bound for decoded IAM models (SDK transport is capped at 4 MiB).
     pub max_response_bytes: NonZeroUsize,
 }
 
@@ -173,10 +179,8 @@ pub enum S3Encryption {
 /// IAM webhook authentication and replay-window settings.
 #[derive(Clone, Debug)]
 pub struct WebhookSettings {
-    /// HMAC key shared with IAM.
-    pub signing_secret: SecretString,
-    /// IAM webhook signing-key version accepted by this deployment.
-    pub signing_key_version: NonZeroU32,
+    /// IAM webhook HMAC keys indexed by the exact delivery key version.
+    pub signing_secrets: BTreeMap<i64, SecretString>,
     /// Maximum accepted difference between signature and server time.
     pub replay_window: Duration,
     /// Maximum webhook request body size.
@@ -229,6 +233,7 @@ impl Settings {
         let environment = parse_or("BRIEFCASE_ENVIRONMENT", "development")?;
         let server = server_settings()?;
         let database = database_settings("BRIEFCASE_DATABASE_URL", false)?;
+        let testing = testing_settings(&database)?;
         let iam = iam_settings()?;
         let s3 = s3_settings()?;
         let webhook = webhook_settings()?;
@@ -238,6 +243,7 @@ impl Settings {
             environment,
             server,
             database,
+            testing,
             iam,
             s3,
             webhook,
@@ -259,14 +265,29 @@ impl WorkerProcessSettings {
     pub fn from_env() -> Result<Self, SettingsError> {
         let environment = parse_or("BRIEFCASE_ENVIRONMENT", "development")?;
         let database = database_settings("BRIEFCASE_WORKER_DATABASE_URL", false)?;
+        let test_database = optional_database_settings("BRIEFCASE_TEST_WORKER_DATABASE_URL")?;
         let s3 = s3_settings()?;
         let worker = worker_settings()?;
         validate_database_transport(environment, &database, "BRIEFCASE_WORKER_DATABASE_URL")?;
+        if let Some(test_database) = &test_database {
+            validate_database_transport(
+                environment,
+                test_database,
+                "BRIEFCASE_TEST_WORKER_DATABASE_URL",
+            )?;
+            if test_database.url.expose_secret() == database.url.expose_secret() {
+                return Err(invalid(
+                    "BRIEFCASE_TEST_WORKER_DATABASE_URL",
+                    "must be different from BRIEFCASE_WORKER_DATABASE_URL",
+                ));
+            }
+        }
         validate_storage_environment_safety(environment, &s3)?;
 
         Ok(Self {
             environment,
             database,
+            test_database,
             s3,
             worker,
             log_filter: value_or("BRIEFCASE_LOG_FILTER", "silicon_briefcase=info"),
@@ -414,63 +435,76 @@ fn database_settings(
     Ok(settings)
 }
 
+fn optional_database_settings(
+    url_name: &'static str,
+) -> Result<Option<DatabaseSettings>, SettingsError> {
+    if optional(url_name).is_none() {
+        return Ok(None);
+    }
+    database_settings(url_name, false).map(Some)
+}
+
+fn testing_settings(
+    production: &DatabaseSettings,
+) -> Result<Option<TestingSettings>, SettingsError> {
+    let database_present = optional("BRIEFCASE_TEST_DATABASE_URL").is_some();
+    let key_present = optional("BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY").is_some();
+    if !database_present && !key_present {
+        return Ok(None);
+    }
+    if !database_present || !key_present {
+        return Err(invalid(
+            "BRIEFCASE_TEST_DATABASE_URL",
+            "BRIEFCASE_TEST_DATABASE_URL and BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY must be configured together",
+        ));
+    }
+    let database = database_settings("BRIEFCASE_TEST_DATABASE_URL", false)?;
+    if database.url.expose_secret() == production.url.expose_secret() {
+        return Err(invalid(
+            "BRIEFCASE_TEST_DATABASE_URL",
+            "must be different from BRIEFCASE_DATABASE_URL",
+        ));
+    }
+    let encryption_key = required_secret("BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY")?;
+    let decoded = general_purpose::STANDARD
+        .decode(encryption_key.expose_secret())
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(encryption_key.expose_secret()))
+        .map_err(|_| {
+            invalid(
+                "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY",
+                "must be base64 for exactly 32 bytes",
+            )
+        })?;
+    if decoded.len() != 32 {
+        return Err(invalid(
+            "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY",
+            "must be base64 for exactly 32 bytes",
+        ));
+    }
+    Ok(Some(TestingSettings {
+        database,
+        encryption_key,
+    }))
+}
+
 fn iam_settings() -> Result<IamSettings, SettingsError> {
-    let base_url = normalized_base_url(
+    let base_url = normalized_origin_url(
         "BRIEFCASE_IAM_BASE_URL",
         parse_or(
             "BRIEFCASE_IAM_BASE_URL",
-            "https://backend.iam.teamofsilicons.com/api/v1/",
+            "https://backend.iam.teamofsilicons.com/",
         )?,
     )?;
-    let bearer_path = value_or(
-        "BRIEFCASE_IAM_BEARER_INTROSPECTION_PATH",
-        "auth/tokens/introspect",
-    );
-    let userinfo_path = value_or("BRIEFCASE_IAM_USERINFO_PATH", "oauth/userinfo");
-    let obo_path = value_or("BRIEFCASE_IAM_OBO_VERIFICATION_PATH", "obo-access/verify");
     let settings = IamSettings {
-        bearer_introspection_url: join_endpoint(
-            "BRIEFCASE_IAM_BEARER_INTROSPECTION_PATH",
-            &base_url,
-            &bearer_path,
-        )?,
-        bearer_userinfo_url: join_endpoint(
-            "BRIEFCASE_IAM_USERINFO_PATH",
-            &base_url,
-            &userinfo_path,
-        )?,
-        obo_verification_url: join_endpoint(
-            "BRIEFCASE_IAM_OBO_VERIFICATION_PATH",
-            &base_url,
-            &obo_path,
-        )?,
         base_url,
-        app_id: nonempty_value(
-            "BRIEFCASE_IAM_APP_ID",
-            &value_or("BRIEFCASE_IAM_APP_ID", "silicon-briefcase"),
-        )?,
+        app_id: required("BRIEFCASE_IAM_APP_ID")?,
         app_secret: required_secret("BRIEFCASE_IAM_APP_SECRET")?,
-        audience: nonempty_value(
-            "BRIEFCASE_IAM_AUDIENCE",
-            &value_or("BRIEFCASE_IAM_AUDIENCE", "silicon-briefcase"),
-        )?,
-        connect_timeout: duration_millis("BRIEFCASE_IAM_CONNECT_TIMEOUT_MS", 1_500)?,
         request_timeout: duration_millis("BRIEFCASE_IAM_REQUEST_TIMEOUT_MS", 4_000)?,
         max_response_bytes: parse_or("BRIEFCASE_IAM_MAX_RESPONSE_BYTES", "65536")?,
     };
-    validate_secret_length(
-        "BRIEFCASE_IAM_APP_SECRET",
-        &settings.app_secret,
-        MIN_SECRET_BYTES,
-    )?;
-    require_nonzero_duration("BRIEFCASE_IAM_CONNECT_TIMEOUT_MS", settings.connect_timeout)?;
+    validate_fixed_iam_secret("BRIEFCASE_IAM_APP_SECRET", &settings.app_secret, "ask_")?;
+    validate_application_id("BRIEFCASE_IAM_APP_ID", &settings.app_id)?;
     require_nonzero_duration("BRIEFCASE_IAM_REQUEST_TIMEOUT_MS", settings.request_timeout)?;
-    if settings.connect_timeout >= settings.request_timeout {
-        return Err(invalid(
-            "BRIEFCASE_IAM_CONNECT_TIMEOUT_MS",
-            "must be lower than BRIEFCASE_IAM_REQUEST_TIMEOUT_MS",
-        ));
-    }
     if settings.max_response_bytes.get() > MAX_IAM_RESPONSE_BYTES {
         return Err(invalid(
             "BRIEFCASE_IAM_MAX_RESPONSE_BYTES",
@@ -546,17 +580,28 @@ fn s3_settings() -> Result<S3Settings, SettingsError> {
 }
 
 fn webhook_settings() -> Result<WebhookSettings, SettingsError> {
+    let current_secret = required_secret("BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET")?;
+    validate_webhook_secret("BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET", &current_secret)?;
+    let current_version = parse_positive_i64(
+        "BRIEFCASE_IAM_WEBHOOK_KEY_VERSION",
+        &value_or("BRIEFCASE_IAM_WEBHOOK_KEY_VERSION", "1"),
+    )?;
+    let mut signing_secrets = BTreeMap::from([(current_version, current_secret)]);
+    if let Some(previous) = optional("BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON") {
+        for (version, secret) in parse_previous_webhook_keys(&previous)? {
+            if signing_secrets.insert(version, secret).is_some() {
+                return Err(invalid(
+                    "BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON",
+                    "must not repeat a signing-key version",
+                ));
+            }
+        }
+    }
     let settings = WebhookSettings {
-        signing_secret: required_secret("BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET")?,
-        signing_key_version: parse_or("BRIEFCASE_IAM_WEBHOOK_KEY_VERSION", "1")?,
+        signing_secrets,
         replay_window: duration_secs("BRIEFCASE_IAM_WEBHOOK_REPLAY_WINDOW_SECONDS", 300)?,
         max_body_bytes: parse_or("BRIEFCASE_IAM_WEBHOOK_MAX_BODY_BYTES", "262144")?,
     };
-    validate_secret_length(
-        "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET",
-        &settings.signing_secret,
-        MIN_SECRET_BYTES,
-    )?;
     require_nonzero_duration(
         "BRIEFCASE_IAM_WEBHOOK_REPLAY_WINDOW_SECONDS",
         settings.replay_window,
@@ -616,6 +661,21 @@ fn validate_environment_safety(
     iam: &IamSettings,
     s3: &S3Settings,
 ) -> Result<(), SettingsError> {
+    if iam.base_url.scheme() == "http"
+        && !matches!(
+            iam.base_url.host(),
+            Some(url::Host::Ipv4(address)) if address.is_loopback()
+        )
+        && !matches!(
+            iam.base_url.host(),
+            Some(url::Host::Ipv6(address)) if address.is_loopback()
+        )
+    {
+        return Err(invalid(
+            "BRIEFCASE_IAM_BASE_URL",
+            "plain HTTP is allowed only for a literal loopback address",
+        ));
+    }
     if environment != RuntimeEnvironment::Production {
         return Ok(());
     }
@@ -711,31 +771,13 @@ fn validate_service_url(
     Ok(())
 }
 
-fn normalized_base_url(name: &'static str, mut url: Url) -> Result<Url, SettingsError> {
+fn normalized_origin_url(name: &'static str, mut url: Url) -> Result<Url, SettingsError> {
     validate_service_url(name, &url, false)?;
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
+    if !matches!(url.path(), "" | "/") {
+        return Err(invalid(name, "must be an origin without an API path"));
     }
+    url.set_path("/");
     Ok(url)
-}
-
-fn join_endpoint(name: &'static str, base_url: &Url, path: &str) -> Result<Url, SettingsError> {
-    let path = path.trim();
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains("..")
-        || path.contains('?')
-        || path.contains('#')
-    {
-        return Err(invalid(
-            name,
-            "must be a non-empty relative path without traversal or a query",
-        ));
-    }
-    base_url
-        .join(path)
-        .map_err(|_| invalid(name, "cannot be resolved against the IAM base URL"))
 }
 
 fn require_https(name: &'static str, url: &Url) -> Result<(), SettingsError> {
@@ -743,6 +785,17 @@ fn require_https(name: &'static str, url: &Url) -> Result<(), SettingsError> {
         return Err(invalid(name, "must use https in production"));
     }
     Ok(())
+}
+
+fn validate_application_id(name: &'static str, value: &str) -> Result<(), SettingsError> {
+    if is_canonical_iam_application_id(value) {
+        Ok(())
+    } else {
+        Err(invalid(
+            name,
+            "must be a qualified IAM Application ID in the form '{org_id}>{handle}'",
+        ))
+    }
 }
 
 fn validate_bucket_name(bucket: &str) -> Result<(), SettingsError> {
@@ -811,18 +864,65 @@ fn is_kms_key_arn(value: &str) -> bool {
         && parts.next().is_none()
 }
 
-fn validate_secret_length(
+fn validate_fixed_iam_secret(
     name: &'static str,
     value: &SecretString,
-    minimum: usize,
+    prefix: &str,
 ) -> Result<(), SettingsError> {
-    if value.expose_secret().len() < minimum {
+    let secret = value.expose_secret();
+    if secret.len() != prefix.len() + 43
+        || !secret.starts_with(prefix)
+        || !secret[prefix.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
         return Err(invalid(
             name,
-            format!("must contain at least {minimum} bytes"),
+            format!("must use IAM's fixed {prefix} wire form"),
         ));
     }
     Ok(())
+}
+
+fn validate_webhook_secret(name: &'static str, value: &SecretString) -> Result<(), SettingsError> {
+    let secret = value.expose_secret();
+    if !(32..=512).contains(&secret.len()) || !secret.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(invalid(
+            name,
+            "must contain 32-512 non-whitespace printable ASCII characters",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_positive_i64(name: &'static str, value: &str) -> Result<i64, SettingsError> {
+    let version = parse::<i64>(name, value)?;
+    if version < 1 {
+        return Err(invalid(name, "must be a positive signed 64-bit integer"));
+    }
+    Ok(version)
+}
+
+fn parse_previous_webhook_keys(value: &str) -> Result<BTreeMap<i64, SecretString>, SettingsError> {
+    let encoded: BTreeMap<String, String> = serde_json::from_str(value).map_err(|_| {
+        invalid(
+            "BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON",
+            "must be a JSON object mapping positive key versions to secrets",
+        )
+    })?;
+    let mut parsed = BTreeMap::new();
+    for (version, secret) in encoded {
+        let version = parse_positive_i64("BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON", &version)?;
+        let secret = SecretString::from(secret);
+        validate_webhook_secret("BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON", &secret)?;
+        if parsed.insert(version, secret).is_some() {
+            return Err(invalid(
+                "BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON",
+                "must not repeat a signing-key version",
+            ));
+        }
+    }
+    Ok(parsed)
 }
 
 fn require_nonzero_duration(name: &'static str, duration: Duration) -> Result<(), SettingsError> {
@@ -903,7 +1003,12 @@ fn invalid(name: &'static str, reason: impl Into<String>) -> SettingsError {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeEnvironment, is_kms_key_arn, normalized_key_prefix};
+    use secrecy::SecretString;
+
+    use super::{
+        RuntimeEnvironment, is_kms_key_arn, normalized_key_prefix, parse_positive_i64,
+        parse_previous_webhook_keys, validate_fixed_iam_secret, validate_webhook_secret,
+    };
 
     #[test]
     fn runtime_environment_is_case_insensitive() {
@@ -930,5 +1035,53 @@ mod tests {
         assert!(!is_kms_key_arn(
             "arn:aws:kms:ap-south-1:123456789012:alias/example"
         ));
+    }
+
+    #[test]
+    fn application_secrets_use_the_published_fixed_wire_form() {
+        let valid = SecretString::from(format!("ask_{}", "a".repeat(43)));
+        assert!(validate_fixed_iam_secret("TEST", &valid, "ask_").is_ok());
+        let wrong_prefix = SecretString::from(format!("whs_{}", "a".repeat(43)));
+        assert!(validate_fixed_iam_secret("TEST", &wrong_prefix, "ask_").is_err());
+        let padded = SecretString::from(format!("ask_{}=", "a".repeat(42)));
+        assert!(validate_fixed_iam_secret("TEST", &padded, "ask_").is_err());
+    }
+
+    #[test]
+    fn webhook_secrets_are_caller_chosen_ascii_graphic_values() {
+        assert!(validate_webhook_secret("TEST", &SecretString::from("x".repeat(32))).is_ok());
+        assert!(validate_webhook_secret("TEST", &SecretString::from("!".repeat(512))).is_ok());
+        assert!(validate_webhook_secret("TEST", &SecretString::from("x".repeat(31))).is_err());
+        assert!(
+            validate_webhook_secret(
+                "TEST",
+                &SecretString::from("caller owned webhook secret 00001".to_owned())
+            )
+            .is_err()
+        );
+        assert!(validate_webhook_secret("TEST", &SecretString::from("x".repeat(513))).is_err());
+    }
+
+    #[test]
+    fn webhook_key_versions_are_positive_i64_values() {
+        assert_eq!(parse_positive_i64("TEST", "1").ok(), Some(1));
+        assert_eq!(
+            parse_positive_i64("TEST", &i64::MAX.to_string()).ok(),
+            Some(i64::MAX)
+        );
+        assert!(parse_positive_i64("TEST", "0").is_err());
+        assert!(parse_positive_i64("TEST", "-1").is_err());
+        assert!(parse_positive_i64("TEST", "9223372036854775808").is_err());
+    }
+
+    #[test]
+    fn previous_webhook_keys_use_json_without_restricting_graphic_secrets() {
+        let parsed = parse_previous_webhook_keys(r#"{"1":"commas,equals=and\\slashes!!!!!!!!"}"#)
+            .unwrap_or_else(|error| panic!("valid previous-key JSON: {error}"));
+        assert_eq!(parsed.len(), 1);
+        assert!(
+            parse_previous_webhook_keys(r#"{"0":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#).is_err()
+        );
+        assert!(parse_previous_webhook_keys("1=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").is_err());
     }
 }

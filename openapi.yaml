@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 0.1.0
+  version: 0.3.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
 servers:
   - url: https://backend.briefcase.teamofsilicons.com/api/v1
@@ -11,7 +11,11 @@ servers:
       https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
 security:
   - bearerAuth: []
+  - bearerAuth: []
+    testingEnvironmentKey: []
 tags:
+  - name: Authentication
+  - name: Testing environments
   - name: Entries
   - name: Applications
   - name: Uploads
@@ -63,6 +67,338 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ApiVersionDocument' }
         '406': { description: The client supports no API version this build serves }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/slt:
+    post:
+      tags: [Authentication]
+      operationId: exchangeShortLivedToken
+      summary: Exchange an IAM short-lived token for a Briefcase Application session
+      security: []
+      description: >-
+        Accepts only the single-use SLT obtained from IAM's hosted Application
+        login. Briefcase supplies its own Application credential. When
+        X-Testing-Environment-Key is present, Briefcase uses only the mapped
+        IAM testing-environment key and test-only Application credential.
+        Preserve the same Idempotency-Key when recovering an uncertain result.
+      parameters:
+        - $ref: '#/components/parameters/AuthIdempotencyKey'
+        - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShortLivedTokenExchange' }
+      responses:
+        '200':
+          description: Opaque access token and rotating refresh token
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApplicationSessionTokens' }
+        '400': { description: Missing or invalid idempotency key or request body }
+        '401': { description: The SLT is invalid, expired, consumed, or belongs to another plane }
+        '503': { description: IAM or the configured testing plane is unavailable }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      operationId: refreshApplicationSession
+      summary: Rotate an IAM Application refresh token
+      security: []
+      description: >-
+        A successful refresh consumes the presented token and returns its
+        replacement. Serialize refreshes per token family. Retry an uncertain
+        result only with the exact same token, Idempotency-Key, and testing
+        environment selection; rejected refreshes are terminal.
+      parameters:
+        - $ref: '#/components/parameters/AuthIdempotencyKey'
+        - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApplicationSessionRefresh' }
+      responses:
+        '200':
+          description: Rotated opaque access and refresh tokens
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApplicationSessionTokens' }
+        '400': { description: Missing or invalid idempotency key or request body }
+        '401': { description: The refresh token is invalid, consumed, revoked, or belongs to another plane }
+        '503': { description: IAM or the configured testing plane is unavailable }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+    get:
+      tags: [Testing environments]
+      operationId: listTestingEnvironments
+      summary: List Briefcase testing environments owned by an organization
+      description: >-
+        This lifecycle route always authenticates in production. The path
+        organization must equal X-Org-ID. Active environments are returned by
+        default; status=deleted or status=all changes that selection.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, deleted, all], default: active }
+      responses:
+        '200':
+          description: Matching environments; at most ten can be active
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentPage' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Testing environments]
+      operationId: createTestingEnvironment
+      summary: Create an empty Briefcase testing environment
+      description: >-
+        Stores the paired IAM testing-environment and its test-only Briefcase
+        Application credential encrypted. The Application ID must equal the
+        Briefcase service Application ID configured by this deployment, and
+        one IAM environment UUID can be paired with only one Briefcase
+        environment at a time. A completed retry is recovered from encrypted
+        idempotency state before IAM credentials are revalidated. The generated
+        Briefcase root key is returned in this no-store response and selects
+        the isolated data plane.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestingEnvironmentCreate' }
+      responses:
+        '201':
+          description: Empty environment and its generated root key
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentWithKey' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    get:
+      tags: [Testing environments]
+      operationId: getTestingEnvironment
+      summary: Read one testing environment without revealing credentials
+      responses:
+        '200':
+          description: Environment metadata
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironment' }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Testing environments]
+      operationId: updateTestingEnvironment
+      summary: Rename or re-describe an active testing environment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/TestingEnvironmentPatch' }
+          application/json:
+            schema: { $ref: '#/components/schemas/TestingEnvironmentPatch' }
+      responses:
+        '200':
+          description: Updated environment metadata
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironment' }
+        '409': { description: If-Match does not name the current resource version }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Testing environments]
+      operationId: deleteTestingEnvironment
+      summary: Retire an environment for thirty days and invalidate its root key
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Soft-deleted environment, including its purge deadline
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironment' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}/key:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    get:
+      tags: [Testing environments]
+      operationId: getTestingEnvironmentKey
+      summary: Retrieve the current Briefcase root key
+      description: Restricted to the creator or a current organization admin/owner.
+      responses:
+        '200':
+          description: Current key and generation
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentKey' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}/key-rotations:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    post:
+      tags: [Testing environments]
+      operationId: rotateTestingEnvironmentKey
+      summary: Replace the Briefcase root key immediately
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Environment and its new root key
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentWithKey' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    post:
+      tags: [Testing environments]
+      operationId: replaceTestingEnvironmentIamPairing
+      summary: Replace every credential in the paired IAM testing plane
+      description: >-
+        Restricted to the creator or a current organization admin/owner. The
+        replacement IAM environment root, UUID, Application ID, and test-only
+        Application secret are validated by IAM before they replace the prior
+        encrypted pairing atomically. The Application ID must equal this
+        deployment's configured Briefcase service Application ID. Briefcase
+        data and its root key are preserved; the control version advances so
+        requests carrying the old IAM pairing cannot publish afterward.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestingEnvironmentIamPairing' }
+      responses:
+        '200':
+          description: Environment metadata with the replacement public pairing
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironment' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}/cleanings:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    post:
+      tags: [Testing environments]
+      operationId: cleanTestingEnvironment
+      summary: Erase an environment's isolated data while retaining its key
+      description: >-
+        Atomically erases Briefcase content, versions, permissions, logs,
+        notifications, idempotency state, storage settings, and consumption.
+        Exact provider deletion and multipart-abort descriptors are durably
+        queued before source metadata is removed, then retried by the worker.
+        The paired IAM directory projection is retained so existing test
+        identities can use the empty environment immediately; deterministic
+        roots are rebuilt on their next request.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Cleaning result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentCleaning' }
+        default: { $ref: '#/components/responses/Error' }
+  /organizations/{org_id}/testing-environments/{environment_id}/restorations:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/OrgIdPath'
+      - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+    post:
+      tags: [Testing environments]
+      operationId: restoreTestingEnvironment
+      summary: Restore a retired environment before its purge deadline
+      description: Restoration necessarily generates a new Briefcase root key.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Restored environment and replacement root key
+          headers:
+            ETag: { schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentWithKey' }
+        default: { $ref: '#/components/responses/Error' }
+  /testing-environment:
+    get:
+      tags: [Testing environments]
+      operationId: describeCurrentTestingEnvironment
+      summary: Describe the environment selected by its root key
+      security:
+        - testingEnvironmentKey: []
+      responses:
+        '200':
+          description: Minimal environment metadata visible to a key holder
+          headers:
+            Cache-Control: { schema: { const: 'private, no-store' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentSelf' }
+        default: { $ref: '#/components/responses/Error' }
+  /testing-environment/cleanings:
+    post:
+      tags: [Testing environments]
+      operationId: cleanCurrentTestingEnvironment
+      summary: Erase isolated data using the root key as sole authority
+      description: >-
+        Uses only the selected environment root as authority and performs the
+        same atomic Briefcase-state erasure as the production control-plane
+        cleaning route while retaining the paired IAM identity projection.
+        Provider deletion is durably queued and retried after logical erasure.
+      security:
+        - testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Cleaning result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestingEnvironmentCleaning' }
         default: { $ref: '#/components/responses/Error' }
   /entries:
     get:
@@ -305,6 +641,28 @@ paths:
       responses:
         '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
         default: { $ref: '#/components/responses/Error' }
+  /access-requests:
+    post:
+      tags: [Permissions]
+      operationId: requestAccessByPath
+      summary: Request access using the path from a permanent URL
+      description: >-
+        Resolves the exact organization-relative path without requiring read
+        access, then creates the same opaque access request as the UUID route.
+        It returns no entry metadata beyond the created request; a missing path
+        and a path outside the authenticated tenant both return 404.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PathAccessRequestCreate' }
+      responses:
+        '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
+        '404': { description: The exact path does not resolve in the authenticated tenant }
+        default: { $ref: '#/components/responses/Error' }
   /access-requests/{request_id}/decision:
     post:
       tags: [Permissions]
@@ -403,6 +761,9 @@ paths:
       security:
         - oboAccess: []
           appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
       parameters:
         - { name: X-Org-ID, in: header, required: false, schema: { type: string }, description: Optional; IAM derives the tenant and the header must agree with it }
       requestBody:
@@ -495,6 +856,8 @@ paths:
       operationId: configureOrganizationBucket
       security:
         - bearerAuth: []
+        - bearerAuth: []
+          testingEnvironmentKey: []
       parameters: [{ $ref: '#/components/parameters/OrgId' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfiguration' } } } }
       responses:
@@ -534,10 +897,16 @@ components:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
     oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof }
     appId: { type: apiKey, in: header, name: X-App-ID, description: Originating application identifier required together with an OBO Access proof }
+    testingEnvironmentKey: { type: apiKey, in: header, name: X-Testing-Environment-Key, description: Exact 32-character Briefcase testing-environment root key }
   parameters:
     OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
+    OrgIdPath: { name: org_id, in: path, required: true, schema: { type: string, pattern: '^[a-z0-9_-]{3,50}$' } }
     EntryId: { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
+    TestingEnvironmentIdPath: { name: environment_id, in: path, required: true, schema: { type: string, format: uuid } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
+    AuthIdempotencyKey: { name: Idempotency-Key, in: header, required: true, description: Stable key for recovering the same IAM token exchange, schema: { type: string, minLength: 16, maxLength: 255 } }
+    OptionalTestingEnvironmentKey: { name: X-Testing-Environment-Key, in: header, required: false, description: Selects a Briefcase test plane; omission selects production, schema: { $ref: '#/components/schemas/TestingEnvironmentKeyValue' } }
+    IfMatch: { name: If-Match, in: header, required: true, description: Strong ETag containing the expected resource version, schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
     Cursor: { name: cursor, in: query, schema: { type: string } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
     ContentsLimit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
@@ -569,6 +938,143 @@ components:
         application/octet-stream:
           schema: { type: string, format: binary }
   schemas:
+    ShortLivedTokenExchange:
+      type: object
+      additionalProperties: false
+      required: [slt]
+      properties:
+        slt: { type: string, pattern: '^oac_[A-Za-z0-9_-]{43}$' }
+    ApplicationSessionRefresh:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string, pattern: '^ort_[A-Za-z0-9_-]{43}$' }
+    ApplicationSessionActor:
+      type: object
+      additionalProperties: false
+      required: [principal_id, type, public_id]
+      properties:
+        principal_id: { type: string, format: uuid }
+        type: { type: string, enum: [carbon, silicon] }
+        public_id: { type: string, minLength: 1, maxLength: 255 }
+    ApplicationSessionTokens:
+      type: object
+      additionalProperties: false
+      required: [access_token, refresh_token, token_type, expires_in, scope, actor, org_id]
+      properties:
+        access_token: { type: string, pattern: '^oat_[A-Za-z0-9_-]{43}$' }
+        refresh_token: { type: string, pattern: '^ort_[A-Za-z0-9_-]{43}$' }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, const: 1800 }
+        scope: { type: string }
+        actor: { $ref: '#/components/schemas/ApplicationSessionActor' }
+        org_id: { type: [string, 'null'], pattern: '^[a-z0-9_-]{3,50}$' }
+    TestingEnvironmentCreator:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [carbon, silicon] }
+        id: { type: string, minLength: 1, maxLength: 255 }
+    TestingEnvironment:
+      type: object
+      required: [id, org_id, name, description, status, iam_environment_id, iam_app_id, created_by, key_generation, key_rotated_at, last_activity_at, cleaned_at, deleted_at, purge_after, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, pattern: '^[a-z0-9_-]{3,50}$' }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: [string, 'null'], maxLength: 1000 }
+        status: { type: string, enum: [active, deleted] }
+        iam_environment_id: { type: string, format: uuid }
+        iam_app_id: { type: string, pattern: '^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$' }
+        created_by: { $ref: '#/components/schemas/TestingEnvironmentCreator' }
+        key_generation: { type: integer, minimum: 1 }
+        key_rotated_at: { type: [string, 'null'], format: date-time }
+        last_activity_at: { type: string, format: date-time }
+        cleaned_at: { type: [string, 'null'], format: date-time }
+        deleted_at: { type: [string, 'null'], format: date-time }
+        purge_after: { type: [string, 'null'], format: date-time }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TestingEnvironmentPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TestingEnvironment' }
+    TestingEnvironmentCreate:
+      type: object
+      additionalProperties: false
+      required: [name, iam_environment_id, iam_environment_key, iam_app_id, iam_app_secret]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: [string, 'null'], maxLength: 1000 }
+        iam_environment_id: { type: string, format: uuid }
+        iam_environment_key: { $ref: '#/components/schemas/IamTestingEnvironmentKeyValue' }
+        iam_app_id: { type: string, pattern: '^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$' }
+        iam_app_secret: { type: string, pattern: '^ask_[A-Za-z0-9_-]{43}$' }
+    TestingEnvironmentPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: [string, 'null'], maxLength: 1000 }
+    TestingEnvironmentIamPairing:
+      type: object
+      additionalProperties: false
+      required: [iam_environment_id, iam_environment_key, iam_app_id, iam_app_secret]
+      properties:
+        iam_environment_id: { type: string, format: uuid }
+        iam_environment_key: { $ref: '#/components/schemas/IamTestingEnvironmentKeyValue' }
+        iam_app_id: { type: string, pattern: '^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$' }
+        iam_app_secret: { type: string, pattern: '^ask_[A-Za-z0-9_-]{43}$' }
+    TestingEnvironmentKeyValue:
+      type: string
+      pattern: '^[A-Za-z0-9]{32}$'
+      description: Root authority for exactly one Briefcase testing environment.
+    IamTestingEnvironmentKeyValue:
+      type: string
+      pattern: '^[A-Za-z0-9]{32}$'
+      description: Root key for the separately created IAM testing environment; stored encrypted and sent only to IAM.
+    TestingEnvironmentWithKey:
+      allOf:
+        - $ref: '#/components/schemas/TestingEnvironment'
+        - type: object
+          required: [key]
+          properties:
+            key: { $ref: '#/components/schemas/TestingEnvironmentKeyValue' }
+    TestingEnvironmentKey:
+      type: object
+      additionalProperties: false
+      required: [environment_id, key_generation, key_rotated_at, key]
+      properties:
+        environment_id: { type: string, format: uuid }
+        key_generation: { type: integer, minimum: 1 }
+        key_rotated_at: { type: [string, 'null'], format: date-time }
+        key: { $ref: '#/components/schemas/TestingEnvironmentKeyValue' }
+    TestingEnvironmentSelf:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, key_generation, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: [string, 'null'], maxLength: 1000 }
+        key_generation: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+    TestingEnvironmentCleaning:
+      type: object
+      additionalProperties: false
+      required: [environment_id, erased_rows, cleaned_at]
+      properties:
+        environment_id: { type: string, format: uuid }
+        erased_rows: { type: integer, minimum: 0, description: Database rows logically removed after provider cleanup was durably queued. }
+        cleaned_at: { type: string, format: date-time }
     ActorRef:
       type: object
       required: [type, id]
@@ -712,6 +1218,14 @@ components:
         - type: object
           required: [id, granted_by, created_at]
           properties: { id: { type: string, format: uuid }, granted_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    PathAccessRequestCreate:
+      type: object
+      additionalProperties: false
+      required: [path, access]
+      properties:
+        path: { type: string, minLength: 1, maxLength: 2048, description: Exact organization-relative path from the permanent URL }
+        access: { $ref: '#/components/schemas/AccessRights' }
+        reason: { type: string, maxLength: 1000 }
     AccessRequest:
       type: object
       required: [id, entry_id, requested_by, access, status, created_at]
