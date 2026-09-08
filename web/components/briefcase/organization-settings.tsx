@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { api, ApiError, bytes, type BrowserSession } from '@/lib/api';
+import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link';
 
 type UsageMeasure = {
   used_bytes: number;
@@ -175,6 +176,7 @@ export default function OrganizationSettings({
               {session.testing ? ' · Testing environment' : ''}
             </DialogDescription>
           </DialogHeader>
+          <IamOrganizationsLink />
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList>
               <TabsTrigger value="usage">Usage</TabsTrigger>

@@ -21,6 +21,12 @@ again. The login remains unscoped when its tokens refresh. Organisation choices
 are updated at login and token refresh; IAM checks live membership on every
 file operation. Scoped logins cannot switch to a different organisation.
 
+Choose **Create or manage organisations in IAM** from the organisation picker
+or **Organisation settings** to open IAM in a new tab. Organisation creation,
+membership, and invitations stay in IAM. The link is also available when your
+account has no organisations. After creating or joining one, sign in to
+Briefcase again to refresh your workspaces immediately.
+
 A file link has the form `/org/{org_id}/{path}` on the website's origin. Opening
 one selects that organisation for sign-in and retains the target through the IAM
 callback. After authentication, Briefcase resolves the path using your session.
