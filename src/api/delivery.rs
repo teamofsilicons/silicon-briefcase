@@ -23,6 +23,9 @@ use crate::{
 /// Value that isolates rendered content from the application and the network.
 const SANDBOX_POLICY: HeaderValue =
     HeaderValue::from_static("sandbox; default-src 'none'; frame-ancestors 'none'");
+/// Attachments may be saved, but never gain script or same-origin privileges.
+const DOWNLOAD_POLICY: HeaderValue =
+    HeaderValue::from_static("sandbox allow-downloads; default-src 'none'; frame-ancestors 'none'");
 const NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
 const NO_REFERRER: HeaderValue = HeaderValue::from_static("no-referrer");
 const PRIVATE_NO_STORE: HeaderValue = HeaderValue::from_static("private, no-store");
@@ -93,6 +96,10 @@ pub(crate) fn response(
         ContentIntent::Download => OCTET_STREAM,
         ContentIntent::Render => header_value(&delivery.content_type)?,
     };
+    let content_policy = match intent {
+        ContentIntent::Download => DOWNLOAD_POLICY,
+        ContentIntent::Render => SANDBOX_POLICY,
+    };
     let status = if delivery.range.is_some() {
         StatusCode::PARTIAL_CONTENT
     } else {
@@ -105,7 +112,7 @@ pub(crate) fn response(
         .header(header::CONTENT_LENGTH, served_length)
         .header(header::ACCEPT_RANGES, BYTES_UNIT)
         .header(header::CONTENT_DISPOSITION, disposition(&delivery, intent)?)
-        .header(header::CONTENT_SECURITY_POLICY, SANDBOX_POLICY)
+        .header(header::CONTENT_SECURITY_POLICY, content_policy)
         .header(header::X_CONTENT_TYPE_OPTIONS, NO_SNIFF)
         .header(header::REFERRER_POLICY, NO_REFERRER)
         .header(header::CACHE_CONTROL, PRIVATE_NO_STORE)

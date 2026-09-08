@@ -412,6 +412,10 @@ bearer capability. Responses are hardened for untrusted content:
 `Referrer-Policy: no-referrer`, and `Cross-Origin-Resource-Policy: same-origin`.
 Range support is what lets a media player seek.
 
+Attachment responses add only `allow-downloads` to the CSP sandbox so browsers
+can save the file. Inline previews retain the stricter policy above; scripts,
+same-origin privileges, and network access are not enabled.
+
 ### `GET /entries/{entry_id}/download`
 
 Streams the same bytes as an attachment, as `application/octet-stream`, for

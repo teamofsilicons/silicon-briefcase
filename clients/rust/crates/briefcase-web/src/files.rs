@@ -400,9 +400,11 @@ pub(crate) async fn content(
     );
     h.insert(
         "content-security-policy",
-        HeaderValue::from_static(
-            "sandbox; default-src 'none'; frame-ancestors 'self'; base-uri 'none'",
-        ),
+        HeaderValue::from_static(if q.download {
+            "sandbox allow-downloads; default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        } else {
+            "sandbox; default-src 'none'; frame-ancestors 'self'; base-uri 'none'"
+        }),
     );
     Ok(response)
 }
