@@ -76,6 +76,8 @@ function Field({
 }: React.ComponentProps<'div'> & VariantProps<typeof fieldVariants>) {
   return (
     <div
+      // Field composes its own labels/controls and is not a nested form fieldset.
+      // eslint-disable-next-line jsx-a11y/prefer-tag-over-role
       role="group"
       data-slot="field"
       data-orientation={orientation}
