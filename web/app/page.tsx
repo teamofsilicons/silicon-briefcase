@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
+import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link';
 import { api, setWorkspaceOrganization, type AccountSession, type BrowserSession } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
 export default function Home() {
@@ -193,6 +194,7 @@ export default function Home() {
                   IAM did not return an active organization for this account.
                 </output>
               )}
+              <IamOrganizationsLink />
               {error && (
                 <p className="error-box" role="alert">
                   {error}
