@@ -81,6 +81,24 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     if let Some(binding) = authorization.iam_binding() {
         synchronize_iam_snapshot(&mut transaction, authorization, binding).await?;
     }
+    // These are fresh recipient directory records, not identities on whose
+    // behalf this request executes. Preserve the caller's RLS/audit context.
+    for member in execution.directory_members() {
+        if member.organization_id() != authorization.organization_id() {
+            return Err(MetadataRepositoryError::NotFound);
+        }
+        let binding = member
+            .iam_binding()
+            .ok_or(MetadataRepositoryError::NotFound)?;
+        if authorization
+            .iam_binding()
+            .map(|caller| caller.organization_id)
+            != Some(binding.organization_id)
+        {
+            return Err(MetadataRepositoryError::NotFound);
+        }
+        synchronize_iam_snapshot(&mut transaction, member, binding).await?;
+    }
     let caller_is_current = caller_projection_is_current(&mut transaction, authorization).await?;
     let roots_are_consistent = caller_is_current
         && super::super::roots::system_roots_are_consistent(&mut transaction, caller)

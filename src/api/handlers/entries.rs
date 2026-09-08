@@ -148,6 +148,13 @@ pub(crate) async fn create_folder(
     let resource = parent_id.map_or(organization, |id| id.to_string());
     let metadata = extract::mutation(&headers, "create_folder", &resource, &body, true)?;
     let command = folder_command(body, parent_id)?;
+    let recipients = command
+        .invitees
+        .iter()
+        .map(|invitee| invitee.principal.clone())
+        .collect::<Vec<_>>();
+    let context =
+        extract::with_directory_recipients(&state, &headers, context, &recipients).await?;
     let created = extract::scoped(
         &context,
         state.metadata.create_folder(&context, command, &metadata),

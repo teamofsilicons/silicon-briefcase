@@ -116,6 +116,13 @@ pub(crate) async fn grant_permission(
         access: granted_access(&body.access)?,
         inherits_to_descendants: body.inherit,
     };
+    let context = extract::with_directory_recipients(
+        &state,
+        &headers,
+        context,
+        std::slice::from_ref(&command.principal),
+    )
+    .await?;
     let grant = extract::scoped(
         &context,
         state

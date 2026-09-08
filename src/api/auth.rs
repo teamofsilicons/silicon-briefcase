@@ -269,7 +269,7 @@ pub(crate) fn optional_organization(
         .transpose()
 }
 
-fn require_bearer_only(headers: &HeaderMap) -> Result<&str, AppError> {
+pub(super) fn require_bearer_only(headers: &HeaderMap) -> Result<&str, AppError> {
     if optional_single_header(headers, &OBO_PROOF)?.is_some()
         || optional_single_header(headers, &APP_ID)?.is_some()
     {
@@ -292,7 +292,7 @@ fn parse_organization(headers: &HeaderMap) -> Result<OrganizationId, AppError> {
     OrganizationId::new(value.to_owned()).map_err(|_| AppError::bad_request("invalid_org_id"))
 }
 
-fn parse_bearer(value: &str) -> Result<SecretString, AppError> {
+pub(super) fn parse_bearer(value: &str) -> Result<SecretString, AppError> {
     let mut parts = value.split_ascii_whitespace();
     let scheme = parts.next();
     let token = parts.next();

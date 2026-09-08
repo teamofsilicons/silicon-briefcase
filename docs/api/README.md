@@ -512,6 +512,11 @@ or replacing what already exists.
 
 Only the owner or an actor with permission-management authority may grant access. The principal must be a current Carbon or Silicon in the same organization.
 
+Briefcase resolves recipients through IAM's live, read-only membership directory
+using the caller's app token. Recipients do not need to sign into Briefcase first.
+The same lookup applies to initial folder invitees; missing, removed, or
+cross-organization members are rejected instead of using a stale local record.
+
 Granting a principal who already holds a grant amends that grant in place and
 returns it: the rights and inheritance become exactly what this request named.
 There is no separate edit operation, and widening access never has to pass

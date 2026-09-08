@@ -46,6 +46,7 @@ pub struct ExecutionContext {
     authorization: RequestAuthContext,
     request_id: String,
     testing_environment: Option<TestingEnvironmentContext>,
+    directory_members: Vec<RequestAuthContext>,
 }
 
 impl ExecutionContext {
@@ -56,6 +57,7 @@ impl ExecutionContext {
             authorization,
             request_id: request_id.into(),
             testing_environment: None,
+            directory_members: Vec::new(),
         }
     }
 
@@ -70,6 +72,7 @@ impl ExecutionContext {
             authorization,
             request_id: request_id.into(),
             testing_environment: Some(testing_environment),
+            directory_members: Vec::new(),
         }
     }
 
@@ -89,5 +92,15 @@ impl ExecutionContext {
     #[must_use]
     pub const fn testing_environment(&self) -> Option<TestingEnvironmentContext> {
         self.testing_environment
+    }
+
+    /// Attaches online directory projections, never caller authentication.
+    pub(crate) fn with_directory_members(mut self, members: Vec<RequestAuthContext>) -> Self {
+        self.directory_members = members;
+        self
+    }
+
+    pub(crate) fn directory_members(&self) -> &[RequestAuthContext] {
+        &self.directory_members
     }
 }
