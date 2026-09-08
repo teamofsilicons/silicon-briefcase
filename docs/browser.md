@@ -18,7 +18,7 @@ IAM asks you which organisations Briefcase may access. Login is always
 unscoped, but only those explicitly granted, active organisations are returned.
 New memberships are not automatically included. If there is
 only one, Briefcase opens it directly; otherwise choose a workspace. Use
-**Switch organisation** in the sidebar to choose another without signing in
+**Workspaces & access** in the sidebar to choose another without signing in
 again. The login remains unscoped when its tokens refresh. Organisation choices
 are updated at login and token refresh; IAM checks live membership on every
 file operation. Workspace selection does not change or enlarge IAM consent.
