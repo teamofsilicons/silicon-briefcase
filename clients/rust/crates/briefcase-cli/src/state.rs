@@ -401,7 +401,7 @@ pub struct StoredSession {
     pub actor: SessionActor,
     /// Organization selected when the SLT was exchanged.
     pub org_id: Option<String>,
-    /// Organizations currently reachable by an unscoped IAM session.
+    /// Active organizations explicitly granted in IAM, not all memberships.
     #[serde(default)]
     pub organizations: Vec<String>,
     /// Retry identity persisted before an in-flight refresh.

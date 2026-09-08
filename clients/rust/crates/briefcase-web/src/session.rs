@@ -17,7 +17,6 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub(crate) struct LoginFlow {
-    org: Option<String>,
     return_to: String,
     deadline: Instant,
     operation_id: Uuid,
@@ -25,17 +24,9 @@ pub(crate) struct LoginFlow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Start {
-    org: Option<String>,
     return_to: Option<String>,
 }
 pub(crate) async fn start(State(app): State<App>, Json(input): Json<Start>) -> Result<Response> {
-    if input
-        .org
-        .as_ref()
-        .is_some_and(|org| org.is_empty() || org.len() > 128 || org.trim() != org)
-    {
-        return Err(bad("Invalid workspace link."));
-    }
     let return_to = input.return_to.unwrap_or_else(|| "/".into());
     let target = url::Url::parse(&format!("{}{return_to}", app.origin))
         .map_err(|_| bad("Invalid return path"))?;
@@ -66,13 +57,9 @@ pub(crate) async fn start(State(app): State<App>, Json(input): Json<Start>) -> R
     url.query_pairs_mut()
         .append_pair("app_id", "tos>briefcase")
         .append_pair("redirect_uri", &callback);
-    if let Some(org) = &input.org {
-        url.query_pairs_mut().append_pair("org_id", org);
-    }
     flows.insert(
         nonce.clone(),
         LoginFlow {
-            org: input.org,
             return_to,
             deadline: Instant::now() + Duration::from_secs(600),
             operation_id: Uuid::new_v4(),
@@ -143,7 +130,7 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
         .filter(|f| f.deadline > Instant::now())
         .ok_or_else(unauthenticated)?;
     let input = Login {
-        org: flow.org.clone(),
+        org: None,
         slt: input.slt,
         test_key: None,
         operation_id: flow.operation_id,
@@ -284,11 +271,7 @@ pub(crate) async fn login(State(app): State<App>, Json(input): Json<Login>) -> R
         )
             .into_response());
     }
-    let mut config = match &input.org {
-        Some(org) => Config::new(&app.upstream, org)?,
-        None => Config::for_sign_in(&app.upstream)?,
-    }
-    .with_auto_update(false);
+    let mut config = Config::for_sign_in(&app.upstream)?.with_auto_update(false);
     let testing = input.test_key.is_some();
     if let Some(key) = input.test_key {
         config = config.with_environment(EnvironmentKey::new(key)?);
@@ -309,15 +292,13 @@ pub(crate) async fn login(State(app): State<App>, Json(input): Json<Login>) -> R
             return Err(error.into());
         }
     };
-    let mut organizations = tokens.organizations.clone();
-    if organizations.is_empty()
-        && let Some(org) = tokens.org_id.as_deref()
-    {
-        organizations.push(org.to_owned());
-    }
+    // Only live IAM consent snapshots confer workspace authority. A legacy
+    // token's org_id must never restore a revoked or migrated grant.
+    let organizations = tokens.organizations.clone();
     let session_org = input
         .org
         .clone()
+        .filter(|org| organizations.contains(org))
         .or_else(|| (organizations.len() == 1).then(|| organizations[0].clone()));
     let auth_config = config.clone();
     let config = session_org
@@ -404,11 +385,7 @@ async fn refresh_if_needed(session: &mut Session) -> Result<()> {
             Ok(tokens) => {
                 session.expires =
                     Instant::now() + Duration::from_secs(tokens.expires_in.min(86400));
-                session.organizations = if tokens.organizations.is_empty() {
-                    tokens.org_id.clone().into_iter().collect()
-                } else {
-                    tokens.organizations.clone()
-                };
+                session.organizations = tokens.organizations.clone();
                 if session
                     .org
                     .as_ref()

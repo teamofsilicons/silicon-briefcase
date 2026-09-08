@@ -677,11 +677,9 @@ export default function Workspace({
           <div className="org-label">
             <div className="org-heading">ORGANISATION</div>
             <span>{session.org}</span>
-            {session.organizations.length > 1 && (
-              <Button variant="ghost" onClick={onChooseOrganization}>
-                Switch organisation
-              </Button>
-            )}
+            <Button variant="ghost" onClick={onChooseOrganization}>
+              Workspaces & access
+            </Button>
             <small>
               {session.testing
                 ? 'Testing environment'

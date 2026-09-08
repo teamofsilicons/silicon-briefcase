@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "briefcase-client",
  "clap",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures-core",
  "libc",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-web"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",

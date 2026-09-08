@@ -12,8 +12,7 @@ import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link'
 import { api, setWorkspaceOrganization, type AccountSession, type BrowserSession } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
 export default function Home() {
-  const [org, setOrg] = useState<string | undefined>(),
-    [busy, setBusy] = useState(false),
+  const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const [session, setSession] = useState<
       BrowserSession | AccountSession | null
@@ -24,10 +23,8 @@ export default function Home() {
   const signOut = useCallback(() => {
     try {
       const target = readFileLocation();
-      setOrg(target?.org);
       setReturnTo(target ? location.pathname : '/');
     } catch {
-      setOrg(undefined);
       setReturnTo('/');
     }
     setSession(null);
@@ -39,7 +36,6 @@ export default function Home() {
       const target = readFileLocation();
       if (target) {
         // eslint-disable-next-line react/react-compiler -- Hydrate the organisation from the actual browser URL, which is unavailable during static export.
-        setOrg(target.org);
         setReturnTo(location.pathname);
       }
     } catch (e) {
@@ -50,7 +46,18 @@ export default function Home() {
       history.replaceState(null, '', location.pathname);
     }
     api<BrowserSession | AccountSession>('/session')
-      .then((value) => {
+      .then(async (value) => {
+        const target = readFileLocation();
+        // A deep link selects a workspace only after IAM has supplied the
+        // user's grants. It never contributes consent or scopes login.
+        if (value.authenticated && target && value.org !== target.org) {
+          if (value.organizations.includes(target.org)) {
+            value = await api<BrowserSession>('/session', 'PATCH', { org: target.org });
+          } else {
+            setChoosingOrganization(true);
+            setError('This workspace was not granted to Briefcase. Continue with IAM to review your organisation selection.');
+          }
+        }
         setWorkspaceOrganization(value.authenticated ? value.org : null);
         setSession(value.authenticated ? value : null);
       })
@@ -70,7 +77,7 @@ export default function Home() {
           'Content-Type': 'application/json',
           'X-Briefcase-Browser': '1',
         },
-        body: JSON.stringify({ org, return_to: returnTo }),
+        body: JSON.stringify({ return_to: returnTo }),
       });
       const value = (await r.json()) as {
         error?: { message?: string };
@@ -175,7 +182,7 @@ export default function Home() {
           {session ? (
             <>
               <p>Signed in as {session.actor.public_id}.</p>
-              <p>Choose a workspace to open its files.</p>
+              <p>Open a workspace you authorised in IAM.</p>
               <div className="organization-list">
                 {session.organizations.map((organization) => (
                   <Button
@@ -191,10 +198,17 @@ export default function Home() {
               </div>
               {session.organizations.length === 0 && (
                 <output className="notice">
-                  IAM did not return an active organization for this account.
+                  Organisation access needs reauthorisation. Continue with IAM
+                  and choose the organisations Briefcase may access.
                 </output>
               )}
               <IamOrganizationsLink />
+              <form onSubmit={login}>
+                <Button className="primary-action" disabled={busy} type="submit">
+                  {busy ? 'Continuing…' : 'Review organisation access in IAM'}
+                  <ArrowRight size={18} />
+                </Button>
+              </form>
               {error && (
                 <p className="error-box" role="alert">
                   {error}

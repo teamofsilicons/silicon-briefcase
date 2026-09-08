@@ -14,8 +14,8 @@ export default function IamOrganizationsLink() {
         <span className="sr-only"> (opens in a new tab)</span>
       </a>
       <p className="text-muted-foreground">
-        Manage organisations and invitations in IAM. Sign in to Briefcase again
-        after joining or creating an organisation to refresh your workspaces.
+        Manage organisations and invitations in IAM. After joining or creating
+        one, review your IAM access selection to share it with Briefcase.
       </p>
     </div>
   );

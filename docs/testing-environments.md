@@ -94,7 +94,7 @@ binding even if IAM discovers additional organizations:
 
 ```bash
 iam --url https://backend.iam.teamofsilicons.com --test "$IAM_TEST_ID" \
-  --no-org login --app-id 'tos>briefcase'
+  login --app-id 'tos>briefcase'
 briefcase --test "$BRIEFCASE_TEST_ID" login
 # Paste the test SLT at the hidden prompt.
 briefcase --test "$BRIEFCASE_TEST_ID" env current
