@@ -433,7 +433,7 @@ impl S3ObjectStore {
         target: &StorageTarget,
         key: &str,
         body: &'static [u8],
-    ) -> Result<(), ObjectStoreError> {
+    ) -> Result<Option<String>, ObjectStoreError> {
         let request = clients
             .s3
             .put_object()
@@ -441,11 +441,11 @@ impl S3ObjectStore {
             .key(key)
             .content_type("application/octet-stream")
             .body(ByteStream::from_static(body));
-        Self::apply_encryption_to_put(request, target)
+        let output = Self::apply_encryption_to_put(request, target)
             .send()
             .await
             .map_err(|_| ObjectStoreError::InvalidConfiguration)?;
-        Ok(())
+        Ok(output.version_id().map(str::to_owned))
     }
 
     async fn copy_single_object(
@@ -1389,8 +1389,9 @@ impl ObjectStore for S3ObjectStore {
             format!("{}/{relative_key}", target.prefix.trim_matches('/'))
         };
 
+        let mut probe_versions = Vec::new();
         let probe = async {
-            Self::put_probe(&clients, target, &key, VALIDATION_CONTENT).await?;
+            probe_versions.push(Self::put_probe(&clients, target, &key, VALIDATION_CONTENT).await?);
             let first = clients
                 .s3
                 .get_object()
@@ -1407,7 +1408,8 @@ impl ObjectStore for S3ObjectStore {
                 return Err(ObjectStoreError::InvalidConfiguration);
             }
 
-            Self::put_probe(&clients, target, &key, UPDATED_VALIDATION_CONTENT).await?;
+            probe_versions
+                .push(Self::put_probe(&clients, target, &key, UPDATED_VALIDATION_CONTENT).await?);
             let second = clients
                 .s3
                 .get_object()
@@ -1427,14 +1429,26 @@ impl ObjectStore for S3ObjectStore {
         }
         .await;
 
-        let cleanup = clients
-            .s3
-            .delete_object()
-            .bucket(&target.bucket)
-            .key(&key)
-            .send()
-            .await;
-        if cleanup.is_err() {
+        // A versionless DELETE in a versioned bucket merely adds a delete
+        // marker and leaks both probe versions. Delete only the versions
+        // returned by our writes. Deduplicate the unversioned case as well.
+        probe_versions.dedup();
+        let mut cleanup_failed = false;
+        for version_id in probe_versions {
+            if clients
+                .s3
+                .delete_object()
+                .bucket(&target.bucket)
+                .key(&key)
+                .set_version_id(version_id)
+                .send()
+                .await
+                .is_err()
+            {
+                cleanup_failed = true;
+            }
+        }
+        if cleanup_failed {
             return Err(ObjectStoreError::InvalidConfiguration);
         }
         probe?;
