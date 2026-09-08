@@ -23,6 +23,18 @@ use crate::{
     infrastructure::{postgres, s3::S3ObjectStore},
 };
 
+// A sandbox's persisted tenant key is not its IAM organization handle. Use
+// the trusted organization projection to remove exactly that environment's
+// namespace, preserving the same STS identity used by the authenticated API.
+fn storage_external_id(org_id: &str, environment_id: Option<uuid::Uuid>) -> Option<String> {
+    let public_id = match environment_id {
+        Some(environment_id) => org_id.strip_prefix(&format!("{environment_id}:"))?,
+        None => org_id,
+    };
+    crate::domain::actor::is_canonical_iam_organization_id(public_id)
+        .then(|| crate::infrastructure::s3::organization_storage_external_id(public_id))
+}
+
 /// Runs the durable worker until an interrupt or termination signal arrives.
 ///
 /// The worker refuses to touch tenant tables unless its effective PostgreSQL
