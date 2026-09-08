@@ -1,6 +1,8 @@
 //! Contracted HTTP route handlers.
 
 pub(crate) mod content;
+pub(crate) mod delegated;
+pub(crate) mod delegated_upload;
 pub(crate) mod entries;
 pub(crate) mod notifications;
 pub(crate) mod obo;

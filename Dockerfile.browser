@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.98.0-bookworm AS builder
+WORKDIR /workspace
+COPY . .
+RUN --mount=type=cache,id=silicon-iam-client-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=silicon-briefcase-client-target,target=/workspace/clients/rust/target,sharing=locked \
+    cargo build --locked --manifest-path clients/rust/Cargo.toml --release -p briefcase-web \
+    && install -D -m 0755 clients/rust/target/release/briefcase-web /opt/briefcase/briefcase-web
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/briefcase/briefcase-web /usr/local/bin/briefcase-web
+COPY web/dist/client /opt/briefcase/web/dist/client
+ENV BRIEFCASE_WEB_ASSETS=/opt/briefcase/web/dist/client
+USER 65532:65532
+EXPOSE 4318
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/briefcase-web"]

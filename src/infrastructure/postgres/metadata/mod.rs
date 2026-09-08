@@ -50,6 +50,44 @@ use common::{
     push_owned_ancestor_access, record_change, resolve_tag_id, retention_deadline,
 };
 
+async fn load_boundary_container(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &ExecutionContext,
+    boundary: &crate::domain::entry::EntryBoundary,
+) -> Result<Option<AuthorizableEntry>> {
+    let actor = context.authorization().actor();
+    let (root_type, tag) = boundary_columns(boundary);
+    let row = sqlx::query_as::<_, EntryRow>(concat!(
+        "SELECT ",
+        entry_columns!(),
+        " FROM briefcase.entries \
+          WHERE org_id = briefcase.current_org_id() \
+            AND deleted_at IS NULL \
+            AND ( \
+                ($1 = 'public' AND system_kind = 'public_root') \
+                OR ($1 = 'private' AND system_kind = 'actor_root' \
+                    AND owner_type = $3 AND owner_id = $4) \
+                OR ($1 = 'tag' AND system_kind = 'tag_root' AND tag_id IN ( \
+                        SELECT tag_id FROM briefcase.organization_tags \
+                         WHERE org_id = briefcase.current_org_id() \
+                           AND name = $2 AND lifecycle_status = 'active' \
+                    )) \
+            ) \
+          LIMIT 1 FOR SHARE",
+    ))
+    .bind(root_type)
+    .bind(tag)
+    .bind(actor_kind(actor.kind()))
+    .bind(actor.id().as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sql)?;
+    match row {
+        Some(row) => Ok(Some(build_authorizable(transaction, context, row).await?)),
+        None => Ok(None),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct UuidCursor {
     id: Uuid,
@@ -106,40 +144,7 @@ impl MetadataRepository for PostgresRepository {
         boundary: &crate::domain::entry::EntryBoundary,
     ) -> Result<Option<AuthorizableEntry>> {
         let mut request = begin(self, context).await?;
-        let actor = context.authorization().actor();
-        let row = sqlx::query_as::<_, EntryRow>(concat!(
-            "SELECT ",
-            entry_columns!(),
-            " FROM briefcase.entries \
-              WHERE org_id = briefcase.current_org_id() \
-                AND deleted_at IS NULL \
-                AND ( \
-                    ($1 = 'public' AND system_kind = 'public_root') \
-                    OR ($1 = 'private' AND system_kind = 'actor_root' \
-                        AND owner_type = $3 AND owner_id = $4) \
-                    OR ($1 = 'tag' AND system_kind = 'tag_root' AND tag_id IN ( \
-                            SELECT tag_id FROM briefcase.organization_tags \
-                             WHERE org_id = briefcase.current_org_id() \
-                               AND name = $2 AND lifecycle_status = 'active' \
-                        )) \
-                ) \
-              LIMIT 1",
-        ))
-        .bind(match boundary.root_type() {
-            crate::domain::entry::RootType::Public => "public",
-            crate::domain::entry::RootType::Private => "private",
-            crate::domain::entry::RootType::Tag => "tag",
-        })
-        .bind(boundary.tag().map(crate::domain::actor::TagName::as_str))
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .fetch_optional(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
-        let entry = match row {
-            Some(row) => Some(build_authorizable(&mut request.transaction, context, row).await?),
-            None => None,
-        };
+        let entry = load_boundary_container(&mut request.transaction, context, boundary).await?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(entry)
     }
@@ -347,6 +352,14 @@ impl MetadataRepository for PostgresRepository {
             require_capability(&parent, context, capability)?;
         } else if required_parent_capability.is_some() {
             return Err(MetadataRepositoryError::Conflict);
+        } else {
+            // Recheck root-creation authority inside the write transaction.
+            // The reserved container is an authority source, not the parent.
+            let container =
+                load_boundary_container(&mut request.transaction, context, &mutation.boundary)
+                    .await?
+                    .ok_or(MetadataRepositoryError::NotFound)?;
+            require_capability(&container, context, Capability::CreateChild)?;
         }
 
         let (root_type, tag_name) = boundary_columns(&mutation.boundary);
@@ -572,9 +585,15 @@ impl MetadataRepository for PostgresRepository {
         roots::lock_organization_reconciliation(&mut request.transaction)
             .await
             .map_err(map_sql)?;
-        let entry = load_entry(&mut request.transaction, context, entry_id, false, true)
-            .await?
-            .ok_or(MetadataRepositoryError::NotFound)?;
+        let entry = load_entry(
+            &mut request.transaction,
+            context,
+            entry_id,
+            metadata.idempotency_key.is_some(),
+            true,
+        )
+        .await?
+        .ok_or(MetadataRepositoryError::NotFound)?;
         require_capability(&entry, context, required_capability)?;
         if entry.system_kind.is_some() {
             return Err(MetadataRepositoryError::Conflict);
@@ -586,7 +605,45 @@ impl MetadataRepository for PostgresRepository {
             Capability::Delete,
         )
         .await?;
-        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+        if entry.entry.deleted_at.is_some() {
+            // The service uses find_bin_entry for this fallback; enforce the
+            // same retained deletion-batch-root boundary under the row lock
+            // so direct repository calls cannot replay hidden child entries.
+            let recoverable_root = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS ( \
+                     SELECT 1 FROM briefcase.entries AS entry \
+                      WHERE entry.org_id = briefcase.current_org_id() AND entry.entry_id = $1 \
+                        AND entry.deleted_at IS NOT NULL AND entry.purge_after > clock_timestamp() \
+                        AND NOT EXISTS ( \
+                            SELECT 1 FROM briefcase.entries AS parent \
+                             WHERE parent.org_id = entry.org_id AND parent.entry_id = entry.parent_id \
+                               AND parent.deletion_batch_id = entry.deletion_batch_id \
+                        ) \
+                 )",
+            )
+            .bind(entry_id.as_uuid())
+            .fetch_one(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
+            if !recoverable_root {
+                return Err(MetadataRepositoryError::NotFound);
+            }
+            if let IdempotencyClaim::Replay(Some(replayed_id)) = claim_idempotency(
+                &mut request.transaction,
+                &request.context,
+                OPERATION,
+                metadata,
+                Some(entry_id.as_uuid()),
+            )
+            .await?
+                && replayed_id == entry_id.as_uuid()
+            {
+                request.transaction.commit().await.map_err(map_sql)?;
+                return Ok(());
+            }
+            return Err(MetadataRepositoryError::NotFound);
+        }
+        match claim_idempotency(
             &mut request.transaction,
             &request.context,
             OPERATION,
@@ -595,8 +652,10 @@ impl MetadataRepository for PostgresRepository {
         )
         .await?
         {
-            request.transaction.commit().await.map_err(map_sql)?;
-            return Ok(());
+            IdempotencyClaim::Acquired(Some(claimed_id)) if claimed_id == entry_id.as_uuid() => {}
+            // A successful earlier delete may have been restored. Reusing
+            // that logical operation cannot delete the active entry again.
+            _ => return Err(MetadataRepositoryError::Conflict),
         }
         let batch_id = Uuid::now_v7();
         let deleted_at = OffsetDateTime::now_utc();
@@ -1514,8 +1573,14 @@ impl MetadataRepository for PostgresRepository {
         let entry = load_entry(&mut request.transaction, context, entry_id, true, true)
             .await?
             .ok_or(MetadataRepositoryError::NotFound)?;
+        // Replays return current metadata, so current authority is required
+        // even when the original restore has already made this root active.
+        require_capability(&entry, context, required_capability)?;
+        if entry.system_kind.is_some() {
+            return Err(MetadataRepositoryError::Conflict);
+        }
         if entry.entry.deleted_at.is_none() {
-            if let IdempotencyClaim::Replay(_) = claim_idempotency(
+            if let IdempotencyClaim::Replay(Some(replayed_id)) = claim_idempotency(
                 &mut request.transaction,
                 &request.context,
                 OPERATION,
@@ -1523,21 +1588,23 @@ impl MetadataRepository for PostgresRepository {
                 Some(entry_id.as_uuid()),
             )
             .await?
+                && replayed_id == entry_id.as_uuid()
             {
                 request.transaction.commit().await.map_err(map_sql)?;
                 return Ok(entry);
             }
             return Err(MetadataRepositoryError::Conflict);
         }
-        require_capability(&entry, context, required_capability)?;
-        if entry.system_kind.is_some() {
-            return Err(MetadataRepositoryError::Conflict);
-        }
         let batch_id = sqlx::query_scalar::<_, Uuid>(
-            "SELECT deletion_batch_id FROM briefcase.entries \
-              WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
-                AND deleted_at IS NOT NULL AND purge_after > clock_timestamp() \
-              FOR UPDATE",
+            "SELECT entry.deletion_batch_id FROM briefcase.entries AS entry \
+              WHERE entry.org_id = briefcase.current_org_id() AND entry.entry_id = $1 \
+                AND entry.deleted_at IS NOT NULL AND entry.purge_after > clock_timestamp() \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM briefcase.entries AS parent \
+                     WHERE parent.org_id = entry.org_id AND parent.entry_id = entry.parent_id \
+                       AND parent.deletion_batch_id = entry.deletion_batch_id \
+                ) \
+              FOR UPDATE OF entry",
         )
         .bind(entry_id.as_uuid())
         .fetch_optional(&mut *request.transaction)
@@ -1551,7 +1618,7 @@ impl MetadataRepository for PostgresRepository {
             Capability::UpdateMetadata,
         )
         .await?;
-        if let IdempotencyClaim::Replay(_) = claim_idempotency(
+        match claim_idempotency(
             &mut request.transaction,
             &request.context,
             OPERATION,
@@ -1560,7 +1627,8 @@ impl MetadataRepository for PostgresRepository {
         )
         .await?
         {
-            return Err(MetadataRepositoryError::Conflict);
+            IdempotencyClaim::Acquired(Some(claimed_id)) if claimed_id == entry_id.as_uuid() => {}
+            _ => return Err(MetadataRepositoryError::Conflict),
         }
         let subtree = sqlx::query_as::<_, SubtreeRow>(
             "SELECT child.entry_id, path.depth \

@@ -55,11 +55,22 @@ impl MetadataService {
         metadata: &MutationMetadata,
     ) -> Result<AuthorizedEntryView, MetadataServiceError> {
         validate_context(context)?;
-        let entry = self
+        let entry = match self
             .repository
             .find_bin_entry(context, command.entry_id)
             .await?
-            .ok_or(MetadataServiceError::NotFound)?;
+        {
+            Some(entry) => entry,
+            // A completed keyed restore has made the root active already.
+            // This lookup preserves visibility checks; only the repository's
+            // authority-bound completed claim may authorize the actual replay.
+            None if metadata.idempotency_key.is_some() => self
+                .repository
+                .find_active_entry(context, command.entry_id)
+                .await?
+                .ok_or(MetadataServiceError::NotFound)?,
+            None => return Err(MetadataServiceError::NotFound),
+        };
         require_capability(&entry, context, Capability::UpdateMetadata)?;
         let restored = self
             .repository

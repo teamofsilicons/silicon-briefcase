@@ -1,4 +1,4 @@
-//! Fail-closed domain adapter around official `silicon-iam-client` 1.2.
+//! Fail-closed domain adapter around official `silicon-iam-client` 1.3.
 //!
 //! IAM publishes token-introspection and OBO verification contracts.
 //! This adapter keeps those wire types isolated from Briefcase domain types and

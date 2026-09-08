@@ -43,7 +43,37 @@ const fn operation(
 }
 
 /// Every operation this client calls, with the revision it expects.
-pub const OPERATIONS: [OperationRevision; 42] = [
+pub const OPERATIONS: [OperationRevision; 51] = [
+    operation(
+        "reserveDelegatedUpload",
+        "1.0.0",
+        "POST",
+        "/obo/uploads/reserve",
+    ),
+    operation(
+        "commitDelegatedUpload",
+        "1.0.0",
+        "POST",
+        "/obo/uploads/commit",
+    ),
+    operation(
+        "getDelegatedUploadStatus",
+        "1.0.0",
+        "POST",
+        "/obo/uploads/status",
+    ),
+    operation(
+        "cancelDelegatedUpload",
+        "1.0.0",
+        "POST",
+        "/obo/uploads/cancel",
+    ),
+    operation(
+        "transferDelegatedUpload",
+        "1.0.0",
+        "PUT",
+        "/obo/uploads/{upload_id}/content",
+    ),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("exchangeShortLivedToken", "1.0.0", "POST", "/auth/slt"),
     operation(
@@ -125,7 +155,7 @@ pub const OPERATIONS: [OperationRevision; 42] = [
         "/testing-environment/cleanings",
     ),
     operation("listEntries", "1.1.0", "GET", "/entries"),
-    operation("createFolder", "1.1.0", "POST", "/entries"),
+    operation("createFolder", "2.0.0", "POST", "/entries"),
     operation("getEntry", "1.1.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.0.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
@@ -149,6 +179,30 @@ pub const OPERATIONS: [OperationRevision; 42] = [
     ),
     operation("uploadFile", "1.1.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "1.0.0", "POST", "/obo/files"),
+    operation(
+        "createFolderOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/folders/create",
+    ),
+    operation(
+        "listEntriesOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/entries/list",
+    ),
+    operation(
+        "readFileOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/files/read",
+    ),
+    operation(
+        "trashEntryOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/entries/trash",
+    ),
     operation(
         "listPermissions",
         "1.0.0",

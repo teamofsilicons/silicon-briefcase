@@ -127,7 +127,8 @@ impl Client {
 
 fn require_session_organization(actual: Option<&str>, expected: &str) -> Result<()> {
     match actual {
-        Some(actual) if actual == expected => Ok(()),
+        None if expected.is_empty() => Ok(()),
+        Some(actual) if !expected.is_empty() && actual == expected => Ok(()),
         Some(actual) => Err(Error::Protocol(format!(
             "Briefcase returned a session for organization {actual}, but this client is configured for {expected}"
         ))),

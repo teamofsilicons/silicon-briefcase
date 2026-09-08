@@ -117,6 +117,10 @@ pub struct ApiError {
     pub request_id: Option<String>,
     /// How long to wait before retrying, when the answer carried it.
     pub retry_after: Option<std::time::Duration>,
+    /// Authoritative file length from a `416` response's `Content-Range`.
+    ///
+    /// Absent when the server omitted the header or did not send `bytes */N`.
+    pub unsatisfied_range_length: Option<u64>,
 }
 
 impl fmt::Display for ApiError {
@@ -219,6 +223,7 @@ mod tests {
             message: "refused".to_owned(),
             request_id: Some("01a0".to_owned()),
             retry_after: None,
+            unsatisfied_range_length: None,
         })
     }
 

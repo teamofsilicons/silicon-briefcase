@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 
 use crate::{
-    client::{Client, IdempotencyKey},
+    client::{Client, IdempotencyKey, Maintenance},
     error::{Error, Result, io, transport},
     models::{Entry, FileVersion, FileVersionPage},
     requests::{ByteRange, Destination, OnBehalfOfUpload, Upload, UploadSource},
@@ -22,6 +22,7 @@ pub struct ContentStream {
     content_type: Option<String>,
     content_length: Option<u64>,
     content_range: Option<String>,
+    maintenance: Option<Maintenance>,
 }
 
 impl std::fmt::Debug for ContentStream {
@@ -36,6 +37,24 @@ impl std::fmt::Debug for ContentStream {
 }
 
 impl ContentStream {
+    /// Wraps a delegated response without ordinary package maintenance hooks.
+    pub(crate) fn without_maintenance(response: reqwest::Response) -> Self {
+        let header = |name: reqwest::header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned)
+        };
+        Self {
+            content_type: header(reqwest::header::CONTENT_TYPE),
+            content_length: response.content_length(),
+            content_range: header(reqwest::header::CONTENT_RANGE),
+            response,
+            maintenance: None,
+        }
+    }
+
     /// Returns the media type Briefcase served the bytes as.
     #[must_use]
     pub fn content_type(&self) -> Option<&str> {
@@ -60,12 +79,18 @@ impl ContentStream {
     ///
     /// Returns a transport error when the stream breaks mid-file.
     pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>> {
-        Ok(self
+        let result = self
             .response
             .chunk()
             .await
-            .map_err(transport)?
-            .map(|bytes| bytes.to_vec()))
+            .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+            .map_err(transport);
+        if !matches!(&result, Ok(Some(_))) {
+            // EOF or an error ends the transfer. Dropping a partly consumed
+            // ContentStream also drops this guard without blocking the caller.
+            self.maintenance.take();
+        }
+        result
     }
 
     /// Reads the whole body into memory.
@@ -73,7 +98,8 @@ impl ContentStream {
     /// # Errors
     ///
     /// Returns a transport error when the stream breaks mid-file.
-    pub async fn bytes(self) -> Result<Vec<u8>> {
+    pub async fn bytes(mut self) -> Result<Vec<u8>> {
+        let _maintenance = self.maintenance.take();
         Ok(self.response.bytes().await.map_err(transport)?.to_vec())
     }
 
@@ -84,6 +110,7 @@ impl ContentStream {
     /// Returns an I/O error when the file cannot be written, and a transport
     /// error when the stream breaks mid-file.
     pub async fn write_to_file(mut self, path: impl AsRef<Path>) -> Result<u64> {
+        let _maintenance = self.maintenance.take();
         let path = path.as_ref();
         let display = path.display().to_string();
         let mut file = tokio::fs::File::create(path)
@@ -206,6 +233,7 @@ impl Client {
     }
 
     async fn open_content(&self, url: url::Url, range: Option<ByteRange>) -> Result<ContentStream> {
+        let maintenance = self.maintenance();
         let mut request = self
             .request(Method::GET, url)
             .timeout(self.transfer_timeout());
@@ -225,6 +253,7 @@ impl Client {
             content_length: response.content_length(),
             content_range: header(reqwest::header::CONTENT_RANGE),
             response,
+            maintenance: Some(maintenance),
         })
     }
 
@@ -287,10 +316,12 @@ impl Client {
 
     /// Creates a file for the member an application represents.
     ///
-    /// This is the only operation applications may call. The destination, name,
+    /// This is the compatible one-shot upload. The destination, name,
     /// and media type come from the IAM proof rather than from this request,
     /// and the proof is spent exactly once: a refused call must never be
-    /// retried with the same proof.
+    /// retried with the same proof. For long transfers and durable logical
+    /// reconciliation, use [`Client::reserve_delegated_upload`] and a separate
+    /// fresh-authorized commit instead.
     ///
     /// The client's own bearer token, if it has one, is deliberately not sent:
     /// presenting both credentials at once is a request error.

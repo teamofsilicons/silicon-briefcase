@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    io::{IsTerminal as _, Read as _},
+    io::{BufRead as _, IsTerminal as _, Read as _},
 };
 
 use briefcase_client::{
@@ -28,6 +28,12 @@ use crate::{
     state::{CredentialScope, PendingMutation, Profile, StateDirectory, StoredSession},
 };
 
+mod delegated;
+
+/// Keep timestamps embedded in JSON values consistent with the API and store.
+#[derive(Serialize)]
+struct JsonTimestamp(#[serde(with = "time::serde::rfc3339")] time::OffsetDateTime);
+
 /// Everything that can stop a command, with the exit code it deserves.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
@@ -43,6 +49,11 @@ pub enum CliError {
     /// The command as typed cannot be carried out.
     #[error("{0}")]
     Usage(String),
+    /// The storage probe completed, but did not activate the proposed bucket.
+    #[error(
+        "storage validation failed; the previous configuration remains selected. After fixing the bucket or role, use a new operation ID to validate again"
+    )]
+    StorageValidationFailed,
     /// A local file could not be read or written.
     #[error("{path}: {source}")]
     Io {
@@ -164,14 +175,6 @@ fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<Resolved
         .unwrap_or(configuration.current_profile.clone());
     let saved = configuration.profiles.get(&profile_name);
     let url = deployment_url(global, saved);
-    let org = global
-        .org
-        .clone()
-        .or_else(|| saved.map(|profile| profile.org.clone()))
-        .ok_or_else(|| {
-            CliError::usage("no organization configured: run `briefcase login` or pass --org")
-        })?;
-    let credential_scope = scope_for(&url, &org)?;
     // A production OBO call needs no local credential material at all. Avoid
     // even deserializing an unrelated member session; only bearer-backed or
     // test-root-backed commands need the private credential store.
@@ -186,6 +189,29 @@ fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<Resolved
     let legacy_token = (include_bearer && global.test.is_none())
         .then(|| credentials.tokens.get(&profile_name).cloned())
         .flatten();
+    let org = global
+        .org
+        .clone()
+        .or_else(|| saved.filter(|profile| !profile.org.is_empty()).map(|profile| profile.org.clone()))
+        .or_else(|| stored_session.as_ref().and_then(|session| session.org_id.clone()))
+        .or_else(|| {
+            stored_session.as_ref().and_then(|session| {
+                (session.organizations.len() == 1).then(|| session.organizations[0].clone())
+            })
+        })
+        .ok_or_else(|| {
+            if let Some(session) = stored_session.as_ref()
+                && !session.organizations.is_empty()
+            {
+                CliError::usage(format!(
+                    "this unscoped login reaches multiple organizations ({}); pass --org to choose one",
+                    session.organizations.join(", ")
+                ))
+            } else {
+                CliError::usage("no organization configured: run `briefcase login` or pass --org")
+            }
+        })?;
+    let credential_scope = scope_for(&url, &org)?;
     let environment_key = match global.test {
         Some(id) => {
             let key = credentials
@@ -251,6 +277,14 @@ fn scope_for(url: &str, org: &str) -> Result<CredentialScope> {
     })
 }
 
+fn scope_for_unscoped(url: &str) -> Result<CredentialScope> {
+    let config = Config::for_sign_in(url)?;
+    Ok(CredentialScope {
+        deployment_origin: config.origin().as_str().to_owned(),
+        organization: String::new(),
+    })
+}
+
 fn ensure_stored_scope(
     credentials: &crate::state::Credentials,
     saved: Option<&Profile>,
@@ -259,6 +293,7 @@ fn ensure_stored_scope(
     effective: &CredentialScope,
 ) -> Result<()> {
     let legacy_scope = saved
+        .filter(|saved| !saved.org.is_empty())
         .map(|saved| scope_for(&saved.url, &saved.org))
         .transpose()?;
     let bound = credentials
@@ -269,7 +304,9 @@ fn ensure_stored_scope(
                 "stored credentials for profile {profile} have no destination binding; sign in again before using them"
             ))
         })?;
-    if bound != effective {
+    if bound.deployment_origin != effective.deployment_origin
+        || (!bound.organization.is_empty() && bound.organization != effective.organization)
+    {
         return Err(CliError::usage(format!(
             "stored credentials for profile {profile} are bound to {} organization {}; refusing to send them to {} organization {}",
             bound.deployment_origin,
@@ -302,6 +339,18 @@ fn testing_environment_for_login(
 
 fn config(session: &ResolvedSession) -> Result<Config> {
     let mut config = Config::new(&session.url, &session.org)?.with_auto_update(false);
+    if let Some(environment) = &session.environment_key {
+        config = config.with_environment(environment.clone());
+    }
+    Ok(config)
+}
+
+fn refresh_config(session: &ResolvedSession, stored: &StoredSession) -> Result<Config> {
+    let mut config = if stored.org_id.is_some() {
+        Config::new(&session.url, &session.org)?.with_auto_update(false)
+    } else {
+        Config::for_sign_in(&session.url)?.with_auto_update(false)
+    };
     if let Some(environment) = &session.environment_key {
         config = config.with_environment(environment.clone());
     }
@@ -346,11 +395,11 @@ async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSessio
             }
             let refresh_key = IdempotencyKey::new(refresh_key)?;
             let refresh_client = if global.no_verify {
-                Client::new_unchecked(config(&resolved)?)?
+                Client::new_unchecked(refresh_config(&resolved, &stored)?)?
             } else {
                 // Verify the destination before presenting a rotating,
                 // single-use refresh credential to it.
-                Client::connect(config(&resolved)?).await?
+                Client::connect(refresh_config(&resolved, &stored)?).await?
             };
             let refreshed = refresh_client
                 .refresh_session_with_key(&stored.refresh_token, &refresh_key)
@@ -415,14 +464,15 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         ));
     }
     let state = StateDirectory::locate()?;
-    let org = global
-        .org
-        .clone()
-        .ok_or_else(|| CliError::usage("--org is required to log in"))?;
+    if global.test.is_some() && global.org.is_none() {
+        return Err(CliError::usage(
+            "--org is required when logging into a testing environment",
+        ));
+    }
     let slt = if args.slt_stdin {
         read_secret_stdin()?
     } else {
-        match &args.slt {
+        match args.slt_positional.as_ref().or(args.slt.as_ref()) {
             Some(slt) => slt.clone(),
             None => prompt_secret("IAM short-lived token: ")?,
         }
@@ -444,19 +494,30 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         .unwrap_or_else(|| configuration.current_profile.clone());
     let url = deployment_url(global, configuration.profiles.get(&profile_name));
     let mut credentials = state.credentials()?;
-    if let Some(previous) = configuration.profiles.get(&profile_name) {
+    if let Some(previous) = configuration.profiles.get(&profile_name)
+        && !previous.org.is_empty()
+    {
         let previous_scope = scope_for(&previous.url, &previous.org)?;
         credentials.bind_legacy_profile_scope(&profile_name, &previous_scope);
     }
-    let login_scope = scope_for(&url, &org)?;
-    let mut login_config = Config::new(&url, &org)?.with_auto_update(false);
+    let login_scope = global
+        .org
+        .as_deref()
+        .map(|org| scope_for(&url, org))
+        .transpose()?;
+    let mut login_config = match global.org.as_deref() {
+        Some(org) => Config::new(&url, org)?.with_auto_update(false),
+        None => Config::for_sign_in(&url)?.with_auto_update(false),
+    };
     if let Some(environment_id) = global.test {
         let environment = testing_environment_for_login(
             &credentials,
             configuration.profiles.get(&profile_name),
             &profile_name,
             environment_id,
-            &login_scope,
+            login_scope
+                .as_ref()
+                .expect("test login requires an organization"),
         )?;
         login_config = login_config.with_environment(environment);
     }
@@ -470,7 +531,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         "operation": "login",
         "profile": profile_name,
         "url": url,
-        "org": org,
+        "org": global.org,
         "testing_environment_id": global.test,
         "slt": slt,
     }))?;
@@ -480,6 +541,16 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         .login_with_slt_with_key(&slt, &idempotency_key)
         .await?;
     let stored = StoredSession::from_tokens(&tokens);
+    let login_scope = match global.org.as_deref().or(tokens.org_id.as_deref()) {
+        Some(org) => scope_for(&url, org)?,
+        None => scope_for_unscoped(&url)?,
+    };
+    let org = global
+        .org
+        .clone()
+        .or_else(|| tokens.org_id.clone())
+        .or_else(|| (tokens.organizations.len() == 1).then(|| tokens.organizations[0].clone()))
+        .unwrap_or_default();
 
     configuration.profiles.insert(
         profile_name.clone(),
@@ -505,9 +576,10 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
             "profile": profile_name,
             "url": url,
             "org": org,
+            "organizations": stored.organizations,
             "test_environment_id": global.test,
             "actor": stored.actor,
-            "expires_at": stored.expires_at,
+            "expires_at": JsonTimestamp(stored.expires_at),
         }));
     } else {
         output.note(&format!(
@@ -696,32 +768,45 @@ async fn file_identity(path: &std::path::Path) -> Result<(String, String)> {
     ))
 }
 
+const MAXIMUM_SECRET_BYTES: u64 = 64 * 1024;
+
 fn prompt_secret(label: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
-        return rpassword::prompt_password(label).map_err(|source| CliError::Io {
+        let secret = rpassword::prompt_password(label).map_err(|source| CliError::Io {
             path: "terminal".to_owned(),
             source,
-        });
+        })?;
+        return bounded_secret(&secret);
     }
     let mut line = String::new();
     std::io::stdin()
+        .lock()
+        .take(MAXIMUM_SECRET_BYTES + 1)
         .read_line(&mut line)
         .map_err(|source| CliError::Io {
             path: "standard input".to_owned(),
             source,
         })?;
-    Ok(line.trim().to_owned())
+    bounded_secret(&line)
 }
 
 fn read_secret_stdin() -> Result<String> {
     let mut buffer = String::new();
     std::io::stdin()
+        .take(MAXIMUM_SECRET_BYTES + 1)
         .read_to_string(&mut buffer)
         .map_err(|source| CliError::Io {
             path: "standard input".to_owned(),
             source,
         })?;
-    Ok(buffer.trim().to_owned())
+    bounded_secret(&buffer)
+}
+
+fn bounded_secret(value: &str) -> Result<String> {
+    if value.len() as u64 > MAXIMUM_SECRET_BYTES {
+        return Err(CliError::usage("secret input is limited to 64 KiB"));
+    }
+    Ok(value.trim().to_owned())
 }
 
 fn logout(global: &GlobalArgs, output: Output) -> Result<()> {
@@ -765,7 +850,7 @@ async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
             "org": session.org,
             "test_environment_id": session.environment_id,
             "authenticated": session.token.is_some(),
-            "session_expires_at": session.stored_session.as_ref().map(|stored| stored.expires_at),
+            "session_expires_at": session.stored_session.as_ref().map(|stored| JsonTimestamp(stored.expires_at)),
             "service": served.service,
             "build": served.build,
             "contract_version": served.contract_version,
@@ -1155,7 +1240,7 @@ async fn remove(global: &GlobalArgs, args: &RmArgs, output: Output) -> Result<()
 }
 
 async fn bin(global: &GlobalArgs, command: &BinCommand, output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let (client, resolved) = connect_resolved(global).await?;
     match command {
         BinCommand::List { limit, cursor, all } => {
             let page = if *all {
@@ -1169,7 +1254,22 @@ async fn bin(global: &GlobalArgs, command: &BinCommand, output: Output) -> Resul
             output.entry_page(&page, true);
         }
         BinCommand::Restore { entry_id } => {
-            let entry = client.restore_from_bin(*entry_id).await?;
+            let scope = format!(
+                "entry:restore-bin:{}:{entry_id}",
+                plane_scope(&resolved.profile_name, resolved.environment_id)
+            );
+            let fingerprint = request_fingerprint(&serde_json::json!({
+                "operation": "restore-bin",
+                "profile": &resolved.profile_name,
+                "url": &resolved.url,
+                "org": &resolved.org,
+                "testing_environment_id": resolved.environment_id,
+                "entry_id": entry_id,
+            }))?;
+            let pending = prepare_durable_mutation(&scope, &fingerprint, Some(*entry_id), None)?;
+            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
+            let entry = client.restore_from_bin_with_key(*entry_id, &key).await?;
+            finish_durable_mutation(&scope, &pending)?;
             if output.is_json() {
                 output.json(&entry);
             } else {
@@ -1395,7 +1495,6 @@ async fn usage(global: &GlobalArgs, output: Output) -> Result<()> {
 }
 
 async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) -> Result<()> {
-    let client = connect(global).await?;
     let StorageCommand::Configure(args) = command;
     let configuration = BucketConfiguration {
         bucket_name: args.bucket.clone(),
@@ -1406,7 +1505,17 @@ async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) 
         encryption_mode: args.encryption.into(),
         kms_key_arn: args.kms_key_arn.clone(),
     };
-    let status = client.configure_storage(&configuration).await?;
+    let operation = args.operation_id.unwrap_or_else(Uuid::new_v4);
+    if operation.is_nil() {
+        return Err(CliError::usage("--operation-id must be a non-nil UUID"));
+    }
+    let client = connect(global).await?;
+    eprintln!(
+        "Storage operation ID: {operation}. Reuse --operation-id {operation} with the same configuration after a lost response."
+    );
+    let status = client
+        .configure_storage_with_key(&configuration, &IdempotencyKey::new(operation.to_string())?)
+        .await?;
     if output.is_json() {
         output.json(&status);
     } else {
@@ -1428,10 +1537,43 @@ async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) 
             }
         }
     }
+    if status.status == briefcase_client::BucketConfigurationState::Failed {
+        return Err(CliError::StorageValidationFailed);
+    }
     Ok(())
 }
 
 async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) -> Result<()> {
+    let (app_id, proof, proof_stdin, file) = match command {
+        AppCommand::Request(args) => return delegated::run(global, args, output).await,
+        AppCommand::PrepareUpload {
+            file,
+            operation_id,
+            parent_path,
+        } => return delegated::prepare_upload(*operation_id, parent_path, file, output).await,
+        AppCommand::Transfer {
+            upload_id,
+            file,
+            capability_file,
+            capability_stdin,
+        } => {
+            return delegated::transfer(
+                global,
+                *upload_id,
+                file,
+                capability_file.as_deref(),
+                *capability_stdin,
+                output,
+            )
+            .await;
+        }
+        AppCommand::Upload {
+            app_id,
+            proof,
+            proof_stdin,
+            file,
+        } => (app_id, proof, proof_stdin, file),
+    };
     // An OBO proof is the complete actor credential for this operation. Never
     // load or rotate an unrelated member session that will not be sent.
     let session = anonymous_session(global)?;
@@ -1440,12 +1582,6 @@ async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) 
     } else {
         Client::connect(config(&session)?).await?
     };
-    let AppCommand::Upload {
-        app_id,
-        proof,
-        proof_stdin,
-        file,
-    } = command;
     let proof = if *proof_stdin {
         read_secret_stdin()?
     } else {
@@ -1929,12 +2065,21 @@ fn report_cleaning(output: Output, cleaning: &briefcase_client::TestingEnvironme
 }
 
 fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Result<()> {
+    if let ConfigCommand::Home { location } = command {
+        StateDirectory::configure_home(location)?;
+        output.note(&format!(
+            "Briefcase state will be stored under {}",
+            location.join(".briefcase").display()
+        ));
+        return Ok(());
+    }
     let state = StateDirectory::locate()?;
     // Writers lock before reading so concurrent setting changes merge instead
     // of replacing one another with snapshots taken at the same time.
     let _state_lock = match command {
         ConfigCommand::Set { .. } | ConfigCommand::Unset { .. } => Some(state.lock_credentials()?),
         ConfigCommand::Show => None,
+        ConfigCommand::Home { .. } => unreachable!("home was handled before locating state"),
     };
     let mut configuration = state.configuration()?;
     match command {
@@ -1981,6 +2126,7 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
                 "unknown setting `{key}`; supported setting: auto-update"
             )));
         }
+        ConfigCommand::Home { .. } => unreachable!("home was handled before reading configuration"),
     }
     Ok(())
 }

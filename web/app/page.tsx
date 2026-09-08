@@ -1,0 +1,245 @@
+'use client';
+import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
+import {
+  ArrowRight,
+  BriefcaseBusiness,
+  KeyRound,
+  ShieldCheck,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import Workspace from '@/components/briefcase/workspace';
+import { api, type AccountSession, type BrowserSession } from '@/lib/api';
+import { readFileLocation } from '@/lib/file-location';
+export default function Home() {
+  const [org, setOrg] = useState<string | undefined>(),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState('');
+  const [session, setSession] = useState<
+      BrowserSession | AccountSession | null
+    >(null),
+    [checking, setChecking] = useState(true);
+  const [returnTo, setReturnTo] = useState('/');
+  const signOut = useCallback(() => {
+    try {
+      const target = readFileLocation();
+      setOrg(target?.org);
+      setReturnTo(target ? location.pathname : '/');
+    } catch {
+      setOrg(undefined);
+      setReturnTo('/');
+    }
+    setSession(null);
+  }, []);
+  useEffect(() => {
+    try {
+      const target = readFileLocation();
+      if (target) {
+        // eslint-disable-next-line react/react-compiler -- Hydrate the organisation from the actual browser URL, which is unavailable during static export.
+        setOrg(target.org);
+        setReturnTo(location.pathname);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'File not found.');
+    }
+    if (new URLSearchParams(location.search).has('signin_error')) {
+      setError('IAM sign-in could not be completed. Please start again.');
+      history.replaceState(null, '', location.pathname);
+    }
+    api<BrowserSession | AccountSession>('/session')
+      .then((value) => setSession(value.authenticated ? value : null))
+      .catch((e) => {
+        if (e.status !== 401) setError(e.message);
+      })
+      .finally(() => setChecking(false));
+  }, []);
+  async function login(event: SubmitEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const r = await fetch('/browser/login/start', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Briefcase-Browser': '1',
+        },
+        body: JSON.stringify({ org, return_to: returnTo }),
+      });
+      const value = (await r.json()) as {
+        error?: { message?: string };
+        redirect_url: string;
+      };
+      if (!r.ok)
+        throw new Error(
+          value.error?.message || 'Sign-in could not be completed.',
+        );
+      window.location.assign(value.redirect_url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function selectOrganization(selected: string) {
+    setBusy(true);
+    setError('');
+    try {
+      setSession(await api<AccountSession | BrowserSession>('/session', 'PATCH', { org: selected }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to choose that workspace.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (checking)
+    return (
+      <main className="loading-page">
+        <BriefcaseBusiness size={32} />
+        <output>Opening Briefcase…</output>
+      </main>
+    );
+  if (session?.org != null)
+    return (
+      <Workspace
+        session={{ ...session, org: session.org }}
+        onSignOut={signOut}
+      />
+    );
+  return (
+    <div className="entry-screen">
+      <header className="masthead">
+        {/* Full-page navigation resets a deep-link sign-in attempt. */}
+        {/* eslint-disable-next-line next/no-html-link-for-pages */}
+        <a className="brand" href="/">
+          {/* eslint-disable-next-line next/no-img-element -- Local shared Silicon brand asset. */}
+          <img src="/brand/mark.svg" alt="" width={28} height={28} />
+          <strong>silicon</strong>
+          <span>BRIEFCASE</span>
+        </a>
+        <a href="https://github.com/teamofsilicons/silicon-briefcase/tree/main/docs">
+          Documentation <ArrowRight size={15} />
+        </a>
+      </header>
+      <main className="signin-grid">
+        <section className="signin-intro">
+          <div className="eyebrow">
+            {session ? 'YOUR ACCOUNT' : 'YOUR FILES'}
+          </div>
+          <h1>
+            Open your <br />
+            Briefcase<span className="blue">.</span>
+          </h1>
+          <p>
+            Sign in as yourself. Your files, shared folders, and organisation
+            spaces will be waiting.
+          </p>
+          <dl className="principles">
+            <div>
+              <dt>01 / Public</dt>
+              <dd>Shared across your organisation.</dd>
+            </div>
+            <div>
+              <dt>02 / Private</dt>
+              <dd>Your files, with access you control.</dd>
+            </div>
+            <div>
+              <dt>03 / Tags</dt>
+              <dd>Spaces for the teams you belong to.</dd>
+            </div>
+          </dl>
+          <div className="identity-note">
+            <ShieldCheck size={19} />
+            <span>Identity by Silicon IAM. Permissions by Briefcase.</span>
+          </div>
+        </section>
+        <section className="signin-panel" aria-labelledby="signin-title">
+          <div className="panel-kicker">
+            <KeyRound size={18} /> MEMBER ACCESS
+          </div>
+          <h2 id="signin-title">
+            {session ? 'Your organisations' : 'Sign in with IAM'}
+          </h2>
+          {session ? (
+            <>
+              <p>Signed in as {session.actor.public_id}.</p>
+              <p>Choose a workspace to open its files.</p>
+              <div className="organization-list">
+                {session.organizations.map((organization) => (
+                  <Button
+                    className="primary-action"
+                    key={organization}
+                    disabled={busy}
+                    onClick={() => selectOrganization(organization)}
+                  >
+                    {organization}
+                    <ArrowRight size={18} />
+                  </Button>
+                ))}
+              </div>
+              {session.organizations.length === 0 && (
+                <output className="notice">
+                  IAM did not return an active organization for this account.
+                </output>
+              )}
+              {error && (
+                <p className="error-box" role="alert">
+                  {error}
+                </p>
+              )}
+              <Button
+                className="primary-action"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError('');
+                  try {
+                    await api('/session', 'DELETE');
+                    signOut();
+                  } catch (e) {
+                    setError(
+                      e instanceof Error ? e.message : 'Unable to sign out.',
+                    );
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Sign out
+              </Button>
+            </>
+          ) : (
+            <>
+              <p>
+                Continue to Silicon IAM to verify your identity. You’ll return
+                here automatically.
+              </p>
+              <form onSubmit={login}>
+                {error && (
+                  <p className="error-box" role="alert">
+                    {error}
+                  </p>
+                )}
+                <Button
+                  className="primary-action"
+                  type="submit"
+                  disabled={busy}
+                >
+                  {busy ? 'Continuing to IAM…' : 'Continue with IAM'}
+                  <ArrowRight size={18} />
+                </Button>
+              </form>
+            </>
+          )}
+          <p className="session-note">
+            Your session stays on the server. Tokens aren’t saved in browser
+            storage.
+          </p>
+        </section>
+      </main>
+      <footer className="entry-footer">
+        <span>TEAM OF SILICONS</span>
+        <span>Files for Carbons & Silicons</span>
+      </footer>
+    </div>
+  );
+}

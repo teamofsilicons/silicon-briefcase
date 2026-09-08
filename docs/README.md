@@ -7,8 +7,11 @@ CLI, or work inside an IAM-paired testing environment.
 
 | Guide | Audience and contents |
 | --- | --- |
+| [Browser app](browser.md) | IAM sign-in, file links, browsing, sharing, access requests, notifications, previews, and sessions |
+| [OBO for applications](obo.md) | Hand this to another Application: prerequisites, proof exchange, every `/obo/` operation, retries, errors, SDK and CLI |
+| [Delegated uploads](api/delegated-uploads.md) | Exact IAM manifests, private staging, fresh-authorized publication and recovery |
 | [API](api/README.md) | HTTP authentication, request/response conventions, all public operations, permissions, filters, uploads, errors, and retention |
-| [42-operation map](api/operations.md) | Exact HTTP route and revision mapped to the Rust method and CLI command |
+| [51-operation map](api/operations.md) | Exact HTTP route and revision mapped to the Rust method and CLI command |
 | [Rust client](client/README.md) | Stateless `briefcase-client`, login/refresh, typed requests, streaming, retries, testing, and method inventory |
 | [CLI](cli/README.md) | Installation, SLT login, profiles, file commands, sharing, scripting, environment management, and updates |
 | [Testing environments](testing-environments.md) | IAM preparation, pairing, UUID/key distinctions, API/CLI/client usage, lifecycle, and hands-on checks |
@@ -41,17 +44,21 @@ has been deployed. Example actor paths must be replaced with actual IAM IDs.
    owns its own storage and refresh policy.
 4. Ordinary requests carry the actor bearer and `X-Org-ID`. A test request also
    carries the separate Briefcase root key. That key does not replace the actor.
-5. Another application uses a single-use IAM OBO proof on `/obo/files`, not its
-   own application secret on the member API.
+5. Another application uses a fresh single-use IAM OBO proof on the documented
+   `/obo/` operations, not its own application secret on the member API.
 
 Webhooks reconcile changes but do not grant request authority. First-use login
 and sandbox bootstrap use current online IAM snapshots and need no synthetic
 membership-update webhook. Production webhook approval is a separate IAM
-platform-admin operation; see the [approval runbook](iam-integration.md).
+operation for the owning organization owner/admin or a platform reviewer; see
+the [approval runbook](iam-integration.md).
 
 ## Contract and sources
 
+See [Migrating to client and CLI 0.2](migration-0.2.md) for typed-root placement,
+SDK error metadata, and matching client/backend operation revisions.
+
 [UNDERSTANDING.md](../UNDERSTANDING.md) is the requested product behavior.
 [openapi.yaml](../openapi.yaml) describes the wire contract. The guides explain
-how to use the API, package, and CLI. SDK/CLI sources are maintained in
-the sibling `briefcase-client-rust` repository.
+how to use the API, package, and CLI. SDK/CLI sources are maintained in this
+repository under [`clients/rust`](../clients/rust).

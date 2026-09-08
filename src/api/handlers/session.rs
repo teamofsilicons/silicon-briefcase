@@ -47,6 +47,7 @@ struct SessionTokens {
     scope: String,
     actor: SessionActor,
     org_id: Option<String>,
+    organizations: Vec<String>,
 }
 
 /// Exchanges a single-use short-lived token for an Application session.
@@ -67,8 +68,12 @@ pub(crate) async fn exchange_slt(
         .iam
         .exchange_short_lived_token(&body.slt, idempotency_key, environment.as_ref())
         .await?;
+    let organizations = state
+        .iam
+        .reachable_organizations(tokens.access_token(), environment.as_ref())
+        .await?;
     extract::touch_testing_access(&state, access.as_ref()).await?;
-    Ok(token_response(&tokens))
+    Ok(token_response(&tokens, organizations))
 }
 
 /// Rotates an IAM Application refresh token exactly once.
@@ -89,8 +94,12 @@ pub(crate) async fn refresh(
         .iam
         .refresh_application_session(&body.refresh_token, idempotency_key, environment.as_ref())
         .await?;
+    let organizations = state
+        .iam
+        .reachable_organizations(tokens.access_token(), environment.as_ref())
+        .await?;
     extract::touch_testing_access(&state, access.as_ref()).await?;
-    Ok(token_response(&tokens))
+    Ok(token_response(&tokens, organizations))
 }
 
 fn auth_idempotency_key(headers: &HeaderMap) -> Result<&str, AppError> {
@@ -107,7 +116,10 @@ fn auth_idempotency_key(headers: &HeaderMap) -> Result<&str, AppError> {
         .ok_or_else(|| AppError::bad_request("invalid_idempotency_key"))
 }
 
-fn token_response(tokens: &IamApplicationTokens) -> Response {
+fn token_response(
+    tokens: &IamApplicationTokens,
+    organizations: Vec<crate::domain::actor::OrganizationId>,
+) -> Response {
     let actor = tokens.actor();
     let body = SessionTokens {
         access_token: tokens.access_token().expose_secret().to_owned(),
@@ -123,6 +135,10 @@ fn token_response(tokens: &IamApplicationTokens) -> Response {
         org_id: tokens
             .organization_id()
             .map(|organization| organization.as_str().to_owned()),
+        organizations: organizations
+            .into_iter()
+            .map(|organization| organization.into_inner())
+            .collect(),
     };
     // The official IAM SDK preserves retry keys but does not expose upstream
     // replay headers. Do not claim a replay was false when it is unknown.

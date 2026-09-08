@@ -143,6 +143,50 @@ impl IamClient {
         validate_application_tokens(self.convert(tokens)?, None)
     }
 
+    /// Lists every organization currently reachable by an Application access
+    /// token. An organization-bound token returns one item; an unscoped token
+    /// returns one item per active membership.
+    ///
+    /// # Errors
+    /// Rejects inactive tokens, mismatched audiences, malformed organization
+    /// handles, and snapshots from the wrong testing environment.
+    pub async fn reachable_organizations(
+        &self,
+        access_token: &SecretString,
+        environment: Option<&IamEnvironmentCredential>,
+    ) -> Result<Vec<OrganizationId>, IamClientError> {
+        if !valid_fixed_iam_secret(access_token.expose_secret(), "oat_") {
+            return Err(IamClientError::Rejected);
+        }
+        let authorizations = self
+            .scoped_client(environment)?
+            .oauth()
+            .authorizations(access_token.expose_secret())
+            .await
+            .map_err(|error| sdk_error(error, Operation::Service))?
+            .ok_or(IamClientError::Rejected)?;
+        let expected_audience = self.application_identity(environment).0.as_str();
+        let expected_environment = environment.and_then(|value| value.environment_id);
+        let mut organizations = Vec::with_capacity(authorizations.len());
+        for authorization in authorizations {
+            if authorization.audience.as_str() != expected_audience
+                || authorization.testing_environment_id != expected_environment
+                || !is_canonical_iam_organization_id(authorization.org_id.as_str())
+                || authorization.membership_version < 1
+                || authorization.authorization_epoch < 1
+            {
+                return Err(invalid_response("authorization.organization"));
+            }
+            organizations.push(
+                OrganizationId::new(authorization.org_id)
+                    .map_err(|_| invalid_response("authorization.org_id"))?,
+            );
+        }
+        organizations.sort();
+        organizations.dedup();
+        Ok(organizations)
+    }
+
     /// Rotates a refresh token without retrying or retaining session state.
     ///
     /// # Errors

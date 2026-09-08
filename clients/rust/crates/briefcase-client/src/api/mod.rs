@@ -5,6 +5,7 @@
 
 mod access;
 mod content;
+pub mod delegated;
 mod entries;
 mod environments;
 mod login;

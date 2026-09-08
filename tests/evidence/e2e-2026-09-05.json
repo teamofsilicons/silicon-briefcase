@@ -1,0 +1,73 @@
+{
+  "date": "2026-09-05",
+  "iam_revision": "b57848c",
+  "final_automated_gates": {
+    "backend_passed": 208,
+    "client_cli_default_passed": 98,
+    "client_explicit_live_passed": 2,
+    "format_and_strict_clippy": "passed in both Briefcase repositories",
+    "client_documentation_build": "passed"
+  },
+  "iam_environment_id": "01a07011-7752-76d1-968e-e9441a142b8c",
+  "briefcase_environment_id": "01a07012-a56f-7601-adf2-fcd82853bbc3",
+  "checkpoints": [
+    {
+      "at": "2026-09-05T05:44:08.268Z",
+      "name": "FILE_WORKFLOW_ASSERTIONS_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:49:35.861Z",
+      "name": "OBO_DEFAULT_UPLOAD_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:51:27.350Z",
+      "name": "OBO_DEFAULT_UPLOAD_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:52:04.967Z",
+      "name": "LARGE_UPLOAD_BOUNDARIES_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:52:58.158Z",
+      "name": "PROTOCOL_AND_PAGINATION_ASSERTIONS_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:54:39.956Z",
+      "name": "OBO_NEGATIVE_AND_WEBHOOK_ASSERTIONS_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:54:41.874Z",
+      "name": "REFRESH_CONCURRENCY_AND_REUSE_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:54:51.142Z",
+      "name": "IAM_TAG_ACCESS_REVOCATION_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:56:49.589Z",
+      "name": "FIFTY_VERSION_AND_HUNDRED_HISTORY_LIMITS_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:56:50.609Z",
+      "name": "ENVIRONMENT_REPAIR_ROTATION_RETIRE_RESTORE_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:57:02.904Z",
+      "name": "LIVE_CLIENT_FINAL_TWO_TESTS_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:57:40.737Z",
+      "name": "ENVIRONMENT_LOGICAL_CLEAN_PASSED"
+    },
+    {
+      "at": "2026-09-05T05:58:35.079Z",
+      "name": "PROVIDER_CLEANUP_VERIFIED",
+      "objects": 0,
+      "pending_jobs": 0
+    },
+    {
+      "at": "2026-09-05T05:58:38.865Z",
+      "name": "IAM_ROOT_ROTATION_AND_CLEAN_REBOOTSTRAP_PASSED"
+    }
+  ]
+}

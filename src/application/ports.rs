@@ -430,6 +430,33 @@ pub trait ObjectStore: Send + Sync {
         provider_upload_id: &str,
     ) -> Result<(), ObjectStoreError>;
 
+    /// Lists every active provider session for one exact owned object key.
+    ///
+    /// A bounded or incomplete provider listing must fail closed rather than
+    /// return a partial result. Unsupported adapters cannot claim cleanup is
+    /// complete merely because they cannot discover a lost create response.
+    async fn list_multipart_uploads_for_key(
+        &self,
+        _target: &StorageTarget,
+        _key: &ObjectKey,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        Err(ObjectStoreError::Unavailable)
+    }
+
+    /// Confirms that one exact provider session has no retained parts now.
+    ///
+    /// An absent session is empty. This is a point-in-time check after abort,
+    /// not a guarantee against previously in-flight provider writes; cleanup
+    /// must retain uncertainty until its transfer-fencing policy permits it.
+    async fn multipart_upload_is_empty(
+        &self,
+        _target: &StorageTarget,
+        _key: &ObjectKey,
+        _provider_upload_id: &str,
+    ) -> Result<bool, ObjectStoreError> {
+        Err(ObjectStoreError::Unavailable)
+    }
+
     /// Performs create/read/overwrite/delete and identity validation.
     async fn validate_configuration(
         &self,

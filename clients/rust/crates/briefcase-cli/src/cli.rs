@@ -86,7 +86,7 @@ pub enum Command {
         long_about = "Sign in to Silicon Briefcase with an IAM short-lived token.\n\n\
         The hosted backend is selected automatically; --url is only needed to override it \
         for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
-        Start with `briefcase login --org <organization>` and paste the IAM token at the hidden prompt."
+        Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane."
     )]
     Login(LoginArgs),
     /// Forget the saved session for this profile and plane.
@@ -160,6 +160,10 @@ pub enum Command {
 /// Arguments for `login`.
 #[derive(Args)]
 pub struct LoginArgs {
+    /// IAM short-lived token as the direct login argument.
+    #[arg(index = 1, value_name = "SLT", conflicts_with_all = ["slt", "slt_stdin"])]
+    pub slt_positional: Option<String>,
+
     /// IAM short-lived token. Prompted for when omitted.
     #[arg(long, value_name = "SLT", conflicts_with = "slt_stdin")]
     pub slt: Option<String>,
@@ -245,7 +249,7 @@ pub struct MkdirArgs {
     /// A single segment creates at the organization base, which needs `--type`.
     pub path: String,
 
-    /// Which container a base-level folder belongs in.
+    /// Access boundary for a folder created at the organization base.
     #[arg(long = "type", value_name = "KIND")]
     pub root_type: Option<RootTypeArg>,
 
@@ -424,6 +428,10 @@ pub enum StorageCommand {
 /// Arguments for `storage configure`.
 #[derive(Args, Debug)]
 pub struct StorageConfigureArgs {
+    /// Reuse this UUID with the exact same configuration after a lost response.
+    /// A completed failed probe needs a new UUID to run the checks again.
+    #[arg(long)]
+    pub operation_id: Option<Uuid>,
     /// Bucket name.
     #[arg(long)]
     pub bucket: String,
@@ -450,6 +458,37 @@ pub struct StorageConfigureArgs {
 /// Application operations.
 #[derive(Subcommand)]
 pub enum AppCommand {
+    /// Prepare or send one exact, IAM-authorized delegated JSON operation.
+    ///
+    /// First use --describe to see the endpoint and SHA-256 to give IAM.
+    /// Mint a fresh proof, then repeat without --describe and paste the proof
+    /// at the hidden prompt. Retrying a mutation requires the same body and
+    /// `operation_id` but a new proof; no member login session is used.
+    Request(AppRequestArgs),
+    /// Hash a local file and print a reservation manifest without contacting a server.
+    PrepareUpload {
+        /// Local file to hash; keep it unchanged until transfer completes.
+        file: PathBuf,
+        /// Stable logical upload UUID, retained for reserve, status, commit, and cancel.
+        #[arg(long)]
+        operation_id: Uuid,
+        /// Existing destination folder path; empty selects the member's private app folder.
+        #[arg(long, default_value = "")]
+        parent_path: String,
+    },
+    /// Transfer bytes into private staging; a separate fresh-proof commit publishes them.
+    Transfer {
+        /// Reservation UUID returned by upload-reserve.
+        upload_id: Uuid,
+        /// The same local file used to prepare the reservation manifest.
+        file: PathBuf,
+        /// Owner-only capability file saved by upload-reserve; prompted for when omitted.
+        #[arg(long, conflicts_with = "capability_stdin")]
+        capability_file: Option<PathBuf>,
+        /// Read the private upload capability from standard input.
+        #[arg(long, conflicts_with = "capability_file")]
+        capability_stdin: bool,
+    },
     /// Create a file for the member an IAM proof represents.
     Upload {
         /// The application's IAM identifier.
@@ -464,6 +503,59 @@ pub enum AppCommand {
         /// Local file whose bytes the proof was minted over.
         file: PathBuf,
     },
+}
+
+/// Exact-body delegated operation supported by `app request`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum DelegatedOperation {
+    /// Create one folder under an existing path or the private app folder.
+    FolderCreate,
+    /// List one authorized page; pagination inputs are bound into the body.
+    EntriesList,
+    /// Read a file, with an optional body-bound byte range.
+    FileRead,
+    /// Move one entry to the recoverable bin using a stable operation UUID.
+    EntryTrash,
+    /// Reserve an exact private upload and save its capability in a new private file.
+    UploadReserve,
+    /// Publish staged bytes using a fresh proof and the original logical UUID.
+    UploadCommit,
+    /// Reconcile an upload using its original logical UUID and fresh authority.
+    UploadStatus,
+    /// Cancel unpublished staging using its logical UUID and fresh authority.
+    UploadCancel,
+}
+
+/// Prepare or execute one delegated request, without retaining a proof.
+#[derive(Args)]
+pub struct AppRequestArgs {
+    /// Operation whose exact JSON body is supplied below.
+    #[arg(value_enum)]
+    pub operation: DelegatedOperation,
+    /// UTF-8 JSON file containing the operation inputs, not credentials.
+    #[arg(long, value_name = "JSON_FILE")]
+    pub body: PathBuf,
+    /// Print the canonical body and IAM binding without reading credentials or calling a server.
+    #[arg(long, conflicts_with_all = ["app_id", "proof", "proof_stdin", "output", "force", "capability_file"])]
+    pub describe: bool,
+    /// Issuing application's canonical IAM identifier; required when sending.
+    #[arg(long, required_unless_present = "describe")]
+    pub app_id: Option<ApplicationId>,
+    /// Single-use proof; prefer the hidden prompt or --proof-stdin over shell history.
+    #[arg(long, conflicts_with = "proof_stdin")]
+    pub proof: Option<String>,
+    /// Read a freshly minted, single-use proof from standard input.
+    #[arg(long, conflicts_with = "proof")]
+    pub proof_stdin: bool,
+    /// Local destination for file-read; required when sending that operation.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+    /// Atomically replace an existing file-read destination after complete delivery.
+    #[arg(long, requires = "output")]
+    pub force: bool,
+    /// New owner-only file for upload-reserve's capability; never printed to standard output.
+    #[arg(long, value_name = "NEW_FILE")]
+    pub capability_file: Option<PathBuf>,
 }
 
 /// Testing-environment lifecycle and key-authorized self operations.
@@ -565,6 +657,11 @@ pub enum EnvCommand {
 pub enum ConfigCommand {
     /// Show the current updater policy and profile.
     Show,
+    /// Set the parent directory for the private `.briefcase` state directory.
+    Home {
+        /// Existing directory to use as the configured home.
+        location: PathBuf,
+    },
     /// Set a supported setting.
     Set {
         /// Currently `auto-update`.
@@ -601,14 +698,14 @@ fn parse_testing_environment_id(value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|_| "expected a valid testing-environment UUID".to_owned())
 }
 
-/// Which container a base-level folder belongs in.
+/// Access boundary for a user-created top-level folder.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum RootTypeArg {
-    /// The Public container, readable by every member.
+    /// Readable by every organization member.
     Public,
-    /// The caller's own folder inside Private.
+    /// Private to its owner unless explicitly shared.
     Private,
-    /// A tag's container.
+    /// Readable and writable by members of the specified IAM tag.
     Tag,
 }
 

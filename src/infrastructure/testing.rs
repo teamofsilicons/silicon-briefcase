@@ -48,6 +48,10 @@ const UPDATE_OPERATION: &str = "testing_environment.update";
 const ROTATE_KEY_OPERATION: &str = "testing_environment.rotate_key";
 const DELETE_OPERATION: &str = "testing_environment.delete";
 const RESTORE_OPERATION: &str = "testing_environment.restore";
+// These apply only when evaluating active inactivity or assigning a new
+// retirement deadline. Existing deleted rows retain their recorded purge_after.
+const TESTING_ENVIRONMENT_IDLE_DAYS: i32 = 1;
+const TESTING_ENVIRONMENT_RECOVERY_DAYS: i32 = 2;
 const CLEAN_OPERATION: &str = "testing_environment.clean";
 
 macro_rules! environment_columns {
@@ -470,9 +474,16 @@ impl TestingEnvironmentExclusiveFence {
             TenantContext::for_testing_environment_service(owner_org_id, selected, request_id);
         let mut transaction =
             begin_testing_environment_cleanup_transaction(&mut self.connection, &tenant).await?;
+        sqlx::query_scalar::<_, i64>(
+            "SELECT briefcase.prepare_current_testing_environment_delegated_cleanup()",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
         let pending = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM briefcase.object_cleanup_jobs \
-              WHERE org_id = briefcase.current_org_id())",
+              WHERE org_id = briefcase.current_org_id()) \
+              OR EXISTS (SELECT 1 FROM briefcase.delegated_uploads \
+              WHERE org_id = briefcase.current_org_id() AND provider_write_started)",
         )
         .fetch_one(&mut *transaction)
         .await?;
@@ -1284,11 +1295,12 @@ impl TestingEnvironmentStore {
         let row = sqlx::query_as::<_, EnvironmentRow>(concat!(
             "UPDATE briefcase.testing_environments SET status = 'deleted', ",
             "root_key_digest = NULL, root_key_ciphertext = NULL, root_key_nonce = NULL, ",
-            "deleted_at = clock_timestamp(), purge_after = clock_timestamp() + INTERVAL '30 days', ",
+            "deleted_at = clock_timestamp(), purge_after = clock_timestamp() + make_interval(days => $2), ",
             "version = version + 1 WHERE org_id = briefcase.current_org_id() ",
             "AND environment_id = $1 AND status = 'active' RETURNING ", environment_columns!()
         ))
         .bind(environment_id)
+        .bind(TESTING_ENVIRONMENT_RECOVERY_DAYS)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -2286,9 +2298,10 @@ pub async fn maintain_testing_environments(
     let idle = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM briefcase.testing_environments \
           WHERE status = 'active' \
-            AND last_activity_at <= clock_timestamp() - INTERVAL '30 days' \
+            AND last_activity_at <= clock_timestamp() - make_interval(days => $1) \
           ORDER BY last_activity_at, environment_id",
     )
+    .bind(TESTING_ENVIRONMENT_IDLE_DAYS)
     .fetch_all(production)
     .await?;
     let mut retired = 0_u64;
@@ -2296,6 +2309,8 @@ pub async fn maintain_testing_environments(
         retired += retire_idle_environment(production, test, environment_id).await?;
     }
 
+    // Honor the deadline recorded at retirement, including longer windows
+    // assigned by an earlier policy; never recalculate it from deleted_at.
     let expired = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM briefcase.testing_environments \
           WHERE (status = 'deleted' AND purge_after <= clock_timestamp()) \
@@ -2320,12 +2335,14 @@ async fn retire_idle_environment(
     let retired = sqlx::query(
         "UPDATE briefcase.testing_environments SET status = 'deleted', \
                 root_key_digest = NULL, root_key_ciphertext = NULL, root_key_nonce = NULL, \
-                deleted_at = clock_timestamp(), purge_after = clock_timestamp() + INTERVAL '30 days', \
+                deleted_at = clock_timestamp(), purge_after = clock_timestamp() + make_interval(days => $2), \
                 version = version + 1 \
           WHERE environment_id = $1 AND status = 'active' \
-            AND last_activity_at <= clock_timestamp() - INTERVAL '30 days'",
+            AND last_activity_at <= clock_timestamp() - make_interval(days => $3)",
     )
     .bind(environment_id)
+    .bind(TESTING_ENVIRONMENT_RECOVERY_DAYS)
+    .bind(TESTING_ENVIRONMENT_IDLE_DAYS)
     .execute(production)
     .await?
     .rows_affected();

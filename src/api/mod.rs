@@ -18,6 +18,7 @@ use tower_http::{
 use crate::{
     application::{
         content::{ContentRepository, ContentService},
+        delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
         ports::ObjectStore,
         service::{MetadataRepository, MetadataService},
         webhook::IamWebhookRepository,
@@ -46,9 +47,10 @@ pub mod versioning;
 mod webhook;
 
 use handlers::{
-    content, entries, notifications, obo, permissions, session, system, testing, usage,
+    content, delegated, delegated_upload, entries, notifications, obo, permissions, session,
+    system, testing, usage,
 };
-use state::{AppState, ContentUseCases};
+use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
 /// Builds the dependency graph, binds the configured listener, and serves the
 /// complete HTTP contract until graceful shutdown.
@@ -82,9 +84,24 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     );
     let metadata_repository: Arc<dyn MetadataRepository> = Arc::new(repository.clone());
     let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
-    let content_repository: Arc<dyn ContentRepository> = Arc::new(PostgresContentRepository::new(
+    let concrete_content = Arc::new(PostgresContentRepository::new(
         repository,
         settings.s3.clone(),
+    ));
+    let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
+    let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content;
+    let lease_seconds = settings
+        .server
+        .upload_timeout
+        .checked_add(settings.s3.operation_timeout)
+        .and_then(|duration| duration.checked_add(Duration::from_secs(120)))
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .ok_or_else(|| anyhow::anyhow!("delegated upload lease exceeds supported duration"))?;
+    let delegated_uploads: Arc<DelegatedUploadUseCases> = Arc::new(DelegatedUploadService::new(
+        delegated_repository,
+        Arc::clone(&object_store),
+        lease_seconds,
+        settings.s3.operation_timeout,
     ));
     let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
         content_repository,
@@ -95,6 +112,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         iam: Arc::new(IamClient::connect(&settings.iam).await?),
         metadata: MetadataService::new(metadata_repository),
         content,
+        delegated_uploads,
         webhook_repository,
         database: database.clone(),
         mapper: mapping::ResponseMapper::new(
@@ -200,6 +218,10 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         Router::new()
             .route("/api/v1/uploads", post(content::upload))
             .route(obo::CREATE_FILE_PATH, post(obo::create_file))
+            .route(
+                delegated_upload::TRANSFER_PATH,
+                put(delegated_upload::transfer),
+            )
             .layer(DefaultBodyLimit::disable()),
         server.upload_timeout,
     );
@@ -230,6 +252,29 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
 
 fn ordinary_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            delegated_upload::RESERVE_PATH,
+            post(delegated_upload::reserve),
+        )
+        .route(
+            delegated_upload::COMMIT_PATH,
+            post(delegated_upload::commit),
+        )
+        .route(
+            delegated_upload::STATUS_PATH,
+            post(delegated_upload::status),
+        )
+        .route(
+            delegated_upload::CANCEL_PATH,
+            post(delegated_upload::cancel),
+        )
+        .route(
+            delegated::CREATE_FOLDER_PATH,
+            post(delegated::create_folder),
+        )
+        .route(delegated::LIST_ENTRIES_PATH, post(delegated::list_entries))
+        .route(delegated::READ_FILE_PATH, post(delegated::read_file))
+        .route(delegated::TRASH_ENTRY_PATH, post(delegated::trash_entry))
         .route("/healthz", get(system::health))
         .route("/readyz", get(system::ready))
         .route("/api/version", get(system::version))
@@ -357,7 +402,7 @@ fn with_deadline(routes: Router<AppState>, timeout: Duration) -> Router<AppState
     }))
 }
 
-fn sensitive_request_headers() -> [HeaderName; 6] {
+fn sensitive_request_headers() -> [HeaderName; 7] {
     [
         header::AUTHORIZATION,
         header::COOKIE,
@@ -365,6 +410,7 @@ fn sensitive_request_headers() -> [HeaderName; 6] {
         HeaderName::from_static("x-silicon-iam-signature"),
         HeaderName::from_static("idempotency-key"),
         HeaderName::from_static("x-testing-environment-key"),
+        HeaderName::from_static("x-briefcase-upload-capability"),
     ]
 }
 
@@ -391,6 +437,7 @@ mod tests {
     use crate::{
         application::{
             content::{ContentRepository, ContentService},
+            delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
             ports::ObjectStore,
             service::{MetadataRepository, MetadataService},
             webhook::IamWebhookRepository,
@@ -403,9 +450,11 @@ mod tests {
         },
     };
 
-    use super::{AppState, ContentUseCases, mapping::ResponseMapper, router};
+    use super::{
+        AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
+    };
 
-    const CONTRACT: [(&str, &str, &str); 42] = [
+    const CONTRACT: [(&str, &str, &str); 51] = [
         ("/version", "get", "200"),
         ("/auth/slt", "post", "200"),
         ("/auth/refresh", "post", "200"),
@@ -467,6 +516,15 @@ mod tests {
         ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
         ("/obo/files", "post", "201"),
+        ("/obo/uploads/reserve", "post", "200"),
+        ("/obo/uploads/commit", "post", "200"),
+        ("/obo/uploads/status", "post", "200"),
+        ("/obo/uploads/cancel", "post", "200"),
+        ("/obo/uploads/{upload_id}/content", "put", "200"),
+        ("/obo/folders/create", "post", "201"),
+        ("/obo/entries/list", "post", "200"),
+        ("/obo/files/read", "post", "200"),
+        ("/obo/entries/trash", "post", "204"),
         ("/entries/{entry_id}/permissions", "get", "200"),
         ("/entries/{entry_id}/permissions", "post", "201"),
         (
@@ -691,8 +749,9 @@ mod tests {
         };
         let metadata_repository: Arc<dyn MetadataRepository> = Arc::new(repository.clone());
         let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
-        let content_repository: Arc<dyn ContentRepository> =
-            Arc::new(PostgresContentRepository::new(repository, s3.clone()));
+        let concrete_content = Arc::new(PostgresContentRepository::new(repository, s3.clone()));
+        let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
+        let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content;
         let object_store: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
             aws_config::SdkConfig::builder().build(),
             None,
@@ -700,9 +759,16 @@ mod tests {
         ));
         let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
             content_repository,
-            object_store,
+            Arc::clone(&object_store),
             s3.temporary_directory.clone(),
         ));
+        let delegated_uploads: Arc<DelegatedUploadUseCases> =
+            Arc::new(DelegatedUploadService::new(
+                delegated_repository,
+                object_store,
+                122,
+                s3.operation_timeout,
+            ));
         let iam_base = Url::parse("http://127.0.0.1:9/")?;
         let iam = IamClient::new_without_handshake(&IamSettings {
             base_url: iam_base,
@@ -737,6 +803,7 @@ mod tests {
             iam: Arc::new(iam),
             metadata: MetadataService::new(metadata_repository),
             content,
+            delegated_uploads,
             webhook_repository,
             database,
             mapper: ResponseMapper::new(

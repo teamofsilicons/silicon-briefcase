@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use crate::{
     application::{
         content::{ContentRepository, ContentService},
+        delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
         ports::ObjectStore,
         service::MetadataService,
         webhook::IamWebhookRepository,
@@ -18,6 +19,8 @@ use sqlx::PgPool;
 use super::mapping::ResponseMapper;
 
 pub(crate) type ContentUseCases = ContentService<dyn ContentRepository, dyn ObjectStore>;
+pub(crate) type DelegatedUploadUseCases =
+    DelegatedUploadService<dyn DelegatedUploadRepository, dyn ObjectStore>;
 
 /// Immutable process dependencies cloned into Axum route services.
 #[derive(Clone)]
@@ -25,6 +28,7 @@ pub(crate) struct AppState {
     pub(crate) iam: Arc<IamClient>,
     pub(crate) metadata: MetadataService,
     pub(crate) content: Arc<ContentUseCases>,
+    pub(crate) delegated_uploads: Arc<DelegatedUploadUseCases>,
     pub(crate) webhook_repository: Arc<dyn IamWebhookRepository>,
     pub(crate) database: PgPool,
     pub(crate) mapper: ResponseMapper,

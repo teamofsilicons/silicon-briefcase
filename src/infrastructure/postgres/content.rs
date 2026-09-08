@@ -1,5 +1,7 @@
 //! PostgreSQL side of content and object-storage orchestration.
 
+mod delegated;
+
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;

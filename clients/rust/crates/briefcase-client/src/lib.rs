@@ -58,9 +58,10 @@
 //! The contracted API is a bearer surface: an IAM access token for a Carbon or
 //! Silicon, plus the organization the client was built for. Login exchanges an
 //! IAM short-lived token with [`Client::login_with_slt`]; no client method ever
-//! accepts Briefcase's IAM Application secret. An application acts only through
-//! [`Client::create_file_on_behalf_of`], which carries a single-use IAM proof
-//! instead and never sends a bearer token alongside it. A typed
+//! accepts Briefcase's IAM Application secret. Applications use the exact
+//! [`delegated`] operations or the compatible one-shot upload, each carrying
+//! a fresh IAM proof instead of a bearer. Private staged transfers use only a
+//! narrow capability; publication requires another fresh proof. A typed
 //! [`EnvironmentKey`] independently selects an isolated testing plane.
 //!
 //! [Silicon Briefcase]: https://briefcase.teamofsilicons.com
@@ -76,6 +77,13 @@ mod requests;
 pub mod update;
 
 pub use api::ContentStream;
+pub use api::delegated;
+pub use api::delegated::{
+    DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedListEntries,
+    DelegatedManifest, DelegatedOperation, DelegatedReadFile, DelegatedReserveUpload,
+    DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadReservation, DelegatedUploadState,
+    DelegatedUploadStatus, OboProof, UploadCapability,
+};
 pub use client::{Client, IdempotencyKey};
 pub use config::{
     ApplicationId, Config, Credential, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,

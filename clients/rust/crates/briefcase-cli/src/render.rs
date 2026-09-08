@@ -45,7 +45,7 @@ impl Output {
     /// Prints a one-line confirmation, unless JSON was asked for.
     pub fn note(self, message: &str) {
         if !self.json {
-            println!("{message}");
+            println!("{}", terminal_text(message));
         }
     }
 
@@ -160,7 +160,7 @@ impl Output {
             .max()
             .unwrap_or(0);
         for (label, value) in fields {
-            println!("{label:<width$}  {value}");
+            println!("{label:<width$}  {}", terminal_text(&value));
         }
     }
 
@@ -191,7 +191,17 @@ impl Output {
         print_table(&["NAME", "MATCHED", "PATH"], &rows);
         for result in results {
             for snippet in &result.snippets {
-                println!("    {}: {}", result.entry.name, snippet.replace('\n', " "));
+                // ts_headline supplies HTML highlight markers. Human terminal
+                // output is plain text; machine JSON retains the wire value.
+                let excerpt = snippet
+                    .replace("<b>", "")
+                    .replace("</b>", "")
+                    .replace('\n', " ");
+                println!(
+                    "    {}: {}",
+                    terminal_text(&result.entry.name),
+                    terminal_text(&excerpt)
+                );
             }
         }
     }
@@ -255,7 +265,7 @@ impl Output {
             print_table(&["PATH", "YOU MAY"], &rows);
         }
         for path in &inspection.unresolved_paths {
-            println!("{path}: not found, or not yours to see");
+            println!("{}: not found, or not yours to see", terminal_text(path));
         }
         for id in &inspection.unresolved_entry_ids {
             println!("{id}: not found, or not yours to see");
@@ -471,9 +481,13 @@ fn print_json<T: Serialize>(value: &T) {
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| row.iter().map(|cell| terminal_text(cell)).collect())
+        .collect();
     let columns = headers.len();
     let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
-    for row in rows {
+    for row in &rows {
         for (index, cell) in row.iter().enumerate().take(columns) {
             widths[index] = widths[index].max(cell.chars().count());
         }
@@ -483,7 +497,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         push_cell(&mut line, header, *width, index + 1 == columns);
     }
     println!("{}", line.trim_end());
-    for row in rows {
+    for row in &rows {
         let mut line = String::new();
         for (index, width) in widths.iter().enumerate() {
             let cell = row.get(index).map_or("", String::as_str);
@@ -491,6 +505,23 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         }
         println!("{}", line.trim_end());
     }
+}
+
+// Names, paths and excerpts are user-controlled. Never interpret their terminal
+// control sequences or bidi overrides as display instructions. Raw file output
+// (`cat`/download) and structured JSON deliberately preserve the original data.
+fn terminal_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control()
+            || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn push_cell(line: &mut String, cell: &str, width: usize, last: bool) {

@@ -1,6 +1,7 @@
 //! Durable cross-tenant maintenance and outbox worker.
 
 mod cleanup;
+mod delegated_cleanup;
 mod extraction;
 mod maintenance;
 mod outbox;
@@ -210,6 +211,31 @@ impl WorkerRuntime {
             );
         }
 
+        if let Ok(stats) = delegated_cleanup::process_batch(
+            pool,
+            objects,
+            self.batch_size,
+            self.settings.cleanup_concurrency.get(),
+            self.cleanup_lease_duration_millis,
+            self.settings.poll_interval,
+            self.settings.max_retry_delay,
+        )
+        .await
+        {
+            info!(
+                event = "delegated_cleanup_completed",
+                expired = stats.expired,
+                completed = stats.completed,
+                deferred = stats.deferred,
+                "delegated upload cleanup batch completed"
+            );
+        } else {
+            error!(
+                event = "delegated_cleanup_failed",
+                error_code = "delegated_cleanup_database_error",
+                "delegated upload cleanup batch failed"
+            );
+        }
         match cleanup::process_batch(
             pool,
             objects,

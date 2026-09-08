@@ -21,7 +21,7 @@ pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CRATES_IO: &str = "https://crates.io/api/v1/crates";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Result of one client's one-time package update attempt.
+/// Result of the most recent package update attempt for a Cargo project.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum UpdateStatus {
     /// No request has triggered the check yet.
@@ -153,6 +153,7 @@ pub fn update_dependency(
         .arg(package)
         .arg("--precise")
         .arg(version.to_string())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;
@@ -181,6 +182,10 @@ pub fn install_binary(package: &str, binary: &str, version: &Version) -> Result<
         .arg(format!("={version}"))
         .arg("--locked")
         .arg("--force")
+        .stdin(Stdio::null())
+        // Keep the CLI command's machine-readable stdout intact even when
+        // package maintenance runs after it. Cargo progress remains on stderr.
+        .stdout(Stdio::null())
         .status()?;
     if status.success() {
         Ok(())

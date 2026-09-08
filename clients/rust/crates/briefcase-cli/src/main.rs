@@ -24,24 +24,30 @@ use clap::Parser as _;
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = cli::Cli::parse();
-    match updater::automatic(&cli.command).await {
-        Ok(updater::Outcome::Updated { from, to }) => eprintln!(
-            "briefcase: updated from {from} to {to}; the next invocation uses the new version"
-        ),
-        Ok(_) => {}
-        Err(error) => eprintln!("briefcase: warning: automatic update skipped: {error}"),
-    }
-    match run::run(cli).await {
+    let run_maintenance = !updater::defers_automatic_update(&cli.command);
+    let exit = match run::run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("briefcase: {error}");
             if let run::CliError::Client(briefcase_client::Error::Incompatible(_)) = &error {
                 eprintln!(
-                    "briefcase: upgrade the CLI, or pass --no-verify to call it anyway at your own risk"
+                    "briefcase: use matching CLI and server versions; check `briefcase --version` and the deployment's `/api/version` before retrying"
                 );
             }
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             std::process::ExitCode::from(error.exit_code() as u8)
         }
+    };
+    // Print the command's result before maintenance, and never let registry,
+    // Cargo, or updater-state failures replace its result or exit status.
+    if run_maintenance {
+        match updater::automatic().await {
+            Ok(updater::Outcome::Updated { from, to }) => eprintln!(
+                "briefcase: updated from {from} to {to}; the next invocation uses the new version"
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!("briefcase: warning: automatic update skipped: {error}"),
+        }
     }
+    exit
 }
