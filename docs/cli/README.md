@@ -17,6 +17,7 @@ shared files without needing independent access to their parent folder.
 
 This guide targets CLI 0.2 and API contract 0.5. Top-level folder placement
 changed in this release; see the [migration guide](../migration-0.2.md).
+Use CLI 0.2.2 or later for unscoped sandbox login.
 
 See the [documentation index](../) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
 
@@ -35,7 +36,7 @@ terminal login:
 ```bash
 iam --no-org login --app-id 'tos>briefcase'
 briefcase login <slt>
-# Or use `briefcase login --org tos` and paste only the SLT at the hidden prompt.
+# Or run `briefcase login` and paste only the SLT at the hidden prompt.
 ```
 
 The positional form exchanges the supplied SLT directly. To use the hidden
@@ -52,15 +53,16 @@ need to find or enter a backend URL for normal use.
 For automation, pipe that one-use SLT instead of putting it in argv:
 
 ```bash
-printf '%s\n' "$BRIEFCASE_SLT" | briefcase login --org tos --slt-stdin
+printf '%s\n' "$BRIEFCASE_SLT" | briefcase login --slt-stdin
 ```
 
 The deployment and current workspace preference are saved in
 `{home_dir}/.briefcase/config.json`.
 Briefcase exchanges the SLT for an access/refresh pair and stores the rotating
 session in `{home_dir}/.briefcase/credentials.json` with owner-only permissions. It
-rejects an exchange response whose session is unscoped or bound to an
-organization other than `--org`, before either token can be stored or used. It
+preserves unscoped sessions and their organization list. When login explicitly
+uses `--org`, it rejects an unscoped response or one bound to another organization
+before either token can be stored or used. It
 refreshes one minute before expiry and persists the new refresh token before
 sending the requested command. It records a refresh idempotency key before the
 network call, so an uncertain outcome reuses the exact token/key pair. A
@@ -86,9 +88,11 @@ or the process stops, rerun the exact command with the same SLT; the CLI reuses
 the key and recovers the original server response. Raw SLTs and IAM secrets are
 never written into the retry record.
 
-Stored production sessions and every test root/session are bound to the
-canonical deployment origin and organization where they were acquired.
-Changing `--url` or `--org` therefore fails before a request rather than
+Stored credentials remain bound to their canonical deployment origin. A scoped
+session also stays bound to its organization; an unscoped production session can
+select another currently reachable organization with `--org`. A test root
+always retains its owning organization, even with an unscoped IAM session.
+An incompatible `--url` or scoped/root `--org` override therefore fails before
 forwarding a stored credential. Older state is migrated only against that
 profile's existing saved destination. An explicit `--token` authorizes its own
 production destination override; it never authorizes forwarding a stored test
@@ -157,10 +161,12 @@ briefcase env create checkout-e2e \
 # prompts: IAM environment root key; IAM Application secret
 ```
 
-IAM 1.2 online authorization snapshots now bootstrap the caller's projection on first use. Do not change profile metadata to force a webhook. Obtain an organization-bound SLT inside the paired IAM test plane, then:
+Online IAM authorization snapshots bootstrap the caller's projection on first
+use. Do not change profile metadata to force a webhook. Obtain an unscoped SLT
+inside the paired IAM test plane, then use CLI 0.2.2 or later:
 
 ```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
+briefcase --test "$BRIEFCASE_TEST_ID" login
 briefcase --test "$BRIEFCASE_TEST_ID" ls
 ```
 
@@ -176,8 +182,8 @@ file.
 Every production command then works unchanged in the isolated plane:
 
 ```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
-briefcase --test "$BRIEFCASE_TEST_ID" mkdir reports --type private
+briefcase --test "$BRIEFCASE_TEST_ID" login
+briefcase --test "$BRIEFCASE_TEST_ID" mkdir private/cos:test/reports
 briefcase --test "$BRIEFCASE_TEST_ID" put report.pdf private/cos:test/reports
 briefcase --test "$BRIEFCASE_TEST_ID" ls --all
 ```

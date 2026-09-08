@@ -16,19 +16,43 @@ long-lived delegated key to store, leak, or revoke.
 `X-Org-ID`, `org_id` and the `{org_id}` URL segment carry the **Team** ID; they
 are wire names from the IAM contract, kept verbatim throughout this guide.
 
-## What Briefcase exposes
+## Choose an operation
 
-One endpoint. Discover it with
+Briefcase supports the following proof-authorized operations. Discover the
+audience's registered endpoints with
 `GET {iam}/api/v1/obo-access/applications/tos>briefcase/endpoints`
-(URL-encode the `>`).
+(URL-encode the `>`). Register the fixed paths below before issuing proofs;
+registration is separate in production and each imported IAM test Application.
 
 | Endpoint ID | Method and registered path | Metadata schema |
 | --- | --- | --- |
 | `briefcase.files.create` | `POST /api/v1/obo/files` | `path`, `name`, `content_type` — all required strings |
+| `briefcase.folders.create` | `POST /api/v1/obo/folders/create` | Empty object `{}` |
+| `briefcase.entries.list` | `POST /api/v1/obo/entries/list` | Empty object `{}` |
+| `briefcase.files.read` | `POST /api/v1/obo/files/read` | Empty object `{}` |
+| `briefcase.entries.trash` | `POST /api/v1/obo/entries/trash` | Empty object `{}` |
+| `briefcase.uploads.reserve` | `POST /api/v1/obo/uploads/reserve` | Empty object `{}` |
+| `briefcase.uploads.commit` | `POST /api/v1/obo/uploads/commit` | Empty object `{}` |
+| `briefcase.uploads.status` | `POST /api/v1/obo/uploads/status` | Empty object `{}` |
+| `briefcase.uploads.cancel` | `POST /api/v1/obo/uploads/cancel` | Empty object `{}` |
 
-Briefcase serves other `/obo/` routes, but they are not in its IAM catalog, so
-no proof can be bound to them and the exchange answers `404 not_found`. This
-endpoint is the delegated surface today.
+- **Large, slow, or recoverable uploads:** use reserve → private transfer →
+  fresh-authorized commit. Retain the logical operation UUID and reconcile an
+  uncertain result with status. See [delegated uploads](api/delegated-uploads.md).
+- **Small, immediate uploads:** the compatible one-shot `files.create` route
+  sends raw file bytes. Its proof must still be valid after the body arrives;
+  the 5 TiB size ceiling does not guarantee a transfer fits the proof lifetime.
+  A fresh proof after an uncertain one-shot result is a new upload attempt.
+- **Folder hierarchy, browsing, download and deletion:** use the JSON controls
+  below with the represented member's current permissions.
+
+The byte-only `PUT /api/v1/obo/uploads/{upload_id}/content` is not registered in
+IAM. It uses the reservation's private upload capability, not an IAM proof or
+member bearer. It cannot publish a file; only fresh-authorized commit can.
+
+An endpoint missing from the selected audience's live catalog cannot receive a
+proof. Confirm [registration and scope disclosure](iam-integration.md#obo-registration-is-separate)
+before sending either production or sandbox operations.
 
 ## Before you start
 
@@ -51,9 +75,68 @@ You need all five of these. Briefcase fails closed on any of them.
 The member must be an active member of your Application's Team at verification
 time. Ending a session does not by itself extend or revoke IAM authority.
 
-## The shape of the call
+## JSON controls and recoverable uploads
 
-Four steps, in this order, every time:
+All eight JSON operations use `POST`, `Content-Type: application/json`, and an
+empty IAM metadata object. Bind the complete serialized JSON body, not file
+bytes or a subset of its fields. Send `X-App-ID` and
+`X-IAM-OBO-Access-Proof`, never a bearer. A supplied `X-Org-ID` must agree with
+IAM; a sandbox also needs its separate Briefcase root key.
+
+| Operation | JSON inputs | Result |
+| --- | --- | --- |
+| Folder create | `operation_id`, `parent_path`, `name` | `201` created entry |
+| Entries list | Optional `parent_id` or `path`, `filter`, `cursor`, `limit` | `200` page; limit 1–100 |
+| File read | `entry_id`; optional `range`, `download` | `200` or `206` bytes |
+| Entry trash | `operation_id`, `entry_id` | `204`; recoverable bin deletion |
+| Upload reserve | `operation_id`, `parent_path`, `name`, `content_type`, `size`, `sha256` | `200` status and an idle reservation's private capability |
+| Upload commit | `operation_id`, `upload_id` | `200` status and published entry ID |
+| Upload status | `operation_id` | `200` current state; no capability |
+| Upload cancel | `operation_id` | `200` cancellation or cleanup-pending state |
+
+Mutation `operation_id` values are caller-generated, non-nil UUIDs. Persist
+the UUID and unchanged request before sending. After an uncertain result,
+obtain a fresh proof for the same logical operation; never reuse the consumed
+proof. A successful repeated commit does not publish a second version. A
+repeated trash cannot delete an entry that has since been restored.
+
+An empty creation `parent_path` selects the member's private app folder.
+Otherwise the parent must already exist and be writable. Create a hierarchy
+one folder at a time. Listing and reads retain ordinary permission filtering;
+range, disposition and pagination values are proof-bound JSON, not override
+headers or query parameters. See the [exact JSON API contract](api/README.md#delegated-json-operations).
+
+For uploads, prepare the complete file manifest before requesting a proof:
+
+```bash
+briefcase app prepare-upload --operation-id "$UPLOAD_OPERATION_ID" \
+  --parent-path '' ./recording.webm > manifest.json
+briefcase app request upload-reserve --body manifest.json --describe
+# Ask IAM for a fresh proof using the described endpoint, method and exact body.
+briefcase app request upload-reserve --body manifest.json \
+  --app-id 'tos>your-app' --capability-file upload.capability
+# The hidden prompt accepts the proof; keep the returned upload_id.
+briefcase app transfer "$UPLOAD_ID" ./recording.webm \
+  --capability-file upload.capability
+```
+
+Transfer only stages bytes. Prepare `{"operation_id":"<original UUID>",
+"upload_id":"<returned UUID>"}` in `commit.json`, describe `upload-commit`,
+obtain a new IAM proof, and send `briefcase app request upload-commit --body commit.json
+--app-id 'tos>your-app'`. Use `upload-status` with a body containing only the
+original `operation_id` after an uncertain response. The
+[upload guide](api/delegated-uploads.md) specifies states, limits, cancellation
+and cleanup. Keep capability files owner-only; they are credentials.
+
+The official Rust client prepares the exact body and binding through typed
+`DelegatedReserveUpload`, `DelegatedCommitUpload`, `DelegatedUploadQuery` and
+`DelegatedCancelUpload` requests. Use the prepared value for both IAM proof
+issuance and its matching SDK call. The [operation map](api/operations.md)
+lists every SDK method and CLI verb.
+
+## One-shot upload: the shape of the call
+
+For the compatible raw-byte endpoint, use these four steps:
 
 ```text
 1. Discover   GET  {iam}/api/v1/obo-access/applications/tos%3Ebriefcase/endpoints
@@ -124,12 +207,14 @@ Returns `201` with the created entry.
 recomputes the digest from what it actually received, and any difference is a
 binding failure.
 
-**One proof, one request, no retry.** A proof is valid for one verification or
+**One proof, one request.** A proof is valid for one verification or
 60 seconds, whichever comes first. IAM consumes it exactly once; a retry is
-indistinguishable from a replay and is refused as one. Exempt this call from any
-automatic HTTP retry layer. To try again, mint a fresh proof.
+indistinguishable from a replay and is refused as one. Disable automatic HTTP
+retries. For a JSON mutation, keep its logical operation UUID and inputs but
+mint a fresh proof. The one-shot endpoint has no separate logical retry UUID;
+a fresh proof can create another version, so do not blindly resend it.
 
-## The operation in detail
+## One-shot upload in detail
 
 Everything that decides where the file lands travels as proof-bound
 **metadata**, not as a header or query parameter, so a proof you legitimately
@@ -141,8 +226,9 @@ obtained cannot be redirected somewhere else.
 | `name` | The file name to create. |
 | `content_type` | Media type of the bytes; empty defaults to `application/octet-stream`. |
 
-- **Any supported size**, up to 5 TiB. Briefcase decides internally how to store
-  it; you always send one request body.
+- **Size ceiling: 5 TiB**, subject to quota and HTTP deadlines. The complete
+  body must arrive before IAM verification and proof expiry. Use the staged
+  protocol for large or slow transfers instead of relying on this ceiling.
 - **Versioning is automatic.** A name an active file already carries publishes
   that file's next version rather than a duplicate.
 - **The proof identifier is the idempotency key**, so a proof cannot create two
@@ -205,7 +291,7 @@ fall back to production. Register the endpoint in the paired IAM test plane
 before testing. Full setup is in the
 [testing-environment guide](testing-environments.md).
 
-## Rust
+## One-shot Rust call
 
 Use the official `briefcase-client` package. It never sends your bearer on this
 call, never retries it, and never stores a session.
@@ -226,7 +312,7 @@ The proof is redacted in debug output and consumed by the call. Keep the source
 file unchanged between hashing and sending, and use a real file — not a symlink,
 pipe or device.
 
-## CLI
+## One-shot CLI call
 
 Useful for trying the flow before you write code:
 
@@ -239,7 +325,7 @@ The destination, name and media type come from the proof, so the command takes
 no path argument. Pass proofs through the hidden prompt or `--proof-stdin`,
 never `--proof` in a shared shell, where the process list would expose them.
 
-## Checklist
+## One-shot checklist
 
 - [ ] Same Team as Briefcase; subject token issued to your Application.
 - [ ] `obo.issue`, `roles.read`, `memberships.read` present.

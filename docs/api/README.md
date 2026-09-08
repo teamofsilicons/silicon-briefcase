@@ -647,8 +647,10 @@ An empty `path` stores the file in the application's own folder,
 `private/{actor}/apps/{app_id}`, created on first use and reserved from then
 on. Any other path must name an existing folder the represented member may add
 content to; their own permissions still decide. The proof identifier doubles as
-the idempotency key. Any supported size is accepted here too, and a name an
-active file already carries publishes that file's next version. The
+the idempotency key. The raw endpoint has a 5 TiB size ceiling, but its proof
+must remain valid until verification after the complete body arrives. Use the
+[staged protocol](delegated-uploads.md) for large, slow or recoverable uploads.
+A name an active file already carries publishes that file's next version. The
 organization's upload allowances apply exactly as they do to a member's own
 upload.
 
