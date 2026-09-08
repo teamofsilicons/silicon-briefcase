@@ -10,7 +10,7 @@ The [delegated-upload protocol](api/delegated-uploads.md) documents endpoint
 registration, exact manifests, narrow staging capabilities and fresh commit
 proofs. It never turns an IAM authorization snapshot into a reusable grant.
 
-The backend imports registry `silicon-iam-client = "=1.3.0"`. Its typed methods
+The backend imports registry `silicon-iam-client = "=1.4.0"`. Its typed methods
 own all IAM network calls, API-version negotiation, redirects, and transport.
 Runtime dependency auto-updates are disabled for the backend: upgrading the
 dependency requires a deliberate build and deployment. This is distinct from
@@ -21,6 +21,15 @@ migration 0067 and testing migration 9003). Briefcase cross-checks identity,
 organization, membership, role/tag disclosure, authorization epoch, audience,
 and testing environment; incomplete or conflicting facts fail closed. Older
 identity-only responses cannot be treated as complete authorization.
+
+IAM's [user-selected organization consent](https://github.com/teamofsilicons/silicon-iam/blob/main/docs/ORGANIZATION_CONSENT.md)
+requires migrations 0072–0074. Briefcase starts login with only `app_id` and
+`redirect_uri`; IAM owns the user's organization choices. The server exchanges
+the SLT and reads selected active authorization snapshots through the official
+client. It never calls IAM's direct-user consent endpoints or infers grants from
+membership, a file URL, `X-Org-ID`, or cached organization IDs. Existing legacy
+sessions with no explicit grants must revisit IAM. Selected-grant additions are
+additive within the parent IAM session; future memberships are not automatic.
 
 The IAM base is `https://backend.iam.teamofsilicons.com/`, not its `/api/v1/`
 subpath. The Briefcase SDK base, in contrast, includes `/api/v1/`.

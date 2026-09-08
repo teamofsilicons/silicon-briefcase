@@ -132,7 +132,7 @@ is persisted.
 
 Deploy IAM's current authorization contract (backend migration 0067 and test
 migration 9003) before this Briefcase version. Briefcase uses the official
-`silicon-iam-client` 1.3.0, with dependency auto-updates disabled. Complete
+`silicon-iam-client` 1.4.0, with dependency auto-updates disabled. Complete
 online snapshots populate immutable membership bindings on first use; webhook
 delivery is no longer a prerequisite for first login or post-clean bootstrap.
 Keep webhooks enabled for other members, resource lifecycle and directory

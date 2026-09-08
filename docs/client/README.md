@@ -68,11 +68,12 @@ A `Client` is cheap to clone and shares one connection pool, so build it once.
 Do not collect a Carbon/Silicon password, OTP, or the Briefcase IAM Application
 secret. Obtain an IAM short-lived token (SLT) minted for Briefcase's canonical
 `{org_id}>{handle}` Application ID and give only that one-use value to the
-Briefcase backend. The normal login is unscoped; omit the organization in IAM
-to receive all reachable organizations in `SessionTokens::organizations`:
+Briefcase backend. Login is always unscoped; the user selects organization
+access inside IAM. `SessionTokens::organizations` contains only their active
+grants, not every membership:
 
 ```bash
-iam --no-org login --app-id 'tos>briefcase'
+iam login --app-id 'tos>briefcase'
 ```
 
 ```rust
@@ -99,11 +100,12 @@ An SLT lasts two minutes and is single-use. A successful refresh rotates the
 refresh token, so persist the returned pair before doing later work. The
 Application secret used to exchange/introspect with IAM is configured only on
 the Briefcase backend and is absent from every client method and response.
-The package rejects a scoped exchange or refresh response whose `org_id` is
-missing or differs from the organization in `Config`, before returning either
-token to the caller. An unscoped configuration accepts `org_id: null` and
-returns the live organization list; Briefcase still reevaluates membership on
-every organization-scoped request.
+The package accepts unscoped exchange and refresh responses independently of
+the workspace in `Config`. That workspace selects file operations, not consent.
+Legacy non-null `org_id` responses must still match the configured workspace.
+Only `organizations` supplies the current granted list; an empty list requires
+reauthorisation in IAM, not fallback to `org_id` or cached rights. Briefcase
+reevaluates membership and consent on every organization-scoped request.
 For crash-safe retries, use `login_with_slt_with_key` or
 `refresh_session_with_key`, persist the 16–255-byte `IdempotencyKey` beside the
 credential before sending, and reuse that exact pair after an uncertain

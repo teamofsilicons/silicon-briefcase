@@ -30,16 +30,17 @@ Briefcase is an organization-scoped filesystem for Carbons and Silicons. Every r
   the documented `/obo/` application operations. Never send a bearer alongside
   a proof; ordinary member endpoints do not accept these credentials.
 - **Organization context:** Ordinary authenticated operations require `X-Org-ID`; OBO derives the organization from IAM and checks any optional header against it.
-- **Unscoped sessions:** `/auth/slt` and `/auth/refresh` preserve IAM's login
-  scope. An unscoped session returns `org_id: null` plus every currently
-  reachable organization in `organizations`; callers choose an `X-Org-ID` for
-  each file request without exchanging a second login token.
+- **Unscoped sessions:** Login is always unscoped. `/auth/slt` and
+  `/auth/refresh` return `org_id: null` and only the user's explicitly selected,
+  active IAM grants in `organizations`. Callers choose an `X-Org-ID` for each
+  file request; that header cannot add consent. Empty grants require IAM
+  reauthorisation. New memberships are not implicitly granted.
 - **Private staging:** `PUT /obo/uploads/{upload_id}/content` requires a narrow
   upload capability and `X-Org-ID`, not a bearer or proof. Fresh proof-authorized
   control operations reserve and publish the bytes separately.
 - **Idempotency:** Ordinary creation and upload-finalization operations use `Idempotency-Key`; delegated JSON mutations use the proof-bound `operation_id` UUID so retries do not create duplicate resources.
 
-Briefcase uses the official registry-published `silicon-iam-client` 1.3.0 for
+Briefcase uses the official registry-published `silicon-iam-client` 1.4.0 for
 all IAM operations, with runtime dependency auto-updates disabled. At startup
 it performs IAM's mandatory `GET /api/version` handshake,
 advertises support for `v1`, verifies the selected version in both the response

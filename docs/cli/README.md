@@ -34,17 +34,19 @@ password, verification code, or Application secret, and it never redirects a
 terminal login:
 
 ```bash
-iam --no-org login --app-id 'tos>briefcase'
+iam login --app-id 'tos>briefcase'
 briefcase login <slt>
 # Or run `briefcase login` and paste only the SLT at the hidden prompt.
 ```
 
 The positional form exchanges the supplied SLT directly. To use the hidden
 prompt instead, run `briefcase login` with no token. A normal production login
-is unscoped by default: IAM returns every organization currently reachable by
-the signed-in member, and Briefcase keeps that one token family for all of
-them. Supply `--org` only when you deliberately want a login permanently bound
-to one workspace. When several organizations are available, commands that
+is always unscoped: IAM prompts you to select the organizations Briefcase may
+access, and Briefcase keeps that one token family for the selected set.
+For noninteractive IAM use, explicitly supply `--grant-org tos,my-team` or
+`--all-orgs` to IAM (the latter grants only memberships shown now).
+Briefcase's `--org` selects a workspace, never consent or a scoped login.
+When several granted organizations are available, commands that
 touch files ask you to choose with `--org`; no second IAM login is required.
 
 The CLI connects to the hosted Briefcase service automatically. You do not
@@ -60,9 +62,9 @@ The deployment and current workspace preference are saved in
 `{home_dir}/.briefcase/config.json`.
 Briefcase exchanges the SLT for an access/refresh pair and stores the rotating
 session in `{home_dir}/.briefcase/credentials.json` with owner-only permissions. It
-preserves unscoped sessions and their organization list. When login explicitly
-uses `--org`, it rejects an unscoped response or one bound to another organization
-before either token can be stored or used. It
+preserves unscoped sessions and the IAM-selected organization list. A workspace
+preference cannot add grants. If IAM returns no active grants, revisit IAM to
+select organizations and sign in again; do not reuse cached access. It
 refreshes one minute before expiry and persists the new refresh token before
 sending the requested command. It records a refresh idempotency key before the
 network call, so an uncertain outcome reuses the exact token/key pair. A

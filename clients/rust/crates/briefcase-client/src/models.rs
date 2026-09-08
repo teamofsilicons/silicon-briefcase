@@ -740,8 +740,8 @@ pub struct SessionTokens {
     pub actor: SessionActor,
     /// Organization selected for this session.
     pub org_id: Option<String>,
-    /// Organizations currently reachable by this session. An unscoped login
-    /// can reach several organizations; a scoped login contains one.
+    /// Active organizations explicitly selected by the user in IAM.
+    /// Empty means reauthorisation is needed, never access to all memberships.
     #[serde(default)]
     pub organizations: Vec<String>,
 }

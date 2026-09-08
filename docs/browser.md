@@ -14,24 +14,27 @@ starts a normal, organisation-free IAM login. Opening an existing organisation
 file link supplies its workspace context automatically.
 You do not paste tokens, verification codes, or application secrets into Briefcase.
 
-An unscoped login discovers all currently reachable organisations. If there is
+IAM asks you which organisations Briefcase may access. Login is always
+unscoped, but only those explicitly granted, active organisations are returned.
+New memberships are not automatically included. If there is
 only one, Briefcase opens it directly; otherwise choose a workspace. Use
 **Switch organisation** in the sidebar to choose another without signing in
 again. The login remains unscoped when its tokens refresh. Organisation choices
 are updated at login and token refresh; IAM checks live membership on every
-file operation. Scoped logins cannot switch to a different organisation.
+file operation. Workspace selection does not change or enlarge IAM consent.
 
 Choose **Create or manage organisations in IAM** from the organisation picker
 or **Organisation settings** to open IAM in a new tab. Organisation creation,
 membership, and invitations stay in IAM. The link is also available when your
-account has no organisations. After creating or joining one, sign in to
-Briefcase again to refresh your workspaces immediately.
+session has no active grants. Choose **Review organisation access in IAM** to
+authorise organisations, including any you have newly created or joined.
+An empty grant list requires reauthorisation, not cached workspace access.
 
 A file link has the form `/org/{org_id}/{path}` on the website's origin. Opening
-one selects that organisation for sign-in and retains the target through the IAM
-callback. After authentication, Briefcase resolves the path using your session.
-Opening a link for a different organisation does not silently reuse the current
-organisation's session: sign out and sign in to the organisation in the link.
+one retains the target through the IAM callback without supplying an organisation
+to IAM. After authentication, Briefcase selects that workspace only if IAM
+included it in your grants. Otherwise review access in IAM or open a granted
+workspace; a file link cannot grant access.
 
 The address bar follows folder navigation and opened files. **Copy link** copies
 the clean file URL without a token. Browser Back and Forward resolve their target

@@ -541,10 +541,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
             )))?;
         login_scope = Some(scope_for(&url, &bound.organization)?);
     }
-    let mut login_config = match global.org.as_deref() {
-        Some(org) => Config::new(&url, org)?.with_auto_update(false),
-        None => Config::for_sign_in(&url)?.with_auto_update(false),
-    };
+    let mut login_config = Config::for_sign_in(&url)?.with_auto_update(false);
     if let Some(environment_id) = global.test {
         let environment = testing_environment_for_login(
             &credentials,
@@ -580,7 +577,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
     let login_scope = if global.test.is_some() {
         login_scope.ok_or_else(|| CliError::usage("test root has no destination binding"))?
     } else {
-        match global.org.as_deref().or(tokens.org_id.as_deref()) {
+        match tokens.org_id.as_deref() {
             Some(org) => scope_for(&url, org)?,
             None => scope_for_unscoped(&url)?,
         }
@@ -908,7 +905,10 @@ async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
     if let Some(stored) = &session.stored_session {
         println!(
             "login scope  {}",
-            stored.org_id.as_deref().unwrap_or("all organizations")
+            stored
+                .org_id
+                .as_deref()
+                .unwrap_or("unscoped (IAM-selected grants)")
         );
         println!("available    {}", stored.organizations.join(", "));
     }

@@ -145,9 +145,9 @@ impl IamClient {
         validate_application_tokens(self.convert(tokens)?, None)
     }
 
-    /// Lists every organization currently reachable by an Application access
-    /// token. An organization-bound token returns one item; an unscoped token
-    /// returns one item per active membership.
+    /// Lists only active memberships explicitly selected by the user in IAM
+    /// for this Application and parent login. An empty list grants no access;
+    /// new memberships are not implicitly added to existing consent.
     ///
     /// # Errors
     /// Rejects inactive tokens, mismatched audiences, malformed organization

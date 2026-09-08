@@ -38,8 +38,8 @@ has been deployed. Example actor paths must be replaced with actual IAM IDs.
 
 1. IAM owns identities, organizations, membership, roles, and tags.
 2. A Carbon or Silicon obtains a Briefcase-targeted SLT from IAM. Login is
-   unscoped by default and discovers all reachable organizations; an explicitly
-   organization-bound login is also supported. Briefcase accepts the SLT, not
+   always unscoped; the user selects the organization grants in IAM.
+   Briefcase receives only those active grants and accepts the SLT, not
    the actor's password or OTP.
 3. The backend exchanges it using the server-held Application secret and
    returns an access/refresh pair. The CLI stores and rotates it; a Rust caller
