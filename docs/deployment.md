@@ -4,11 +4,20 @@ Run shell commands from the backend repository root unless stated otherwise.
 This is the operator guide; start with the [documentation index](README.md)
 for API, package, and CLI usage.
 
-Briefcase runs the way Silicon IAM does: one private EC2 instance in an auto
-scaling group behind the shared Team of Silicons load balancer, with RDS for
-metadata and S3 for file bytes. The image is immutable and tagged with the
-commit it was built from; putting a new build in service means replacing the
-instance, not restarting a process on it.
+## Current production: base tier
+
+Briefcase runs on one ARM64 EC2 instance with direct Nginx TLS ingress, RDS for
+metadata, and S3 for file bytes. API, worker, and browser containers are managed
+by systemd. There is no load balancer or autoscaling group in the current
+deployment path. Follow the [base-tier runbook](../deploy/base-tier/README.md)
+for image updates, both database migrations, streaming upload ingress, private
+browser staging, and rollback.
+
+## Historical load-balancer deployment
+
+The procedure below documents the former autoscaling/load-balancer topology.
+Do not run its stack or instance-refresh commands against the current base-tier
+deployment. Reintroducing that topology is a separate infrastructure decision.
 
 ```
 Namecheap ──DNS──▶ shared ALB ──host header──▶ target group ──▶ EC2 (private)

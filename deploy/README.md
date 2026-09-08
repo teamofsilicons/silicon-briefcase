@@ -1,5 +1,9 @@
 # Deploying Silicon Briefcase
 
+Current production uses the [single-instance base-tier deployment](base-tier/README.md).
+Use that guide for live updates. The load-balancer/ASG procedure below is retained
+for historical infrastructure and is not the current production deployment path.
+
 The canonical [deployment runbook](../docs/deployment.md) now lives under the
 backend `docs/` directory alongside the [API/client/CLI guides](../docs/README.md).
 
