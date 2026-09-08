@@ -15,7 +15,7 @@ client, CLI, and deployment behavior.
 
 - `briefcase-api` serves health checks, the `/api/v1` contract, and the IAM
   webhook receiver.
-- `briefcase-worker` performs outbox delivery, search indexing and text
+- `briefcase-worker` manages outbox leases/retries, search indexing and text
   extraction, multipart cleanup, retention, and reconciliation.
 - `briefcase-migrate` is the only process that applies forward SQL migrations.
 
