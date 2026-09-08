@@ -34,7 +34,7 @@ println!("{}", entry.permanent_url);
 ```bash
 # Ask IAM for an organization-bound SLT for the canonical Application first.
 iam --org tos login --app-id 'tos>briefcase'
-briefcase login --org tos
+briefcase login <slt>
 briefcase put ./report.pdf private/cos:tos/notes
 briefcase share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
 ```
@@ -50,11 +50,14 @@ Both crates also support disposable IAM-coupled test planes; see the guides for
 the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
 
 Both crates maintain themselves from crates.io by default. The package advances
-the consuming Cargo project's lockfile as a best-effort first-ordinary-request
-check; the CLI checks at most daily and installs a newer `briefcase-cli` for the
-next invocation. Contract negotiation and short-lived IAM credential commands
-defer maintenance so those credentials are sent immediately. Both behaviors
-have documented config and environment opt-outs.
+the consuming Cargo project's lockfile through best-effort background
+maintenance after ordinary operations, at most hourly per project in the
+process; streams defer it until they end. The CLI checks at most hourly after
+an ordinary command finishes and installs a newer `briefcase-cli` for the next
+invocation without changing the command's result. Contract negotiation and
+short-lived IAM credential commands defer maintenance so those credentials
+are sent immediately. Both behaviors have documented config and environment
+opt-outs; loaded code changes only on the next build or invocation.
 
 ## The contract check
 

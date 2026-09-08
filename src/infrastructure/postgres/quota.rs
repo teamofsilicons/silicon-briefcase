@@ -84,7 +84,10 @@ pub(super) async fn check_upload(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    let result = read_usage(transaction).await?.admits_upload(bytes);
+    let pending = pending_delegated_bytes(transaction).await?;
+    let result = read_usage(transaction)
+        .await?
+        .admits_upload(with_pending(bytes, pending)?);
     map_exhaustion(transaction, result).await
 }
 
@@ -98,7 +101,10 @@ pub(super) async fn check_storage(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    let result = read_usage(transaction).await?.admits_storage(bytes);
+    let pending = pending_delegated_bytes(transaction).await?;
+    let result = read_usage(transaction)
+        .await?
+        .admits_storage(with_pending(bytes, pending)?);
     map_exhaustion(transaction, result).await
 }
 
@@ -113,13 +119,14 @@ pub(super) async fn charge_upload(
     bytes: u64,
 ) -> Result<(), AppError> {
     let usage = lock_usage(transaction, bytes).await?;
+    let pending = pending_delegated_bytes(transaction).await?;
     // The daily counter now includes this upload while the stored counter does
     // not: the version row that moves it is inserted next. Asking whether the
     // organization still admits these bytes therefore answers both questions
     // at once — did the day have room, and does the storage.
     let result = usage
-        .admits_upload(0)
-        .and_then(|()| usage.admits_storage(bytes));
+        .admits_upload(pending)
+        .and_then(|()| usage.admits_storage(bytes.saturating_add(pending)));
     map_exhaustion(transaction, result).await
 }
 
@@ -136,8 +143,47 @@ pub(super) async fn charge_storage(
     transaction: &mut Transaction<'_, Postgres>,
     bytes: u64,
 ) -> Result<(), AppError> {
-    let result = lock_usage(transaction, 0).await?.admits_storage(bytes);
+    let usage = lock_usage(transaction, 0).await?;
+    let pending = pending_delegated_bytes(transaction).await?;
+    let result = usage.admits_storage(with_pending(bytes, pending)?);
     map_exhaustion(transaction, result).await
+}
+
+/// Reserves capacity under the same counter lock as normal publication.
+///
+/// Call only after locking the destination, and insert the durable reservation
+/// before committing this transaction. Actual daily/storage charges still
+/// happen only when the corresponding version is published.
+pub(super) async fn reserve_delegated_upload(
+    transaction: &mut Transaction<'_, Postgres>,
+    bytes: u64,
+) -> Result<(), AppError> {
+    let usage = lock_usage(transaction, 0).await?;
+    let pending = pending_delegated_bytes(transaction).await?;
+    let result = usage.admits_upload(with_pending(bytes, pending)?);
+    map_exhaustion(transaction, result).await
+}
+
+async fn pending_delegated_bytes(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<u64, AppError> {
+    let pending = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(sum(size_bytes), 0)::bigint FROM briefcase.delegated_uploads \
+          WHERE org_id = briefcase.current_org_id() \
+            AND status IN ('reserved', 'receiving', 'staged', 'cleanup_pending')",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    u64::try_from(pending).map_err(|_| AppError::Internal {
+        category: "usage_overflow",
+    })
+}
+
+fn with_pending(bytes: u64, pending: u64) -> Result<u64, AppError> {
+    bytes.checked_add(pending).ok_or(AppError::Internal {
+        category: "usage_overflow",
+    })
 }
 
 /// Adds `daily_charge` to the day's counter and returns the locked row.

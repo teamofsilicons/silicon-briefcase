@@ -144,7 +144,7 @@ impl Client {
         self.receive_json(request).await
     }
 
-    /// Retires an environment for its 30-day recovery window.
+    /// Retires an environment for its two-day recovery window.
     ///
     /// # Errors
     ///

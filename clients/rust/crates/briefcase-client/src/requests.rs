@@ -230,10 +230,10 @@ impl NewFolder {
         }
     }
 
-    /// Creates a folder at the organization base, in the named container.
+    /// Creates a typed folder at the organization base.
     ///
-    /// Public goes into the Public container, private into the caller's own
-    /// folder inside Private, and a tag into that tag's container.
+    /// The folder is a sibling of the reserved containers. Its type defines
+    /// access, not its location; use `in_folder` for an explicit parent.
     #[must_use]
     pub fn at_base(name: impl Into<String>, root_type: RootType) -> Self {
         Self {
@@ -246,7 +246,7 @@ impl NewFolder {
         }
     }
 
-    /// Creates a folder in a tag's container.
+    /// Creates a folder at the organization base with the given tag boundary.
     #[must_use]
     pub fn in_tag(name: impl Into<String>, tag: impl Into<String>) -> Self {
         Self {

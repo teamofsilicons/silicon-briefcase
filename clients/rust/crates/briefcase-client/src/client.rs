@@ -1,12 +1,10 @@
 //! The client itself: one deployment, one organization, no stored state.
 
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -119,6 +117,9 @@ impl Client {
             // A redirect must never move a bearer, refresh token, test root,
             // or idempotency-bound body outside the configured deployment.
             .redirect(reqwest::redirect::Policy::none())
+            // OBO proofs and staging capabilities are single-attempt calls;
+            // even implicit protocol retries must remain caller-controlled.
+            .retry(reqwest::retry::never())
             .user_agent(config.user_agent.clone())
             .build()
             .map_err(|error| {
@@ -126,10 +127,10 @@ impl Client {
             })?;
         let disabled_by_environment = std::env::var("BRIEFCASE_CLIENT_AUTO_UPDATE")
             .is_ok_and(|value| explicitly_disabled(&value));
-        let updater = Arc::new(AutomaticUpdater::new(
+        let updater = AutomaticUpdater::shared(
             config.auto_update && !disabled_by_environment,
             config.update_manifest.clone(),
-        ));
+        );
         Ok(Self {
             http,
             config,
@@ -143,13 +144,16 @@ impl Client {
         &self.config
     }
 
-    /// Reports the result of this client's one-time best-effort update check.
+    /// Reports the latest best-effort update result for this Cargo project.
+    ///
+    /// Maintenance runs in the background after ordinary operations, at most
+    /// hourly. This remains the preceding result while a check is in flight.
     #[must_use]
     pub fn update_status(&self) -> UpdateStatus {
         self.updater.status()
     }
 
-    /// Returns the organization every request is scoped to.
+    /// Returns the selected organization, or an empty string for sign-in-only clients.
     #[must_use]
     pub fn organization(&self) -> &str {
         &self.config.organization
@@ -170,6 +174,7 @@ impl Client {
     }
 
     async fn version_response(&self, run_maintenance: bool) -> Result<ServiceVersion> {
+        let _maintenance = run_maintenance.then(|| self.maintenance());
         let url = self.origin_url(&["api", "version"])?;
         let request = self
             .http
@@ -177,11 +182,7 @@ impl Client {
             .header("briefcase-supported-api-versions", API_VERSION)
             .timeout(self.config.request_timeout);
         let request = self.apply_environment(request);
-        let response = if run_maintenance {
-            self.receive(request).await?
-        } else {
-            self.receive_without_maintenance(request).await?
-        };
+        let response = self.receive_without_maintenance(request).await?;
         let selected_header = response
             .headers()
             .get("briefcase-api-version")
@@ -239,6 +240,11 @@ impl Client {
 
     /// Builds a URL under the versioned API base from already-safe segments.
     pub(crate) fn api_url(&self, segments: &[&str]) -> Result<Url> {
+        if self.config.organization.is_empty() && !matches!(segments, ["auth", "slt" | "refresh"]) {
+            return Err(Error::Configuration(
+                "choose an authorised organisation before using workspace APIs".into(),
+            ));
+        }
         let mut url = self.config.api_base.clone();
         {
             let mut path = url
@@ -312,13 +318,13 @@ impl Client {
     where
         T: DeserializeOwned,
     {
+        let _maintenance = self.maintenance();
         let response = self.receive(request).await?;
         Self::decode_json(response).await
     }
 
-    /// Sends a credential-sensitive request without preceding it with package
-    /// maintenance. The next ordinary request still triggers the shared
-    /// default-on updater.
+    /// Sends a credential-sensitive request without package maintenance.
+    /// A later ordinary operation triggers the shared default-on updater.
     pub(crate) async fn receive_json_without_maintenance<T>(
         &self,
         request: RequestBuilder,
@@ -342,18 +348,28 @@ impl Client {
 
     /// Sends a request that answers with no content.
     pub(crate) async fn receive_empty(&self, request: RequestBuilder) -> Result<()> {
+        let _maintenance = self.maintenance();
         self.receive(request).await.map(drop)
     }
 
     /// Sends a request and returns the raw successful response.
     pub(crate) async fn receive(&self, request: RequestBuilder) -> Result<Response> {
-        self.updater.run().await;
         self.receive_without_maintenance(request).await
+    }
+
+    /// Defers background maintenance until the whole operation or stream ends.
+    pub(crate) fn maintenance(&self) -> Maintenance {
+        Maintenance {
+            updater: Arc::clone(&self.updater),
+        }
     }
 
     /// Sends immediately, leaving automatic maintenance for a later ordinary
     /// request so a short-lived or one-use credential cannot expire first.
-    async fn receive_without_maintenance(&self, request: RequestBuilder) -> Result<Response> {
+    pub(crate) async fn receive_without_maintenance(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<Response> {
         let response = request.send().await.map_err(transport)?;
         if response.status().is_success() {
             return Ok(response);
@@ -362,66 +378,165 @@ impl Client {
     }
 }
 
+/// A response-lifetime guard; dropping it never waits for registry or Cargo.
+pub(crate) struct Maintenance {
+    updater: Arc<AutomaticUpdater>,
+}
+
+impl Drop for Maintenance {
+    fn drop(&mut self) {
+        self.updater.schedule();
+    }
+}
+
+const UPDATE_INTERVAL: Duration = Duration::from_hours(1);
+
+// No credentials or API data live here. Keeping one maintenance state per
+// canonical manifest also throttles callers that construct a Client per call.
+static PROJECT_UPDATERS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<AutomaticUpdater>>>> =
+    OnceLock::new();
+
 #[derive(Debug)]
 struct AutomaticUpdater {
     enabled: bool,
     manifest: Option<PathBuf>,
-    started: AtomicBool,
-    status: Mutex<UpdateStatus>,
+    state: Mutex<UpdaterState>,
+}
+
+#[derive(Debug, Default)]
+struct UpdaterState {
+    in_flight: bool,
+    last_checked: Option<Instant>,
+    status: UpdateStatus,
+}
+
+impl UpdaterState {
+    fn is_due(&self, now: Instant) -> bool {
+        !self.in_flight
+            && self
+                .last_checked
+                .is_none_or(|checked| now.saturating_duration_since(checked) >= UPDATE_INTERVAL)
+    }
 }
 
 impl AutomaticUpdater {
+    fn shared(enabled: bool, manifest: Option<PathBuf>) -> Arc<Self> {
+        if !enabled {
+            return Arc::new(Self::new(false, None));
+        }
+        let manifest = manifest
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|directory| find_manifest(&directory))
+            })
+            .and_then(|path| {
+                let absolute = if path.is_absolute() {
+                    path
+                } else {
+                    std::env::current_dir().ok()?.join(path)
+                };
+                Some(absolute.canonicalize().unwrap_or(absolute))
+            });
+        let Some(project) = manifest.as_ref() else {
+            return Arc::new(Self::new(true, None));
+        };
+        let Ok(mut projects) = PROJECT_UPDATERS.get_or_init(Mutex::default).lock() else {
+            // A poisoned coordination lock must not affect API operations.
+            return Arc::new(Self::new(false, None));
+        };
+        Arc::clone(
+            projects
+                .entry(project.clone())
+                .or_insert_with(|| Arc::new(Self::new(true, manifest))),
+        )
+    }
+
     fn new(enabled: bool, manifest: Option<PathBuf>) -> Self {
         Self {
             enabled,
             manifest,
-            started: AtomicBool::new(false),
-            status: Mutex::new(UpdateStatus::NotChecked),
+            state: Mutex::new(UpdaterState::default()),
         }
     }
 
     fn status(&self) -> UpdateStatus {
-        self.status.lock().map_or_else(
+        self.state.lock().map_or_else(
             |_| UpdateStatus::Failed {
                 reason: "update status lock was poisoned".to_owned(),
             },
-            |status| status.clone(),
+            |state| state.status.clone(),
         )
     }
 
-    fn set_status(&self, status: UpdateStatus) {
-        if let Ok(mut current) = self.status.lock() {
-            *current = status;
-        }
-    }
-
-    async fn run(&self) {
-        if self.started.swap(true, Ordering::AcqRel) {
+    fn schedule(self: &Arc<Self>) {
+        let Ok(mut state) = self.state.lock() else {
             return;
-        }
+        };
         if !self.enabled {
-            self.set_status(UpdateStatus::Disabled);
+            state.status = UpdateStatus::Disabled;
             return;
         }
-        let manifest = self.manifest.clone().or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|directory| find_manifest(&directory))
-        });
-        let Some(manifest) = manifest else {
-            self.set_status(UpdateStatus::NoCargoProject);
+        if !state.is_due(Instant::now()) {
+            return;
+        }
+        state.last_checked = Some(Instant::now());
+        let Some(manifest) = self.manifest.clone() else {
+            state.status = UpdateStatus::NoCargoProject;
             return;
         };
-        let release = match check(CLIENT_CRATE, CLIENT_VERSION).await {
-            Ok(release) => release,
-            Err(error) => {
-                self.set_status(UpdateStatus::Failed {
-                    reason: error.to_string(),
-                });
-                return;
-            }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            state.status = UpdateStatus::Failed {
+                reason: "automatic maintenance requires a running Tokio runtime".to_owned(),
+            };
+            return;
         };
-        self.set_status(apply_release(&manifest, release));
+        state.in_flight = true;
+        drop(state);
+        let attempt = UpdateAttempt {
+            updater: Arc::clone(self),
+            result: None,
+        };
+        runtime.spawn(async move {
+            let release = match check(CLIENT_CRATE, CLIENT_VERSION).await {
+                Ok(release) => release,
+                Err(error) => {
+                    attempt.finish(UpdateStatus::Failed {
+                        reason: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            // Cargo is synchronous. Move both it and the attempt guard to the
+            // blocking pool: unrelated API I/O keeps running, and cancellation
+            // cannot clear ownership while Cargo is still changing the lockfile.
+            tokio::task::spawn_blocking(move || {
+                attempt.finish(apply_release(&manifest, release));
+            });
+        });
+    }
+}
+
+struct UpdateAttempt {
+    updater: Arc<AutomaticUpdater>,
+    result: Option<UpdateStatus>,
+}
+
+impl UpdateAttempt {
+    fn finish(mut self, result: UpdateStatus) {
+        self.result = Some(result);
+    }
+}
+
+impl Drop for UpdateAttempt {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.updater.state.lock() {
+            state.in_flight = false;
+            state.last_checked = Some(Instant::now());
+            state.status = self.result.take().unwrap_or_else(|| UpdateStatus::Failed {
+                reason: "automatic maintenance was interrupted".to_owned(),
+            });
+        }
     }
 }
 
@@ -450,6 +565,21 @@ pub(crate) fn json_body<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 
 async fn api_error(response: Response) -> ApiError {
     let status = response.status();
+    let unsatisfied_range_length = (status == StatusCode::RANGE_NOT_SATISFIABLE)
+        .then(|| {
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)?
+                .to_str()
+                .ok()?
+                .strip_prefix("bytes */")
+                .filter(|length| {
+                    !length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit())
+                })?
+                .parse::<u64>()
+                .ok()
+        })
+        .flatten();
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -468,6 +598,7 @@ async fn api_error(response: Response) -> ApiError {
                 .to_owned(),
             request_id: None,
             retry_after,
+            unsatisfied_range_length,
         },
         |envelope| ApiError {
             status: status.as_u16(),
@@ -475,6 +606,7 @@ async fn api_error(response: Response) -> ApiError {
             message: envelope.error.message,
             request_id: envelope.error.request_id,
             retry_after,
+            unsatisfied_range_length,
         },
     )
 }
@@ -495,9 +627,64 @@ fn fallback_code(status: StatusCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use std::{path::PathBuf, sync::Arc, time::Instant};
 
-    use super::{Client, IdempotencyKey};
+    use crate::config::Config;
+    use crate::update::UpdateStatus;
+
+    use super::{
+        AutomaticUpdater, Client, IdempotencyKey, Maintenance, UPDATE_INTERVAL, UpdateAttempt,
+        UpdaterState,
+    };
+
+    #[test]
+    fn completion_guard_defers_maintenance_until_the_operation_ends() {
+        let updater = Arc::new(AutomaticUpdater::new(false, None));
+        let guard = Maintenance {
+            updater: Arc::clone(&updater),
+        };
+        assert_eq!(updater.status(), UpdateStatus::NotChecked);
+        drop(guard);
+        assert_eq!(updater.status(), UpdateStatus::Disabled);
+    }
+
+    #[test]
+    fn hourly_throttle_never_overlaps_an_in_flight_check() {
+        let now = Instant::now();
+        let mut state = UpdaterState::default();
+        assert!(state.is_due(now));
+        state.last_checked = Some(now);
+        assert!(!state.is_due(now));
+        assert!(!state.is_due(now + std::time::Duration::from_secs(3_599)));
+        assert!(state.is_due(now + UPDATE_INTERVAL));
+        state.in_flight = true;
+        assert!(!state.is_due(now + UPDATE_INTERVAL * 2));
+    }
+
+    #[test]
+    fn abandoned_update_releases_ownership_and_throttles_retries() {
+        let updater = Arc::new(AutomaticUpdater::new(true, None));
+        updater.state.lock().unwrap().in_flight = true;
+        drop(UpdateAttempt {
+            updater: Arc::clone(&updater),
+            result: None,
+        });
+        let state = updater.state.lock().unwrap();
+        assert!(!state.in_flight);
+        assert!(!state.is_due(Instant::now()));
+        assert!(matches!(state.status, UpdateStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn independent_clients_share_project_maintenance_but_not_opt_out_policy() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let first = AutomaticUpdater::shared(true, Some(manifest.clone()));
+        let second = AutomaticUpdater::shared(true, Some(manifest.clone()));
+        let disabled = AutomaticUpdater::shared(false, Some(manifest));
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &disabled));
+        assert!(!disabled.enabled);
+    }
 
     fn client() -> Client {
         Client::new_unchecked(

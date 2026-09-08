@@ -94,19 +94,24 @@ separate `briefcase_test` database on a dedicated testing RDS instance, matching
 IAM's topology. Every sandbox shares that test database but is namespaced by
 its environment UUID, while control rows remain in production `briefcase`.
 
-**3. Register the webhook and endpoint with IAM.** Follow the
+**3. Register the webhook and endpoints with IAM.** Follow the
 [separate IAM approval/OBO runbook](iam-integration.md). Production
-webhook approval requires an existing platform-admin Carbon with
-`applications.review` and verified-channel step-up; an organization owner or
-Application secret cannot approve the pending destination. Do not expose this
-operator workflow in the Briefcase CLI/client.
+webhook approval uses IAM's dedicated `app approve-webhook` operation. It
+requires a direct Carbon session as the owning organization's owner/admin or
+an IAM `applications.review` reviewer, plus verified-channel step-up for
+`application.webhook.approve`. An Application secret cannot approve the pending
+destination. Do not expose this operator workflow in the Briefcase CLI/client.
 
 Briefcase receives the IAM
 Application current-state events needed for organizations, memberships, roles,
-and tags at `POST https://backend.briefcase.teamofsilicons.com/webhook/`,
-and applications reach it through the endpoint `briefcase.files.create` at the
-registered path `/api/v1/obo/files`, with metadata keys `path`, `name`, and
-`content_type`.
+and tags at `POST https://backend.briefcase.teamofsilicons.com/webhook/`.
+Register every delegated control endpoint listed in the [IAM guide](iam-integration.md)
+on the appropriate production or test Application. The one-shot endpoint
+`briefcase.files.create` uses `/api/v1/obo/files` and metadata keys `path`,
+`name`, and `content_type`. The JSON folder/list/read/trash and upload-control
+endpoints use their own fixed paths and empty metadata schemas. The
+[capability-only byte-transfer route](api/delegated-uploads.md) is not an IAM
+endpoint registration; its ingress must allow the documented PUT request body.
 
 Verify that the Briefcase Application discloses `profile`, `organizations.read`,
 `memberships.read`, and `roles.read`; without those scopes IAM correctly omits
@@ -118,7 +123,7 @@ is persisted.
 
 Deploy IAM's current authorization contract (backend migration 0067 and test
 migration 9003) before this Briefcase version. Briefcase uses the official
-`silicon-iam-client` 1.2.0, with dependency auto-updates disabled. Complete
+`silicon-iam-client` 1.3.0, with dependency auto-updates disabled. Complete
 online snapshots populate immutable membership bindings on first use; webhook
 delivery is no longer a prerequisite for first login or post-clean bootstrap.
 Keep webhooks enabled for other members, resource lifecycle and directory

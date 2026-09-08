@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 0.3.0
+  version: 0.5.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
 servers:
   - url: https://backend.briefcase.teamofsilicons.com/api/v1
@@ -90,14 +90,14 @@ paths:
             schema: { $ref: '#/components/schemas/ShortLivedTokenExchange' }
       responses:
         '200':
-          description: Opaque access token and rotating refresh token
+          description: Opaque access token, rotating refresh token, and the live organizations reachable by the IAM session
           headers:
             Cache-Control: { schema: { const: no-store } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApplicationSessionTokens' }
         '400': { description: Missing or invalid idempotency key or request body }
-        '401': { description: The SLT is invalid, expired, consumed, or belongs to another plane }
+        '401': { description: 'The SLT is invalid, expired, consumed, or belongs to another plane' }
         '503': { description: IAM or the configured testing plane is unavailable }
         default: { $ref: '#/components/responses/Error' }
   /auth/refresh:
@@ -121,14 +121,14 @@ paths:
             schema: { $ref: '#/components/schemas/ApplicationSessionRefresh' }
       responses:
         '200':
-          description: Rotated opaque access and refresh tokens
+          description: Rotated access and refresh tokens, including the live organizations reachable by the IAM session
           headers:
             Cache-Control: { schema: { const: no-store } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApplicationSessionTokens' }
         '400': { description: Missing or invalid idempotency key or request body }
-        '401': { description: The refresh token is invalid, consumed, revoked, or belongs to another plane }
+        '401': { description: 'The refresh token is invalid, consumed, revoked, or belongs to another plane' }
         '503': { description: IAM or the configured testing plane is unavailable }
         default: { $ref: '#/components/responses/Error' }
   /organizations/{org_id}/testing-environments:
@@ -440,7 +440,11 @@ paths:
         - $ref: '#/components/parameters/OrgId'
         - { name: parent_id, in: query, schema: { type: string, format: uuid }, description: Omit for the organization root }
         - { name: path, in: query, schema: { type: string, maxLength: 2048 }, description: Parent folder addressed by path instead of identifier }
-        - { name: filter, in: query, schema: { type: string, maxLength: 1024 }, description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md" }
+        - name: filter
+          in: query
+          schema: { type: string, maxLength: 1024 }
+          description: >-
+            Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md"
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/ContentsLimit'
       responses:
@@ -453,6 +457,13 @@ paths:
     post:
       tags: [Entries]
       operationId: createFolder
+      description: >-
+        Without a parent, creates a user folder at the organization base with
+        the required root_type access boundary (and IAM tag for type tag).
+        The new folder is a sibling of the reserved containers, not redirected
+        into one. With parent_id or parent_path, creates inside that folder and
+        inherits its boundary. Existing folders are not relocated. Sibling name
+        collisions return 409 without exposing hidden entry metadata.
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -572,12 +583,12 @@ paths:
               required: [file]
               properties:
                 parent_id: { type: string, format: uuid, description: Destination folder identifier }
-                path: { type: string, maxLength: 2048, description: Destination folder path, as an alternative to parent_id }
+                path: { type: string, maxLength: 2048, description: 'Destination folder path, as an alternative to parent_id' }
                 file: { type: string, format: binary }
       responses:
-        '201': { description: File created, or a new version published on the existing file, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '201': { description: 'File created, or a new version published on the existing file', content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
-        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '429': { description: "The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC" }
         '507': { description: The organization has no storage capacity left }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/permissions:
@@ -738,8 +749,8 @@ paths:
       operationId: createFileOnBehalfOfMember
       summary: Create a file for a member on behalf of another application
       description: >-
-        The only operation Briefcase exposes to other applications. The request
-        body is the raw file bytes, and everything else — the destination
+        The compatible one-shot delegated file upload. The request body is
+        the raw file bytes, and everything else — the destination
         folder path, the file name, and the media type — travels as metadata
         bound into the IAM OBO proof, so an application cannot redirect a proof
         it legitimately obtained to another destination.
@@ -772,10 +783,305 @@ paths:
           application/octet-stream:
             schema: { type: string, format: binary }
       responses:
-        '201': { description: File created, or a new version published, for the represented member, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '201': { description: 'File created, or a new version published, for the represented member', content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
         '413': { description: The file exceeds the 5 TiB maximum }
-        '429': { description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC }
+        '429': { description: "The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC" }
         '507': { description: The organization has no storage capacity left }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/uploads/reserve:
+    post:
+      tags: [Applications, Uploads]
+      operationId: reserveDelegatedUpload
+      summary: Reserve private upload storage with current member authority
+      description: >-
+        Register `briefcase.uploads.reserve` at `/api/v1/obo/uploads/reserve`.
+        The exact destination, logical operation UUID, size and lowercase SHA-256 are immutable. A fresh proof binds POST and the exact JSON digest with empty metadata. A repeated reservation with unchanged intent can return its current state; a capability is issued only when a transfer can start. Store the non-secret operation UUID and manifest for reconciliation, never a parent token or proof. Capabilities do not authorize publication.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedReserveUpload' }
+      responses:
+        '200':
+          description: Current authorized upload state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegatedUploadReservation' }
+        '404': { description: Operation or destination is absent or not visible }
+        '409': { description: Logical intent or current lifecycle state conflicts }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/uploads/commit:
+    post:
+      tags: [Applications, Uploads]
+      operationId: commitDelegatedUpload
+      summary: Publish previously staged bytes with fresh member authority
+      description: >-
+        Register `briefcase.uploads.commit` at `/api/v1/obo/uploads/commit`.
+        Mint a new proof after transfer, binding this small JSON body and empty metadata. Current IAM identity, membership, originating application, test generation, destination permission and quota are rechecked before atomic publication. The capability cannot commit. A response lost after publication is reconciled by the same logical operation UUID without creating another file version.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedCommitUpload' }
+      responses:
+        '200':
+          description: Current authorized upload state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegatedUploadStatus' }
+        '404': { description: Operation or destination is absent or not visible }
+        '409': { description: Logical intent or current lifecycle state conflicts }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/uploads/status:
+    post:
+      tags: [Applications, Uploads]
+      operationId: getDelegatedUploadStatus
+      summary: Reconcile one logical upload with a fresh IAM proof
+      description: >-
+        Register `briefcase.uploads.status` at `/api/v1/obo/uploads/status`.
+        Use a fresh proof for the exact JSON body and empty metadata after an uncertain response. This endpoint returns only the represented member and originating application's operation in the selected plane. It does not return a staging capability or read file bytes. A staged result can be committed with another fresh proof; a committed result carries its published entry UUID.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedUploadQuery' }
+      responses:
+        '200':
+          description: Current authorized upload state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegatedUploadStatus' }
+        '404': { description: Operation or destination is absent or not visible }
+        '409': { description: Logical intent or current lifecycle state conflicts }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/uploads/cancel:
+    post:
+      tags: [Applications, Uploads]
+      operationId: cancelDelegatedUpload
+      summary: Cancel unpublished private staging
+      description: >-
+        Register `briefcase.uploads.cancel` at `/api/v1/obo/uploads/cancel`.
+        Use a fresh proof for the exact JSON body and empty metadata. Cancellation revokes further staging and publication, with durable provider cleanup. Cleanup may remain pending while a writer lease or ambiguous provider operation is reconciled. Cancellation never deletes a published file; use the separately authorized trash operation for that.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedUploadQuery' }
+      responses:
+        '200':
+          description: Current authorized upload state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegatedUploadStatus' }
+        '404': { description: Operation or destination is absent or not visible }
+        '409': { description: Logical intent or current lifecycle state conflicts }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/uploads/{upload_id}/content:
+    put:
+      tags: [Applications, Uploads]
+      operationId: transferDelegatedUpload
+      summary: Transfer exact private bytes using a narrow upload capability
+      description: >-
+        Sends only the capability issued by the fresh-authorized reservation,
+        the organization selector and the same test root when using a test plane.
+        Do not send an IAM bearer, proof or application credential.
+        Content-Length and the raw bytes must match the reserved size; the
+        complete SHA-256 is checked before provider writes. A successful
+        transfer is private staging only, not file publication. Use a fresh
+        commit proof separately. A failed or uncertain transfer must be
+        reconciled through the fresh-authorized status endpoint before retry.
+      security:
+        - uploadCapability: []
+        - uploadCapability: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: upload_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Content-Length
+          in: header
+          required: true
+          schema: { type: integer, minimum: 0, maximum: 5497558138880 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Exact bytes are privately staged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegatedUploadStatus' }
+        '401': { description: Invalid or revoked upload capability }
+        '409': { description: Transfer cannot start in the current lifecycle state }
+        '413': { description: Content exceeds the reservation or maximum size }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/folders/create:
+    post:
+      tags: [Applications]
+      operationId: createFolderOnBehalfOfMember
+      summary: Create a child folder for a represented member
+      description: >-
+        Register `briefcase.folders.create` at `/api/v1/obo/folders/create`
+        with an empty IAM metadata schema. Mint a fresh proof for POST and
+        the SHA-256 of the exact JSON body. No bearer credential accompanies
+        the proof. Every input, including the logical operation UUID, is
+        body-bound; query parameters and Idempotency-Key do not select them.
+        An empty parent_path selects the represented member's private folder
+        for the originating application. Otherwise the path must resolve to
+        an existing folder. Ordinary write permission is required, and the
+        created folder retains its originating application for auditing.
+        Retry an uncertain result with the same operation_id and unchanged
+        input, but a fresh proof. Authorization is checked again before replay.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedCreateFolder' }
+      responses:
+        '201': { description: Created folder or the same logical operation's authorized replay, content: { application/json: { schema: { $ref: '#/components/schemas/Entry' } } } }
+        '404': { description: Parent is absent or not visible }
+        '409': { description: Name or logical operation conflicts with existing state }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/entries/list:
+    post:
+      tags: [Applications]
+      operationId: listEntriesOnBehalfOfMember
+      summary: List the represented member's visible entries
+      description: >-
+        Register `briefcase.entries.list` at `/api/v1/obo/entries/list` with
+        an empty IAM metadata schema. Each page requires a fresh proof bound
+        to POST and the exact JSON body digest. The ordinary entry-list
+        semantics apply, including traversal-only folders, privacy-filtered
+        results, filters and opaque pagination. A parent can be addressed by
+        UUID or path, never both. Omission lists roots, or searches the visible
+        tree when a filter is present. No query parameter changes the request.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedListEntries' }
+      responses:
+        '200': { description: Permission-filtered entries and optional next cursor, content: { application/json: { schema: { $ref: '#/components/schemas/EntryPage' } } } }
+        '404': { description: Parent is absent or not visible }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/files/read:
+    post:
+      tags: [Applications]
+      operationId: readFileOnBehalfOfMember
+      summary: Stream a file for a represented member
+      description: >-
+        Register `briefcase.files.read` at `/api/v1/obo/files/read` with an
+        empty IAM metadata schema. Mint a fresh proof for POST and the exact
+        JSON body digest. Ordinary read/download authorization applies. Only
+        the body-bound range and download flag control delivery; an HTTP Range
+        header or query parameter cannot override them. Inline content uses
+        the normal sandbox CSP, nosniff and private no-store response headers.
+        Attachment content is served as application/octet-stream. The proof's
+        authority applies only to this file request and is never cached.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedReadFile' }
+      responses:
+        '200': { $ref: '#/components/responses/FileContent' }
+        '206': { $ref: '#/components/responses/PartialFileContent' }
+        '404': { description: File is absent or unreadable }
+        '416': { description: The bound byte range is unsatisfiable }
+        default: { $ref: '#/components/responses/Error' }
+  /obo/entries/trash:
+    post:
+      tags: [Applications]
+      operationId: trashEntryOnBehalfOfMember
+      summary: Move an application-created entry to the recoverable bin
+      description: >-
+        Register `briefcase.entries.trash` at `/api/v1/obo/entries/trash` with
+        an empty IAM metadata schema. Mint a fresh proof for POST and the
+        SHA-256 of the exact JSON body. The represented member must currently
+        have delete authority across the subtree, and the originating
+        application may delete only entries it created. System containers
+        cannot be deleted. Retry an uncertain result with the same operation_id
+        and entry_id but a fresh proof; current authority is rechecked before
+        recognizing the same completed deletion. A successful old key cannot
+        delete an entry that has since been restored. This is recoverable
+        deletion with normal retention, not permanent removal.
+      security:
+        - oboAccess: []
+          appId: []
+        - oboAccess: []
+          appId: []
+          testingEnvironmentKey: []
+      parameters:
+        - $ref: '#/components/parameters/OboOrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DelegatedTrashEntry' }
+      responses:
+        '204': { description: Entry moved to the bin or the same deletion was recognized }
+        '404': { description: Entry is absent or not visible }
+        '409': { description: Logical operation or current entry state conflicts }
         default: { $ref: '#/components/responses/Error' }
   /entries/{entry_id}/versions:
     get:
@@ -858,7 +1164,13 @@ paths:
         - bearerAuth: []
         - bearerAuth: []
           testingEnvironmentKey: []
-      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      parameters:
+        - { $ref: '#/components/parameters/OrgId' }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Retain with the exact configuration to recover a lost response. A completed failed probe is replayed; use a new key to run validation again.
+          schema: { type: string, minLength: 8, maxLength: 255 }
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfiguration' } } } }
       responses:
         '200': { description: Configuration saved after CRUD validation, content: { application/json: { schema: { $ref: '#/components/schemas/BucketConfigurationStatus' } } } }
@@ -894,12 +1206,14 @@ paths:
         default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
+    uploadCapability: { type: apiKey, in: header, name: X-Briefcase-Upload-Capability, description: Narrow private-byte capability issued by an authorized upload reservation }
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
     oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof }
     appId: { type: apiKey, in: header, name: X-App-ID, description: Originating application identifier required together with an OBO Access proof }
     testingEnvironmentKey: { type: apiKey, in: header, name: X-Testing-Environment-Key, description: Exact 32-character Briefcase testing-environment root key }
   parameters:
     OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
+    OboOrgId: { name: X-Org-ID, in: header, required: false, schema: { type: string }, description: Optional; IAM derives the organization and any supplied value must agree }
     OrgIdPath: { name: org_id, in: path, required: true, schema: { type: string, pattern: '^[a-z0-9_-]{3,50}$' } }
     EntryId: { name: entry_id, in: path, required: true, schema: { type: string, format: uuid } }
     TestingEnvironmentIdPath: { name: environment_id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -923,7 +1237,7 @@ components:
         Content-Disposition: { schema: { type: string }, description: '`inline` for content reads and `attachment` for downloads, with both the quoted and RFC 5987 file name' }
         Content-Security-Policy: { schema: { const: "sandbox; default-src 'none'; frame-ancestors 'none'" } }
         X-Content-Type-Options: { schema: { const: nosniff } }
-        Cache-Control: { schema: { const: private, no-store } }
+        Cache-Control: { schema: { const: 'private, no-store' } }
         Accept-Ranges: { schema: { const: bytes } }
       content:
         application/octet-stream:
@@ -938,6 +1252,89 @@ components:
         application/octet-stream:
           schema: { type: string, format: binary }
   schemas:
+    DelegatedReserveUpload:
+      type: object
+      additionalProperties: false
+      required: [operation_id, parent_path, name, content_type, size, sha256]
+      properties:
+        operation_id: { type: string, format: uuid, description: Stable non-nil logical upload UUID }
+        parent_path: { type: string, maxLength: 2048, description: Existing folder path; empty selects the private app folder }
+        name: { type: string, minLength: 1, maxLength: 255 }
+        content_type: { type: string, minLength: 1 }
+        size: { type: integer, minimum: 0, maximum: 5497558138880 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$', description: Full raw-file digest }
+    DelegatedCommitUpload:
+      type: object
+      additionalProperties: false
+      required: [operation_id, upload_id]
+      properties:
+        operation_id: { type: string, format: uuid }
+        upload_id: { type: string, format: uuid }
+    DelegatedUploadQuery:
+      type: object
+      additionalProperties: false
+      required: [operation_id]
+      properties:
+        operation_id: { type: string, format: uuid }
+    DelegatedUploadStatus:
+      type: object
+      required: [operation_id, upload_id, state, expires_at, published_entry_id]
+      properties:
+        operation_id: { type: string, format: uuid }
+        upload_id: { type: string, format: uuid }
+        state:
+          type: string
+          enum: [reserved, receiving, staged, committed, cancelled, expired, cleanup_pending]
+        expires_at: { type: string, format: date-time, description: Absolute reservation deadline; retries do not extend it }
+        published_entry_id: { type: [string, 'null'], format: uuid }
+    DelegatedUploadReservation:
+      allOf:
+        - $ref: '#/components/schemas/DelegatedUploadStatus'
+        - type: object
+          required: [capability]
+          properties:
+            capability:
+              type: [string, 'null']
+              format: password
+              description: Fresh private-byte staging capability; never log it or use it for publication
+    DelegatedOperationId:
+      type: string
+      format: uuid
+      not: { const: '00000000-0000-0000-0000-000000000000' }
+      description: Stable non-nil logical mutation UUID, reused with unchanged inputs and a fresh proof after an uncertain response
+    DelegatedCreateFolder:
+      type: object
+      additionalProperties: false
+      required: [operation_id, parent_path, name]
+      properties:
+        operation_id: { $ref: '#/components/schemas/DelegatedOperationId' }
+        parent_path: { type: string, description: Existing parent path; the empty string selects the private application folder }
+        name: { type: string, minLength: 1, description: One valid child folder name }
+    DelegatedListEntries:
+      type: object
+      additionalProperties: false
+      not: { required: [parent_id, path], properties: { parent_id: { type: string }, path: { type: string } } }
+      properties:
+        parent_id: { type: [string, 'null'], format: uuid }
+        path: { type: [string, 'null'], minLength: 1, description: Alternative parent path; must not be blank }
+        filter: { type: [string, 'null'], minLength: 1, description: Ordinary permission-filtered entry expression }
+        cursor: { type: [string, 'null'], maxLength: 2048 }
+        limit: { type: [integer, 'null'], minimum: 1, maximum: 100, default: 100 }
+    DelegatedReadFile:
+      type: object
+      additionalProperties: false
+      required: [entry_id]
+      properties:
+        entry_id: { type: string, format: uuid }
+        range: { type: [string, 'null'], description: Single bytes= range; malformed or multi-range syntax falls back to the complete file just as ordinary reads do }
+        download: { type: boolean, default: false }
+    DelegatedTrashEntry:
+      type: object
+      additionalProperties: false
+      required: [operation_id, entry_id]
+      properties:
+        operation_id: { $ref: '#/components/schemas/DelegatedOperationId' }
+        entry_id: { type: string, format: uuid }
     ShortLivedTokenExchange:
       type: object
       additionalProperties: false
@@ -961,7 +1358,7 @@ components:
     ApplicationSessionTokens:
       type: object
       additionalProperties: false
-      required: [access_token, refresh_token, token_type, expires_in, scope, actor, org_id]
+      required: [access_token, refresh_token, token_type, expires_in, scope, actor, org_id, organizations]
       properties:
         access_token: { type: string, pattern: '^oat_[A-Za-z0-9_-]{43}$' }
         refresh_token: { type: string, pattern: '^ort_[A-Za-z0-9_-]{43}$' }
@@ -970,6 +1367,10 @@ components:
         scope: { type: string }
         actor: { $ref: '#/components/schemas/ApplicationSessionActor' }
         org_id: { type: [string, 'null'], pattern: '^[a-z0-9_-]{3,50}$' }
+        organizations:
+          type: array
+          description: Organizations currently reachable by this IAM session. Unscoped logins may contain more than one; scoped logins contain the selected organization.
+          items: { type: string, pattern: '^[a-z0-9_-]{3,50}$' }
     TestingEnvironmentCreator:
       type: object
       additionalProperties: false
@@ -1094,7 +1495,7 @@ components:
       properties:
         service: { type: string, const: silicon-briefcase }
         selected_api_version: { type: string, examples: [v1] }
-        supported_api_versions: { type: array, items: { type: string }, description: Served majors, newest first }
+        supported_api_versions: { type: array, items: { type: string }, description: 'Served majors, newest first' }
         contract_version: { type: string, description: Version of this document }
         build: { type: string, description: Running backend package version }
         operations:

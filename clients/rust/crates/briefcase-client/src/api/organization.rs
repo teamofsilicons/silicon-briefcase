@@ -3,6 +3,7 @@
 use reqwest::Method;
 
 use crate::{
+    IdempotencyKey,
     client::{Client, json_body},
     error::Result,
     models::{BucketConfiguration, BucketConfigurationStatus, OrganizationUsage},
@@ -40,11 +41,32 @@ impl Client {
         &self,
         configuration: &BucketConfiguration,
     ) -> Result<BucketConfigurationStatus> {
+        self.configure_storage_with_key(configuration, &IdempotencyKey::random())
+            .await
+    }
+
+    /// Configures storage with a caller-owned retry identity.
+    ///
+    /// Retain this key together with the exact configuration before sending.
+    /// Reuse both after a lost response to recover the same validation outcome.
+    /// To retry a completed failed probe after fixing the external bucket or
+    /// role policy, use a new key: the old key replays that failed result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Client::configure_storage`], or a conflict
+    /// when the key was previously used for a different configuration.
+    pub async fn configure_storage_with_key(
+        &self,
+        configuration: &BucketConfiguration,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<BucketConfigurationStatus> {
         let url = self.api_url(&["storage", "configuration"])?;
         let body = json_body(configuration)?;
         let request = self
             .request(Method::PUT, url)
             .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key.as_str())
             .body(body)
             .timeout(self.transfer_timeout());
         self.receive_json(request).await

@@ -95,9 +95,9 @@ impl Client {
 
     /// Creates a folder.
     ///
-    /// At the organization base the folder goes into the container its
-    /// `root_type` names: Public, the caller's own folder inside Private, or
-    /// that tag's container.
+    /// At the organization base, `root_type` defines the new folder's access
+    /// boundary. The folder is a sibling of Public, Private, and tag containers.
+    /// Specify a parent explicitly to create inside one of those containers.
     ///
     /// # Errors
     ///
@@ -277,9 +277,28 @@ impl Client {
     ///
     /// Returns a not-found error once the 45-day window has passed.
     pub async fn restore_from_bin(&self, entry_id: Uuid) -> Result<Entry> {
+        self.restore_from_bin_with_key(entry_id, &IdempotencyKey::random())
+            .await
+    }
+
+    /// Restores a deleted entry with a stable operation identity.
+    ///
+    /// Keep the same key when recovering an uncertain response. A key belongs
+    /// to one deletion cycle; use a new key after the entry is deleted again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the API error if the entry cannot be restored, authorization
+    /// fails, or the key belongs to a different deletion cycle.
+    pub async fn restore_from_bin_with_key(
+        &self,
+        entry_id: Uuid,
+        key: &IdempotencyKey,
+    ) -> Result<Entry> {
         let url = self.api_url(&["bin", &entry_id.to_string(), "restore"])?;
         let request = self
             .request(Method::POST, url)
+            .header("Idempotency-Key", key.as_str())
             .timeout(self.request_timeout());
         self.receive_json(request).await
     }

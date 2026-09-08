@@ -5,7 +5,7 @@ product documentation contract:
 
 - [Rust client guide](https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/client/README.md)
 - [Paired testing environments](https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/testing-environments.md)
-- [Documentation index](https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/README.md)
+- [Documentation index](https://github.com/teamofsilicons/silicon-briefcase/tree/main/docs)
 
 Within this repository, open
 [the local Rust guide](../../../docs/client/README.md).

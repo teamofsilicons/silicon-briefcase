@@ -20,12 +20,16 @@ secrecy.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { version = "0.7.17", features = ["io"] }
 url.workspace = true
 uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

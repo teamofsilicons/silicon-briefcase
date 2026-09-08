@@ -223,17 +223,19 @@ It queues exact S3 cleanup descriptors before removing source metadata. Logical
 completion does not imply all physical object deletion has already finished;
 the worker retries cleanup. The operation cannot be undone by environment restore.
 
-Retirement is different: data remains recoverable for 30 days, the root stops
+Retirement is different: data remains recoverable for two days, the root stops
 working immediately, and restoration generates a new root. After purge, restore
 is unavailable. At most ten environments may be active across the deployment;
 retained deleted rows may make `env list --status all` longer than ten.
+Previously retired environments keep their already recorded `purge_after`
+deadline; a newer retention policy does not shorten that existing window.
 
 Each sandbox is capped at 2 GiB (2,147,483,648 bytes). Exceeding it returns
 `testing_environment_storage_limit_exhausted` with the product's current message:
 `In test enviorment you are limited to a total storage of 2gb per enviorment.`
 
-Idle environments are automatically retired after 30 days without accepted
-test-plane activity. The separate recovery window starts when retirement occurs.
+Idle environments are automatically retired after one day without accepted
+test-plane activity. The separate two-day recovery window starts when retirement occurs.
 
 ## Signed webhook routing
 

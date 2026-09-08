@@ -1,7 +1,7 @@
 //! What the CLI remembers between runs.
 //!
 //! The package underneath is stateless; this is the part that is not. Profiles
-//! and rotating sessions live under `~/.briefcase/`; sessions and environment
+//! and rotating sessions live under `{home_dir}/.briefcase/`; sessions and environment
 //! root keys are in a file only the owner can read, so a shell does not need to
 //! carry long-lived credentials in its history or environment.
 
@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 /// Directory name under the user's home.
 const STATE_DIRECTORY: &str = ".briefcase";
+/// Pointer in the default home directory to a user-selected home directory.
+const HOME_POINTER_FILE: &str = ".briefcase-home";
 /// Profiles and their deployments.
 const CONFIG_FILE: &str = "config.json";
 /// Tokens, readable only by their owner.
@@ -28,13 +30,23 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
 /// Non-secret updater throttle state.
 const UPDATE_FILE: &str = "update.json";
+/// Separate from credentials so maintenance never delays session renewal.
+const UPDATE_LOCK_FILE: &str = "update.lock";
 
 /// Something the CLI could not read or write locally.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     /// The home directory could not be determined.
-    #[error("no home directory: set HOME, or pass --url, --org and --token")]
+    #[error(
+        "no home directory: set HOME or configure one with `briefcase config home <directory>`"
+    )]
     NoHome,
+    /// A configured home path exists but is not a directory.
+    #[error("{path}: not a directory")]
+    NotDirectory {
+        /// The path supplied by the user or stored in the home pointer.
+        path: String,
+    },
     /// A state file could not be read or written.
     #[error("{path} could not be {action}")]
     File {
@@ -68,7 +80,7 @@ pub struct Profile {
 /// Every saved profile, and which one is current.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Configuration {
-    /// Whether the installed CLI checks crates.io once per day.
+    /// Whether the installed CLI checks crates.io at most once per hour.
     #[serde(default = "enabled")]
     pub auto_update: bool,
     /// Profile used when `--profile` is not given.
@@ -93,10 +105,10 @@ fn enabled() -> bool {
     true
 }
 
-/// Non-secret throttle state for the daily CLI updater.
+/// Non-secret throttle state for the hourly CLI updater.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct UpdateState {
-    /// Compiled CLI version whose check was most recently attempted.
+    /// Newest CLI version known to be installed when a check was attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_version: Option<String>,
     /// Time of the most recent check attempt.
@@ -389,6 +401,9 @@ pub struct StoredSession {
     pub actor: SessionActor,
     /// Organization selected when the SLT was exchanged.
     pub org_id: Option<String>,
+    /// Organizations currently reachable by an unscoped IAM session.
+    #[serde(default)]
+    pub organizations: Vec<String>,
     /// Retry identity persisted before an in-flight refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_idempotency_key: Option<String>,
@@ -405,6 +420,7 @@ impl StoredSession {
                 + time::Duration::seconds(i64::try_from(tokens.expires_in).unwrap_or(i64::MAX)),
             actor: tokens.actor.clone(),
             org_id: tokens.org_id.clone(),
+            organizations: tokens.organizations.clone(),
             refresh_idempotency_key: None,
         }
     }
@@ -425,6 +441,7 @@ impl std::fmt::Debug for StoredSession {
             .field("expires_at", &self.expires_at)
             .field("actor", &self.actor)
             .field("org_id", &self.org_id)
+            .field("organizations", &self.organizations)
             .field(
                 "refresh_idempotency_key",
                 &self.refresh_idempotency_key.as_ref().map(|_| "<redacted>"),
@@ -453,6 +470,18 @@ impl Drop for CredentialsLock {
     }
 }
 
+/// Exclusive cross-process ownership of CLI package maintenance.
+#[derive(Debug)]
+pub struct UpdateLock {
+    file: File,
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 impl StateDirectory {
     /// Locates the state directory, honoring `BRIEFCASE_HOME` when set.
     ///
@@ -471,9 +500,56 @@ impl StateDirectory {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or(StateError::NoHome)?;
+        let pointer = home.join(HOME_POINTER_FILE);
+        if pointer.is_file() {
+            let configured =
+                std::fs::read_to_string(&pointer).map_err(|source| StateError::File {
+                    path: pointer.display().to_string(),
+                    action: "read",
+                    source,
+                })?;
+            let configured = PathBuf::from(configured.trim());
+            if !configured.is_dir() {
+                return Err(StateError::NotDirectory {
+                    path: configured.display().to_string(),
+                });
+            }
+            return Ok(Self {
+                root: configured.join(STATE_DIRECTORY),
+            });
+        }
         Ok(Self {
             root: home.join(STATE_DIRECTORY),
         })
+    }
+
+    /// Persists the user-selected parent directory for future invocations.
+    pub fn configure_home(directory: impl AsRef<Path>) -> Result<(), StateError> {
+        let directory = directory.as_ref();
+        if !directory.is_dir() {
+            return Err(StateError::NotDirectory {
+                path: directory.display().to_string(),
+            });
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(StateError::NoHome)?;
+        let pointer = home.join(HOME_POINTER_FILE);
+        std::fs::write(
+            &pointer,
+            directory
+                .canonicalize()
+                .unwrap_or_else(|_| directory.to_owned())
+                .display()
+                .to_string(),
+        )
+        .map_err(|source| StateError::File {
+            path: pointer.display().to_string(),
+            action: "written",
+            source,
+        })?;
+        restrict_to_owner(&pointer, 0o600)?;
+        Ok(())
     }
 
     /// Uses an explicit directory, which is what the tests do.
@@ -545,6 +621,37 @@ impl StateDirectory {
         self.read_json(UPDATE_FILE)
     }
 
+    /// Claims updater ownership without waiting for another process's Cargo.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the private lock file cannot be opened or secured.
+    pub fn try_lock_update(&self) -> Result<Option<UpdateLock>, StateError> {
+        self.ensure_directory()?;
+        let path = self.root.join(UPDATE_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| StateError::File {
+                path: path.display().to_string(),
+                action: "opened",
+                source,
+            })?;
+        restrict_to_owner(&path, 0o600)?;
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(UpdateLock { file })),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(source) => Err(StateError::File {
+                path: path.display().to_string(),
+                action: "locked",
+                source,
+            }),
+        }
+    }
+
     /// Writes the profiles.
     ///
     /// # Errors
@@ -563,7 +670,7 @@ impl StateDirectory {
         self.write_json(CREDENTIALS_FILE, credentials, 0o600)
     }
 
-    /// Records a successful crates.io check without storing credentials.
+    /// Records a crates.io check attempt without storing credentials.
     pub fn save_update_state(&self, state: &UpdateState) -> Result<(), StateError> {
         self.write_json(UPDATE_FILE, state, 0o600)
     }
@@ -679,6 +786,18 @@ mod tests {
 
     use super::{Configuration, Credentials, Profile, StateDirectory, StoredSession};
 
+    #[test]
+    fn updater_lock_is_nonblocking_and_independent_of_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateDirectory::at(directory.path());
+        let credentials = state.lock_credentials().unwrap();
+        let update = state.try_lock_update().unwrap().unwrap();
+        assert!(state.try_lock_update().unwrap().is_none());
+        drop(update);
+        assert!(state.try_lock_update().unwrap().is_some());
+        drop(credentials);
+    }
+
     fn session(expires_in: Duration) -> StoredSession {
         StoredSession {
             access_token: "access-secret-value".to_owned(),
@@ -690,6 +809,7 @@ mod tests {
                 public_id: "cos:tester".to_owned(),
             },
             org_id: Some("tos".to_owned()),
+            organizations: vec!["tos".to_owned()],
             refresh_idempotency_key: None,
         }
     }

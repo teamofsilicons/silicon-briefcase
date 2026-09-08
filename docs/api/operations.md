@@ -1,7 +1,7 @@
 # API / Rust / CLI operation map
 
-This inventory was checked against the 42 entries in `src/api/versioning.rs`
-on 2026-09-05. Paths are relative to `/api/v1`; the version handshake is also
+This inventory describes the 51 entries in `src/api/versioning.rs`.
+Paths are relative to `/api/v1`; the version handshake is also
 available anonymously at host-root `/api/version`. Operation revisions, not
 just the crate's release number, determine client compatibility.
 
@@ -29,7 +29,7 @@ remain in the [API guide](README.md) and [OpenAPI](../../openapi.yaml).
 | `describeCurrentTestingEnvironment` 1.0.0 | `GET /testing-environment` | `current_testing_environment` | `--test <UUID> env current` |
 | `cleanCurrentTestingEnvironment` 1.0.0 | `POST /testing-environment/cleanings` | `clean_current_testing_environment` | `--test <UUID> env clean` |
 | `listEntries` 1.1.0 | `GET /entries` | `list_entries` | `ls / find` |
-| `createFolder` 1.1.0 | `POST /entries` | `create_folder` | `mkdir` |
+| `createFolder` 2.0.0 | `POST /entries` | `create_folder` | `mkdir` |
 | `getEntry` 1.1.0 | `GET /entries/{entry_id}` | `entry` | `stat <UUID>` |
 | `updateEntry` 1.0.0 | `PATCH /entries/{entry_id}` | `update_entry` | `mv` |
 | `moveEntryToBin` 1.0.0 | `DELETE /entries/{entry_id}` | `delete_entry` | `rm` |
@@ -38,6 +38,15 @@ remain in the [API guide](README.md) and [OpenAPI](../../openapi.yaml).
 | `resolvePermanentUrl` 1.1.0 | `GET /org/{org_id}/{path}` | `entry_at` | `stat <path>` |
 | `uploadFile` 1.1.0 | `POST /uploads` | `upload` | `put` |
 | `createFileOnBehalfOfMember` 1.0.0 | `POST /obo/files` | `create_file_on_behalf_of` | `app upload` |
+| `createFolderOnBehalfOfMember` 1.0.0 | `POST /obo/folders/create` | `create_folder_on_behalf_of` | `app request folder-create` |
+| `listEntriesOnBehalfOfMember` 1.0.0 | `POST /obo/entries/list` | `list_entries_on_behalf_of` | `app request entries-list` |
+| `readFileOnBehalfOfMember` 1.0.0 | `POST /obo/files/read` | `read_file_on_behalf_of` | `app request file-read` |
+| `trashEntryOnBehalfOfMember` 1.0.0 | `POST /obo/entries/trash` | `trash_entry_on_behalf_of` | `app request entry-trash` |
+| `reserveDelegatedUpload` 1.0.0 | `POST /obo/uploads/reserve` | `reserve_delegated_upload` | `app request upload-reserve` |
+| `commitDelegatedUpload` 1.0.0 | `POST /obo/uploads/commit` | `commit_delegated_upload` | `app request upload-commit` |
+| `getDelegatedUploadStatus` 1.0.0 | `POST /obo/uploads/status` | `delegated_upload_status` | `app request upload-status` |
+| `cancelDelegatedUpload` 1.0.0 | `POST /obo/uploads/cancel` | `cancel_delegated_upload` | `app request upload-cancel` |
+| `transferDelegatedUpload` 1.0.0 | `PUT /obo/uploads/{upload_id}/content` | `transfer_delegated_upload` | `app transfer` |
 | `listPermissions` 1.0.0 | `GET /entries/{entry_id}/permissions` | `permissions` | `shares` |
 | `grantPermission` 1.1.0 | `POST /entries/{entry_id}/permissions` | `grant` | `share` |
 | `revokePermission` 1.0.0 | `DELETE /entries/{entry_id}/permissions/{grant_id}` | `revoke` | `unshare` |

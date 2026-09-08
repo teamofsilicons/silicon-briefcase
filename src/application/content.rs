@@ -1836,7 +1836,11 @@ async fn sha256_file_and_update(
 ///
 /// The provider verifies a per-part checksum, and each part is a range of the
 /// single staged upload, so the digest is taken over that range alone.
-async fn sha256_file_range(path: &Path, offset: u64, length: u64) -> Result<[u8; 32], AppError> {
+pub(super) async fn sha256_file_range(
+    path: &Path,
+    offset: u64,
+    length: u64,
+) -> Result<[u8; 32], AppError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|_| AppError::Internal {
@@ -1932,7 +1936,7 @@ fn map_plan_error(error: &MultipartPlanError) -> AppError {
     }
 }
 
-fn map_object_error(error: &ObjectStoreError) -> AppError {
+pub(super) fn map_object_error(error: &ObjectStoreError) -> AppError {
     match error {
         ObjectStoreError::NotFound => AppError::NotFound,
         ObjectStoreError::Conflict => AppError::conflict("storage_conflict"),

@@ -1,5 +1,5 @@
 //! Read-only, hands-on example for an already prepared paired test environment.
-//! Put this in examples/sandbox.rs of a project using briefcase-client 0.1 and
+//! Put this in examples/sandbox.rs of a project using briefcase-client 0.2 and
 //! tokio with macros + rt-multi-thread, then run `cargo run --example sandbox`.
 //! Inject BRIEFCASE_TEST_ROOT and BRIEFCASE_TEST_BEARER from private storage.
 //! This program does not create environments, mutate files, or print secrets.

@@ -6,7 +6,11 @@ IAM platform-admin operations through the Briefcase package or CLI.
 
 ## Official client and compatibility
 
-The backend imports registry `silicon-iam-client = "=1.2.0"`. Its typed methods
+The [delegated-upload protocol](api/delegated-uploads.md) documents endpoint
+registration, exact manifests, narrow staging capabilities and fresh commit
+proofs. It never turns an IAM authorization snapshot into a reusable grant.
+
+The backend imports registry `silicon-iam-client = "=1.3.0"`. Its typed methods
 own all IAM network calls, API-version negotiation, redirects, and transport.
 Runtime dependency auto-updates are disabled for the backend: upgrading the
 dependency requires a deliberate build and deployment. This is distinct from
@@ -40,55 +44,62 @@ owner-only permissions. Keep the sandbox encryption key stable across normal
 deployments: replacing it without migrating encrypted rows loses access to
 stored pairing credentials.
 
-## Why `applications.review` is required
+## Who can approve a webhook
 
-IAM separates an organization owner's/admin's ability to register or propose
-an Application webhook from a platform administrator's ability to activate a
-production destination. The decision endpoint checks the **current Carbon's**
-platform capability `applications.review`; the Application's own secret and an
-organization-admin membership do not supply it.
+IAM's dedicated webhook-approval operation accepts a direct Carbon session
+belonging to the Application's current owning-organization owner/admin, or an
+IAM reviewer with `applications.review`. The owning owner/admin does **not**
+need that platform capability. An Application secret, Application-bound member
+token or AWS access is not an approval credential.
 
-This is enforced by IAM, not a new permission requested by Briefcase. Having
-AWS access also does not make an IAM Carbon a platform administrator. Do not
-bypass the decision API with database writes or grant platform authority just
-to make an integration test pass. Changing this policy belongs to a separate
-IAM product/security change.
+This narrow operation activates a verified Application's pending webhook
+destination only. It does not approve additional scopes or change the
+Application's review status. General platform Application review remains a
+different operation; do not route webhook-only approval through it or grant
+platform authority just to complete setup.
 
-Source: IAM's local `src/features/applications/applications.rs::admin_decide`
-and its [platform review documentation](https://github.com/teamofsilicons/silicon-iam/blob/main/docs/API_DOCS.md#platform-application-review).
+The official IAM CLI provides `app approve-webhook`. IAM implements the
+dedicated route in
+[`webhooks.rs::approve`](https://github.com/teamofsilicons/silicon-iam/blob/main/src/features/applications/webhooks.rs)
+with current authority, verified-channel step-up and version/idempotency checks.
 
 ## Approval procedure
 
 1. Inspect `iam --url https://backend.iam.teamofsilicons.com -o json app webhook 'tos>briefcase'`.
    The pending URL must be exactly `https://backend.briefcase.teamofsilicons.com/webhook/`.
-2. Use an existing platform-admin Carbon session with `applications.review`.
-   `GET /api/v1/admin/applications` is a read-only authority/inventory check.
-   If it returns 403, stop; an app secret cannot solve that failure.
+2. Use a direct Carbon session for the owning organization's current owner or
+   admin, or a current IAM `applications.review` reviewer. Do not use the
+   Briefcase member token or server-held Application secret.
 3. Read the current Application version/ETag. Do not reuse a version copied
    from this dated document or another mutation.
-4. Obtain verified-channel step-up for `platform_admin.application_review`,
+4. Obtain verified-channel step-up for `application.webhook.approve`,
    resource UUID `01a070db-89b4-7542-83f1-4fad5cbce625`, in the same session:
 
    ```bash
    iam --url https://backend.iam.teamofsilicons.com step-up \
-     platform_admin.application_review 01a070db-89b4-7542-83f1-4fad5cbce625
+     application.webhook.approve 01a070db-89b4-7542-83f1-4fad5cbce625
    ```
 
    Complete the code prompt through the user's verified channel. Treat the
    returned assertion as a short-lived credential; do not paste it into logs.
-5. An authorized operator calls `POST /api/v1/admin/applications/{app_id}/decisions`
-   with `Authorization: Bearer <admin-access-token>`, current `If-Match`, a
-   persisted `Idempotency-Key`, `Content-Type: application/json`, and the
-   assertion in `X-Step-Up-Token`. Use decision `approve_pending_changes` and a specific
-   audit reason. Preserve the existing scopes; this task approves the webhook,
-   not an unrelated policy change. Encode the public app ID in the URL.
+5. Run the official IAM CLI's `app approve-webhook 'tos>briefcase'` with the
+   fresh assertion supplied through its global `--step-up` option. Keep the
+   same session, organization, service URL and production/test context as the
+   inspection. Avoid putting the literal assertion into shell history.
+
+   The equivalent HTTP request is
+   `POST /api/v1/applications/{app_id}/webhook/approvals`, with no request body,
+   the direct Carbon bearer, current `If-Match`, a persisted `Idempotency-Key`
+   and `X-Step-Up-Token`. URL-encode the public app ID. A raw HTTP caller must
+   preserve the exact version and key when reconciling an uncertain response;
+   a new pending replacement must not reuse the earlier approval intent.
 6. Read the webhook again. Success means `status=active`, the expected
    `active_url`, and no pending replacement. Then cause a deliberate event in
    an isolated test environment and confirm signed delivery and reconciliation.
 
-The current IAM CLI has no `app approve` command; do not invent one. It does
-expose the step-up command. The privileged decision itself uses IAM's admin
-HTTP workflow, outside the public Briefcase SDK/CLI.
+The command is `app approve-webhook`, not `app approve`. Test-environment
+webhooks activate immediately and normally have no pending destination to
+approve. These are IAM operator actions, outside the public Briefcase SDK/CLI.
 
 ## Receiving signed events
 
@@ -109,14 +120,42 @@ delivered, or successfully replayed a webhook.
 
 ## OBO registration is separate
 
-Register `briefcase.files.create`, method `POST`, path `/api/v1/obo/files`, with
-metadata keys `path`, `name`, and `content_type`. The issuer and audience must
-meet IAM's same-organization and authorization rules. Proofs bind exact body
-bytes by SHA-256, method, endpoint, audience, actor, and environment; they are
-single-use and must not be blindly retried.
+The caller-facing companion to this section is the [OBO guide](obo.md).
+
+Register these fixed paths in the Briefcase Application's IAM endpoint catalog.
+Every operation uses `POST`; endpoint IDs must not be repointed to other paths.
+
+| Endpoint ID | Registered path | IAM metadata schema |
+| --- | --- | --- |
+| `briefcase.files.create` | `/api/v1/obo/files` | Required strings `path`, `name`, `content_type` |
+| `briefcase.folders.create` | `/api/v1/obo/folders/create` | Empty object `{}` |
+| `briefcase.entries.list` | `/api/v1/obo/entries/list` | Empty object `{}` |
+| `briefcase.files.read` | `/api/v1/obo/files/read` | Empty object `{}` |
+| `briefcase.entries.trash` | `/api/v1/obo/entries/trash` | Empty object `{}` |
+| `briefcase.uploads.reserve` | `/api/v1/obo/uploads/reserve` | Empty object `{}` |
+| `briefcase.uploads.commit` | `/api/v1/obo/uploads/commit` | Empty object `{}` |
+| `briefcase.uploads.status` | `/api/v1/obo/uploads/status` | Empty object `{}` |
+| `briefcase.uploads.cancel` | `/api/v1/obo/uploads/cancel` | Empty object `{}` |
+
+The one-shot file endpoint keeps its raw-byte body and metadata contract.
+The other operations put all inputs in exact JSON body bytes, including range,
+disposition, pagination and logical mutation UUIDs. The issuer and audience
+must meet IAM's same-organization and authorization rules. Proofs bind exact
+body bytes by SHA-256, method, endpoint, audience, actor, and environment; they
+are single-use and must not be blindly retried. Keep the same logical mutation
+UUID when recovering an uncertain JSON mutation, but obtain a fresh proof.
+Briefcase always rechecks current authority and its ordinary resource policy.
+
+The raw `PUT /api/v1/obo/uploads/{upload_id}/content` is not an IAM catalog
+endpoint. Its narrow capability permits private staging only; a fresh commit
+proof separately authorizes publication. See [delegated uploads](api/delegated-uploads.md).
 
 Webhook approval and OBO catalog registration are separate operations.
-Confirm the required scope disclosure (`profile`,
+Confirm the Briefcase Application's required scope disclosure (`profile`,
 `organizations.read`, `memberships.read`, `roles.read`) and catalog registration
-before making OBO calls. The [API](api/README.md) and
-[Rust guide](client/README.md) document the file-creation request itself.
+before making OBO calls. The issuing member's Application token needs
+`obo.issue`; `memberships.read` and `roles.read` must also be present in both
+that token and the recipient's approved scopes. The [API](api/README.md#applications)
+documents the exact request bodies and recovery behavior. Proofs remain
+dependent on current initiator authorization; storing a verified snapshot does
+not create permission for later requests.

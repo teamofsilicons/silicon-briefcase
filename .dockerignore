@@ -5,4 +5,9 @@
 deploy/aws/production.env
 **/secrets
 target
+**/target
+web/node_modules
+web/dist/*
+!web/dist/client/
+!web/dist/client/**
 *.log

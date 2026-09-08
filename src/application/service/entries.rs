@@ -191,7 +191,6 @@ impl MetadataService {
         validate_context(context)?;
         metadata.require_key()?;
 
-        let mut command = command;
         let (boundary, parent_id) = if let Some(parent_id) = command.parent_id {
             let parent = self
                 .repository
@@ -202,13 +201,11 @@ impl MetadataService {
                 return Err(MetadataServiceError::NotFound);
             }
             require_capability(&parent, context, Capability::CreateChild)?;
-            (parent.entry.boundary, parent_id)
+            (parent.entry.boundary, Some(parent_id))
         } else {
-            // The organization base holds exactly the reserved containers:
-            // Public, Private, and one per tag. Declaring a kind of folder at
-            // that level chooses which container it goes into — Public, the
-            // caller's own folder inside Private, or that tag's folder — so a
-            // member's material always sits somewhere the contract describes.
+            // A typed user folder is a sibling of the reserved containers,
+            // not content silently redirected into one of them. The canonical
+            // container establishes current authority for that boundary only.
             let boundary =
                 command
                     .root_boundary
@@ -225,10 +222,9 @@ impl MetadataService {
             // A tag folder the caller does not carry is not visible to them,
             // so this reports it exactly as a container that is not there.
             require_capability(&container, context, Capability::CreateChild)?;
-            (container.entry.boundary.clone(), container.entry.id)
+            (container.entry.boundary.clone(), None)
         };
-        command.parent_id = Some(parent_id);
-        let required_parent_capability = Some(Capability::CreateChild);
+        let required_parent_capability = parent_id.map(|_| Capability::CreateChild);
 
         for invitee in &command.invitees {
             if !self
@@ -436,11 +432,18 @@ impl MetadataService {
         metadata: &MutationMetadata,
     ) -> Result<(), MetadataServiceError> {
         validate_context(context)?;
-        let entry = self
-            .repository
-            .find_active_entry(context, entry_id)
-            .await?
-            .ok_or(MetadataServiceError::NotFound)?;
+        let entry = match self.repository.find_active_entry(context, entry_id).await? {
+            Some(entry) => entry,
+            // A completed keyed delete has made this root recoverable. The
+            // repository must still match the exact completed claim after
+            // rechecking current authority; a key alone grants no bin access.
+            None if metadata.idempotency_key.is_some() => self
+                .repository
+                .find_bin_entry(context, entry_id)
+                .await?
+                .ok_or(MetadataServiceError::NotFound)?,
+            None => return Err(MetadataServiceError::NotFound),
+        };
         require_capability(&entry, context, Capability::Delete)?;
         self.repository
             .soft_delete_entry(context, entry_id, metadata, Capability::Delete)

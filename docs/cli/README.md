@@ -15,7 +15,10 @@ The SLT/session login and paired testing-environment commands require CLI
 0.1.2 or newer. Use 0.1.3 or newer for renaming and replacing individually
 shared files without needing independent access to their parent folder.
 
-See the [documentation index](../README.md) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
+This guide targets CLI 0.2 and API contract 0.5. Top-level folder placement
+changed in this release; see the [migration guide](../migration-0.2.md).
+
+See the [documentation index](../) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
 
 Set uppercase shell variables such as `VERSION_ID`, `ENTRY_ID`, `GRANT_ID`,
 and `REQUEST_ID` from the corresponding listing/creation response before using
@@ -30,10 +33,18 @@ password, verification code, or Application secret, and it never redirects a
 terminal login:
 
 ```bash
-iam --org tos login --email you@example.com --app-id 'tos>briefcase'
-briefcase login --org tos
-# Paste only the IAM short-lived token at the hidden prompt.
+iam --no-org login --app-id 'tos>briefcase'
+briefcase login <slt>
+# Or use `briefcase login --org tos` and paste only the SLT at the hidden prompt.
 ```
+
+The positional form exchanges the supplied SLT directly. To use the hidden
+prompt instead, run `briefcase login` with no token. A normal production login
+is unscoped by default: IAM returns every organization currently reachable by
+the signed-in member, and Briefcase keeps that one token family for all of
+them. Supply `--org` only when you deliberately want a login permanently bound
+to one workspace. When several organizations are available, commands that
+touch files ask you to choose with `--org`; no second IAM login is required.
 
 The CLI connects to the hosted Briefcase service automatically. You do not
 need to find or enter a backend URL for normal use.
@@ -44,9 +55,10 @@ For automation, pipe that one-use SLT instead of putting it in argv:
 printf '%s\n' "$BRIEFCASE_SLT" | briefcase login --org tos --slt-stdin
 ```
 
-The deployment and organization are saved in `~/.briefcase/config.json`.
+The deployment and current workspace preference are saved in
+`{home_dir}/.briefcase/config.json`.
 Briefcase exchanges the SLT for an access/refresh pair and stores the rotating
-session in `~/.briefcase/credentials.json` with owner-only permissions. It
+session in `{home_dir}/.briefcase/credentials.json` with owner-only permissions. It
 rejects an exchange response whose session is unscoped or bound to an
 organization other than `--org`, before either token can be stored or used. It
 refreshes one minute before expiry and persists the new refresh token before
@@ -92,7 +104,15 @@ briefcase login --url http://127.0.0.1:8080/api/v1/ --org tos --save-as local
 
 `--url`, `--org`, `--token`, and `--profile` also read `BRIEFCASE_URL`,
 `BRIEFCASE_ORG`, `BRIEFCASE_TOKEN`, and `BRIEFCASE_PROFILE`, which is the usual
-shape for CI. `BRIEFCASE_HOME` moves the state directory itself.
+shape for CI. State defaults to `$HOME/.briefcase`; set `BRIEFCASE_HOME` to
+override it, or choose a persistent parent directory interactively:
+
+```bash
+briefcase config home /path/to/existing-directory
+```
+
+The configured location must already be a directory; otherwise the command
+fails with `not a directory`.
 
 ```bash
 briefcase status     # profile, deployment, token, and contract agreement
@@ -102,6 +122,17 @@ briefcase logout     # forget the token, keep the profile
 `--token`/`BRIEFCASE_TOKEN` remains an explicit ephemeral override for CI and
 does not replace the stored rotating session. `logout` forgets only the
 production or `--test` session currently selected.
+
+## Limits and test-plane boundaries
+
+Regular uploads use one endpoint for every supported file size. Briefcase
+uses one storage request through 100 MiB and automatically switches to its
+durable multipart path above that threshold; callers do not need a delegated
+upload flow for ordinary member uploads.
+Each paired testing environment is isolated from production IAM, limited to
+2 GiB of aggregate content and at most 10 active environments per deployment;
+deleted environments remain recoverable for two days. A Briefcase test bearer
+and its Briefcase root key are both required for test-plane requests.
 
 ## Disposable testing environments
 
@@ -234,9 +265,11 @@ fails explicitly if a broken deployment repeats a cursor.
 ## Files
 
 ```bash
-briefcase mkdir notes --type private            # in your own Private folder
-briefcase mkdir handbook --type public          # in the Public container
+briefcase mkdir notes --type private            # /notes, a Private root
+briefcase mkdir handbook --type public          # /handbook, a Public root
 briefcase mkdir specs --type tag --tag engineering
+briefcase mkdir private/cos:tos/notes            # explicitly inside your folder
+briefcase mkdir public/handbook                  # explicitly inside Public
 briefcase mkdir private/cos:tos/notes/quarterly # inside an existing folder
 briefcase mkdir shared --type private --invite carbon:cos:tos=read,write
 
@@ -279,6 +312,11 @@ briefcase bin restore "$ENTRY_ID"
 
 `bin list` uses the same cursor, JSON page, and exhaustive `--all` behavior as
 `ls` and `find`.
+
+`bin restore` saves its operation key before sending. If the response is lost,
+rerun the exact command with the same profile and environment to recover that
+restore. The pending operation is cleared after success; restoring a later
+deletion uses a new key.
 
 ## Sharing
 
@@ -323,11 +361,90 @@ briefcase app upload --app-id 'tos>app-notes' ./generated.md # hidden proof prom
 briefcase app upload --app-id 'tos>app-notes' --proof-stdin ./generated.md < proof.txt
 ```
 
+`storage configure` prints its operation UUID to stderr before submitting the
+configuration. After a lost response, repeat the exact same arguments with
+`--operation-id <that-uuid>` to recover the result. A completed failed probe needs
+a new UUID after fixing the bucket or role; reusing the old UUID returns that
+failed result without running a new probe. Validation failure exits with status
+1. With `--json`, stdout still contains the single validation-status object;
+the operation ID and diagnostics go to stderr.
+
 Application IDs on client-facing operations are always canonical
 `{org_id}>{handle}`. A local handle such as `app-notes` is rejected before a
 request so it cannot silently target the wrong organization. Explicit
 `--proof "$PROOF"` remains available, but can expose the proof through the
 process list; prefer the hidden prompt or `--proof-stdin`.
+
+### Delegated application requests
+
+Applications can create folders, list entries, read files, move entries to the
+bin, and stage uploads without a saved member session. Prepare the operation's
+JSON file, then describe it locally before asking IAM for a proof:
+
+```bash
+briefcase app request folder-create --body folder.json --describe
+briefcase app request folder-create --body folder.json --app-id 'tos>app-notes'
+briefcase app request file-read --body read.json --app-id 'tos>app-notes' --output ./download.bin
+```
+
+`--describe` only reads the bounded JSON file (at most 1 MiB), validates the
+selected operation, and prints its canonical `body` string, HTTP `method`,
+`path`, IAM `endpoint_id`, `body_sha256`, and empty `metadata` object. It does
+not read profiles or credentials, contact a server, or check for updates.
+Give IAM those exact binding values, then repeat the command with the same
+JSON file and a fresh proof at the hidden prompt or through `--proof-stdin`.
+Unknown JSON fields are rejected. See the [API request schemas](../api/README.md#delegated-json-operations)
+for the body fields.
+
+The available operations are `folder-create`, `entries-list`, `file-read`,
+`entry-trash`, `upload-reserve`, `upload-commit`, `upload-status`, and
+`upload-cancel`. Each request uses fresh IAM authorization; no proof is cached
+or retried automatically. Keep a mutation's `operation_id` and body unchanged
+when obtaining a fresh proof for a retry. A file read requires `--output`
+before any proof or request is sent. Its destination appears only after the
+complete response is saved; existing paths are protected unless `--force`
+explicitly permits replacement. Ranges and download disposition belong in
+the signed JSON body, not separate request headers.
+
+### Staged application uploads
+
+Prepare a reservation before minting its short-lived proof. This local command
+hashes the file with bounded memory and prints a credential-free JSON manifest:
+
+```bash
+briefcase app prepare-upload ./recording.webm --operation-id "$OPERATION_ID" --parent-path public/recordings > reserve.json
+briefcase app request upload-reserve --body reserve.json --describe
+briefcase app request upload-reserve --body reserve.json --app-id 'tos>app-notes' --capability-file ./upload.cap
+briefcase app transfer "$UPLOAD_ID" ./recording.webm --capability-file ./upload.cap
+```
+
+Choose one stable non-nil UUID as `OPERATION_ID`; `UPLOAD_ID` is the reservation
+UUID in the response. Keep the source file unchanged between preparation and
+transfer. An empty `--parent-path` selects the member's private application
+folder. Preparation and transfer require a regular source file: use its actual
+path, not a symlink, pipe or device. `prepare-upload` needs no configured
+profile, credential, network, or update check.
+
+Reservation requires a new `--capability-file` and creates it with owner-only
+Unix permissions before consuming a proof. The capability is never included
+in ordinary JSON or terminal output, and an existing file is never replaced.
+If the request fails or the server returns no capability, that new file may remain
+empty; a local write failure may instead leave incomplete content. Reconcile
+with a fresh status proof before retrying, and use a new filename for a later
+reservation attempt. Transfer accepts
+the private file, a hidden prompt, or `--capability-stdin`. It refuses symlink
+capability files, special files, and files accessible to other users. Secret
+input is limited to 64 KiB. Capability-file handling
+requires Unix file permissions.
+
+Transfer only stores private bytes. Publish with a fresh proof for
+`upload-commit`, using a body containing the original `operation_id` and the
+returned `upload_id`. `upload-status` and `upload-cancel` take a body containing
+the original `operation_id`, also with a fresh proof. After any uncertain
+transfer or commit, reconcile with status before retrying; never infer
+publication from a completed transfer. Retain the credential-free manifest
+and status for recovery, not IAM proofs or parent tokens. Protect the capability
+file while needed and remove it when the upload is finished.
 
 ## Scripting
 
@@ -384,14 +501,16 @@ where the mismatch is known and accepted.
 
 ## Automatic updates
 
-Before an ordinary command, the installed CLI performs a best-effort crates.io
-check at most once per day. When a newer stable `briefcase-cli` exists it runs
+After an ordinary command finishes, the installed CLI performs a best-effort
+crates.io check if the last attempt was at least one hour ago. When a newer
+stable `briefcase-cli` exists it runs
 `cargo install briefcase-cli --bin briefcase --version =<version> --locked
---force`; the current command finishes on the old process and the next
-invocation uses the new binary. Update failures are warnings and never block
-the command.
+--force`; the next invocation uses the new binary. The command's output and
+exit status are preserved even if maintenance fails. Automatic maintenance
+never waits for another CLI process's updater; failed attempts are throttled
+too. The first eligible command checks when no timestamp has been saved.
 
-`login` and `app` commands deliberately skip this pre-command work. Their IAM
+`login` and `app` commands deliberately skip automatic maintenance. Their IAM
 SLTs and OBO proofs are short-lived, single-use credentials, so the CLI sends
 them immediately and defers any due update check to the next ordinary
 invocation.
@@ -404,5 +523,8 @@ BRIEFCASE_AUTO_UPDATE=off briefcase ls # process-scoped opt-out
 briefcase system update                # explicit check, ignoring the throttle
 ```
 
-The package uses a separate first-ordinary-request maintenance hook. Neither
-updater replaces code already loaded in a running process.
+The package schedules separate, best-effort hourly maintenance in the
+background after an ordinary operation completes. Download streams defer it
+until EOF, failure, or abandonment. Clients targeting the same Cargo manifest
+share the in-process throttle. Neither updater replaces code already loaded
+in a running process.

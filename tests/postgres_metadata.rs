@@ -22,9 +22,10 @@ use silicon_briefcase::{
         context::ExecutionContext,
         idempotency::IdempotencyKey,
         service::{
-            CreateFolderCommand, EntryListItem, ListEntriesQuery, MetadataRepository,
-            MetadataService, MetadataServiceError, MutationMetadata, PageRequest,
-            RequestAccessByPathCommand, SearchQuery, TokenAuthorizationQuery,
+            CreateFolderCommand, EntryListItem, GrantPermissionCommand, ListEntriesQuery,
+            MetadataRepository, MetadataRepositoryError, MetadataService, MetadataServiceError,
+            MutationMetadata, PageRequest, RequestAccessByPathCommand, RestoreBinEntryCommand,
+            RevokePermissionCommand, SearchQuery, TokenAuthorizationQuery,
         },
     },
     config::DatabaseSettings,
@@ -36,7 +37,7 @@ use silicon_briefcase::{
         entry::{EntryName, EntryPath},
         filter::FilterQuery,
         notification::NotificationKind,
-        permission::GrantedAccess,
+        permission::{AccessRight, Capability, GrantedAccess},
     },
     infrastructure::postgres::{self, PostgresRepository},
 };
@@ -742,6 +743,284 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
     .await?;
     assert_eq!(metadata_reads_after, metadata_reads_before + 1);
 
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn bin_restore_replays_require_current_authority_and_the_original_root() -> anyhow::Result<()>
+{
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let pool = postgres::connect(&settings(url), "briefcase-bin-tests").await?;
+    postgres::migrate(&pool).await?;
+    let repository = PostgresRepository::new(pool.clone());
+    let service = MetadataService::new(Arc::new(repository.clone()));
+    let organization = format!("test-bin-{}", Uuid::now_v7().simple());
+    let owner = ExecutionContext::new(
+        authorization(&organization, AuthenticationMode::Bearer),
+        "bin-owner",
+    );
+    let member = ExecutionContext::new(
+        authorization_with_role(
+            &organization,
+            VIEWER_ID,
+            OrganizationRole::Member,
+            AuthenticationMode::Bearer,
+        ),
+        "bin-member",
+    );
+    let roots_query = ListEntriesQuery {
+        parent_id: None,
+        filter: None,
+        page: PageRequest::new(None, 100)?,
+    };
+    let roots = repository
+        .list_active_children(&owner, &roots_query)
+        .await?;
+    repository
+        .list_active_children(&member, &roots_query)
+        .await?;
+    let public = roots
+        .items
+        .iter()
+        .find(|entry| entry.entry.name.as_str() == "public")
+        .ok_or_else(|| anyhow::anyhow!("public root must exist"))?
+        .entry
+        .id;
+    let folder = service
+        .create_folder(
+            &owner,
+            CreateFolderCommand::new(
+                EntryName::new("restore-root")?,
+                Some(public),
+                None,
+                Vec::new(),
+            )?,
+            &MutationMetadata::new(None, [1; 32]),
+        )
+        .await?;
+    let child = service
+        .create_folder(
+            &owner,
+            CreateFolderCommand::new(
+                EntryName::new("restore-child")?,
+                Some(folder.entry.id),
+                None,
+                Vec::new(),
+            )?,
+            &MutationMetadata::new(None, [2; 32]),
+        )
+        .await?;
+    let grant = service
+        .grant_permission(
+            &owner,
+            &GrantPermissionCommand {
+                entry_id: folder.entry.id,
+                principal: member.authorization().actor().clone(),
+                access: GrantedAccess::new([AccessRight::Update]),
+                inherits_to_descendants: true,
+            },
+            &MutationMetadata::new(None, [3; 32]),
+        )
+        .await?;
+    service
+        .soft_delete_entry(
+            &owner,
+            folder.entry.id,
+            &MutationMetadata::new(None, [4; 32]),
+        )
+        .await?;
+    let restore = MutationMetadata::new(
+        Some(IdempotencyKey::new("restore-root".to_owned())?),
+        [5; 32],
+    );
+    assert!(matches!(
+        repository
+            .restore_bin_entry(
+                &member,
+                child.entry.id,
+                &restore,
+                Capability::UpdateMetadata
+            )
+            .await,
+        Err(MetadataRepositoryError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .restore_bin_entry(
+                &member,
+                RestoreBinEntryCommand {
+                    entry_id: child.entry.id
+                },
+                &restore
+            )
+            .await,
+        Err(MetadataServiceError::NotFound)
+    ));
+
+    let command = RestoreBinEntryCommand {
+        entry_id: folder.entry.id,
+    };
+    let first = service
+        .restore_bin_entry(&member, command, &restore)
+        .await?;
+    let replay = service
+        .restore_bin_entry(&member, command, &restore)
+        .await?;
+    assert_eq!(
+        first, replay,
+        "a completed keyed restore is replayable through the service"
+    );
+    assert!(
+        repository
+            .find_active_entry(&owner, child.entry.id)
+            .await?
+            .is_some()
+    );
+    let restoration_count = repository
+        .list_entry_activity(&owner, folder.entry.id)
+        .await?
+        .iter()
+        .filter(|event| event.action == "entry.subtree_restored.v1")
+        .count();
+    assert_eq!(
+        restoration_count, 1,
+        "a replay must not repeat restore/audit effects"
+    );
+    assert!(matches!(
+        service
+            .restore_bin_entry(&member, command, &MutationMetadata::new(None, [5; 32]))
+            .await,
+        Err(MetadataServiceError::NotFound)
+    ));
+    let changed_intent = MutationMetadata::new(restore.idempotency_key.clone(), [6; 32]);
+    assert!(matches!(
+        service
+            .restore_bin_entry(&member, command, &changed_intent)
+            .await,
+        Err(MetadataServiceError::Conflict)
+    ));
+    assert!(
+        matches!(
+            service.restore_bin_entry(&owner, command, &restore).await,
+            Err(MetadataServiceError::Conflict)
+        ),
+        "another actor cannot use the completed claim"
+    );
+    let application_member = ExecutionContext::new(
+        authorization_with_role(
+            &organization,
+            VIEWER_ID,
+            OrganizationRole::Member,
+            AuthenticationMode::OnBehalfOf {
+                application_id: ApplicationId::new(APPLICATION_ID)?,
+            },
+        ),
+        "bin-application-member",
+    );
+    assert!(
+        matches!(
+            service
+                .restore_bin_entry(&application_member, command, &restore)
+                .await,
+            Err(MetadataServiceError::Conflict)
+        ),
+        "an originating application has a separate idempotency authority"
+    );
+    let other = service
+        .create_folder(
+            &member,
+            CreateFolderCommand::new(
+                EntryName::new("other-root")?,
+                Some(public),
+                None,
+                Vec::new(),
+            )?,
+            &MutationMetadata::new(None, [7; 32]),
+        )
+        .await?;
+    assert!(
+        matches!(
+            service
+                .restore_bin_entry(
+                    &member,
+                    RestoreBinEntryCommand {
+                        entry_id: other.entry.id
+                    },
+                    &restore,
+                )
+                .await,
+            Err(MetadataServiceError::Conflict)
+        ),
+        "even an identical supplied fingerprint cannot replay a different resource"
+    );
+
+    service
+        .soft_delete_entry(
+            &owner,
+            folder.entry.id,
+            &MutationMetadata::new(None, [8; 32]),
+        )
+        .await?;
+    assert!(
+        matches!(
+            service.restore_bin_entry(&member, command, &restore).await,
+            Err(MetadataServiceError::Conflict)
+        ),
+        "an old successful restore must not undo a later deletion"
+    );
+    assert!(
+        repository
+            .find_bin_entry(&owner, folder.entry.id)
+            .await?
+            .is_some()
+    );
+    let fresh_restore = MutationMetadata::new(
+        Some(IdempotencyKey::new("restore-again".to_owned())?),
+        [9; 32],
+    );
+    service
+        .restore_bin_entry(&member, command, &fresh_restore)
+        .await?;
+    service
+        .revoke_permission(
+            &owner,
+            RevokePermissionCommand {
+                entry_id: folder.entry.id,
+                grant_id: grant.id(),
+            },
+            &MutationMetadata::new(None, [10; 32]),
+        )
+        .await?;
+    assert!(
+        matches!(
+            service
+                .restore_bin_entry(&member, command, &fresh_restore)
+                .await,
+            Err(MetadataServiceError::Forbidden {
+                required: Capability::UpdateMetadata
+            })
+        ),
+        "a completed key cannot preserve revoked restore rights"
+    );
+    assert!(
+        matches!(
+            repository
+                .restore_bin_entry(
+                    &member,
+                    folder.entry.id,
+                    &fresh_restore,
+                    Capability::UpdateMetadata,
+                )
+                .await,
+            Err(MetadataRepositoryError::Conflict)
+        ),
+        "the locked repository path must also recheck current rights"
+    );
     pool.close().await;
     Ok(())
 }

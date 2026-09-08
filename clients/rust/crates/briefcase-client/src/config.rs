@@ -367,6 +367,42 @@ impl Config {
                 "organization must not be empty".into(),
             ));
         }
+        Self::build(base_url, organization)
+    }
+
+    /// Configures an organisation-free account sign-in.
+    ///
+    /// This client can exchange and refresh unscoped IAM sessions and read
+    /// service status. Organisation API calls are rejected locally. Create a
+    /// separate scoped configuration after choosing an authorised workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] for an invalid or insecure API URL.
+    pub fn for_sign_in(base_url: &str) -> Result<Self, Error> {
+        Self::build(base_url, String::new())
+    }
+
+    /// Selects an organization on an existing configuration while preserving
+    /// its deployment, testing environment, credential, and timeouts.
+    ///
+    /// This is the safe way to switch workspaces after an unscoped IAM login;
+    /// it does not mint or replace the bearer credential.
+    ///
+    /// # Errors
+    /// Returns [`Error::Configuration`] if the organization is empty.
+    pub fn with_organization(mut self, organization: impl Into<String>) -> Result<Self, Error> {
+        let organization = organization.into();
+        if organization.trim().is_empty() {
+            return Err(Error::Configuration(
+                "organization must not be empty".into(),
+            ));
+        }
+        self.organization = organization;
+        Ok(self)
+    }
+
+    fn build(base_url: &str, organization: String) -> Result<Self, Error> {
         let normalized = if base_url.ends_with('/') {
             base_url.to_owned()
         } else {
@@ -494,7 +530,7 @@ impl Config {
         self
     }
 
-    /// Returns the organization every request is scoped to.
+    /// Returns the selected organization, or an empty string for sign-in-only clients.
     #[must_use]
     pub fn organization(&self) -> &str {
         &self.organization

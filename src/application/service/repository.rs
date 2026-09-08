@@ -82,11 +82,11 @@ pub trait MetadataRepository: Send + Sync {
         entry_id: EntryId,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
-    /// Loads the reserved container a boundary's content belongs in.
+    /// Loads the reserved container used to check typed-root creation authority.
     ///
     /// Public and Tag resolve to their own container; Private resolves to the
     /// caller's own folder inside it, never to the shared Private container.
-    /// Resolution is a lookup: the caller still evaluates domain policy, which
+    /// This container is not the new root's parent. The caller evaluates policy,
     /// is what keeps a tag the caller does not carry out of reach.
     async fn find_boundary_container(
         &self,
@@ -141,6 +141,10 @@ pub trait MetadataRepository: Send + Sync {
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
 
     /// Atomically marks a complete subtree recoverable for 45 days.
+    ///
+    /// A keyed retry may recognize an already recoverable root only after
+    /// current root/subtree authorization and an exact completed claim match.
+    /// An old successful key must not delete a subsequently restored entry.
     async fn soft_delete_entry(
         &self,
         context: &ExecutionContext,
@@ -226,7 +230,9 @@ pub trait MetadataRepository: Send + Sync {
         entry_id: EntryId,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
-    /// Atomically restores a retained subtree, applying deterministic fallback naming.
+    /// Atomically restores a retained deletion-batch root with fallback naming.
+    /// Replays require the same authority, request and resource binding, plus
+    /// current capability checked under the mutation lock; they add no effects.
     async fn restore_bin_entry(
         &self,
         context: &ExecutionContext,

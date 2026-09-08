@@ -8,17 +8,20 @@ Its Briefcase behavior is **stateless**. It holds no login session or API cache:
 a `Config` goes in, a `Client` comes out, and access/refresh tokens or
 environment UUID-to-key mappings that survive between runs belong to the
 calling program. The one intentionally process-external behavior is dependency
-maintenance: by default a first ordinary request performs a best-effort
-crates.io check and may advance `briefcase-client` in the nearest consuming
-`Cargo.lock`.
+maintenance: after an ordinary operation completes, an hourly best-effort
+background check may advance `briefcase-client` in the consuming `Cargo.lock`.
+This changes the next build, not the running program.
 
 ```toml
 [dependencies]
-briefcase-client = "0.1"
+briefcase-client = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 See the [documentation index](../README.md) and [paired testing-environment guide](../testing-environments.md). Production Briefcase's canonical IAM ID is `tos>briefcase`; example member paths elsewhere in this guide must be replaced with real IAM public IDs.
+
+This guide targets client 0.2 and API contract 0.5. Read the
+[0.2 migration guide](../migration-0.2.md) when upgrading from 0.1.
 
 ## Connecting
 
@@ -63,25 +66,26 @@ A `Client` is cheap to clone and shares one connection pool, so build it once.
 ## IAM short-lived-token login
 
 Do not collect a Carbon/Silicon password, OTP, or the Briefcase IAM Application
-secret. Obtain an organization-bound IAM short-lived token (SLT) minted for
-Briefcase's canonical `{org_id}>{handle}` Application ID and give only that
-one-use value to the Briefcase backend. With the IAM CLI, select the same
-organization passed to `Config::new`:
+secret. Obtain an IAM short-lived token (SLT) minted for Briefcase's canonical
+`{org_id}>{handle}` Application ID and give only that one-use value to the
+Briefcase backend. The normal login is unscoped; omit the organization in IAM
+to receive all reachable organizations in `SessionTokens::organizations`:
 
 ```bash
-iam --org tos login --app-id 'tos>briefcase'
+iam --no-org login --app-id 'tos>briefcase'
 ```
 
 ```rust
 use briefcase_client::{Client, Config};
 
 let anonymous = Client::connect(
-    Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
+    Config::for_sign_in("https://backend.briefcase.teamofsilicons.com/api/v1/")?
 ).await?;
 let tokens = anonymous.login_with_slt(&slt).await?;
 
 let signed_in = Client::connect(
-    Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
+    Config::for_sign_in("https://backend.briefcase.teamofsilicons.com/api/v1/")?
+        .with_organization("tos")?
         .with_token(tokens.access_token.clone()),
 ).await?;
 
@@ -95,9 +99,11 @@ An SLT lasts two minutes and is single-use. A successful refresh rotates the
 refresh token, so persist the returned pair before doing later work. The
 Application secret used to exchange/introspect with IAM is configured only on
 the Briefcase backend and is absent from every client method and response.
-The package rejects an exchange or refresh response whose `org_id` is missing
-or differs from the organization in `Config`, before returning either token to
-the caller.
+The package rejects a scoped exchange or refresh response whose `org_id` is
+missing or differs from the organization in `Config`, before returning either
+token to the caller. An unscoped configuration accepts `org_id: null` and
+returns the live organization list; Briefcase still reevaluates membership on
+every organization-scoped request.
 For crash-safe retries, use `login_with_slt_with_key` or
 `refresh_session_with_key`, persist the 16–255-byte `IdempotencyKey` beside the
 credential before sending, and reuse that exact pair after an uncertain
@@ -189,15 +195,25 @@ Use the [read-only sandbox example](examples/sandbox.rs) with a test bearer and 
 
 ## Automatic package maintenance
 
-On the first ordinary request for a client (clones share the result), it checks
-crates.io with a short timeout. Contract negotiation and IAM SLT, refresh, and
-OBO exchanges deliberately defer maintenance: their short-lived or one-use
-credentials are sent immediately, and the next ordinary request performs the
-due check. If a newer stable `briefcase-client` exists and a consuming
-`Cargo.toml` can be found, it runs an exact `cargo update -p briefcase-client
---precise <version>`; the current process keeps its compiled version and the
-next build uses the updated lockfile. Network/Cargo failures never fail the API
-request and are visible through `client.update_status()`.
+After an ordinary operation completes, the package starts a due crates.io
+check in the background with a short timeout. Checks run at most hourly;
+clones and separately constructed clients share the throttle for the same
+canonical Cargo manifest within a process. An attempt is recorded before work
+starts, so failures do not trigger a check after every request and concurrent
+calls cannot overlap an update.
+
+Streaming reads defer maintenance until EOF, a stream error or drop; file
+downloads wait through the final flush. Contract negotiation, IAM SLT/refresh
+exchanges and every delegated proof/capability operation never trigger it.
+There is no timer that runs without completed ordinary operations, and a
+short-lived process may exit before background maintenance completes.
+
+If a newer stable `briefcase-client` exists and a consuming `Cargo.toml` can be
+found, it runs an exact `cargo update -p briefcase-client --precise <version>`
+off the asynchronous request executor. The current process keeps its compiled
+version and the next build uses the updated lockfile. Network/Cargo failures
+never change the API result and are visible through `client.update_status()`;
+while a check runs, that method returns the preceding result.
 
 ```rust
 let managed = Config::new(base, org)?
@@ -284,8 +300,8 @@ the same durable form as `restore_version_with_key`.
 ```rust
 use briefcase_client::{AccessRight, ActorRef, NewFolder, NewGrant, RootType};
 
-// At the organization base, a declared kind chooses the container: Public,
-// the caller's own folder inside Private, or that tag's folder.
+// Creates /notes at the organization base with a Private access boundary.
+// Use NewFolder::in_folder for an explicit destination inside a container.
 let notes = client
     .create_folder(&NewFolder::at_base("notes", RootType::Private))
     .await?;
@@ -324,12 +340,23 @@ For a caller-managed crash retry, attach a persisted key with
 `NewFolder::with_idempotency_key`, and use `update_entry_with_key` for rename or
 move. Reuse both the same key and the same request after an uncertain result.
 
+Use `restore_from_bin_with_key(entry_id, &key)` to recover an uncertain Bin
+restore. Persist the key before sending and reuse it for that same deletion
+cycle. A later deletion requires a new key; the backend rejects attempts to
+reuse a completed restore key for a different deletion. `restore_from_bin`
+generates a fresh key for each call.
+
 The rights are independent. `write` adds content that is not there yet;
 `update` changes content that is; neither implies `delete`. Granting a member
 who already holds a grant amends it in place, so widening access never has to
 pass through a revocation.
 
 ## Reading the answers
+
+When a byte-range read returns `416`, `ApiError::unsatisfied_range_length`
+contains the file length reported by `Content-Range: bytes */N`, if the server
+provided it. Use this response metadata rather than an earlier file-size lookup
+when recovering a download after a concurrent update.
 
 ```rust
 match client.entry_at(path).await {
@@ -351,8 +378,80 @@ branches, and `retry_after` carries the delay a spent allowance names.
 
 ## Applications
 
-An application never uses the bearer surface. It obtains a single-use proof
-from IAM over the exact bytes it is about to send, and calls one operation:
+Applications use fresh IAM proofs for the represented member, never a
+Browser-bound or other application-bound bearer on the ordinary Briefcase API.
+The API, SDK and CLI surfaces are listed in the
+[operation map](../api/operations.md). No delegated SDK call automatically
+retries, sends the configured bearer, stores a session or runs maintenance.
+
+### Exact-JSON operations
+
+Prepare a typed manifest before asking IAM to issue its single-use proof:
+
+```rust
+use briefcase_client::{ApplicationId, DelegatedCreateFolder, OboProof};
+
+let manifest = DelegatedCreateFolder {
+    operation_id, // retain this non-nil UUID with the unchanged logical request
+    parent_path: String::new(), // the represented member's private app folder
+    name: "recordings".into(),
+}.prepare()?;
+
+// Obtain fresh_proof from IAM with the caller application's own credentials
+// and current initiating member authority. Bind manifest.endpoint_id(),
+// method(), path(), body_sha256() and empty metadata {}. The SDK sends
+// manifest.body_bytes() unchanged, not a second serialization.
+let folder = client.create_folder_on_behalf_of(
+    &ApplicationId::new("tos>browser")?,
+    OboProof::new(fresh_proof)?,
+    &manifest,
+).await?;
+```
+
+`DelegatedListEntries` binds the parent, filter, cursor and limit;
+`DelegatedReadFile` binds the file UUID, optional range and download flag;
+`DelegatedTrashEntry` binds the entry UUID and logical operation UUID. Each
+has the same `prepare()` interface. File reads return `ContentStream`. Each
+new listing page or different read range needs a newly prepared manifest and
+proof. Trash requires both the represented member's delete permission and the
+originating application's authority over the content it created.
+
+After an uncertain create/trash response, preserve the exact manifest and
+operation UUID but obtain a fresh proof before retrying. Current permissions
+are checked before logical replay. `OboProof` is redacted, non-cloneable and
+non-serializable, and is consumed by the call.
+
+### Staged uploads and recovery
+
+For a long or recoverable upload, use the [staged-upload protocol](../api/delegated-uploads.md):
+
+1. `DelegatedReserveUpload::file(operation_id, parent_path, local_path).await?`
+   hashes a regular file with bounded memory. Retain that manifest and keep the
+   source unchanged. Call `prepare()` before minting its reserve proof.
+2. `reserve_delegated_upload(&app_id, proof, &manifest)` returns the durable
+   status and, only while idle/reserved, a narrow `UploadCapability`.
+3. `transfer_delegated_upload(upload_id, capability, &source)` sends
+   `UploadSource::File` or `UploadSource::Bytes` using only the capability and
+   the configured organization/plane. The server verifies the complete size
+   and digest; this does not publish the file.
+4. Prepare `DelegatedCommitUpload { operation_id, upload_id }`, obtain another
+   fresh proof, and call `commit_delegated_upload`. It publishes the existing
+   staged object after current identity, destination permissions and quota
+   pass. Successful logical retries do not create another version.
+
+Use `DelegatedUploadQuery` with `delegated_upload_status` after an uncertain
+result, and `DelegatedCancelUpload` with `cancel_delegated_upload` to abandon
+an unpublished operation. Each control request requires its own fresh proof.
+Status/cancel remain available to the same immutable member/application/plane
+after destination write access is lost, but never disclose a capability or
+file contents. A fresh reserve can rotate an idle capability, not extend its
+original deadline. Capabilities are secret, non-cloneable, non-serializable
+and consumed by transfer; persist one only in caller-owned secure storage if
+needed. Do not save an IAM proof or authorization snapshot as an outbox grant.
+
+### One-shot uploads
+
+The existing small, immediate raw-body operation remains available:
 
 ```rust
 use briefcase_client::OnBehalfOfUpload;
@@ -362,11 +461,34 @@ let entry = client
     .await?;
 ```
 
-The destination, name, and media type travel inside the proof rather than in
+For this one-shot operation, the destination, name, and media type travel inside the proof rather than in
 the request, so an application cannot redirect a proof it legitimately
 obtained. The client never sends its own bearer token here, because presenting
 both credentials at once is a request error. A refused proof must never be
-retried: IAM consumes it exactly once.
+retried: IAM consumes it exactly once. Body staging must finish while the
+proof and its parent authorization are still valid. After an uncertain
+one-shot result, a new proof is not an idempotent retry; use the staged protocol
+when durable recovery is needed.
+
+## Organisation-owned storage
+
+Pass a `BucketConfiguration` to `configure_storage` to validate and activate an
+organisation-owned S3 bucket. This is an owner/authorised-administrator operation.
+The configuration contains the bucket, region, assumed-role ARN, prefix, AWS
+account ID, encryption mode, and (for SSE-KMS) KMS key ARN. It never contains AWS
+access keys or IAM application secrets.
+
+For recoverable configuration changes, use
+`configure_storage_with_key(&configuration, &operation_key)`. Retain the
+`IdempotencyKey` with the exact configuration before sending, then reuse both
+after a lost response. The SDK's ordinary `configure_storage` method generates a
+fresh key for that call.
+
+Inspect `BucketConfigurationStatus.status`: `Configured` means the probe and
+activation completed; `Failed` means the previous configuration remains selected.
+A completed failed probe is replayed by its key. After fixing the external bucket
+or role, use a new key to run validation again. Existing file versions retain their
+recorded storage location; subsequent versions use the activated configuration.
 
 ## Everything else
 
@@ -383,9 +505,11 @@ retried: IAM consumes it exactly once.
 | Inbox | `notifications`, `mark_notifications_read` |
 | History | `activity` |
 | Search | `search` |
-| Bin | `bin`, `restore_from_bin` |
+| Bin | `bin`, `restore_from_bin`, `restore_from_bin_with_key` |
 | Consumption | `usage` |
-| Organization storage | `configure_storage` |
-| Applications | `create_file_on_behalf_of` |
+| Organization storage | `configure_storage`, `configure_storage_with_key` |
+| Delegated JSON | `create_folder_on_behalf_of`, `list_entries_on_behalf_of`, `read_file_on_behalf_of`, `trash_entry_on_behalf_of` |
+| Delegated uploads | `reserve_delegated_upload`, `transfer_delegated_upload`, `commit_delegated_upload`, `delegated_upload_status`, `cancel_delegated_upload` |
+| One-shot delegated upload | `create_file_on_behalf_of` |
 | IAM SLT session | `login_with_slt`, `refresh_session` |
 | Testing environments | `testing_environments`, `create_testing_environment`, lifecycle/key/self methods |

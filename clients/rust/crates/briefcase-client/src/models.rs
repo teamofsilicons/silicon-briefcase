@@ -551,7 +551,7 @@ pub enum EncryptionMode {
 }
 
 /// An organization-owned S3 bucket to store its files in.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BucketConfiguration {
     /// Bucket name.
     pub bucket_name: String,
@@ -740,6 +740,10 @@ pub struct SessionTokens {
     pub actor: SessionActor,
     /// Organization selected for this session.
     pub org_id: Option<String>,
+    /// Organizations currently reachable by this session. An unscoped login
+    /// can reach several organizations; a scoped login contains one.
+    #[serde(default)]
+    pub organizations: Vec<String>,
 }
 
 /// IAM actor represented by a Briefcase Application session.
@@ -765,6 +769,7 @@ impl std::fmt::Debug for SessionTokens {
             .field("scope", &self.scope)
             .field("actor", &self.actor)
             .field("org_id", &self.org_id)
+            .field("organizations", &self.organizations)
             .finish()
     }
 }

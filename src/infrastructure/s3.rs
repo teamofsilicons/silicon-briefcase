@@ -1,6 +1,10 @@
 //! AWS S3 object-storage adapter.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use aws_config::{SdkConfig, sts::AssumeRoleProvider};
@@ -16,6 +20,7 @@ use aws_sdk_s3::{
 use aws_sdk_sts::Client as StsClient;
 use aws_smithy_types::{
     byte_stream::{ByteStream, Length},
+    retry::RetryConfig,
     timeout::TimeoutConfig,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -46,9 +51,23 @@ use crate::{
 };
 
 const MAXIMUM_CACHED_CLIENTS: usize = 128;
+const MULTIPART_DISCOVERY_PAGE_SIZE: i32 = 100;
+const MAXIMUM_MULTIPART_DISCOVERY_PAGES: usize = 10;
+const MAXIMUM_MULTIPART_DISCOVERY_UPLOADS: usize = 1000;
 const COPY_OBJECT_MAX_BYTES: u64 = 5 * 1_073_741_824;
 const VALIDATION_CONTENT: &[u8] = b"silicon-briefcase-storage-validation-v1";
 const UPDATED_VALIDATION_CONTENT: &[u8] = b"silicon-briefcase-storage-validation-v2";
+
+/// Override only non-idempotent object writes, not the shared S3 client.
+///
+/// A lost acknowledgement may already have created an object version or a
+/// multipart session. Replaying that request inside the SDK can create another
+/// resource whose identity never reaches our durable cleanup ledger. Let the
+/// application reconcile the one uncertain attempt instead. Reads and writes
+/// to an exact existing multipart part retain their normal retry behavior.
+fn one_provider_write_attempt() -> aws_sdk_s3::config::Builder {
+    aws_sdk_s3::config::Builder::new().retry_config(RetryConfig::disabled())
+}
 
 fn sha256_checksum(
     value: &str,
@@ -725,6 +744,8 @@ impl ObjectStore for S3ObjectStore {
             .checksum_sha256(&encoded_checksum)
             .body(body);
         let output = Self::apply_encryption_to_put(request, target)
+            .customize()
+            .config_override(one_provider_write_attempt())
             .send()
             .await
             .map_err(|_| ObjectStoreError::Unavailable)?;
@@ -1066,6 +1087,8 @@ impl ObjectStore for S3ObjectStore {
             .checksum_algorithm(ChecksumAlgorithm::Sha256)
             .checksum_type(ChecksumType::Composite);
         let output = Self::apply_encryption_to_create_multipart(request, target)
+            .customize()
+            .config_override(one_provider_write_attempt())
             .send()
             .await
             .map_err(|_| ObjectStoreError::Unavailable)?;
@@ -1162,6 +1185,8 @@ impl ObjectStore for S3ObjectStore {
             .key(Self::full_key(target, key))
             .upload_id(provider_upload_id)
             .multipart_upload(completed_upload)
+            .customize()
+            .config_override(one_provider_write_attempt())
             .send()
             .await
             .map_err(|_| ObjectStoreError::Unavailable)?;
@@ -1217,6 +1242,120 @@ impl ObjectStore for S3ObjectStore {
                     .is_some_and(|code| matches!(code, "NoSuchUpload" | "NoSuchKey")) =>
             {
                 Ok(())
+            }
+            Err(_) => Err(ObjectStoreError::Unavailable),
+        }
+    }
+
+    async fn list_multipart_uploads_for_key(
+        &self,
+        target: &StorageTarget,
+        key: &ObjectKey,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        let clients = self.clients(target).await?;
+        let full_key = Self::full_key(target, key);
+        let mut key_marker = None;
+        let mut upload_id_marker = None;
+        let mut found = BTreeSet::new();
+        let mut scanned = 0_usize;
+        for _ in 0..MAXIMUM_MULTIPART_DISCOVERY_PAGES {
+            let output = clients
+                .s3
+                .list_multipart_uploads()
+                .bucket(&target.bucket)
+                .prefix(&full_key)
+                .max_uploads(MULTIPART_DISCOVERY_PAGE_SIZE)
+                .set_key_marker(key_marker.clone())
+                .set_upload_id_marker(upload_id_marker.clone())
+                .send()
+                .await
+                .map_err(|_| ObjectStoreError::Unavailable)?;
+            scanned = scanned
+                .checked_add(output.uploads().len())
+                .filter(|count| *count <= MAXIMUM_MULTIPART_DISCOVERY_UPLOADS)
+                .ok_or(ObjectStoreError::Unavailable)?;
+            for upload in output.uploads() {
+                let listed_key = upload.key().ok_or(ObjectStoreError::Unavailable)?;
+                // S3 supports prefix filtering, not exact-key filtering. Never
+                // return a neighbouring object's session to the cleanup caller.
+                if listed_key == full_key {
+                    let id = upload
+                        .upload_id()
+                        .filter(|id| !id.is_empty())
+                        .ok_or(ObjectStoreError::Unavailable)?;
+                    found.insert(id.to_owned());
+                }
+            }
+            match output.is_truncated() {
+                Some(false) => return Ok(found.into_iter().collect()),
+                Some(true) => {}
+                None => return Err(ObjectStoreError::Unavailable),
+            }
+            if scanned >= MAXIMUM_MULTIPART_DISCOVERY_UPLOADS {
+                return Err(ObjectStoreError::Unavailable);
+            }
+            // Both markers are required for general-purpose bucket pagination
+            // when multiple sessions share a key. Missing or stuck markers must
+            // not silently skip an orphan and allow its ledger to be removed.
+            let next_key = output
+                .next_key_marker()
+                .filter(|value| !value.is_empty())
+                .ok_or(ObjectStoreError::Unavailable)?;
+            let next_upload = output
+                .next_upload_id_marker()
+                .filter(|value| !value.is_empty())
+                .ok_or(ObjectStoreError::Unavailable)?;
+            if key_marker.as_deref() == Some(next_key)
+                && upload_id_marker.as_deref() == Some(next_upload)
+            {
+                return Err(ObjectStoreError::Unavailable);
+            }
+            key_marker = Some(next_key.to_owned());
+            upload_id_marker = Some(next_upload.to_owned());
+        }
+        Err(ObjectStoreError::Unavailable)
+    }
+
+    async fn multipart_upload_is_empty(
+        &self,
+        target: &StorageTarget,
+        key: &ObjectKey,
+        provider_upload_id: &str,
+    ) -> Result<bool, ObjectStoreError> {
+        let clients = self.clients(target).await?;
+        let full_key = Self::full_key(target, key);
+        let result = clients
+            .s3
+            .list_parts()
+            .bucket(&target.bucket)
+            .key(&full_key)
+            .upload_id(provider_upload_id)
+            .max_parts(1)
+            .send()
+            .await;
+        match result {
+            Ok(output) => {
+                if output.key() != Some(full_key.as_str())
+                    || output.upload_id() != Some(provider_upload_id)
+                {
+                    return Err(ObjectStoreError::Unavailable);
+                }
+                if !output.parts().is_empty() {
+                    return Ok(false);
+                }
+                match output.is_truncated() {
+                    Some(false) => Ok(true),
+                    Some(true) => Ok(false),
+                    None => Err(ObjectStoreError::Unavailable),
+                }
+            }
+            Err(error)
+                if error
+                    .as_service_error()
+                    .and_then(|inner| inner.meta().code())
+                    .is_some_and(|code| code == "NoSuchUpload") =>
+            {
+                Ok(true)
             }
             Err(_) => Err(ObjectStoreError::Unavailable),
         }

@@ -7,7 +7,7 @@ file bytes in S3-compatible object storage.
 
 The product contract lives in [UNDERSTANDING.md](./UNDERSTANDING.md) and the
 public API in [openapi.yaml](./openapi.yaml). Start with the segregated
-[API, Rust-client, CLI, and testing guides](./docs/README.md).
+[API, Rust-client, CLI, and testing guides](./docs/).
 UNDERSTANDING.md is the product source of truth; the guides describe the API,
 client, CLI, and deployment behavior.
 
@@ -76,19 +76,22 @@ or accepted from a client.
   filter expression combines every documented predicate with `and`, `or`,
   `not`, and grouping. It is parsed in the domain, compiled to parameterized
   SQL, and its `permissions:` predicate is decided by domain policy.
-- **One application endpoint.** `POST /obo/files` creates a file for a
-  represented member, taking its destination from IAM-bound proof metadata and
-  defaulting to `private/{actor}/apps/{app_id}`.
+- **Delegated application operations.** Fresh IAM proofs authorize folder
+  creation, listing, reading, trash and upload control for a represented member.
+  [Staged uploads](docs/api/delegated-uploads.md) separate private byte transfer
+  from fresh-authorized publication and support logical-operation recovery.
+  The one-shot `POST /obo/files` remains available for small immediate uploads.
+  Empty destinations default to `private/{actor}/apps/{app_id}`.
 
 ## Clients
 
-- **Rust:** [`briefcase-client`](../briefcase-client-rust) is the official
+- **Rust:** [`briefcase-client`](clients/rust/crates/briefcase-client) is the official
   client crate. It negotiates the API version and verifies every operation's
   revision against this build before its first call, so an incompatible pairing
   fails at startup rather than mid-request.
 - **Command line:** `briefcase`, in the same repository, is built on that crate
   and exposes the same operations to a shell. It has no capability the crate
-  lacks; what it adds is a saved profile, a token stored under `~/.briefcase/`,
+lacks; what it adds is a saved profile, a token stored under `{home_dir}/.briefcase/` (default `$HOME`),
   `--json` output, and exit codes a script can branch on.
 
 Any client can do the same by reading `GET /api/version`, which names the
@@ -231,15 +234,17 @@ BRIEFCASE_TEST_S3_BUCKET=briefcase-local cargo test --test s3_object_store
 
 ## Security model
 
-Every protected request is bound to a current IAM membership and an
-`X-Org-ID`. The contracted API is a bearer surface; an application acts only
-through `POST /obo/files`, where IAM binds the proof to the exact method,
-registered path, and body digest, consumes it once, and is never retried.
+Ordinary protected requests use a current IAM membership and `X-Org-ID`.
+Applications use the documented `/obo/` operations, where IAM binds a fresh
+proof to the exact method, registered path and body digest. A proof is consumed
+once and is never automatically retried. The staged byte-transfer route instead
+accepts a narrow, organization/plane-bound upload capability; that capability
+cannot read or publish a file. Publication requires a separate fresh IAM proof.
 Entry IDs and permanent URLs are not capabilities: authorization is reevaluated
 for browsing, filtering, direct reads, downloads, search, versions, and bin
 access, and an entry the caller may not read is reported as missing.
 
-Briefcase imports official `silicon-iam-client = "=1.2.0"` from crates.io;
+Briefcase imports official `silicon-iam-client = "=1.3.0"` from crates.io;
 all IAM calls use its typed APIs, with runtime auto-updates disabled. It
 negotiates IAM API `v1` at startup. Bearer and OBO authorization come from
 current online snapshots, cross-bound to identity, membership, audience and

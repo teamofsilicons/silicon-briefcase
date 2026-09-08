@@ -1960,6 +1960,36 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         assert_eq!(deleted.version, deleted_replay.version);
         assert_eq!(deleted.deleted_at, deleted_replay.deleted_at);
         assert_eq!(deleted.status, TestingEnvironmentStatus::Deleted);
+        let recovery_window = deleted
+            .purge_after
+            .zip(deleted.deleted_at)
+            .map(|(purge_after, deleted_at)| purge_after - deleted_at)
+            .ok_or_else(|| anyhow::anyhow!("retirement must record its recovery deadline"))?;
+        assert!(
+            recovery_window >= time::Duration::days(2)
+                && recovery_window < time::Duration::days(2) + time::Duration::seconds(1),
+            "a new retirement receives a two-day recovery window"
+        );
+        // Model a retained row from the former policy. The worker must honor
+        // its persisted deadline instead of deriving a new one from deleted_at.
+        let retained_deadline = sqlx::query_scalar::<_, time::OffsetDateTime>(
+            "UPDATE briefcase.testing_environments \
+                SET deleted_at = clock_timestamp() - INTERVAL '3 days', \
+                    purge_after = clock_timestamp() + INTERVAL '27 days' \
+              WHERE environment_id = $1 RETURNING purge_after",
+        )
+        .bind(environment_a.environment.id)
+        .fetch_one(&production)
+        .await?;
+        maintain_testing_environments(&production, &data, object_store.as_ref()).await?;
+        let retained = sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+            "SELECT status, purge_after FROM briefcase.testing_environments \
+              WHERE environment_id = $1",
+        )
+        .bind(environment_a.environment.id)
+        .fetch_one(&production)
+        .await?;
+        assert_eq!(retained, ("deleted".to_owned(), retained_deadline));
         assert!(matches!(
             store
                 .resolve_root_key(&SecretString::from(rotated.key.clone()))
@@ -2024,7 +2054,23 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
             .await?;
         sqlx::query(
             "UPDATE briefcase.testing_environments \
-                SET last_activity_at = clock_timestamp() - INTERVAL '31 days' \
+                SET last_activity_at = clock_timestamp() - INTERVAL '23 hours' \
+              WHERE environment_id = $1",
+        )
+        .bind(environment_c.environment.id)
+        .execute(&production)
+        .await?;
+        maintain_testing_environments(&production, &data, object_store.as_ref()).await?;
+        let still_active = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM briefcase.testing_environments WHERE environment_id = $1",
+        )
+        .bind(environment_c.environment.id)
+        .fetch_one(&production)
+        .await?;
+        assert_eq!(still_active, "active", "less than one idle day is retained");
+        sqlx::query(
+            "UPDATE briefcase.testing_environments \
+                SET last_activity_at = clock_timestamp() - INTERVAL '25 hours' \
               WHERE environment_id = $1",
         )
         .bind(environment_c.environment.id)
@@ -2052,13 +2098,21 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         use_fence_c.release().await?;
         let (retired_count, _) = retire_task.await??;
         assert!(retired_count >= 1);
-        let retired_status = sqlx::query_scalar::<_, String>(
-            "SELECT status FROM briefcase.testing_environments WHERE environment_id = $1",
+        let (retired_status, retired_at, retired_deadline) =
+            sqlx::query_as::<_, (String, time::OffsetDateTime, time::OffsetDateTime)>(
+            "SELECT status, deleted_at, purge_after FROM briefcase.testing_environments \
+              WHERE environment_id = $1",
         )
         .bind(environment_c.environment.id)
         .fetch_one(&production)
         .await?;
         assert_eq!(retired_status, "deleted");
+        let idle_recovery = retired_deadline - retired_at;
+        assert!(
+            idle_recovery >= time::Duration::days(2)
+                && idle_recovery < time::Duration::days(2) + time::Duration::seconds(1),
+            "one-day idle retirement starts its own two-day recovery window"
+        );
 
         sqlx::query(
             "UPDATE briefcase.testing_environments \
