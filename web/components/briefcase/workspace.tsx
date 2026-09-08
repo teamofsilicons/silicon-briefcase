@@ -149,9 +149,11 @@ function invalidateRequestGeneration(counter: { current: number }) {
 export default function Workspace({
   session,
   onSignOut,
+  onChooseOrganization,
 }: {
   session: BrowserSession;
   onSignOut: () => void;
+  onChooseOrganization: () => void;
 }) {
   const [scope, setScope] = useState<Scope>('files'),
     [path, setPath] = useState(''),
@@ -513,6 +515,7 @@ export default function Workspace({
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/browser/upload?' + p);
     xhr.setRequestHeader('X-Briefcase-Browser', '1');
+    xhr.setRequestHeader('X-Briefcase-Organization', session.org);
     xhr.timeout = 1800000;
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable)
@@ -674,6 +677,11 @@ export default function Workspace({
           <div className="org-label">
             <div className="org-heading">ORGANISATION</div>
             <span>{session.org}</span>
+            {session.organizations.length > 1 && (
+              <Button variant="ghost" onClick={onChooseOrganization}>
+                Switch organisation
+              </Button>
+            )}
             <small>
               {session.testing
                 ? 'Testing environment'

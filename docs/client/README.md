@@ -72,7 +72,7 @@ Briefcase backend. The normal login is unscoped; omit the organization in IAM
 to receive all reachable organizations in `SessionTokens::organizations`:
 
 ```bash
-iam login --app-id 'tos>briefcase'
+iam --no-org login --app-id 'tos>briefcase'
 ```
 
 ```rust

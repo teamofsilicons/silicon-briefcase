@@ -6,7 +6,7 @@ download, and share organization files.
 ```bash
 cargo install briefcase-cli
 # Ask IAM for an unscoped SLT for the canonical app (all reachable orgs):
-iam login --app-id 'tos>briefcase'
+iam --no-org login --app-id 'tos>briefcase'
 briefcase login <slt>
 
 briefcase ls private/cos:tos/notes --long

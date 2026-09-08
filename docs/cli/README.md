@@ -33,7 +33,7 @@ password, verification code, or Application secret, and it never redirects a
 terminal login:
 
 ```bash
-iam --org tos login --email you@example.com --app-id 'tos>briefcase'
+iam --no-org login --app-id 'tos>briefcase'
 briefcase login <slt>
 # Or use `briefcase login --org tos` and paste only the SLT at the hidden prompt.
 ```

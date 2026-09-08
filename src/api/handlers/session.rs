@@ -137,7 +137,7 @@ fn token_response(
             .map(|organization| organization.as_str().to_owned()),
         organizations: organizations
             .into_iter()
-            .map(|organization| organization.into_inner())
+            .map(crate::domain::actor::OrganizationId::into_inner)
             .collect(),
     };
     // The official IAM SDK preserves retry keys but does not expose upstream

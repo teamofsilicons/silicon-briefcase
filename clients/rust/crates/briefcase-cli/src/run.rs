@@ -157,16 +157,24 @@ struct ResolvedSession {
 }
 
 fn session(global: &GlobalArgs) -> Result<ResolvedSession> {
-    resolve_session(global, true)
+    resolve_session(global, true, true)
 }
 
 /// Resolves only the destination and optional test root for an operation that
 /// authenticates with its own request-scoped credential, such as an OBO proof.
 fn anonymous_session(global: &GlobalArgs) -> Result<ResolvedSession> {
-    resolve_session(global, false)
+    resolve_session(global, false, true)
 }
 
-fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<ResolvedSession> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "destination and credential bindings are resolved together before any network call"
+)]
+fn resolve_session(
+    global: &GlobalArgs,
+    include_bearer: bool,
+    require_org: bool,
+) -> Result<ResolvedSession> {
     let state = StateDirectory::locate()?;
     let configuration = state.configuration()?;
     let profile_name = global
@@ -199,6 +207,7 @@ fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<Resolved
                 (session.organizations.len() == 1).then(|| session.organizations[0].clone())
             })
         })
+        .or_else(|| (!require_org && global.test.is_none()).then(String::new))
         .ok_or_else(|| {
             if let Some(session) = stored_session.as_ref()
                 && !session.organizations.is_empty()
@@ -211,7 +220,11 @@ fn resolve_session(global: &GlobalArgs, include_bearer: bool) -> Result<Resolved
                 CliError::usage("no organization configured: run `briefcase login` or pass --org")
             }
         })?;
-    let credential_scope = scope_for(&url, &org)?;
+    let credential_scope = if org.is_empty() {
+        scope_for_unscoped(&url)?
+    } else {
+        scope_for(&url, &org)?
+    };
     let environment_key = match global.test {
         Some(id) => {
             let key = credentials
@@ -304,8 +317,13 @@ fn ensure_stored_scope(
                 "stored credentials for profile {profile} have no destination binding; sign in again before using them"
             ))
         })?;
+    let verified_unscoped = environment.is_none()
+        && bound.organization.is_empty()
+        && credentials
+            .session(profile, None)
+            .is_some_and(|session| session.org_id.is_none());
     if bound.deployment_origin != effective.deployment_origin
-        || (!bound.organization.is_empty() && bound.organization != effective.organization)
+        || (!verified_unscoped && bound.organization != effective.organization)
     {
         return Err(CliError::usage(format!(
             "stored credentials for profile {profile} are bound to {} organization {}; refusing to send them to {} organization {}",
@@ -338,7 +356,12 @@ fn testing_environment_for_login(
 }
 
 fn config(session: &ResolvedSession) -> Result<Config> {
-    let mut config = Config::new(&session.url, &session.org)?.with_auto_update(false);
+    let mut config = if session.org.is_empty() {
+        Config::for_sign_in(&session.url)?
+    } else {
+        Config::new(&session.url, &session.org)?
+    }
+    .with_auto_update(false);
     if let Some(environment) = &session.environment_key {
         config = config.with_environment(environment.clone());
     }
@@ -346,8 +369,8 @@ fn config(session: &ResolvedSession) -> Result<Config> {
 }
 
 fn refresh_config(session: &ResolvedSession, stored: &StoredSession) -> Result<Config> {
-    let mut config = if stored.org_id.is_some() {
-        Config::new(&session.url, &session.org)?.with_auto_update(false)
+    let mut config = if let Some(org) = &stored.org_id {
+        Config::new(&session.url, org)?.with_auto_update(false)
     } else {
         Config::for_sign_in(&session.url)?.with_auto_update(false)
     };
@@ -370,6 +393,12 @@ async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSessio
         // waited for the lock. Re-resolve from the authoritative atomic file.
         resolved = session(global)?;
         let mut credentials = state.credentials()?;
+        // Persist the original token-family destination, never the workspace
+        // selected for this request. Otherwise refresh narrows an unscoped login.
+        let stored_scope = credentials
+            .credential_scope(&resolved.profile_name, resolved.environment_id)
+            .cloned()
+            .unwrap_or_else(|| resolved.credential_scope.clone());
         if let Some(stored) = resolved.stored_session.clone()
             && stored.needs_refresh()
         {
@@ -388,7 +417,7 @@ async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSessio
                 credentials.set_credential_scope(
                     &resolved.profile_name,
                     resolved.environment_id,
-                    resolved.credential_scope.clone(),
+                    stored_scope.clone(),
                 );
                 state.save_credentials(&credentials)?;
                 resolved.stored_session = Some(pending);
@@ -413,7 +442,7 @@ async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSessio
             credentials.set_credential_scope(
                 &resolved.profile_name,
                 resolved.environment_id,
-                resolved.credential_scope.clone(),
+                stored_scope,
             );
             state.save_credentials(&credentials)?;
             resolved.token = Some(refreshed.access_token.clone());
@@ -517,7 +546,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
             environment_id,
             login_scope
                 .as_ref()
-                .expect("test login requires an organization"),
+                .ok_or_else(|| CliError::usage("test login requires an organization"))?,
         )?;
         login_config = login_config.with_environment(environment);
     }
@@ -834,7 +863,7 @@ fn logout(global: &GlobalArgs, output: Output) -> Result<()> {
 }
 
 async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
-    let session = session(global)?;
+    let session = resolve_session(global, true, false)?;
     let mut client_config = config(&session)?;
     if let Some(token) = session.token.clone() {
         client_config = client_config.with_token(token);
@@ -848,6 +877,7 @@ async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
             "profile": session.profile_name,
             "url": session.url,
             "org": session.org,
+            "organizations": session.stored_session.as_ref().map(|stored| &stored.organizations),
             "test_environment_id": session.environment_id,
             "authenticated": session.token.is_some(),
             "session_expires_at": session.stored_session.as_ref().map(|stored| JsonTimestamp(stored.expires_at)),
@@ -863,6 +893,13 @@ async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
     println!("state       {}", StateDirectory::locate()?.path().display());
     println!("deployment  {}", session.url);
     println!("organization {}", session.org);
+    if let Some(stored) = &session.stored_session {
+        println!(
+            "login scope  {}",
+            stored.org_id.as_deref().unwrap_or("all organizations")
+        );
+        println!("available    {}", stored.organizations.join(", "));
+    }
     println!(
         "plane       {}",
         session
@@ -2170,7 +2207,7 @@ async fn system(command: &SystemCommand, output: Output) -> Result<()> {
 }
 
 async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
-    let session = match session(global) {
+    let session = match resolve_session(global, true, false) {
         Ok(session) => Some(session),
         Err(error) if global.test.is_some() => return Err(error),
         Err(_) => None,

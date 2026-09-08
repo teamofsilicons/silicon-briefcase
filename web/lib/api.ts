@@ -32,6 +32,12 @@ export class ApiError extends Error {
     super(message);
   }
 }
+// Per-tab request context. This is a consistency guard, not an authorization
+// credential: the gateway and IAM still authorize every file request.
+let workspaceOrganization: string | null = null;
+export function setWorkspaceOrganization(org: string | null) {
+  workspaceOrganization = org;
+}
 export async function api<T>(
   path: string,
   method = 'GET',
@@ -40,7 +46,13 @@ export async function api<T>(
   const options: RequestInit = {
     method,
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-Briefcase-Browser': '1' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Briefcase-Browser': '1',
+      ...(workspaceOrganization && path !== '/session'
+        ? { 'X-Briefcase-Organization': workspaceOrganization }
+        : {}),
+    },
     redirect: 'error',
   };
   if (body !== undefined) {

@@ -809,6 +809,7 @@ mod tests {
                 public_id: "cos:tester".to_owned(),
             },
             org_id: Some("tos".to_owned()),
+            organizations: vec!["tos".to_owned()],
             refresh_idempotency_key: None,
         }
     }

@@ -388,6 +388,9 @@ impl Config {
     ///
     /// This is the safe way to switch workspaces after an unscoped IAM login;
     /// it does not mint or replace the bearer credential.
+    ///
+    /// # Errors
+    /// Returns [`Error::Configuration`] if the organization is empty.
     pub fn with_organization(mut self, organization: impl Into<String>) -> Result<Self, Error> {
         let organization = organization.into();
         if organization.trim().is_empty() {

@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
-import { api, type AccountSession, type BrowserSession } from '@/lib/api';
+import { api, setWorkspaceOrganization, type AccountSession, type BrowserSession } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
 export default function Home() {
   const [org, setOrg] = useState<string | undefined>(),
@@ -19,6 +19,7 @@ export default function Home() {
     >(null),
     [checking, setChecking] = useState(true);
   const [returnTo, setReturnTo] = useState('/');
+  const [choosingOrganization, setChoosingOrganization] = useState(false);
   const signOut = useCallback(() => {
     try {
       const target = readFileLocation();
@@ -29,6 +30,8 @@ export default function Home() {
       setReturnTo('/');
     }
     setSession(null);
+    setChoosingOrganization(false);
+    setWorkspaceOrganization(null);
   }, []);
   useEffect(() => {
     try {
@@ -46,7 +49,10 @@ export default function Home() {
       history.replaceState(null, '', location.pathname);
     }
     api<BrowserSession | AccountSession>('/session')
-      .then((value) => setSession(value.authenticated ? value : null))
+      .then((value) => {
+        setWorkspaceOrganization(value.authenticated ? value.org : null);
+        setSession(value.authenticated ? value : null);
+      })
       .catch((e) => {
         if (e.status !== 401) setError(e.message);
       })
@@ -84,7 +90,11 @@ export default function Home() {
     setBusy(true);
     setError('');
     try {
-      setSession(await api<AccountSession | BrowserSession>('/session', 'PATCH', { org: selected }));
+      const next = await api<BrowserSession>('/session', 'PATCH', { org: selected });
+      setWorkspaceOrganization(next.org);
+      history.replaceState(null, '', '/org/' + encodeURIComponent(next.org) + '/');
+      setSession(next);
+      setChoosingOrganization(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to choose that workspace.');
     } finally {
@@ -98,11 +108,13 @@ export default function Home() {
         <output>Opening Briefcase…</output>
       </main>
     );
-  if (session?.org != null)
+  if (session?.org != null && !choosingOrganization)
     return (
       <Workspace
+        key={session.org}
         session={{ ...session, org: session.org }}
         onSignOut={signOut}
+        onChooseOrganization={() => setChoosingOrganization(true)}
       />
     );
   return (

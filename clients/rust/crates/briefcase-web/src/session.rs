@@ -360,6 +360,10 @@ pub(crate) async fn select(
     }
     let session = lookup(&app, &headers).await?;
     let mut session = session.lock().await;
+    if session.deadline <= Instant::now() || session.rejected {
+        return Err(unauthenticated());
+    }
+    refresh_if_needed(&mut session).await?;
     if !session.organizations.iter().any(|org| org == &input.org) {
         return Err(Failure(
             StatusCode::FORBIDDEN,
@@ -373,6 +377,15 @@ pub(crate) async fn select(
 
 pub(crate) async fn client(app: &App, headers: &HeaderMap) -> Result<Client> {
     let client = authenticated_client(app, headers).await?;
+    if headers
+        .get("x-briefcase-organization")
+        .is_some_and(|value| value.to_str().ok() != Some(client.organization()))
+    {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            "The workspace changed in another tab. Reload before continuing.".into(),
+        ));
+    }
     if client.organization().is_empty() {
         return Err(Failure(
             StatusCode::FORBIDDEN,

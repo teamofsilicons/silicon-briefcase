@@ -14,6 +14,13 @@ starts a normal, organisation-free IAM login. Opening an existing organisation
 file link supplies its workspace context automatically.
 You do not paste tokens, verification codes, or application secrets into Briefcase.
 
+An unscoped login discovers all currently reachable organisations. If there is
+only one, Briefcase opens it directly; otherwise choose a workspace. Use
+**Switch organisation** in the sidebar to choose another without signing in
+again. The login remains unscoped when its tokens refresh. Organisation choices
+are updated at login and token refresh; IAM checks live membership on every
+file operation. Scoped logins cannot switch to a different organisation.
+
 A file link has the form `/org/{org_id}/{path}` on the website's origin. Opening
 one selects that organisation for sign-in and retains the target through the IAM
 callback. After authentication, Briefcase resolves the path using your session.
