@@ -41,6 +41,42 @@ use super::{
 
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 
+/// Resolve every share recipient live, including members with no local row.
+/// Missing members never fall back to a stale local membership projection.
+pub(crate) async fn with_directory_recipients(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ExecutionContext,
+    recipients: &[crate::domain::actor::ActorRef],
+) -> Result<ExecutionContext, AppError> {
+    if recipients.is_empty() {
+        return Ok(context);
+    }
+    let access = optional_testing_access(state, headers).await?;
+    let selection = access.as_ref().map(|access| {
+        TestingEnvironmentContext::new(access.environment_id, access.control_version)
+    });
+    if selection != context.testing_environment() {
+        return Err(AppError::NotFound);
+    }
+    let credential = access
+        .as_ref()
+        .map(iam_environment_credential)
+        .transpose()?;
+    let token = auth::parse_bearer(auth::require_bearer_only(headers)?)?;
+    let members = state
+        .iam
+        .resolve_directory_recipients(
+            &token,
+            context.authorization(),
+            recipients,
+            credential.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| AppError::validation("invalid_principal"))?;
+    Ok(context.with_directory_members(members))
+}
+
 pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,

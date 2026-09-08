@@ -4,6 +4,8 @@ use silicon_iam_client::{Client, Credential, EnvironmentKey, IdempotencyKey, Mut
 
 use super::*;
 
+mod directory;
+
 impl IamClient {
     /// Builds the official IAM client and negotiates its supported API.
     ///
