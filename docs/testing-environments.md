@@ -65,11 +65,12 @@ working: IAM 1.2 online snapshots support first-use bootstrap directly.
 
 ## Create the Briefcase sandbox through the CLI
 
-First log into production Briefcase with an organization-bound SLT for
-`tos>briefcase`; see [CLI login](cli/README.md). Then:
+First log into production Briefcase with an SLT for `tos>briefcase`; normal
+unscoped login is sufficient. Select the sandbox's owning organization on the
+management command; see [CLI login](cli/README.md). Then:
 
 ```bash
-briefcase env create briefcase-manual-e2e \
+briefcase --org tos env create briefcase-manual-e2e \
   --description 'Disposable integration data' \
   --iam-environment-id "$IAM_TEST_ID" \
   --iam-app-id 'tos>briefcase'
@@ -86,13 +87,15 @@ For non-interactive jobs, inject `BRIEFCASE_IAM_ENVIRONMENT_KEY` and
 refer to the **test pairing**, not production server credentials. Do not echo
 them or put literal credentials into shell history.
 
-Now obtain a Briefcase-targeted SLT inside the paired IAM plane, for the same
-organization and the member whose permissions you want to exercise:
+Now obtain an unscoped Briefcase-targeted SLT inside the paired IAM plane for
+the member whose permissions you want to exercise. Use CLI 0.2.2 or later for
+unscoped sandbox login; the saved root retains the sandbox's owner-tenant
+binding even if IAM discovers additional organizations:
 
 ```bash
 iam --url https://backend.iam.teamofsilicons.com --test "$IAM_TEST_ID" \
-  --org tos login --app-id 'tos>briefcase'
-briefcase --test "$BRIEFCASE_TEST_ID" login --org tos
+  --no-org login --app-id 'tos>briefcase'
+briefcase --test "$BRIEFCASE_TEST_ID" login
 # Paste the test SLT at the hidden prompt.
 briefcase --test "$BRIEFCASE_TEST_ID" env current
 briefcase --test "$BRIEFCASE_TEST_ID" ls

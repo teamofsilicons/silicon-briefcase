@@ -32,11 +32,11 @@ println!("{}", entry.permanent_url);
 ```
 
 ```bash
-# Ask IAM for an organization-bound SLT for the canonical Application first.
-iam --org tos login --app-id 'tos>briefcase'
+# Ask IAM for an unscoped SLT for the canonical Application first.
+iam --no-org login --app-id 'tos>briefcase'
 briefcase login <slt>
-briefcase put ./report.pdf private/cos:tos/notes
-briefcase share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
+briefcase --org tos put ./report.pdf private/cos:tos/notes
+briefcase --org tos share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
 ```
 
 The CLI selects the hosted Briefcase service automatically; `--url` is only
@@ -46,6 +46,9 @@ URL, then `https://backend.briefcase.teamofsilicons.com/api/v1/`.
 
 The CLI stores the resulting rotating access/refresh session and renews it
 before expiry. It never asks for an IAM password, OTP, or Application secret.
+Login returns all reachable organizations by default; `--org` on file commands
+selects a workspace without another login. Use `--org` on login only when the
+IAM SLT is intentionally bound to that organization.
 Both crates also support disposable IAM-coupled test planes; see the guides for
 the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
 
