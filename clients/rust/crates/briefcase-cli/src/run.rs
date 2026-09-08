@@ -493,11 +493,6 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         ));
     }
     let state = StateDirectory::locate()?;
-    if global.test.is_some() && global.org.is_none() {
-        return Err(CliError::usage(
-            "--org is required when logging into a testing environment",
-        ));
-    }
     let slt = if args.slt_stdin {
         read_secret_stdin()?
     } else {
@@ -529,11 +524,23 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         let previous_scope = scope_for(&previous.url, &previous.org)?;
         credentials.bind_legacy_profile_scope(&profile_name, &previous_scope);
     }
-    let login_scope = global
+    let mut login_scope = global
         .org
         .as_deref()
         .map(|org| scope_for(&url, org))
         .transpose()?;
+    if let Some(environment_id) = global.test
+        && login_scope.is_none()
+    {
+        // The root's tenant binding is independent of the IAM session's
+        // optional organization. Check its saved origin before dispatch, but
+        // do not turn an unscoped login into an organization-bound exchange.
+        let bound = credentials.credential_scope(&profile_name, Some(environment_id))
+            .ok_or_else(|| CliError::usage(format!(
+                "testing environment {environment_id} has no destination binding; run `briefcase env key {environment_id}` first"
+            )))?;
+        login_scope = Some(scope_for(&url, &bound.organization)?);
+    }
     let mut login_config = match global.org.as_deref() {
         Some(org) => Config::new(&url, org)?.with_auto_update(false),
         None => Config::for_sign_in(&url)?.with_auto_update(false),
@@ -570,14 +577,19 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         .login_with_slt_with_key(&slt, &idempotency_key)
         .await?;
     let stored = StoredSession::from_tokens(&tokens);
-    let login_scope = match global.org.as_deref().or(tokens.org_id.as_deref()) {
-        Some(org) => scope_for(&url, org)?,
-        None => scope_for_unscoped(&url)?,
+    let login_scope = if global.test.is_some() {
+        login_scope.ok_or_else(|| CliError::usage("test root has no destination binding"))?
+    } else {
+        match global.org.as_deref().or(tokens.org_id.as_deref()) {
+            Some(org) => scope_for(&url, org)?,
+            None => scope_for_unscoped(&url)?,
+        }
     };
     let org = global
         .org
         .clone()
         .or_else(|| tokens.org_id.clone())
+        .or_else(|| global.test.map(|_| login_scope.organization.clone()))
         .or_else(|| (tokens.organizations.len() == 1).then(|| tokens.organizations[0].clone()))
         .unwrap_or_default();
 

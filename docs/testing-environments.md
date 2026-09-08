@@ -177,6 +177,13 @@ already prepared plane without creating, cleaning, or deleting anything.
 
 ## Lifecycle and authority
 
+Normal test login can also use an unscoped IAM SLT. With CLI 0.2.2 or later,
+omit `--org` from `briefcase --test <UUID> login`: the saved test root selects
+the sandbox's tenant independently of the session's IAM organization scope.
+The login reports every organization IAM discloses; the sandbox still accepts
+file operations only for its owning organization. Use `--org` at login only
+when intentionally exchanging an organization-bound SLT.
+
 | Action | Authority / effect |
 | --- | --- |
 | Create | Current production organization member; empty sandbox and new root |
