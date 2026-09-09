@@ -51,6 +51,21 @@ pub struct IamClient {
     max_response_bytes: usize,
 }
 
+/// Live session identity, independent of any selected organization.
+#[derive(Debug)]
+pub struct IamSessionIdentity {
+    /// Stable Carbon or Silicon principal UUID.
+    pub principal_id: Uuid,
+    /// Kind of the authenticated actor.
+    pub actor_kind: ActorKind,
+    /// Public identifier, if IAM supplied an organization snapshot.
+    pub public_id: Option<String>,
+    /// Active, explicitly granted organizations.
+    pub organizations: Vec<OrganizationId>,
+    /// Access token expiry as a Unix timestamp.
+    pub expires_at: i64,
+}
+
 /// Complete IAM identity for making an ordinary request inside one test plane.
 ///
 /// Plane selection and application authentication are intentionally held
@@ -795,6 +810,114 @@ mod tests {
             max_response_bytes: NonZeroUsize::new(65_536)
                 .unwrap_or_else(|| panic!("non-zero test fixture")),
         }
+    }
+
+    fn login_inspection_response() -> serde_json::Value {
+        json!({
+            "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
+            "client_id": IAM_APP_ID, "audience": IAM_APP_ID,
+            "expires_at": 4_070_908_800_i64,
+            "authorizations": [authorization_snapshot(IAM_APP_ID, false)],
+        })
+    }
+
+    #[tokio::test]
+    async fn login_inspection_uses_unscoped_official_introspection() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .and(header("authorization", basic_authorization()))
+            .and(body_string(format!(
+                "token={BEARER_TOKEN}&token_type_hint=access_token"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(login_inspection_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        let identity = client
+            .inspect_session(&SecretString::from(BEARER_TOKEN.to_owned()), None)
+            .await?;
+        assert_eq!(identity.principal_id.to_string(), PRINCIPAL_ID);
+        assert_eq!(identity.public_id.as_deref(), Some("carbon-a"));
+        assert_eq!(identity.organizations, vec![organization()]);
+        for request in server.received_requests().await.unwrap_or_default() {
+            assert!(request.headers.get("x-org-id").is_none());
+            assert!(request.headers.get("x-testing-environment-key").is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_identity_accepts_both_actor_types_and_empty_grants() -> anyhow::Result<()> {
+        for kind in ["carbon", "silicon"] {
+            let mut body = login_inspection_response();
+            body["actor_type"] = json!(kind);
+            body["authorizations"][0]["actor_type"] = json!(kind);
+            let identity = super::official::session_identity(
+                serde_json::from_value(body.clone())?,
+                &audience(),
+                None,
+            )?;
+            assert_eq!(serde_json::to_value(identity.actor_kind)?, json!(kind));
+            assert!(identity.public_id.is_some());
+            body["authorizations"] = json!([]);
+            let identity = super::official::session_identity(
+                serde_json::from_value(body)?,
+                &audience(),
+                None,
+            )?;
+            assert!(identity.organizations.is_empty());
+            assert!(identity.public_id.is_none());
+            assert_eq!(identity.principal_id.to_string(), PRINCIPAL_ID);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_identity_rejects_inactive_expired_and_mismatched_authority() -> anyhow::Result<()> {
+        let mut cases = Vec::new();
+        cases.push(json!({"active": false}));
+        for (field, value) in [
+            ("expires_at", json!(0)),
+            ("audience", json!("other>app")),
+            ("client_id", json!("other>app")),
+            ("principal_id", json!(uuid::Uuid::nil())),
+            ("actor_type", json!("unknown")),
+            ("authorizations", serde_json::Value::Null),
+        ] {
+            let mut body = login_inspection_response();
+            body[field] = value;
+            cases.push(body);
+        }
+        for (field, value) in [
+            ("principal_id", json!(uuid::Uuid::nil())),
+            ("actor_type", json!("silicon")),
+            ("testing_environment_id", json!(TEST_ENVIRONMENT_ID)),
+            ("audience", json!("other>app")),
+            ("membership_version", json!(0)),
+        ] {
+            let mut body = login_inspection_response();
+            body["authorizations"][0][field] = value;
+            cases.push(body);
+        }
+        for body in cases {
+            assert!(
+                super::official::session_identity(serde_json::from_value(body)?, &audience(), None)
+                    .is_err()
+            );
+        }
+        let mut body = login_inspection_response();
+        body["authorizations"][0]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
+        assert!(
+            super::official::session_identity(
+                serde_json::from_value(body)?,
+                &audience(),
+                Some(&environment_credential())
+            )
+            .is_ok()
+        );
+        Ok(())
     }
 
     fn basic_authorization() -> String {

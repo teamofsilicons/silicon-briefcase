@@ -863,11 +863,8 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
 }
 
 #[tokio::test]
-async fn slt_exchange_rejects_unbound_or_cross_organization_sessions() {
-    for (returned_organization, expected_message) in [
-        (None, "organization-unbound"),
-        (Some("other"), "organization other"),
-    ] {
+async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions() {
+    for returned_organization in [None, Some("other")] {
         let server = MockServer::start().await;
         let mut response = tokens_document();
         if let Some(organization) = returned_organization {
@@ -894,14 +891,17 @@ async fn slt_exchange_rejects_unbound_or_cross_organization_sessions() {
         )
         .unwrap();
         let key = IdempotencyKey::new("login-org-check-0001").unwrap();
-        let error = client
-            .login_with_slt_with_key("slt-once", &key)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(&error, briefcase_client::Error::Protocol(_)));
-        assert!(error.to_string().contains(expected_message));
-        assert!(error.to_string().contains("configured for tos"));
+        let result = client.login_with_slt_with_key("slt-once", &key).await;
+        if returned_organization.is_some() {
+            let error = result.unwrap_err();
+            assert!(matches!(&error, briefcase_client::Error::Protocol(_)));
+            assert!(error.to_string().contains("organization other"));
+            assert!(error.to_string().contains("configured for tos"));
+        } else {
+            let session = result.unwrap();
+            assert!(session.org_id.is_none());
+            assert!(session.organizations.is_empty());
+        }
         let requests = server.received_requests().await.unwrap_or_default();
         assert_eq!(requests.len(), 1);
         assert!(!requests[0].headers.contains_key("authorization"));
@@ -1130,4 +1130,56 @@ async fn the_complete_environment_lifecycle_matches_the_server_contract() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn discovery_and_login_inspection_work_without_an_organization() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/iam"))
+        .and(header(
+            "x-testing-environment-key",
+            "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "app_id": "tos>briefcase",
+            "test_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f800",
+            "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f802"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .and(header("authorization", "Bearer supplied-token"))
+        .and(header(
+            "x-testing-environment-key",
+            "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authenticated": false, "actor": null, "organizations": [], "expires_at": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
+        .unwrap()
+        .with_auto_update(false)
+        .with_token("supplied-token")
+        .with_environment(EnvironmentKey::new("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6").unwrap());
+    let client = Client::new_unchecked(config).unwrap();
+    assert_eq!(
+        client.iam_info().await.unwrap().app_id.as_str(),
+        "tos>briefcase"
+    );
+    assert!(!client.login_status().await.unwrap().authenticated);
+    for request in server.received_requests().await.unwrap() {
+        if request.url.path().ends_with("/iam") {
+            assert!(request.headers.get("authorization").is_none());
+        }
+    }
+    assert!(
+        client.usage().await.is_err(),
+        "workspace APIs still require an organization"
+    );
 }

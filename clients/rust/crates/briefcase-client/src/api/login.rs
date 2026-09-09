@@ -20,6 +20,31 @@ struct RefreshExchange<'a> {
 }
 
 impl Client {
+    /// Reads public IAM app information without sending a member bearer token.
+    ///
+    /// # Errors
+    /// Returns an error if the deployment or selected test plane is unavailable.
+    pub async fn iam_info(&self) -> Result<crate::IamInfo> {
+        let request = self
+            .anonymous_request(Method::GET, self.api_url(&["iam"])?)
+            .timeout(self.request_timeout());
+        self.receive_json(request).await
+    }
+
+    /// Checks current authentication and identity with IAM, without requiring
+    /// an organization. Inactive tokens return `authenticated: false`.
+    /// This stateless method never refreshes or persists caller-owned tokens.
+    ///
+    /// # Errors
+    /// Returns an error for transport failures, unavailable IAM, or invalid
+    /// test-plane credentials. These failures are not reported as logged out.
+    pub async fn login_status(&self) -> Result<crate::LoginStatus> {
+        let request = self
+            .request(Method::GET, self.api_url(&["auth", "status"])?)
+            .timeout(self.request_timeout());
+        self.receive_json(request).await
+    }
+
     /// Exchanges a two-minute, single-use IAM SLT for a Briefcase session.
     ///
     /// The Briefcase Application secret remains on the backend. This client

@@ -882,3 +882,19 @@ Discover briefcase.files.create in IAM
   -> POST /obo/files with the bytes
   -> Briefcase verifies once, then creates the file for the member
 ```
+
+## IAM discovery and session inspection
+
+`GET /api/v1/iam` returns public `app_id`, `test_environment_id`, and
+`iam_environment_id`, without a bearer or organization header. Production
+returns null environment IDs; an optional `X-Testing-Environment-Key` selects
+the paired test identity. No secret is returned.
+
+`GET /api/v1/auth/status` verifies an optional Bearer access token online with
+IAM, without requiring `X-Org-ID`. It returns `authenticated`, nullable `actor`
+(`principal_id`, `type`, nullable `public_id`), current granted `organizations`,
+and nullable Unix `expires_at`. Missing or inactive member tokens return HTTP
+200 with `authenticated: false` and no identity. An active session can have no
+organization grants; its principal UUID and Carbon/Silicon type are still
+returned. IAM outages and malformed authority remain errors. Both responses
+use `Cache-Control: no-store`. See [OpenAPI](../../openapi.yaml) for schemas.

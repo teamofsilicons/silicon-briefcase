@@ -7,6 +7,48 @@ use super::*;
 mod directory;
 
 impl IamClient {
+    /// Returns the public application ID for production or the selected test plane.
+    #[must_use]
+    pub fn public_application_id<'a>(
+        &'a self,
+        environment: Option<&'a IamEnvironmentCredential>,
+    ) -> &'a str {
+        self.application_identity(environment).0.as_str()
+    }
+
+    /// Inspects a session without selecting an organization or expanding grants.
+    ///
+    /// # Errors
+    /// Rejects inactive, expired, or wrongly bound tokens and malformed IAM responses.
+    pub async fn inspect_session(
+        &self,
+        token: &SecretString,
+        environment: Option<&IamEnvironmentCredential>,
+    ) -> Result<IamSessionIdentity, IamClientError> {
+        if !valid_fixed_iam_secret(token.expose_secret(), "oat_") {
+            return Err(IamClientError::Rejected);
+        }
+        let response = self
+            .scoped_client(environment)?
+            .oauth()
+            .introspect(
+                &models::TokenIntrospectionRequest {
+                    token: token.expose_secret().to_owned(),
+                    token_type_hint: Some(
+                        models::TokenIntrospectionRequestTokenTypeHint::AccessToken,
+                    ),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| sdk_error(error, Operation::Service))?;
+        session_identity(
+            self.convert(response)?,
+            self.application_identity(environment).0,
+            environment,
+        )
+    }
+
     /// Builds the official IAM client and negotiates its supported API.
     ///
     /// # Errors
@@ -364,6 +406,84 @@ fn sdk_error(error: silicon_iam_client::Error, operation: Operation) -> IamClien
         },
         _ => invalid_response("official_client_contract"),
     }
+}
+
+pub(super) fn session_identity(
+    response: models::TokenIntrospection,
+    audience: &ApplicationId,
+    environment: Option<&IamEnvironmentCredential>,
+) -> Result<IamSessionIdentity, IamClientError> {
+    if !response.active {
+        return Err(IamClientError::Rejected);
+    }
+    if response.client_id.as_deref() != Some(audience.as_str())
+        || response.audience.as_deref() != Some(audience.as_str())
+    {
+        return Err(binding_mismatch("session.audience"));
+    }
+    let principal_id = response
+        .principal_id
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| invalid_response("session.principal_id"))?;
+    let actor_kind = match response.actor_type {
+        Some(models::TokenIntrospectionActorType::Carbon) => ActorKind::Carbon,
+        Some(models::TokenIntrospectionActorType::Silicon) => ActorKind::Silicon,
+        _ => return Err(invalid_response("session.actor_type")),
+    };
+    let expires_at = response
+        .expires_at
+        .ok_or_else(|| invalid_response("session.expires_at"))?;
+    if expires_at <= OffsetDateTime::now_utc().unix_timestamp() {
+        return Err(IamClientError::Rejected);
+    }
+    let snapshots = match (response.authorization, response.authorizations) {
+        (Some(snapshot), None) if response.org_id.as_deref() == Some(snapshot.org_id.as_str()) => {
+            vec![snapshot]
+        }
+        (None, Some(snapshots)) if response.org_id.is_none() => snapshots,
+        _ => return Err(invalid_response("session.authorizations")),
+    };
+    let mut identity = IamSessionIdentity {
+        principal_id,
+        actor_kind,
+        public_id: None,
+        organizations: Vec::new(),
+        expires_at,
+    };
+    for snapshot in snapshots {
+        let snapshot_kind = match snapshot.actor_type {
+            models::ApplicationAuthorizationActorType::Carbon => ActorKind::Carbon,
+            models::ApplicationAuthorizationActorType::Silicon => ActorKind::Silicon,
+            models::ApplicationAuthorizationActorType::Other(_) => {
+                return Err(invalid_response("session.actor_type"));
+            }
+        };
+        if snapshot.principal_id != principal_id
+            || snapshot_kind != actor_kind
+            || snapshot.audience != audience.as_str()
+            || snapshot.testing_environment_id != environment.and_then(|value| value.environment_id)
+            || !is_canonical_iam_organization_id(&snapshot.org_id)
+            || snapshot.membership_id.is_nil()
+            || snapshot.organization_id.is_nil()
+            || snapshot.membership_version < 1
+            || snapshot.authorization_epoch < 1
+            || identity
+                .public_id
+                .as_ref()
+                .is_some_and(|id| id != &snapshot.public_id)
+        {
+            return Err(binding_mismatch("session.authorization"));
+        }
+        ActorId::new(snapshot.public_id.clone())
+            .map_err(|_| invalid_response("session.public_id"))?;
+        identity.public_id = Some(snapshot.public_id);
+        identity.organizations.push(
+            OrganizationId::new(snapshot.org_id).map_err(|_| invalid_response("session.org_id"))?,
+        );
+    }
+    identity.organizations.sort();
+    identity.organizations.dedup();
+    Ok(identity)
 }
 
 fn authorization(

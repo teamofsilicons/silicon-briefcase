@@ -96,12 +96,12 @@ pub use models::{
     AccessRequest, AccessRequestStatus, AccessRight, ActivityEvent, ActorRef, ActorType,
     BucketConfiguration, BucketConfigurationState, BucketConfigurationStatus, DailyUsageMeasure,
     EffectiveAccess, EffectivePermission, EncryptionMode, Entry, EntryPage, EntryType,
-    EntryVisibility, FileVersion, Notification, NotificationDecision, NotificationInbox,
-    NotificationKind, NotificationSubject, OrganizationUsage, PermissionGrant,
-    PermissionInspection, RenderKind, RootType, SearchResult, ServiceStatus, SessionActor,
-    SessionTokens, TestingEnvironment, TestingEnvironmentCleaning, TestingEnvironmentCreator,
-    TestingEnvironmentKey, TestingEnvironmentPage, TestingEnvironmentSelf,
-    TestingEnvironmentStatus, TestingEnvironmentWithKey, UsageMeasure,
+    EntryVisibility, FileVersion, IamInfo, LoginActor, LoginStatus, Notification,
+    NotificationDecision, NotificationInbox, NotificationKind, NotificationSubject,
+    OrganizationUsage, PermissionGrant, PermissionInspection, RenderKind, RootType, SearchResult,
+    ServiceStatus, SessionActor, SessionTokens, TestingEnvironment, TestingEnvironmentCleaning,
+    TestingEnvironmentCreator, TestingEnvironmentKey, TestingEnvironmentPage,
+    TestingEnvironmentSelf, TestingEnvironmentStatus, TestingEnvironmentWithKey, UsageMeasure,
 };
 pub use requests::{
     AccessDecision, ByteRange, Destination, EntryUpdate, ListEntries, NewAccessRequest, NewFolder,

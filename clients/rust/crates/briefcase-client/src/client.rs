@@ -240,7 +240,9 @@ impl Client {
 
     /// Builds a URL under the versioned API base from already-safe segments.
     pub(crate) fn api_url(&self, segments: &[&str]) -> Result<Url> {
-        if self.config.organization.is_empty() && !matches!(segments, ["auth", "slt" | "refresh"]) {
+        if self.config.organization.is_empty()
+            && !matches!(segments, ["iam"] | ["auth", "slt" | "refresh" | "status"])
+        {
             return Err(Error::Configuration(
                 "choose an authorised organisation before using workspace APIs".into(),
             ));

@@ -95,7 +95,11 @@ type Result<T> = std::result::Result<T, CliError>;
 pub async fn run(cli: Cli) -> Result<()> {
     let output = Output::new(cli.global.json);
     match cli.command {
-        Command::Login(args) => login(&cli.global, &args, output).await,
+        Command::Login(args) => match args.command {
+            Some(crate::cli::LoginCommand::Status) => login_status(&cli.global, output).await,
+            None => login(&cli.global, &args, output).await,
+        },
+        Command::Iam => iam(&cli.global, output).await,
         Command::Logout => logout(&cli.global, output),
         Command::Status => status(&cli.global, output).await,
         Command::Ls(args) => list(&cli.global, &args, output).await,
@@ -385,13 +389,20 @@ async fn connect(global: &GlobalArgs) -> Result<Client> {
 }
 
 async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSession)> {
-    let mut resolved = session(global)?;
+    connect_with_scope(global, true).await
+}
+
+async fn connect_with_scope(
+    global: &GlobalArgs,
+    require_org: bool,
+) -> Result<(Client, ResolvedSession)> {
+    let mut resolved = resolve_session(global, true, require_org)?;
     if global.token.is_none() {
         let state = StateDirectory::locate()?;
         let credentials_lock = state.lock_credentials()?;
         // Another process may have refreshed or logged out while this process
         // waited for the lock. Re-resolve from the authoritative atomic file.
-        resolved = session(global)?;
+        resolved = resolve_session(global, true, require_org)?;
         let mut credentials = state.credentials()?;
         // Persist the original token-family destination, never the workspace
         // selected for this request. Otherwise refresh narrows an unscoped login.
@@ -868,6 +879,67 @@ fn logout(global: &GlobalArgs, output: Output) -> Result<()> {
     } else {
         "no session was stored for this profile and plane"
     });
+    Ok(())
+}
+
+async fn iam(global: &GlobalArgs, output: Output) -> Result<()> {
+    let resolved = resolve_session(global, false, false)?;
+    let client = if global.no_verify {
+        Client::new_unchecked(config(&resolved)?)?
+    } else {
+        Client::connect(config(&resolved)?).await?
+    };
+    let info = client.iam_info().await?;
+    if output.is_json() {
+        output.json(&info);
+    } else {
+        println!("app_id      {}", info.app_id);
+        println!("deployment  {}", resolved.url);
+        if let Some(id) = info.iam_environment_id {
+            println!("IAM test    {id}");
+        }
+        println!(
+            "Get a short-lived token for this app from IAM, then run `briefcase login <slt>`."
+        );
+    }
+    Ok(())
+}
+
+async fn login_status(global: &GlobalArgs, output: Output) -> Result<()> {
+    let resolved = resolve_session(global, true, false)?;
+    let status = if resolved.token.is_none() {
+        briefcase_client::LoginStatus::default()
+    } else {
+        match connect_with_scope(global, false).await {
+            Ok((client, _)) => client.login_status().await?,
+            Err(CliError::Client(error)) if error.is_unauthenticated() => {
+                briefcase_client::LoginStatus::default()
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if output.is_json() {
+        output.json(&serde_json::json!({
+            "authenticated": status.authenticated,
+            "actor": status.actor,
+            "organizations": status.organizations,
+            "expires_at": status.expires_at,
+            "profile": resolved.profile_name,
+            "url": resolved.url,
+            "test_environment_id": resolved.environment_id,
+        }));
+    } else if let Some(actor) = status.actor {
+        println!(
+            "authenticated as {}:{}",
+            actor.actor_type.as_str(),
+            actor
+                .public_id
+                .unwrap_or_else(|| actor.principal_id.to_string())
+        );
+        println!("organizations {}", status.organizations.join(", "));
+    } else {
+        println!("not authenticated; run `briefcase login <slt>`");
+    }
     Ok(())
 }
 

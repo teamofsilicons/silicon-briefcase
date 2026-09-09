@@ -279,6 +279,8 @@ fn ordinary_routes() -> Router<AppState> {
         .route("/readyz", get(system::ready))
         .route("/api/version", get(system::version))
         .route("/api/v1/version", get(system::version))
+        .route("/api/v1/iam", get(session::iam_info))
+        .route("/api/v1/auth/status", get(session::status))
         .route("/api/v1/auth/slt", post(session::exchange_slt))
         .route("/api/v1/auth/refresh", post(session::refresh))
         .merge(testing_environment_routes())
@@ -454,8 +456,10 @@ mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 51] = [
+    const CONTRACT: [(&str, &str, &str); 53] = [
         ("/version", "get", "200"),
+        ("/iam", "get", "200"),
+        ("/auth/status", "get", "200"),
         ("/auth/slt", "post", "200"),
         ("/auth/refresh", "post", "200"),
         ("/organizations/{org_id}/testing-environments", "get", "200"),
@@ -729,6 +733,36 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/json")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn iam_discovery_and_logged_out_status_are_public_and_not_cached() -> anyhow::Result<()> {
+        let application = test_router()?;
+        for path in ["/api/v1/iam", "/api/v1/auth/status"] {
+            let response = application
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty())?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+            let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if path.ends_with("/iam") {
+                assert!(body["app_id"].as_str().is_some_and(|id| id.contains('>')));
+                assert!(body["test_environment_id"].is_null());
+                assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
+            } else {
+                assert_eq!(body["authenticated"], false);
+                assert!(body["actor"].is_null());
+            }
+        }
         Ok(())
     }
 

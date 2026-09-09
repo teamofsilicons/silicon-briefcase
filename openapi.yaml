@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 0.5.0
+  version: 0.6.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application access.
 servers:
   - url: https://backend.briefcase.teamofsilicons.com/api/v1
@@ -26,6 +26,46 @@ tags:
   - name: Bin
   - name: Storage
 paths:
+  /iam:
+    get:
+      tags: [Authentication]
+      operationId: readIamInfo
+      summary: Read the public IAM application ID before login
+      security: []
+      description: >-
+        No member token or organization is required. An optional
+        X-Testing-Environment-Key selects the paired test application's identity.
+        Application secrets and environment keys are never returned.
+      parameters:
+        - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
+      responses:
+        '200':
+          description: Public IAM configuration (Cache-Control no-store)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IamInfo' }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/status:
+    get:
+      tags: [Authentication]
+      operationId: readLoginStatus
+      summary: Verify the current Carbon or Silicon session with IAM
+      security: [{}, {bearerAuth: []}, {bearerAuth: [], testingEnvironmentKey: []}]
+      description: >-
+        No organization selection is required. Missing, invalid, expired, or revoked
+        member tokens return authenticated false. Active tokens return their
+        identity and currently granted organizations; an empty grant list does
+        not make an active session unauthenticated. IAM outages, malformed
+        upstream responses, and invalid test-plane credentials remain errors.
+      parameters:
+        - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
+      responses:
+        '200':
+          description: Live authentication status (Cache-Control no-store)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginStatus' }
+        default: { $ref: '#/components/responses/Error' }
   /version:
     get:
       tags: [Storage]
@@ -1347,6 +1387,36 @@ components:
       required: [refresh_token]
       properties:
         refresh_token: { type: string, pattern: '^ort_[A-Za-z0-9_-]{43}$' }
+    IamInfo:
+      type: object
+      additionalProperties: false
+      required: [app_id, test_environment_id, iam_environment_id]
+      properties:
+        app_id: { type: string }
+        test_environment_id: { type: [string, 'null'], format: uuid }
+        iam_environment_id: { type: [string, 'null'], format: uuid }
+    LoginStatus:
+      type: object
+      additionalProperties: false
+      required: [authenticated, actor, organizations, expires_at]
+      properties:
+        authenticated: { type: boolean }
+        actor:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [principal_id, type, public_id]
+              properties:
+                principal_id: { type: string, format: uuid }
+                type: { type: string, enum: [carbon, silicon] }
+                public_id:
+                  type: [string, 'null']
+                  description: Public identity from active organization snapshots; otherwise null. The principal UUID is always available when authenticated.
+        organizations:
+          type: array
+          items: { type: string }
+        expires_at: { type: [integer, 'null'], format: int64, description: Access-token expiry as a Unix timestamp. }
     ApplicationSessionActor:
       type: object
       additionalProperties: false

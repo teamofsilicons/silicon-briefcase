@@ -17,7 +17,11 @@ use uuid::Uuid;
     long_about = "Browse, upload, download, and share organization files.\n\n\
                   Entries are addressed by the path their permanent URL shows, \
                   such as private/cos:tos/notes/report.pdf, or by their identifier. \
-                  Run `briefcase login` once, then everything else uses the saved profile.",
+                  Run `briefcase login <slt>` once, then everything else uses the saved profile.\n\n\
+                  Getting started:\n  briefcase iam --json\n  briefcase login <slt>\n  briefcase login status --json\n  briefcase --org tos ls\n\n\
+                  Run `briefcase <command> --help` for full command usage and options.\n\
+                  State defaults to $SILICON_HOME/.briefcase when SILICON_HOME is set,\n\
+                  otherwise $HOME/.briefcase. Use `briefcase config home <directory>` to configure it.",
     propagate_version = true,
     disable_help_subcommand = true
 )]
@@ -86,9 +90,12 @@ pub enum Command {
         long_about = "Sign in to Silicon Briefcase with an IAM short-lived token.\n\n\
         The hosted backend is selected automatically; --url is only needed to override it \
         for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
+        Use `briefcase login status --json` to check authentication and identity.\n\n\
         Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane."
     )]
     Login(LoginArgs),
+    /// Show the deployment's public IAM app ID before signing in.
+    Iam,
     /// Forget the saved session for this profile and plane.
     Logout,
     /// Show the current profile and whether the deployment agrees with it.
@@ -159,7 +166,15 @@ pub enum Command {
 
 /// Arguments for `login`.
 #[derive(Args)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_precedence_over_arg = true
+)]
 pub struct LoginArgs {
+    /// Inspect the current login without exchanging a short-lived token.
+    #[command(subcommand)]
+    pub command: Option<LoginCommand>,
+
     /// IAM short-lived token as the direct login argument.
     #[arg(index = 1, value_name = "SLT", conflicts_with_all = ["slt", "slt_stdin"])]
     pub slt_positional: Option<String>,
@@ -175,6 +190,13 @@ pub struct LoginArgs {
     /// Name to save this deployment under.
     #[arg(long, value_name = "NAME")]
     pub save_as: Option<String>,
+}
+
+/// Login inspection commands.
+#[derive(Subcommand)]
+pub enum LoginCommand {
+    /// Verify the current session with IAM and show its Carbon or Silicon identity.
+    Status,
 }
 
 /// Arguments for `ls`.

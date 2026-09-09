@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "0.5.0";
+pub const CONTRACT_VERSION: &str = "0.6.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 51] = [
+pub const OPERATIONS: [OperationVersion; 53] = [
     operation(
         "reserveDelegatedUpload",
         "1.0.0",
@@ -75,6 +75,8 @@ pub const OPERATIONS: [OperationVersion; 51] = [
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
+    operation("readIamInfo", "1.0.0", "GET", "/iam"),
+    operation("readLoginStatus", "1.0.0", "GET", "/auth/status"),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("exchangeShortLivedToken", "1.0.0", "POST", "/auth/slt"),
     operation(

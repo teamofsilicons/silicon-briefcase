@@ -43,7 +43,7 @@ const fn operation(
 }
 
 /// Every operation this client calls, with the revision it expects.
-pub const OPERATIONS: [OperationRevision; 51] = [
+pub const OPERATIONS: [OperationRevision; 53] = [
     operation(
         "reserveDelegatedUpload",
         "1.0.0",
@@ -74,6 +74,8 @@ pub const OPERATIONS: [OperationRevision; 51] = [
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
+    operation("readIamInfo", "1.0.0", "GET", "/iam"),
+    operation("readLoginStatus", "1.0.0", "GET", "/auth/status"),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("exchangeShortLivedToken", "1.0.0", "POST", "/auth/slt"),
     operation(
@@ -472,7 +474,12 @@ mod tests {
         let mut version = served(everything_this_build_expects());
         version.service = "not-briefcase".to_owned();
         version.selected_api_version = "v2".to_owned();
-        version.operations[0].method = "POST".to_owned();
+        version.operations[0].method = if version.operations[0].method == "POST" {
+            "GET"
+        } else {
+            "POST"
+        }
+        .to_owned();
         version.operations[1].path = "/wrong".to_owned();
         let error = version
             .check_compatibility()

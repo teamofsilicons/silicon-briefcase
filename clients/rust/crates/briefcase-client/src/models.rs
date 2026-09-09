@@ -833,3 +833,39 @@ mod tests {
         assert!(!entry.allows(EffectiveAccess::Delete));
     }
 }
+
+/// Public IAM application configuration for the selected Briefcase deployment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct IamInfo {
+    /// Canonical app ID for which IAM should mint a short-lived token.
+    pub app_id: crate::ApplicationId,
+    /// Briefcase test plane, or production when absent.
+    pub test_environment_id: Option<Uuid>,
+    /// Paired IAM test plane, or production when absent.
+    pub iam_environment_id: Option<Uuid>,
+}
+
+/// Current authentication verified online by IAM; never contains credentials.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LoginStatus {
+    /// Whether IAM accepted the access token as active for this application.
+    pub authenticated: bool,
+    /// The authenticated Carbon or Silicon, absent when unauthenticated.
+    pub actor: Option<LoginActor>,
+    /// Currently granted organizations with active memberships.
+    pub organizations: Vec<String>,
+    /// Access-token expiry as a Unix timestamp, absent when unauthenticated.
+    pub expires_at: Option<i64>,
+}
+
+/// Identity returned by login inspection, even without an organization grant.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LoginActor {
+    /// Stable IAM principal UUID.
+    pub principal_id: Uuid,
+    /// Carbon or Silicon.
+    #[serde(rename = "type")]
+    pub actor_type: ActorType,
+    /// Public identifier, if an active organization snapshot supplies it.
+    pub public_id: Option<String>,
+}

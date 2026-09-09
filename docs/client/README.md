@@ -515,3 +515,36 @@ recorded storage location; subsequent versions use the activated configuration.
 | One-shot delegated upload | `create_file_on_behalf_of` |
 | IAM SLT session | `login_with_slt`, `refresh_session` |
 | Testing environments | `testing_environments`, `create_testing_environment`, lifecycle/key/self methods |
+
+## Public IAM information and live login status
+
+The stateless client exposes the same discovery and authentication inspection as
+the CLI. Construct an unscoped configuration so no organization selection is
+needed:
+
+```rust,no_run
+# async fn inspect() -> Result<(), briefcase_client::Error> {
+use briefcase_client::{Client, Config};
+let config = Config::for_sign_in("https://backend.briefcase.teamofsilicons.com/api/v1/")?
+    .with_auto_update(false);
+let client = Client::connect(config.clone()).await?;
+let iam = client.iam_info().await?;
+println!("Request an IAM SLT for {}", iam.app_id);
+let signed_in = Client::connect(config.with_token("caller-owned-access-token")).await?;
+let status = signed_in.login_status().await?;
+if let Some(actor) = status.actor {
+    println!("{} {}", actor.actor_type.as_str(), actor.principal_id);
+}
+# Ok(())
+# }
+```
+
+`iam_info()` always omits the member bearer and returns only the public app ID
+and optional Briefcase/IAM test-environment IDs. `login_status()` checks the
+current token online; inactive tokens return `authenticated: false`. Active
+sessions include `actor` (principal UUID, type, nullable public identifier),
+current organizations, and access-token expiry as a Unix timestamp. A session
+without grants remains authenticated; its public identifier may be absent.
+Network, IAM, and test-plane failures remain errors. The caller owns token
+refresh and storage; the Rust package does not read `SILICON_HOME` or persist
+credentials. The stateful CLI handles these responsibilities.

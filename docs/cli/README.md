@@ -110,15 +110,22 @@ briefcase login --url http://127.0.0.1:8080/api/v1/ --org tos --save-as local
 
 `--url`, `--org`, `--token`, and `--profile` also read `BRIEFCASE_URL`,
 `BRIEFCASE_ORG`, `BRIEFCASE_TOKEN`, and `BRIEFCASE_PROFILE`, which is the usual
-shape for CI. State defaults to `$HOME/.briefcase`; set `BRIEFCASE_HOME` to
-override it, or choose a persistent parent directory interactively:
+shape for CI. State defaults to `$SILICON_HOME/.briefcase` when `SILICON_HOME`
+is present, otherwise `$HOME/.briefcase`. Missing state directories are created
+on the first write; an empty `SILICON_HOME` or a file path is an error. `BRIEFCASE_HOME` remains
+an explicit override of the **complete state directory**, with highest priority.
+You can also choose a persistent parent directory:
 
 ```bash
 briefcase config home /path/to/existing-directory
 ```
 
 The configured location must already be a directory; otherwise the command
-fails with `not a directory`.
+fails with `not a directory`. The choice is recorded in
+`$SILICON_HOME/.briefcase-home` (or `$HOME/.briefcase-home` when `SILICON_HOME`
+is absent), and takes precedence over that default parent. Changing
+`SILICON_HOME` selects a separate configuration and credential store; existing
+files are not moved automatically. `BRIEFCASE_HOME` still overrides the pointer.
 
 ```bash
 briefcase status     # profile, deployment, token, and contract agreement
@@ -128,6 +135,59 @@ briefcase logout     # forget the token, keep the profile
 `--token`/`BRIEFCASE_TOKEN` remains an explicit ephemeral override for CI and
 does not replace the stored rotating session. `logout` forgets only the
 production or `--test` session currently selected.
+
+## Help, IAM discovery, and authentication status
+
+```bash
+briefcase --help
+briefcase login --help
+briefcase iam --json
+briefcase login status --json
+```
+
+`--help` lists all top-level commands and shared options, with getting-started
+examples. Use `briefcase <command> --help` for its complete syntax. Help works
+without a home directory, saved profile, network connection, or login.
+
+`iam --json` reads the selected deployment's public IAM configuration without
+sending a member access token. It returns `app_id`, `test_environment_id`, and
+`iam_environment_id`. Use the `app_id` when requesting the single-use SLT from
+IAM. Production returns null for both environment IDs. No app secret or
+root key is printed. URL/profile overrides apply as usual.
+
+`login status --json` checks the session with IAM and returns one JSON object:
+
+```json
+{
+  "authenticated": true,
+  "actor": {
+    "principal_id": "01990a9d-86f1-7000-8000-000000000001",
+    "type": "carbon",
+    "public_id": "cos:tester"
+  },
+  "organizations": ["tos"],
+  "expires_at": 1789000000,
+  "profile": "default",
+  "url": "https://backend.briefcase.teamofsilicons.com/api/v1/",
+  "test_environment_id": null
+}
+```
+
+The actor type is `carbon` or `silicon`. IAM supplies the public identifier
+through active organization snapshots; if no organizations are granted,
+`public_id` is null and the stable principal UUID still identifies the actor.
+No `--org` is required, including for logins with several granted organizations.
+A saved session refreshes before expiry using the normal atomic rotation flow.
+An explicit `--token` is checked directly and never refreshes the saved session.
+Missing, expired, or revoked member credentials report `authenticated: false`,
+`actor: null`, empty organizations, and `expires_at: null`. This is a successful
+status query (exit 0); scripts should inspect `authenticated`. Network failures,
+IAM outages, contract mismatches, and invalid test-plane configuration remain
+errors, not a false successful authentication result.
+
+Both commands accept `--test <environment_id>` with the saved paired test key.
+The existing `briefcase status` remains the profile/deployment/contract summary;
+use `briefcase login status` for live authentication and identity.
 
 ## Limits and test-plane boundaries
 

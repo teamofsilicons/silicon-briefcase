@@ -322,15 +322,15 @@ async fn test_login_never_sends_a_stored_root_to_an_overridden_url() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn login_never_persists_an_organization_unbound_session() {
+async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
     let server = MockServer::start().await;
     let home = tempfile::tempdir().unwrap();
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/slt"))
         .and(body_json(json!({"slt": "unscoped-slt"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": "unbound-access-must-not-persist",
-            "refresh_token": "unbound-refresh-must-not-persist",
+            "access_token": "unscoped-access",
+            "refresh_token": "unscoped-refresh",
             "token_type": "Bearer",
             "expires_in": 900,
             "scope": "briefcase",
@@ -359,14 +359,27 @@ async fn login_never_persists_an_organization_unbound_session() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("organization-unbound"));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("signed in"));
-    assert!(!home.path().join("config.json").exists());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let credentials: Value =
         serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
             .unwrap();
-    assert_eq!(credentials["sessions"], json!({}));
+    assert_eq!(
+        credentials["sessions"]["default"]["access_token"],
+        "unscoped-access"
+    );
+    assert!(credentials["sessions"]["default"]["org_id"].is_null());
+    assert_eq!(
+        credentials["sessions"]["default"]["organizations"],
+        json!([])
+    );
+    assert_eq!(
+        credentials["production_credential_scopes"]["default"]["organization"],
+        ""
+    );
     assert_eq!(credentials["test_sessions"], json!({}));
     assert_eq!(credentials["tokens"], json!({}));
 }
@@ -901,4 +914,312 @@ async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() 
         serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
             .unwrap();
     assert_eq!(credentials["pending_mutations"], json!({}));
+}
+
+#[tokio::test]
+async fn iam_discovery_does_not_read_or_send_member_credentials() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(home.path(), &server, &json!({}));
+    std::fs::write(home.path().join("credentials.json"), "not valid JSON").unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("briefcase-api-version", "v1")
+                .set_body_json(version_document()),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/iam"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "app_id": "tos>briefcase", "test_environment_id": null, "iam_environment_id": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = briefcase(home.path(), &["iam".into(), "--json".into()]).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["app_id"], "tos>briefcase");
+    for request in server.received_requests().await.unwrap() {
+        assert!(request.headers.get("authorization").is_none());
+    }
+}
+
+#[tokio::test]
+async fn login_status_without_credentials_is_json_and_needs_no_network() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(home.path(), &server, &json!({}));
+    let output = briefcase(
+        home.path(),
+        &["login".into(), "status".into(), "--json".into()],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["authenticated"], false);
+    assert!(value["actor"].is_null());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn login_status_checks_override_identity_instead_of_the_saved_actor() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(
+        home.path(),
+        &server,
+        &json!({
+            "sessions": { "work": session("2020-01-01T00:00:00Z") },
+            "production_credential_scopes": { "work": scope(&server, "tos") }
+        }),
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("briefcase-api-version", "v1")
+                .set_body_json(version_document()),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .and(header("authorization", "Bearer override-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authenticated": true,
+            "actor": { "principal_id": ACTOR_ID, "type": "silicon", "public_id": "agent-a" },
+            "organizations": ["tos", "other"], "expires_at": 4_102_444_800_i64
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = briefcase(
+        home.path(),
+        &[
+            "login".into(),
+            "status".into(),
+            "--json".into(),
+            "--token".into(),
+            "override-token".into(),
+        ],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["authenticated"], true);
+    assert_eq!(value["actor"]["type"], "silicon");
+    assert_eq!(value["actor"]["public_id"], "agent-a");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("token"));
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == "/api/v1/auth/refresh")
+    );
+}
+
+#[tokio::test]
+async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organization() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    let mut stored = session("2020-01-01T00:00:00Z");
+    stored["org_id"] = Value::Null;
+    stored["organizations"] = json!(["tos", "other"]);
+    write_state(
+        home.path(),
+        &server,
+        &json!({
+            "sessions": { "work": stored },
+            "production_credential_scopes": { "work": scope(&server, "") }
+        }),
+    );
+    let config_file = home.path().join("config.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
+    config["profiles"]["work"]["org"] = json!("");
+    std::fs::write(config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("briefcase-api-version", "v1")
+                .set_body_json(version_document()),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
+        .and(body_json(json!({"refresh_token": "stored-refresh-must-not-leak"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access", "refresh_token": "new-refresh", "token_type": "Bearer",
+            "expires_in": 1800, "scope": "profile", "org_id": null, "organizations": ["tos", "other"],
+            "actor": {"principal_id": ACTOR_ID, "type": "carbon", "public_id": "cos:tester"}
+        }))).expect(1).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .and(header("authorization", "Bearer new-access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authenticated": true,
+            "actor": {"principal_id": ACTOR_ID, "type": "carbon", "public_id": "cos:tester"},
+            "organizations": ["tos", "other"], "expires_at": 4_102_444_800_i64
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = briefcase(
+        home.path(),
+        &["login".into(), "status".into(), "--json".into()],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["authenticated"], true);
+    let credentials: Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        credentials["sessions"]["work"]["refresh_token"],
+        "new-refresh"
+    );
+}
+
+fn clean_cli() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_briefcase"));
+    for key in [
+        "BRIEFCASE_HOME",
+        "SILICON_HOME",
+        "BRIEFCASE_PROFILE",
+        "BRIEFCASE_URL",
+        "BRIEFCASE_ORG",
+        "BRIEFCASE_TOKEN",
+        "BRIEFCASE_TEST",
+    ] {
+        command.env_remove(key);
+    }
+    command.env("BRIEFCASE_AUTO_UPDATE", "off");
+    command
+}
+
+#[test]
+fn shared_home_precedence_and_persistent_configuration_are_isolated() {
+    let os_home = tempfile::tempdir().unwrap();
+    let silicon_home = tempfile::tempdir().unwrap();
+    let configured = tempfile::tempdir().unwrap();
+    let explicit = tempfile::tempdir().unwrap();
+    let output = clean_cli()
+        .env("HOME", os_home.path())
+        .env("SILICON_HOME", silicon_home.path())
+        .args(["config", "set", "auto-update", "off"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(silicon_home.path().join(".briefcase/config.json").is_file());
+    assert!(!os_home.path().join(".briefcase").exists());
+    let output = clean_cli()
+        .env("HOME", os_home.path())
+        .env("SILICON_HOME", silicon_home.path())
+        .args(["config", "home"])
+        .arg(configured.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(silicon_home.path().join(".briefcase-home").is_file());
+    assert!(!os_home.path().join(".briefcase-home").exists());
+    let output = clean_cli()
+        .env("HOME", os_home.path())
+        .env("SILICON_HOME", silicon_home.path())
+        .args(["config", "set", "auto-update", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(configured.path().join(".briefcase/config.json").is_file());
+    let output = clean_cli()
+        .env("HOME", os_home.path())
+        .env("SILICON_HOME", silicon_home.path())
+        .env("BRIEFCASE_HOME", explicit.path())
+        .args(["config", "set", "auto-update", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(explicit.path().join("config.json").is_file());
+}
+
+#[test]
+fn default_home_falls_back_and_shared_home_works_without_home() {
+    let home = tempfile::tempdir().unwrap();
+    let output = clean_cli()
+        .env("HOME", home.path())
+        .args(["config", "set", "auto-update", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(home.path().join(".briefcase/config.json").is_file());
+    let shared = tempfile::tempdir().unwrap();
+    let output = clean_cli()
+        .env_remove("HOME")
+        .env("SILICON_HOME", shared.path())
+        .args(["config", "set", "auto-update", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(shared.path().join(".briefcase/config.json").is_file());
+    let output = clean_cli()
+        .env("HOME", home.path())
+        .env("SILICON_HOME", "")
+        .args(["config", "show"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a directory"));
+}
+
+#[test]
+fn help_is_available_without_state_and_documents_login_inspection() {
+    for args in [
+        vec!["--help"],
+        vec!["-h"],
+        vec!["login", "--help"],
+        vec!["login", "status", "--help"],
+    ] {
+        let output = clean_cli().env_remove("HOME").args(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    }
+    let output = clean_cli()
+        .env_remove("HOME")
+        .args(["--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("briefcase iam --json"));
+    assert!(help.contains("briefcase login status --json"));
+    assert!(help.contains("SILICON_HOME"));
 }

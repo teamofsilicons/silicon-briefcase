@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 51] = [
+const EXPECTED_OPERATIONS: [&str; 53] = [
     "cancelDelegatedUpload",
     "cleanCurrentTestingEnvironment",
     "cleanTestingEnvironment",
@@ -35,6 +35,8 @@ const EXPECTED_OPERATIONS: [&str; 51] = [
     "listVersions",
     "moveEntryToBin",
     "readApiVersion",
+    "readIamInfo",
+    "readLoginStatus",
     "readEntryContent",
     "readFileOnBehalfOfMember",
     "readOrganizationUsage",

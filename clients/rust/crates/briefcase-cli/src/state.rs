@@ -38,7 +38,7 @@ const UPDATE_LOCK_FILE: &str = "update.lock";
 pub enum StateError {
     /// The home directory could not be determined.
     #[error(
-        "no home directory: set HOME or configure one with `briefcase config home <directory>`"
+        "no home directory: set SILICON_HOME or HOME, or configure one with `briefcase config home <directory>`"
     )]
     NoHome,
     /// A configured home path exists but is not a directory.
@@ -482,13 +482,28 @@ impl Drop for UpdateLock {
     }
 }
 
+/// The shared Silicon home is the default parent for Briefcase state and its
+/// configured-home pointer. The app-specific state override is resolved first.
+fn default_home() -> Result<PathBuf, StateError> {
+    let home = std::env::var_os("SILICON_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .ok_or(StateError::NoHome)?;
+    if home.as_os_str().is_empty() || (home.exists() && !home.is_dir()) {
+        return Err(StateError::NotDirectory {
+            path: home.display().to_string(),
+        });
+    }
+    Ok(home)
+}
+
 impl StateDirectory {
     /// Locates the state directory, honoring `BRIEFCASE_HOME` when set.
     ///
     /// # Errors
     ///
     /// Returns [`StateError::NoHome`] when neither `BRIEFCASE_HOME` nor `HOME`
-    /// names a directory.
+    /// is available (with `SILICON_HOME` preferred over `HOME`).
     pub fn locate() -> Result<Self, StateError> {
         if let Ok(explicit) = std::env::var("BRIEFCASE_HOME")
             && !explicit.trim().is_empty()
@@ -497,9 +512,7 @@ impl StateDirectory {
                 root: PathBuf::from(explicit),
             });
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or(StateError::NoHome)?;
+        let home = default_home()?;
         let pointer = home.join(HOME_POINTER_FILE);
         if pointer.is_file() {
             let configured =
@@ -531,9 +544,12 @@ impl StateDirectory {
                 path: directory.display().to_string(),
             });
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or(StateError::NoHome)?;
+        let home = default_home()?;
+        std::fs::create_dir_all(&home).map_err(|source| StateError::File {
+            path: home.display().to_string(),
+            action: "created",
+            source,
+        })?;
         let pointer = home.join(HOME_POINTER_FILE);
         std::fs::write(
             &pointer,

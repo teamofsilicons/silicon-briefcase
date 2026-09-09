@@ -50,6 +50,73 @@ struct SessionTokens {
     organizations: Vec<String>,
 }
 
+/// Describes public IAM identity without exposing application credentials.
+pub(crate) async fn iam_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let access = extract::optional_testing_access(&state, &headers).await?;
+    let _fence = extract::testing_use_fence(&state, access.as_ref()).await?;
+    let environment = access
+        .as_ref()
+        .map(extract::iam_environment_credential)
+        .transpose()?;
+    Ok(private_json(serde_json::json!({
+        "app_id": state.iam.public_application_id(environment.as_ref()),
+        "test_environment_id": access.as_ref().map(|access| access.environment_id),
+        "iam_environment_id": access.as_ref().map(|access| access.iam_environment_id),
+    })))
+}
+
+/// Checks live authentication without requiring a selected organization.
+pub(crate) async fn status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let access = extract::optional_testing_access(&state, &headers).await?;
+    let _fence = extract::testing_use_fence(&state, access.as_ref()).await?;
+    let environment = access
+        .as_ref()
+        .map(extract::iam_environment_credential)
+        .transpose()?;
+    let token = super::super::auth::require_bearer_only(&headers)
+        .and_then(super::super::auth::parse_bearer);
+    let identity = match token {
+        Ok(token) => match state
+            .iam
+            .inspect_session(&token, environment.as_ref())
+            .await
+        {
+            Ok(identity) => Some(identity),
+            Err(crate::infrastructure::iam::IamClientError::Rejected) => None,
+            Err(error) => return Err(error.into()),
+        },
+        Err(AppError::Unauthenticated) => None,
+        Err(error) => return Err(error),
+    };
+    extract::touch_testing_access(&state, access.as_ref()).await?;
+    Ok(private_json(match identity {
+        Some(identity) => serde_json::json!({
+            "authenticated": true,
+            "actor": { "principal_id": identity.principal_id, "type": identity.actor_kind,
+                "public_id": identity.public_id },
+            "organizations": identity.organizations,
+            "expires_at": identity.expires_at,
+        }),
+        None => serde_json::json!({
+            "authenticated": false, "actor": null, "organizations": [], "expires_at": null,
+        }),
+    }))
+}
+
+fn private_json(body: serde_json::Value) -> Response {
+    let mut response = Json(body).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// Exchanges a single-use short-lived token for an Application session.
 pub(crate) async fn exchange_slt(
     State(state): State<AppState>,

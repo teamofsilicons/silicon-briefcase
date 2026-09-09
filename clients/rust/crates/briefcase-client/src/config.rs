@@ -373,7 +373,8 @@ impl Config {
     /// Configures an organisation-free account sign-in.
     ///
     /// This client can exchange and refresh unscoped IAM sessions and read
-    /// service status. Organisation API calls are rejected locally. Create a
+    /// service status, public IAM information, and login inspection.
+    /// Organisation API calls are rejected locally. Create a
     /// separate scoped configuration after choosing an authorised workspace.
     ///
     /// # Errors
