@@ -199,34 +199,65 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Media/download elements cannot attach custom headers. Consume the public
+// selector here so strict endpoint query schemas see only their own fields.
+fn extract_environment_selector(request: &mut Request) -> Result<()> {
+    let Some(query) = request.uri().query() else {
+        return Ok(());
+    };
+    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
+    let selectors: Vec<_> = pairs
+        .iter()
+        .filter(|(k, _)| k == "test_environment")
+        .collect();
+    if selectors.is_empty() {
+        return Ok(());
+    }
+    if selectors.len() != 1
+        || uuid::Uuid::parse_str(&selectors[0].1)
+            .ok()
+            .is_none_or(|id| id.is_nil())
+        || request
+            .headers()
+            .get_all("x-briefcase-environment")
+            .iter()
+            .count()
+            > 1
+        || request
+            .headers()
+            .get("x-briefcase-environment")
+            .is_some_and(|h| h.to_str().ok() != Some(selectors[0].1.as_ref()))
+    {
+        return Err(bad("Invalid testing environment."));
+    }
+    let value =
+        HeaderValue::from_str(&selectors[0].1).map_err(|_| bad("Invalid testing environment."))?;
+    let remaining = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().filter(|(k, _)| k != "test_environment"))
+        .finish();
+    let mut uri = request.uri().clone().into_parts();
+    let path = request.uri().path();
+    uri.path_and_query = Some(
+        if remaining.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{path}?{remaining}")
+        }
+        .parse()
+        .map_err(|_| bad("Invalid request query."))?,
+    );
+    *request.uri_mut() =
+        axum::http::Uri::from_parts(uri).map_err(|_| bad("Invalid request query."))?;
+    request
+        .headers_mut()
+        .insert("x-briefcase-environment", value);
+    Ok(())
+}
+
 async fn boundary(State(app): State<App>, mut request: Request, next: Next) -> Response {
     if request.uri().path().starts_with("/browser/") || request.uri().path() == "/auth/callback" {
-        // Media/download elements cannot attach custom headers. Their public selector
-        // chooses only a child already authenticated under this browser's parent session.
-        if let Some(query) = request.uri().query() {
-            let selectors: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
-                .filter(|(k, _)| k == "test_environment")
-                .map(|(_, v)| v.into_owned())
-                .collect();
-            if !selectors.is_empty() {
-                if selectors.len() != 1
-                    || uuid::Uuid::parse_str(&selectors[0]).is_err()
-                    || request
-                        .headers()
-                        .get("x-briefcase-environment")
-                        .is_some_and(|h| h.to_str().ok() != Some(selectors[0].as_str()))
-                {
-                    return bad("Invalid testing environment.").into_response();
-                }
-                match HeaderValue::from_str(&selectors[0]) {
-                    Ok(value) => {
-                        request
-                            .headers_mut()
-                            .insert("x-briefcase-environment", value);
-                    }
-                    Err(_) => return bad("Invalid testing environment.").into_response(),
-                }
-            }
+        if let Err(error) = extract_environment_selector(&mut request) {
+            return error.into_response();
         }
         let h = request.headers();
         let mutating = !matches!(
@@ -283,4 +314,51 @@ fn document_policy(html: &str) -> anyhow::Result<HeaderValue> {
     Ok(HeaderValue::from_str(&format!(
         "default-src 'self'; {scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; object-src 'none'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     ))?)
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn test_selector_is_consumed_before_strict_upload_query_validation() {
+        let environment = uuid::Uuid::new_v4();
+        let operation = uuid::Uuid::new_v4();
+        let mut request = Request::builder().uri(format!(
+            "/browser/upload?parent=private%2Fsaket&name=a%2Bb+file.txt&content_type=text%2Fplain&operation_id={operation}&test_environment={environment}"
+        )).body(axum::body::Body::empty()).unwrap();
+        assert!(extract_environment_selector(&mut request).is_ok());
+        assert_eq!(
+            request.headers()["x-briefcase-environment"],
+            environment.to_string()
+        );
+        assert!(axum::extract::Query::<files::UploadQuery>::try_from_uri(request.uri()).is_ok());
+        let values: HashMap<_, _> =
+            url::form_urlencoded::parse(request.uri().query().unwrap().as_bytes()).collect();
+        assert_eq!(values.get("name").unwrap(), "a+b file.txt");
+        assert_eq!(values.get("parent").unwrap(), "private/saket");
+        assert!(!values.contains_key("test_environment"));
+    }
+
+    #[test]
+    fn selector_validation_rejects_ambiguity_before_routing() {
+        let id = uuid::Uuid::new_v4();
+        for query in [
+            "test_environment=bad".to_owned(),
+            format!("test_environment={id}&test_environment={id}"),
+            "test_environment=00000000-0000-0000-0000-000000000000".to_owned(),
+        ] {
+            let mut request = Request::builder()
+                .uri(format!("/browser/session?{query}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert!(extract_environment_selector(&mut request).is_err());
+        }
+        let mut request = Request::builder()
+            .uri(format!("/browser/session?test_environment={id}"))
+            .header("x-briefcase-environment", uuid::Uuid::new_v4().to_string())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(extract_environment_selector(&mut request).is_err());
+    }
 }
