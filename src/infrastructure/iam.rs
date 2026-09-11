@@ -1245,6 +1245,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_test_introspection_retries_with_identical_scope() -> anyhow::Result<()> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("x-org-id", "tos"))
+            .and(body_string(format!("token={BEARER_TOKEN}&token_type_hint=access_token")))
+            .respond_with(move |_: &wiremock::Request| {
+                let response = ResponseTemplate::new(200).set_body_json(json!({
+                    "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
+                    "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": MEMBERSHIP_ID,
+                    "session_id": SESSION_ID, "scope": "memberships.read profile roles.read",
+                    "audience": TEST_APP_ID, "authorization": authorization_snapshot(TEST_APP_ID, true),
+                    "authorization_epoch": 7, "issued_at": 1_700_000_000_i64, "expires_at": 4_070_908_800_i64
+                }));
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    response.set_delay(Duration::from_millis(500))
+                } else { response }
+            }).expect(2).mount(&server).await;
+        let mut settings = client_settings(&server);
+        settings.request_timeout = Duration::from_millis(100);
+        let client = IamClient::new_without_handshake(&settings)?;
+        let verified = client
+            .introspect_bearer(
+                &SecretString::from(BEARER_TOKEN.to_owned()),
+                &organization(),
+                Some(&environment_credential()),
+            )
+            .await?;
+        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.verify().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn inactive_bearer_without_cache_headers_is_still_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

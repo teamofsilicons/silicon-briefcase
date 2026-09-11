@@ -5,6 +5,7 @@ use silicon_iam_client::{Client, Credential, EnvironmentKey, IdempotencyKey, Mut
 use super::*;
 
 mod directory;
+mod resilience;
 
 impl IamClient {
     /// Returns the public application ID for production or the selected test plane.
@@ -28,20 +29,14 @@ impl IamClient {
         if !valid_fixed_iam_secret(token.expose_secret(), "oat_") {
             return Err(IamClientError::Rejected);
         }
-        let response = self
-            .scoped_client(environment)?
-            .oauth()
-            .introspect(
-                &models::TokenIntrospectionRequest {
-                    token: token.expose_secret().to_owned(),
-                    token_type_hint: Some(
-                        models::TokenIntrospectionRequestTokenTypeHint::AccessToken,
-                    ),
-                },
-                None,
-            )
-            .await
-            .map_err(|error| sdk_error(error, Operation::Service))?;
+        let client = self.scoped_client(environment)?;
+        let request = models::TokenIntrospectionRequest {
+            token: token.expose_secret().to_owned(),
+            token_type_hint: Some(models::TokenIntrospectionRequestTokenTypeHint::AccessToken),
+        };
+        let response =
+            resilience::introspect(|| async { client.oauth().introspect(&request, None).await })
+                .await?;
         session_identity(
             self.convert(response)?,
             self.application_identity(environment).0,
@@ -267,20 +262,18 @@ impl IamClient {
         expected_organization: &OrganizationId,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<VerifiedIdentity, IamClientError> {
-        let response = self
-            .scoped_client(environment)?
-            .oauth()
-            .introspect(
-                &models::TokenIntrospectionRequest {
-                    token: token.expose_secret().to_owned(),
-                    token_type_hint: Some(
-                        models::TokenIntrospectionRequestTokenTypeHint::AccessToken,
-                    ),
-                },
-                Some(expected_organization.as_str()),
-            )
-            .await
-            .map_err(|error| sdk_error(error, Operation::Service))?;
+        let client = self.scoped_client(environment)?;
+        let request = models::TokenIntrospectionRequest {
+            token: token.expose_secret().to_owned(),
+            token_type_hint: Some(models::TokenIntrospectionRequestTokenTypeHint::AccessToken),
+        };
+        let response = resilience::introspect(|| async {
+            client
+                .oauth()
+                .introspect(&request, Some(expected_organization.as_str()))
+                .await
+        })
+        .await?;
         let snapshot = response.authorization.clone();
         let scopes = response.scope.clone();
         let mut verified = validate_introspection(
@@ -388,6 +381,7 @@ enum Operation {
 
 fn sdk_error(error: silicon_iam_client::Error, operation: Operation) -> IamClientError {
     use silicon_iam_client::Error;
+    resilience::log_error(&error);
     match error {
         Error::Api(error)
             if matches!(operation, Operation::Environment)
@@ -402,7 +396,7 @@ fn sdk_error(error: silicon_iam_client::Error, operation: Operation) -> IamClien
         | Error::RateLimited { .. }
         | Error::Transport(_)
         | Error::UnstructuredResponse { .. } => IamClientError::Unavailable {
-            reason: "official_client_upstream",
+            reason: resilience::failure_class(&error),
         },
         _ => invalid_response("official_client_contract"),
     }
