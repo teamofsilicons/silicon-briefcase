@@ -158,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
             post(environments::pair),
         )
         .route("/browser/environments/{id}/key", post(environments::reveal))
+        .route("/browser/environments/{id}/view", post(session::enter_test))
         .route(
             "/browser/environments/{id}/{action}",
             post(environments::action),
@@ -198,8 +199,35 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn boundary(State(app): State<App>, request: Request, next: Next) -> Response {
+async fn boundary(State(app): State<App>, mut request: Request, next: Next) -> Response {
     if request.uri().path().starts_with("/browser/") || request.uri().path() == "/auth/callback" {
+        // Media/download elements cannot attach custom headers. Their public selector
+        // chooses only a child already authenticated under this browser's parent session.
+        if let Some(query) = request.uri().query() {
+            let selectors: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                .filter(|(k, _)| k == "test_environment")
+                .map(|(_, v)| v.into_owned())
+                .collect();
+            if !selectors.is_empty() {
+                if selectors.len() != 1
+                    || uuid::Uuid::parse_str(&selectors[0]).is_err()
+                    || request
+                        .headers()
+                        .get("x-briefcase-environment")
+                        .is_some_and(|h| h.to_str().ok() != Some(selectors[0].as_str()))
+                {
+                    return bad("Invalid testing environment.").into_response();
+                }
+                match HeaderValue::from_str(&selectors[0]) {
+                    Ok(value) => {
+                        request
+                            .headers_mut()
+                            .insert("x-briefcase-environment", value);
+                    }
+                    Err(_) => return bad("Invalid testing environment.").into_response(),
+                }
+            }
+        }
         let h = request.headers();
         let mutating = !matches!(
             *request.method(),

@@ -24,7 +24,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { api, ApiError, type BrowserSession } from '@/lib/api';
+import {
+  api,
+  ApiError,
+  enterTestingEnvironment,
+  type BrowserSession,
+} from '@/lib/api';
 
 type Environment = {
   id: string;
@@ -116,6 +121,42 @@ export default function TestingEnvironments({
     );
 
   const pendingOperation = useRef<string | null>(null);
+  const [viewEnvironment, setViewEnvironment] = useState<Environment | null>(
+    null,
+  );
+  const [viewToken, setViewToken] = useState('');
+  const [viewError, setViewError] = useState('');
+  const [viewBusy, setViewBusy] = useState(false);
+  const viewOperation = useRef('');
+  async function openView(environment: Environment, slt?: string) {
+    setViewBusy(true);
+    setViewError('');
+    try {
+      await api('/environments/' + environment.id + '/view', 'POST', {
+        operation_id: viewOperation.current,
+        ...(slt ? { slt } : {}),
+      });
+      setViewToken('');
+      enterTestingEnvironment(environment.id);
+    } catch (e) {
+      setViewError(
+        e instanceof ApiError && e.status === 401
+          ? 'Sign in with a fresh token from the paired IAM testing environment.'
+          : e instanceof Error
+            ? e.message
+            : 'The environment could not be opened.',
+      );
+    } finally {
+      setViewBusy(false);
+    }
+  }
+  function beginView(environment: Environment) {
+    setViewEnvironment(environment);
+    setViewToken('');
+    setViewError('');
+    viewOperation.current = crypto.randomUUID();
+    void openView(environment);
+  }
 
   async function load(status: 'active' | 'deleted' = filter) {
     const ticket = ++generation.current;
@@ -350,16 +391,8 @@ export default function TestingEnvironments({
               to 10 active environments across the deployment.
             </p>
             <p className="detail-hint">
-              This panel manages environments; it does not change the identity
-              used by your file manager. Use the{' '}
-              <a
-                href="https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/testing-environments.md"
-                target="_blank"
-                rel="noreferrer"
-              >
-                CLI/client testing guide
-              </a>{' '}
-              to work inside a test plane.
+              Open an active environment to browse its files as a test Carbon or
+              Silicon. Your production workspace remains available.
             </p>
             {loading && <output>Loading environments…</output>}
             {listError && (
@@ -421,6 +454,15 @@ export default function TestingEnvironments({
                   )}
                 </dl>
                 <div className="environment-actions">
+                  {environment.status === 'active' && (
+                    <Button
+                      onClick={() => beginView(environment)}
+                      disabled={viewBusy}
+                    >
+                      <FlaskConical size={16} />
+                      View as testing environment
+                    </Button>
+                  )}
                   {environment.status === 'deleted' ? (
                     <Button
                       variant="outline"
@@ -458,6 +500,66 @@ export default function TestingEnvironments({
           </div>
         </SheetContent>
       </Sheet>
+      <Dialog
+        open={!!viewEnvironment}
+        onOpenChange={(value) => {
+          if (!value && !viewBusy) {
+            setViewEnvironment(null);
+            setViewToken('');
+            setViewError('');
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>View as testing environment</DialogTitle>
+            <DialogDescription>{viewEnvironment?.name}</DialogDescription>
+          </DialogHeader>
+          <p>
+            Browse files, previews, sharing, and uploads using this
+            environment’s test account.
+          </p>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (viewEnvironment)
+                void openView(viewEnvironment, viewToken.trim());
+            }}
+          >
+            {viewError && (
+              <p role="alert" className="error-box">
+                {viewError}
+              </p>
+            )}
+            <label className="block" htmlFor="test-signin-token">
+              IAM test sign-in token
+              <Input
+                id="test-signin-token"
+                aria-label="IAM test sign-in token"
+                type="password"
+                autoComplete="off"
+                value={viewToken}
+                onChange={(e) => {
+                  setViewToken(e.target.value);
+                  viewOperation.current = crypto.randomUUID();
+                }}
+                required
+                disabled={viewBusy}
+              />
+            </label>
+            <p className="detail-hint">
+              Use a fresh token for{' '}
+              <strong>{viewEnvironment?.iam_app_id}</strong> from IAM test
+              environment <code>{viewEnvironment?.iam_environment_id}</code>.
+              Production tokens cannot be used here.
+            </p>
+            <Button type="submit" disabled={viewBusy}>
+              {viewBusy ? 'Opening…' : 'Enter testing environment'}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={!!draft}
         onOpenChange={(value) => {

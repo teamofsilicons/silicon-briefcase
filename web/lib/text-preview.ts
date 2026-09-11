@@ -1,4 +1,4 @@
-import { ApiError } from './api';
+import { ApiError, browserUrl } from './api';
 
 const PREVIEW_BYTES = 1024 * 1024;
 
@@ -11,7 +11,7 @@ export async function textPreview(
   // Independently cap the reader even if a proxy ignores Range or the entry
   // changes between metadata lookup and this request.
   const response = await fetch(
-    '/browser/entries/' + encodeURIComponent(id) + '/content',
+    browserUrl('/browser/entries/' + encodeURIComponent(id) + '/content'),
     {
       signal,
       credentials: 'same-origin',

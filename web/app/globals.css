@@ -336,3 +336,24 @@ summary {
     flex-wrap: wrap;
   }
 }
+
+.testing-view-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  background: #fff7e5;
+  border-bottom: 1px solid #e7d9b5;
+  color: #70551f;
+}
+.testing-view-banner p {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+}
+@media (max-width: 640px) {
+  .testing-view-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

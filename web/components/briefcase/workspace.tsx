@@ -89,6 +89,8 @@ import {
 } from '@/components/ui/select';
 import {
   api,
+  browserUrl,
+  returnToProduction,
   ApiError,
   bytes,
   date,
@@ -512,7 +514,7 @@ export default function Workspace({
       operation_id: intent.operation,
     });
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/browser/upload?' + p);
+    xhr.open('POST', browserUrl('/browser/upload?' + p));
     xhr.setRequestHeader('X-Briefcase-Browser', '1');
     xhr.setRequestHeader('X-Briefcase-Organization', session.org);
     xhr.timeout = 1800000;
@@ -638,7 +640,7 @@ export default function Workspace({
     path !== 'private' &&
     !!parent?.effective_access.includes('write');
   const contentUrl = selected
-    ? '/browser/entries/' + selected.id + '/content'
+    ? browserUrl('/browser/entries/' + selected.id + '/content')
     : '';
   const canCreateFolder =
     canUpload ||
@@ -782,6 +784,25 @@ export default function Workspace({
         </SidebarFooter>
       </Sidebar>
       <SidebarInset className="workspace-main">
+        {session.testing && (
+          <aside
+            className="testing-view-banner"
+            aria-label="Testing environment"
+          >
+            <div>
+              <strong>
+                Testing environment · {session.test_environment?.name}
+              </strong>
+              <p>
+                Files and changes stay in this environment. Signed in as{' '}
+                {session.actor.public_id}.
+              </p>
+            </div>
+            <Button variant="outline" onClick={returnToProduction}>
+              Return to production
+            </Button>
+          </aside>
+        )}
         <header className="workspace-top">
           <SidebarTrigger />
           <div className="workspace-context">
@@ -1042,9 +1063,11 @@ export default function Workspace({
                               <DropdownMenuItem
                                 onClick={() =>
                                   window.location.assign(
-                                    '/browser/entries/' +
-                                      entry.id +
-                                      '/content?download=true',
+                                    browserUrl(
+                                      '/browser/entries/' +
+                                        entry.id +
+                                        '/content?download=true',
+                                    ),
                                   )
                                 }
                               >
@@ -1348,7 +1371,11 @@ export default function Workspace({
                 {selected.type === 'file' && scope !== 'bin' && (
                   <a
                     className="download-link"
-                    href={contentUrl + '?download=true'}
+                    href={
+                      contentUrl +
+                      (contentUrl.includes('?') ? '&' : '?') +
+                      'download=true'
+                    }
                   >
                     <Download size={16} /> Download
                   </a>
