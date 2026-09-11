@@ -34,6 +34,41 @@ additive within the parent IAM session; future memberships are not automatic.
 The IAM base is `https://backend.iam.teamofsilicons.com/`, not its `/api/v1/`
 subpath. The Briefcase SDK base, in contrast, includes `/api/v1/`.
 
+## Temporary IAM failures
+
+Set `BRIEFCASE_IAM_REQUEST_TIMEOUT_MS=4000` (also the configuration default).
+The deployment template previously overrode this to 2000 ms. The normal
+Briefcase request deadline remains 15 seconds.
+
+Read-only token introspection makes at most two attempts within one nine-second
+budget. Timeouts, connection failures, and HTTP 502–504 can retry after 200–455 ms
+of jitter. A rate-limited response honors Retry-After; if that delay cannot fit
+within the budget, the failure is returned without an early retry. Invalid
+credentials, inactive tokens, malformed replies and authorization-binding failures
+never become successful authorizations. Every attempt uses the same token, app
+credential, organization, and testing-environment selection. No stale authorization
+is used as a fallback. Token exchanges, refreshes, and single-use OBO proofs are
+not retried by this policy.
+
+Structured logs preserve `iam.failure`, upstream HTTP status and validated UUID
+request IDs; introspection logs also record attempt, elapsed milliseconds, and
+whether a retry is planned. Raw client errors, URLs, credentials, response bodies,
+and arbitrary upstream messages are excluded. A `dependency_unavailable` response
+means online verification failed, not that a recipient lacks file access.
+
+Reproduction and regression checks:
+
+```sh
+cargo test --locked --lib infrastructure::iam -- --nocapture
+```
+
+The controlled slow-IAM test reproduces a 503 with a two-second timeout and a
+2.5-second response, then verifies recovery with the four-second setting. Other
+checks cover transient retry recovery, preserved test scope, two-attempt limits,
+rate-limit delays, total-budget exhaustion, denied/inactive authority, and log
+redaction. This reproduces the failure mechanism; it does not establish what
+caused the original live IAM delay.
+
 ## IDs and credentials
 
 | Value | Meaning | Who keeps it |
