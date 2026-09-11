@@ -168,7 +168,7 @@ impl std::fmt::Display for EffectiveAccess {
     }
 }
 
-/// One right an invitation or an access request conveys.
+/// One right a permission grant conveys.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRight {
@@ -335,36 +335,6 @@ pub struct PermissionInspection {
     pub unresolved_entry_ids: Vec<Uuid>,
     /// Paths with no readable entry.
     pub unresolved_paths: Vec<String>,
-}
-
-/// Where an access request stands.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccessRequestStatus {
-    /// Awaiting a decision.
-    Pending,
-    /// Approved, and a grant now exists.
-    Approved,
-    /// Denied, and no grant was created.
-    Denied,
-}
-
-/// A request for access to an entry.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AccessRequest {
-    /// Request identifier.
-    pub id: Uuid,
-    /// Stable target identifier; path-addressed creation reveals no other entry metadata.
-    pub entry_id: Uuid,
-    /// Member who asked.
-    pub requested_by: ActorRef,
-    /// Rights asked for.
-    pub access: Vec<AccessRight>,
-    /// Current status.
-    pub status: AccessRequestStatus,
-    /// When it was made.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
 }
 
 /// What a notification is about.

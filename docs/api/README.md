@@ -492,7 +492,7 @@ Because the whole file arrives in one request, a very large upload occupies a
 connection and temporary disk for its duration. `BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`
 and the staging volume are sized for the largest file an operator expects.
 
-## Permissions and access requests
+## Permissions
 
 ### `GET /entries/{entry_id}/permissions`
 
@@ -537,45 +537,6 @@ Revokes an explicit permission grant.
 
 Revocation removes that grant and any inherited access produced by it. Access derived independently from another grant, tag, Public visibility, ownership, or administrative rights remains.
 
-### `POST /entries/{entry_id}/access-requests`
-
-Requests read or write access to an entry.
-
-- **Authentication:** Bearer.
-- **Input:** The requested rights and an optional reason.
-- **Returns:** Pending access request.
-
-This is used when an authenticated organization member opens a permanent URL without access. The response should not reveal sensitive metadata beyond what is required to request access.
-
-### `POST /access-requests`
-
-Requests access using the organization-relative `path` copied from a permanent
-URL, plus the same `access` and optional `reason` fields as the UUID route.
-
-- **Authentication:** Bearer.
-- **Required header:** `Idempotency-Key`.
-- **Input:** Exact `path`, requested rights, and an optional reason.
-- **Returns:** The pending access request only.
-
-This is the deliberate request-access exception to normal path resolution. It
-does not require existing read access and reveals no file or folder metadata.
-A missing path and a path belonging to another authenticated tenant are both
-reported as `404`, while the existing UUID-addressed route remains available
-when a caller already knows the entry ID.
-
-### `POST /access-requests/{request_id}/decision`
-
-Approves or denies an access request.
-
-- **Authentication:** Bearer.
-- **Input:** `approve` or `deny`, plus the granted rights when approving.
-- **Returns:** Updated request.
-
-The owner or an authorized organization administrator can decide. A request
-notifies the entry owner and every organization owner and admin; the decision
-notifies the requester. Approval creates an explicit permission grant and
-records the decision actor and time.
-
 ### `POST /permissions/effective`
 
 Reports what the caller may do on named files and folders.
@@ -598,8 +559,9 @@ Reads the central notification inbox.
 
 A notification is written in the same transaction as the change that caused it,
 so the inbox can never claim access that was rolled back or miss access that
-was committed. Kinds are `access_granted`, `access_revoked`,
-`access_requested`, and `access_request_decided`. Each carries the acting
+was committed. New notifications are `access_granted` and `access_revoked`. Historical
+`access_requested` and `access_request_decided` records remain readable, but
+requests can no longer be created or decided. Each carries the acting
 member, the rights involved, and a snapshot of the entry — name, path, kind, and
 permanent URL — as it was at that moment, so the recipient can still read their
 own history after losing access to it.
@@ -859,18 +821,6 @@ POST /uploads to the same folder with the same file name
   -> the bytes become that file's next version
   -> the same entry and permanent URL come back
   -> GET /entries/{id}/versions lists the history, up to fifty versions
-```
-
-### Access request
-
-```text
-Open a permanent URL and receive 404
-  -> keep the organization-relative path from that URL
-  -> POST /access-requests with that path, the rights wanted, and Idempotency-Key
-  -> owner and organization admins see it in their inbox
-  -> owner/admin decides
-  -> approval creates a grant and notifies the requester
-  -> the entry now resolves at its permanent URL
 ```
 
 ### Application file creation

@@ -433,43 +433,6 @@ impl ByteRange {
     }
 }
 
-/// A request for access to an entry the caller cannot read.
-#[derive(Clone, Debug, Serialize)]
-pub struct NewAccessRequest {
-    /// Rights being asked for.
-    pub access: Vec<AccessRight>,
-    /// Optional context for whoever decides.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-impl NewAccessRequest {
-    /// Asks for a set of rights.
-    #[must_use]
-    pub fn new(access: impl IntoIterator<Item = AccessRight>) -> Self {
-        Self {
-            access: access.into_iter().collect(),
-            reason: None,
-        }
-    }
-
-    /// Explains why.
-    #[must_use]
-    pub fn because(mut self, reason: impl Into<String>) -> Self {
-        self.reason = Some(reason.into());
-        self
-    }
-}
-
-/// The answer to an access request.
-#[derive(Clone, Debug)]
-pub enum AccessDecision {
-    /// Approve, creating a grant that conveys these rights.
-    Approve(Vec<AccessRight>),
-    /// Deny, creating nothing.
-    Deny,
-}
-
 /// Targets whose effective access the caller wants reported.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PermissionQuery {

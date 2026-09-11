@@ -7,9 +7,8 @@
 use std::io::Write as _;
 
 use briefcase_client::{
-    AccessRequest, ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion,
-    Notification, NotificationInbox, OrganizationUsage, PermissionGrant, PermissionInspection,
-    SearchResult,
+    ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, Notification,
+    NotificationInbox, OrganizationUsage, PermissionGrant, PermissionInspection, SearchResult,
 };
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::BorrowedFormatItem, macros::format_description};
@@ -337,26 +336,6 @@ impl Output {
         }
         let rows: Vec<Vec<String>> = inbox.items.iter().map(notification_row).collect();
         print_table(&["", "WHEN", "WHAT", "WHO", "ENTRY"], &rows);
-    }
-
-    /// Prints an access request's current state.
-    pub fn access_request(self, request: &AccessRequest) {
-        if self.json {
-            self.json(request);
-            return;
-        }
-        println!(
-            "request {} is {:?} for {} on entry {}",
-            request.id,
-            request.status,
-            request
-                .access
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            request.entry_id
-        );
     }
 
     /// Prints what the organization is consuming.

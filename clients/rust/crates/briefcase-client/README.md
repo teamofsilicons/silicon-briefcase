@@ -19,7 +19,7 @@ process. Disable maintenance explicitly when a caller owns dependency updates.
 
 ```toml
 [dependencies]
-briefcase-client = "0.2"
+briefcase-client = "0.3"
 ```
 
 ```rust
@@ -66,11 +66,6 @@ environment mutation has a caller-key `_with_key` variant for safely replaying
 an unchanged request after an uncertain result; upload, entry update, and
 version restore accept caller-owned keys too. Persist that `IdempotencyKey`
 before the first attempt.
-
-Hidden permanent-URL paths can be sent directly to
-`Client::request_access_by_path`; the package does not resolve entry metadata
-first. The UUID-addressed `request_access` method remains available when the
-stable identifier is already known.
 
 ## Delegated operations
 

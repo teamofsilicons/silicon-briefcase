@@ -3,9 +3,9 @@
 
 use briefcase_client::{
     AccessRight, ActorRef, ApplicationId, Client, Config, Destination, EntryUpdate, EnvironmentKey,
-    IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries, NewAccessRequest,
-    NewFolder, NewGrant, TestingEnvironmentCreate, TestingEnvironmentIamPairing,
-    TestingEnvironmentUpdate, UpdateStatus, Upload,
+    IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries, NewFolder, NewGrant,
+    TestingEnvironmentCreate, TestingEnvironmentIamPairing, TestingEnvironmentUpdate, UpdateStatus,
+    Upload,
 };
 use serde_json::json;
 use wiremock::{
@@ -105,17 +105,6 @@ fn tokens_document() -> serde_json::Value {
             "public_id": "cos:tester"
         },
         "org_id": "tos"
-    })
-}
-
-fn access_request_document() -> serde_json::Value {
-    json!({
-        "id": "01a067ce-7f19-7790-820a-0be6b3d4f850",
-        "entry_id": "01a067ce-7f19-7790-820a-0be6b3d4f828",
-        "requested_by": {"type": "carbon", "id": "cos:tester"},
-        "access": ["read", "update"],
-        "status": "pending",
-        "created_at": "2026-09-04T00:00:00Z"
     })
 }
 
@@ -313,69 +302,6 @@ async fn creating_a_folder_sends_its_container_and_an_idempotency_key() {
         .find(|request| request.url.path() == "/api/v1/entries")
         .expect("the creation must have been sent");
     assert!(create.headers.contains_key("idempotency-key"));
-}
-
-#[tokio::test]
-async fn access_requests_use_distinct_uuid_and_hidden_path_routes() {
-    let server = MockServer::start().await;
-    let client = connected(&server).await;
-    let entry_id = "01a067ce-7f19-7790-820a-0be6b3d4f828";
-    let hidden_path = "private/cos:owner/hidden/report.pdf";
-    let request =
-        NewAccessRequest::new([AccessRight::Read, AccessRight::Update]).because("quarterly review");
-
-    Mock::given(method("POST"))
-        .and(path(format!("/api/v1/entries/{entry_id}/access-requests")))
-        .and(header("x-org-id", "tos"))
-        .and(header("authorization", "Bearer test-token"))
-        .and(body_json(json!({
-            "access": ["read", "update"],
-            "reason": "quarterly review"
-        })))
-        .respond_with(ResponseTemplate::new(201).set_body_json(access_request_document()))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/access-requests"))
-        .and(header("x-org-id", "tos"))
-        .and(header("authorization", "Bearer test-token"))
-        .and(header("idempotency-key", "path-access-attempt-0001"))
-        .and(body_json(json!({
-            "path": hidden_path,
-            "access": ["read", "update"],
-            "reason": "quarterly review"
-        })))
-        .respond_with(ResponseTemplate::new(201).set_body_json(access_request_document()))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    client
-        .request_access(entry_id.parse().unwrap(), &request)
-        .await
-        .unwrap();
-    client
-        .request_access_by_path_with_key(
-            hidden_path,
-            &request,
-            &IdempotencyKey::new("path-access-attempt-0001").unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let application_requests: Vec<_> = server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|request| request.method.as_str() == "POST")
-        .collect();
-    assert_eq!(application_requests.len(), 2);
-    assert!(application_requests.iter().all(|request| {
-        request.url.path() != format!("/api/v1/org/tos/{hidden_path}")
-            && request.url.path() != format!("/api/v1/entries/{entry_id}")
-    }));
 }
 
 #[tokio::test]

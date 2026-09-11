@@ -137,10 +137,6 @@ pub enum Command {
     Shares(TargetArgs),
     /// Show what you may do with named entries.
     Access(AccessArgs),
-    /// Ask for access to an entry you cannot read.
-    Request(RequestArgs),
-    /// Approve or deny an access request.
-    Decide(DecideArgs),
     /// Read the notification inbox.
     Inbox(InboxArgs),
     /// Show what the organization is consuming.
@@ -400,36 +396,6 @@ pub struct AccessArgs {
     /// Entries to report on, up to a hundred.
     #[arg(required = true)]
     pub targets: Vec<Target>,
-}
-
-/// Arguments for `request`.
-#[derive(Args, Debug)]
-pub struct RequestArgs {
-    /// Hidden permanent-URL path, or a known entry identifier, to ask about.
-    pub target: Target,
-
-    /// Rights to ask for, comma separated.
-    #[arg(long, value_name = "RIGHTS", default_value = "read")]
-    pub access: Rights,
-
-    /// Why you need it.
-    #[arg(long)]
-    pub reason: Option<String>,
-}
-
-/// Arguments for `decide`.
-#[derive(Args, Debug)]
-pub struct DecideArgs {
-    /// Request identifier, as the inbox shows it.
-    pub request_id: Uuid,
-
-    /// What to answer.
-    #[arg(value_enum)]
-    pub decision: DecisionArg,
-
-    /// Rights to grant on approval, comma separated.
-    #[arg(long, value_name = "RIGHTS", default_value = "read")]
-    pub access: Rights,
 }
 
 /// Arguments for `inbox`.
@@ -741,15 +707,6 @@ impl From<RootTypeArg> for RootType {
     }
 }
 
-/// What to answer an access request.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum DecisionArg {
-    /// Create the grant.
-    Approve,
-    /// Create nothing.
-    Deny,
-}
-
 /// Server-side encryption for an organization bucket.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum EncryptionArg {
@@ -941,6 +898,22 @@ mod tests {
         assert_eq!(invitation.principal.id, "atlas");
         assert_eq!(invitation.access.len(), 2);
         assert!("silicon:atlas".parse::<Invitation>().is_err());
+    }
+
+    #[test]
+    fn retired_access_request_commands_are_rejected() {
+        for args in [
+            vec!["briefcase", "request", "private/cos:owner/notes.md"],
+            vec![
+                "briefcase",
+                "decide",
+                "01a067ce-7f19-7790-820a-0be6b3d4f850",
+                "approve",
+            ],
+        ] {
+            let error = Cli::try_parse_from(args).err().unwrap();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
     }
 
     #[test]

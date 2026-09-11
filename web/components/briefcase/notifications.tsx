@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bell, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Sheet,
   SheetContent,
@@ -10,13 +9,6 @@ import {
   SheetTitle,
   SheetDescription,
 } from '@/components/ui/sheet';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
 import { api, ApiError, type Entry } from '@/lib/api';
 
 type Notice = {
@@ -30,7 +22,6 @@ type Notice = {
   actor: { type: string; id: string } | null;
   subject: { entry_id: string; name: string; path: string } | null;
   access: string[] | null;
-  access_request_id: string | null;
   decision: 'approved' | 'denied' | null;
   created_at: string;
 };
@@ -53,13 +44,7 @@ export default function Notifications({
   const [open, setOpen] = useState(false),
     [loading, setLoading] = useState(false),
     [error, setError] = useState('');
-  const [decision, setDecision] = useState<{
-    notice: Notice;
-    approve: boolean;
-  } | null>(null);
-  const [rights, setRights] = useState<string[]>([]),
-    [working, setWorking] = useState(false);
-  const [settled, setSettled] = useState<string[]>([]);
+  const [working, setWorking] = useState(false);
   const report = useCallback(
     (error: unknown) => {
       if (error instanceof ApiError && error.status === 401) {
@@ -94,27 +79,6 @@ export default function Notifications({
     window.addEventListener('focus', focus);
     return () => window.removeEventListener('focus', focus);
   }, [refresh]);
-  async function decide() {
-    if (!decision?.notice.access_request_id) return;
-    setWorking(true);
-    setError('');
-    try {
-      await api(
-        '/access-requests/' + decision.notice.access_request_id + '/decision',
-        'POST',
-        decision.approve
-          ? { decision: 'approve', access: rights }
-          : { decision: 'deny' },
-      );
-      setSettled((values) => [...values, decision.notice.access_request_id!]);
-      setDecision(null);
-      await refresh();
-    } catch (error) {
-      report(error);
-    } finally {
-      setWorking(false);
-    }
-  }
   return (
     <>
       <Button
@@ -213,97 +177,11 @@ export default function Notifications({
                 <time dateTime={notice.created_at}>
                   {new Date(notice.created_at).toLocaleString()}
                 </time>
-                {notice.kind === 'access_requested' &&
-                  notice.access_request_id &&
-                  !settled.includes(notice.access_request_id) && (
-                    <div className="detail-actions">
-                      <Button
-                        variant="outline"
-                        disabled={working}
-                        onClick={() => {
-                          setRights(notice.access || ['read']);
-                          setDecision({ notice, approve: true });
-                          setError('');
-                        }}
-                      >
-                        Review access
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        disabled={working}
-                        onClick={() => {
-                          setDecision({ notice, approve: false });
-                          setError('');
-                        }}
-                      >
-                        Deny
-                      </Button>
-                    </div>
-                  )}
-                {notice.access_request_id &&
-                  settled.includes(notice.access_request_id) && (
-                    <output>Request decided.</output>
-                  )}
               </article>
             ))}
           </div>
         </SheetContent>
       </Sheet>
-      <Dialog
-        open={!!decision}
-        onOpenChange={(open) => {
-          if (!open && !working) setDecision(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {decision?.approve ? 'Approve access' : 'Deny this request?'}
-            </DialogTitle>
-            <DialogDescription>
-              {decision?.notice.actor?.id} ·{' '}
-              {decision?.notice.subject?.name || 'Requested entry'}
-            </DialogDescription>
-          </DialogHeader>
-          {decision?.approve && (
-            <fieldset disabled={working}>
-              <legend>Permissions to grant</legend>
-              <div className="rights">
-                {['read', 'write', 'update', 'delete'].map((right) => (
-                  <label key={right}>
-                    <Checkbox
-                      checked={rights.includes(right)}
-                      onCheckedChange={(checked) =>
-                        setRights((values) =>
-                          checked
-                            ? [...values, right]
-                            : values.filter((value) => value !== right),
-                        )
-                      }
-                    />
-                    {right === 'write' ? 'Create new content' : right}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          )}
-          {error && (
-            <p className="error-box" role="alert">
-              {error}
-            </p>
-          )}
-          <Button
-            disabled={working || (!!decision?.approve && !rights.length)}
-            onClick={() => void decide()}
-          >
-            {working
-              ? 'Saving…'
-              : decision?.approve
-                ? 'Grant selected access'
-                : 'Deny request'}
-          </Button>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 53] = [
+const EXPECTED_OPERATIONS: [&str; 50] = [
     "cancelDelegatedUpload",
     "cleanCurrentTestingEnvironment",
     "cleanTestingEnvironment",
@@ -14,7 +14,6 @@ const EXPECTED_OPERATIONS: [&str; 53] = [
     "createFolder",
     "createFolderOnBehalfOfMember",
     "createTestingEnvironment",
-    "decideAccessRequest",
     "deleteTestingEnvironment",
     "describeCurrentTestingEnvironment",
     "downloadEntry",
@@ -43,8 +42,6 @@ const EXPECTED_OPERATIONS: [&str; 53] = [
     "readNotifications",
     "refreshApplicationSession",
     "replaceTestingEnvironmentIamPairing",
-    "requestAccess",
-    "requestAccessByPath",
     "reserveDelegatedUpload",
     "resolvePermanentUrl",
     "restoreEntry",
@@ -141,22 +138,6 @@ fn testing_environment_listing_and_root_self_cache_contract_are_exact() -> anyho
             ["Cache-Control"]["schema"]["const"]
             .as_str(),
         Some("private, no-store")
-    );
-    Ok(())
-}
-
-#[test]
-fn path_access_requests_require_an_idempotency_key() -> anyhow::Result<()> {
-    let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
-    let parameters = document["paths"]["/access-requests"]["post"]["parameters"]
-        .as_sequence()
-        .ok_or_else(|| anyhow::anyhow!("path access-request parameters must be a sequence"))?;
-    assert!(parameters.iter().any(|parameter| {
-        parameter["$ref"].as_str() == Some("#/components/parameters/IdempotencyKey")
-    }));
-    assert_eq!(
-        document["components"]["parameters"]["IdempotencyKey"]["required"].as_bool(),
-        Some(true)
     );
     Ok(())
 }

@@ -94,7 +94,7 @@ capacity is separate from your organisation's quota: an upload may need to wait
 if the browser gateway cannot reserve enough disk space. File size remains
 limited to 5 TiB, subject to your organisation's configured limits.
 
-## Sharing and access requests
+## Sharing
 
 Choose **Share** on an entry you can manage. Identify an existing organisation
 member as `carbon:member-id` or `silicon:member-id` and select their permissions.
@@ -103,22 +103,17 @@ grants can apply to their contents. The **Access** tab lists explicit grants and
 supports revocation; ownership, tags, inherited grants, and organisation roles
 may also supply access.
 
-A missing or hidden file produces a generic **File not found** state. If you were
-given its link, **Request access** lets you select rights and provide an optional
-message. It does not disclose the hidden entry's metadata. The backend decides
-whether the request can be created.
+A missing or hidden file produces a generic **File not found** state.
 
 ## Notifications
 
 The bell shows the unread count. Open it to see your latest 20 notifications,
-including grants, revocations, requests, and decisions. **Mark all as read** marks
+including grants and revocations. Historical requests and decisions remain
+readable. **Mark all as read** marks
 the entire inbox read, not just those 20 displayed items. The inbox refreshes when
 opened, when the window regains focus, or when you select **Refresh**.
 
-Owners and authorised administrators can review incoming requests, select the
-permissions to grant, or deny a request. Decisions are validated by the backend;
-an already-decided request cannot be settled a second time. Opening a notification
-resolves its stable entry identifier, so access is checked again and stale paths
+Opening a notification resolves its stable entry identifier, so access is checked again and stale paths
 are not trusted.
 
 ## Organisation settings

@@ -6,11 +6,10 @@ use std::{
 };
 
 use briefcase_client::{
-    AccessDecision, BucketConfiguration, Client, Config, Destination, Entry, EntryPage,
-    EnvironmentKey, IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries,
-    NewAccessRequest, NewFolder, NewGrant, OnBehalfOfUpload, PermissionQuery, TestingEnvironment,
-    TestingEnvironmentCreate, TestingEnvironmentIamPairing, TestingEnvironmentUpdate, Upload,
-    guess_content_type,
+    BucketConfiguration, Client, Config, Destination, Entry, EntryPage, EnvironmentKey,
+    IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries, NewFolder, NewGrant,
+    OnBehalfOfUpload, PermissionQuery, TestingEnvironment, TestingEnvironmentCreate,
+    TestingEnvironmentIamPairing, TestingEnvironmentUpdate, Upload, guess_content_type,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -19,10 +18,9 @@ use uuid::Uuid;
 
 use crate::{
     cli::{
-        AppCommand, BinCommand, Cli, Command, ConfigCommand, DecideArgs, DecisionArg, EnvCommand,
-        FindArgs, GetArgs, GlobalArgs, LoginArgs, LsArgs, MkdirArgs, MvArgs, PutArgs, RestoreArgs,
-        RmArgs, SearchArgs, ShareArgs, StorageCommand, SystemCommand, Target, TargetArgs,
-        UnshareArgs,
+        AppCommand, BinCommand, Cli, Command, ConfigCommand, EnvCommand, FindArgs, GetArgs,
+        GlobalArgs, LoginArgs, LsArgs, MkdirArgs, MvArgs, PutArgs, RestoreArgs, RmArgs, SearchArgs,
+        ShareArgs, StorageCommand, SystemCommand, Target, TargetArgs, UnshareArgs,
     },
     render::{Output, human_size},
     state::{CredentialScope, PendingMutation, Profile, StateDirectory, StoredSession},
@@ -120,8 +118,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Unshare(args) => unshare(&cli.global, &args, output).await,
         Command::Shares(args) => shares(&cli.global, &args, output).await,
         Command::Access(args) => access(&cli.global, &args.targets, output).await,
-        Command::Request(args) => request_access(&cli.global, &args, output).await,
-        Command::Decide(args) => decide(&cli.global, &args, output).await,
         Command::Inbox(args) => inbox(&cli.global, args.read, output).await,
         Command::Usage => usage(&cli.global, output).await,
         Command::Storage(command) => storage(&cli.global, &command, output).await,
@@ -1537,63 +1533,6 @@ async fn access(global: &GlobalArgs, targets: &[Target], output: Output) -> Resu
     }
     let inspection = client.effective_access(&query).await?;
     output.inspection(&inspection);
-    Ok(())
-}
-
-async fn request_access(
-    global: &GlobalArgs,
-    args: &crate::cli::RequestArgs,
-    output: Output,
-) -> Result<()> {
-    let (client, resolved) = connect_resolved(global).await?;
-    let mut request = NewAccessRequest::new(args.access.0.clone());
-    if let Some(reason) = &args.reason {
-        request = request.because(reason.clone());
-    }
-    let created = match &args.target {
-        Target::Id(id) => client.request_access(*id, &request).await?,
-        Target::Path(path) => {
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "request-access-by-path",
-                "profile": &resolved.profile_name,
-                "url": &resolved.url,
-                "org": &resolved.org,
-                "testing_environment_id": resolved.environment_id,
-                "path": path,
-                "access": &request.access,
-                "reason": &request.reason,
-            }))?;
-            let address = request_fingerprint(&serde_json::json!({
-                "path": path,
-                "testing_environment_id": resolved.environment_id,
-            }))?;
-            let scope = format!(
-                "access:request:{}:{address}",
-                plane_scope(&resolved.profile_name, resolved.environment_id)
-            );
-            let pending = prepare_durable_mutation(&scope, &fingerprint, None, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let created = client
-                .request_access_by_path_with_key(path, &request, &key)
-                .await?;
-            finish_durable_mutation(&scope, &pending)?;
-            created
-        }
-    };
-    output.access_request(&created);
-    Ok(())
-}
-
-async fn decide(global: &GlobalArgs, args: &DecideArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let decision = match args.decision {
-        DecisionArg::Approve => AccessDecision::Approve(args.access.0.clone()),
-        DecisionArg::Deny => AccessDecision::Deny,
-    };
-    let decided = client
-        .decide_access_request(args.request_id, &decision)
-        .await?;
-    output.access_request(&decided);
     Ok(())
 }
 

@@ -1,33 +1,14 @@
-//! Grants, access requests, and the notification inbox.
+//! Grants and the notification inbox.
 
 use reqwest::Method;
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    client::{Client, IdempotencyKey, json_body},
+    client::{Client, json_body},
     error::Result,
-    models::{
-        AccessRequest, AccessRight, NotificationInbox, PermissionGrant, PermissionGrantPage,
-        PermissionInspection,
-    },
-    requests::{AccessDecision, NewAccessRequest, NewGrant, PermissionQuery},
+    models::{NotificationInbox, PermissionGrant, PermissionGrantPage, PermissionInspection},
+    requests::{NewGrant, PermissionQuery},
 };
-
-#[derive(Serialize)]
-struct WireDecision<'a> {
-    decision: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    access: Option<&'a [AccessRight]>,
-}
-
-#[derive(Serialize)]
-struct WirePathAccessRequest<'a> {
-    path: &'a str,
-    access: &'a [AccessRight],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'a str>,
-}
 
 impl Client {
     /// Lists the explicit grants on an entry.
@@ -102,110 +83,6 @@ impl Client {
     pub async fn effective_access(&self, query: &PermissionQuery) -> Result<PermissionInspection> {
         let url = self.api_url(&["permissions", "effective"])?;
         let body = json_body(query)?;
-        let request = self
-            .request(Method::POST, url)
-            .header("content-type", "application/json")
-            .body(body)
-            .timeout(self.request_timeout());
-        self.receive_json(request).await
-    }
-
-    /// Asks the owner and organization administrators for access.
-    ///
-    /// This works on an entry the caller cannot read: it is what a member does
-    /// after opening a permanent URL that answered as missing.
-    ///
-    /// # Errors
-    ///
-    /// Returns a not-found error when the entry does not exist at all.
-    pub async fn request_access(
-        &self,
-        entry_id: Uuid,
-        request: &NewAccessRequest,
-    ) -> Result<AccessRequest> {
-        let url = self.api_url(&["entries", &entry_id.to_string(), "access-requests"])?;
-        let body = json_body(request)?;
-        let http_request = self
-            .request(Method::POST, url)
-            .header("content-type", "application/json")
-            .body(body)
-            .timeout(self.request_timeout());
-        self.receive_json(http_request).await
-    }
-
-    /// Asks for access using the organization-relative path from a permanent URL.
-    ///
-    /// Unlike ordinary path resolution, this operation works when the target is
-    /// hidden from the caller. It returns only the access-request record and
-    /// never exposes the entry's name, owner, or other metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same opaque not-found response for a missing path and for a
-    /// path outside the configured organization.
-    pub async fn request_access_by_path(
-        &self,
-        path: &str,
-        request: &NewAccessRequest,
-    ) -> Result<AccessRequest> {
-        self.request_access_by_path_with_key(path, request, &IdempotencyKey::random())
-            .await
-    }
-
-    /// Asks for access by path using a caller-owned retry identity.
-    ///
-    /// Persist the key with the exact path, rights, and reason before sending,
-    /// then reuse that complete request after an uncertain outcome.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Client::request_access_by_path`].
-    pub async fn request_access_by_path_with_key(
-        &self,
-        path: &str,
-        request: &NewAccessRequest,
-        idempotency_key: &IdempotencyKey,
-    ) -> Result<AccessRequest> {
-        let url = self.api_url(&["access-requests"])?;
-        let body = json_body(&WirePathAccessRequest {
-            path,
-            access: &request.access,
-            reason: request.reason.as_deref(),
-        })?;
-        let http_request = self
-            .request(Method::POST, url)
-            .header("content-type", "application/json")
-            .header("idempotency-key", idempotency_key.as_str())
-            .body(body)
-            .timeout(self.request_timeout());
-        self.receive_json(http_request).await
-    }
-
-    /// Approves or denies an access request.
-    ///
-    /// Approval creates the grant and notifies the requester; denial creates
-    /// nothing. Either way the request is settled and cannot be decided twice.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the caller is not the owner or an administrator,
-    /// or the request has already been decided.
-    pub async fn decide_access_request(
-        &self,
-        request_id: Uuid,
-        decision: &AccessDecision,
-    ) -> Result<AccessRequest> {
-        let url = self.api_url(&["access-requests", &request_id.to_string(), "decision"])?;
-        let body = match decision {
-            AccessDecision::Approve(access) => json_body(&WireDecision {
-                decision: "approve",
-                access: Some(access),
-            })?,
-            AccessDecision::Deny => json_body(&WireDecision {
-                decision: "deny",
-                access: None,
-            })?,
-        };
         let request = self
             .request(Method::POST, url)
             .header("content-type", "application/json")

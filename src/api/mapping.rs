@@ -7,11 +7,10 @@ use url::Url;
 
 use crate::{
     application::service::{
-        AccessRequestView, ActivityEvent, AuthorizedEntryView, EntryListItem, FileVersionView,
+        ActivityEvent, AuthorizedEntryView, EntryListItem, FileVersionView,
         MetadataRepositoryError, MetadataServiceError, Page, SearchResultView,
     },
     domain::{
-        access::AccessRequestStatus,
         actor::{ActorKind, ActorRef, ApplicationId},
         entry::{EntryKind, EntryPath, RootType},
         ids::EntryId,
@@ -24,13 +23,12 @@ use crate::{
 };
 
 use super::dto::{
-    AccessRequestDto, AccessRequestStatusDto, ActivityEventDto, ActivityPageDto, ActorRefDto,
-    ActorTypeDto, DailyUsageMeasureDto, EffectiveAccessDto, EffectivePermissionDto, EntryDto,
-    EntryPageDto, EntryTypeDto, EntryVisibilityDto, FileVersionDto, GrantAccessDto,
-    NotificationDecisionDto, NotificationDto, NotificationInboxDto, NotificationKindDto,
-    NotificationSubjectDto, OrganizationUsageDto, PermissionGrantDto, PermissionGrantPageDto,
-    PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
-    UsageMeasureDto,
+    ActivityEventDto, ActivityPageDto, ActorRefDto, ActorTypeDto, DailyUsageMeasureDto,
+    EffectiveAccessDto, EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto,
+    EntryVisibilityDto, FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto,
+    NotificationInboxDto, NotificationKindDto, NotificationSubjectDto, OrganizationUsageDto,
+    PermissionGrantDto, PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto,
+    RootTypeDto, SearchPageDto, SearchResultDto, UsageMeasureDto,
 };
 
 /// Returns the next midnight UTC, when a daily allowance returns.
@@ -392,17 +390,6 @@ impl ResponseMapper {
         }
     }
 
-    pub(crate) fn access_request(request: &AccessRequestView) -> AccessRequestDto {
-        AccessRequestDto {
-            id: request.id.as_uuid(),
-            entry_id: request.entry_id.as_uuid(),
-            requested_by: actor(&request.requested_by),
-            access: access_rights(request.requested_access),
-            status: access_request_status(request.status),
-            created_at: request.created_at,
-        }
-    }
-
     pub(crate) fn search(&self, results: Vec<SearchResultView>) -> Result<SearchPageDto, AppError> {
         let items = results
             .into_iter()
@@ -563,12 +550,4 @@ fn access_rights(value: GrantedAccess) -> Vec<GrantAccessDto> {
             AccessRight::Delete => GrantAccessDto::Delete,
         })
         .collect()
-}
-
-const fn access_request_status(value: AccessRequestStatus) -> AccessRequestStatusDto {
-    match value {
-        AccessRequestStatus::Pending => AccessRequestStatusDto::Pending,
-        AccessRequestStatus::Approved => AccessRequestStatusDto::Approved,
-        AccessRequestStatus::Denied => AccessRequestStatusDto::Denied,
-    }
 }

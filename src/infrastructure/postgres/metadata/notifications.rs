@@ -131,47 +131,6 @@ pub(in crate::infrastructure::postgres) async fn insert(
     Ok(())
 }
 
-/// Returns the members who decide access requests for one entry.
-///
-/// The product contract routes a request to the entry owner and to every
-/// organization owner and admin, because those are exactly the identities that
-/// can approve it.
-pub(in crate::infrastructure::postgres) async fn decision_recipients(
-    transaction: &mut Transaction<'_, Postgres>,
-    owner: &ActorRef,
-    requester: &ActorRef,
-) -> Result<Vec<ActorRef>> {
-    #[derive(sqlx::FromRow)]
-    struct RecipientRow {
-        actor_type: String,
-        actor_id: String,
-    }
-
-    let rows = sqlx::query_as::<_, RecipientRow>(
-        "SELECT member.actor_type, member.actor_id \
-           FROM briefcase.organization_members AS member \
-          WHERE member.org_id = briefcase.current_org_id() \
-            AND member.membership_status = 'active' \
-            AND ( \
-                member.org_role IN ('owner', 'admin') \
-                OR (member.actor_type = $1 AND member.actor_id = $2) \
-            ) \
-            AND NOT (member.actor_type = $3 AND member.actor_id = $4) \
-          ORDER BY member.actor_type, member.actor_id",
-    )
-    .bind(actor_kind(owner.kind()))
-    .bind(owner.id().as_str())
-    .bind(actor_kind(requester.kind()))
-    .bind(requester.id().as_str())
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-
-    rows.iter()
-        .map(|row| actor_ref(&row.actor_type, &row.actor_id))
-        .collect()
-}
-
 /// Loads the caller's newest notifications and unread badge count.
 pub(in crate::infrastructure::postgres) async fn load_inbox(
     transaction: &mut Transaction<'_, Postgres>,

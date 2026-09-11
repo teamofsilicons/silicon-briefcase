@@ -7,13 +7,12 @@ use time::OffsetDateTime;
 use crate::{
     application::idempotency::IdempotencyKey,
     domain::{
-        access::{AccessDecision, AccessRequestStatus},
         actor::{
             ActorRef, ApplicationId, OrganizationId, OrganizationRole, RequestAuthContext, TagName,
         },
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         filter::FilterQuery,
-        ids::{AccessRequestId, EntryId, GrantId, VersionId},
+        ids::{EntryId, GrantId, VersionId},
         permission::{
             EffectiveAccess, EffectiveAuthorization, EffectiveAuthorizationInput, EntryVisibility,
             GrantApplication, GrantedAccess, PermissionGrant,
@@ -459,129 +458,6 @@ pub struct RevokePermissionCommand {
     pub grant_id: GrantId,
 }
 
-/// Command to request access without revealing hidden metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequestAccessCommand {
-    /// Target entry from a permanent URL.
-    pub entry_id: EntryId,
-    /// Requested rights.
-    pub access: GrantedAccess,
-    /// Optional user-supplied reason.
-    pub reason: Option<String>,
-}
-
-impl RequestAccessCommand {
-    /// Validates the documented 1,000-character reason limit.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] when the optional reason contains more than
-    /// 1,000 Unicode scalar values after trimming.
-    pub fn new(
-        entry_id: EntryId,
-        access: GrantedAccess,
-        reason: Option<String>,
-    ) -> Result<Self, ValidationError> {
-        Ok(Self {
-            entry_id,
-            access,
-            reason: access_request_reason(reason)?,
-        })
-    }
-}
-
-/// Command to request access using the path carried by a permanent URL.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequestAccessByPathCommand {
-    /// Exact organization-relative entry path.
-    pub path: EntryPath,
-    /// Requested rights.
-    pub access: GrantedAccess,
-    /// Optional user-supplied reason.
-    pub reason: Option<String>,
-}
-
-impl RequestAccessByPathCommand {
-    /// Builds a path-addressed request with the same reason rules as the UUID route.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] when the optional reason contains more than
-    /// 1,000 Unicode scalar values after trimming.
-    pub fn new(
-        path: EntryPath,
-        access: GrantedAccess,
-        reason: Option<String>,
-    ) -> Result<Self, ValidationError> {
-        Ok(Self {
-            path,
-            access,
-            reason: access_request_reason(reason)?,
-        })
-    }
-}
-
-fn access_request_reason(reason: Option<String>) -> Result<Option<String>, ValidationError> {
-    let reason = reason.map(|value| value.trim().to_owned());
-    if reason
-        .as_ref()
-        .is_some_and(|value| value.chars().count() > 1_000)
-    {
-        return Err(ValidationError::new(
-            "reason",
-            "must contain at most 1000 characters",
-        ));
-    }
-    Ok(reason.filter(|value| !value.is_empty()))
-}
-
-/// Persisted access-request view.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccessRequestView {
-    /// Request identifier.
-    pub id: AccessRequestId,
-    /// Requested entry.
-    pub entry_id: EntryId,
-    /// Requesting member.
-    pub requested_by: ActorRef,
-    /// Requested rights.
-    pub requested_access: GrantedAccess,
-    /// Optional reason.
-    pub reason: Option<String>,
-    /// Current state.
-    pub status: AccessRequestStatus,
-    /// Rights actually granted.
-    pub granted_access: Option<GrantedAccess>,
-    /// Decision actor.
-    pub decided_by: Option<ActorRef>,
-    /// Decision time.
-    pub decided_at: Option<OffsetDateTime>,
-    /// Grant created by approval.
-    pub permission_grant_id: Option<GrantId>,
-    /// Creation time.
-    pub created_at: OffsetDateTime,
-    /// Last state change.
-    pub updated_at: OffsetDateTime,
-}
-
-/// Access request paired with the requested entry's policy snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthorizableAccessRequest {
-    /// Request data.
-    pub request: AccessRequestView,
-    /// Requested entry authorization data.
-    pub entry: AuthorizableEntry,
-}
-
-/// Command to approve or deny an access request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DecideAccessRequestCommand {
-    /// Pending request.
-    pub request_id: AccessRequestId,
-    /// Terminal decision.
-    pub decision: AccessDecision,
-}
-
 /// Maximum number of targets one permission inspection may name.
 pub const MAX_INSPECTED_TARGETS: usize = 100;
 
@@ -759,10 +635,9 @@ mod tests {
     use crate::domain::{
         entry::{EntryBoundary, EntryName},
         ids::EntryId,
-        permission::{AccessRight, GrantedAccess},
     };
 
-    use super::{CreateFolderCommand, PageRequest, RequestAccessCommand, SearchQuery};
+    use super::{CreateFolderCommand, PageRequest, SearchQuery};
 
     #[test]
     fn page_request_enforces_contract_bounds() {
@@ -787,25 +662,6 @@ mod tests {
         );
         assert!(
             CreateFolderCommand::new(name, None, Some(EntryBoundary::Private), Vec::new()).is_ok()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn access_request_normalizes_and_limits_reason() -> Result<(), Box<dyn Error>> {
-        let command = RequestAccessCommand::new(
-            EntryId::new(),
-            GrantedAccess::READ_ONLY,
-            Some("  ".to_owned()),
-        )?;
-        assert_eq!(command.reason, None);
-        assert!(
-            RequestAccessCommand::new(
-                EntryId::new(),
-                GrantedAccess::new([AccessRight::Update]),
-                Some("x".repeat(1_001)),
-            )
-            .is_err()
         );
         Ok(())
     }

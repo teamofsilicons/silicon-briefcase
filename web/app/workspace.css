@@ -599,31 +599,6 @@
   padding: 8px 0;
   overflow-wrap: anywhere;
 }
-.request-access {
-  padding: 30px 0;
-  max-width: 600px;
-}
-.request-access h2 {
-  font-size: 24px;
-  margin-bottom: 12px;
-}
-.request-access p {
-  font-size: 16px;
-  margin-bottom: 20px;
-}
-.request-access form {
-  margin-top: 20px;
-}
-.request-access input {
-  margin: 8px 0 20px;
-}
-.request-access legend {
-  margin-bottom: 12px;
-  font-size: 14px;
-}
-.request-access .rights {
-  margin-bottom: 20px;
-}
 .organization-settings-trigger {
   justify-content: flex-start;
   font-size: 14px;

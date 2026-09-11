@@ -38,10 +38,6 @@ Paginated `ls`, `find`, and `bin list` commands return `items` plus the opaque
 `next_cursor` in JSON. Continue with `--cursor`, or use `--all` to follow every
 page without a silent entry cap.
 
-`briefcase request <hidden-path>` uses the path-addressed access-request route
-directly, so requesting access never depends on already being able to resolve
-the entry.
-
 State replacement is atomic and cross-process locked. Stored credentials are
 bound to their canonical deployment origin. Login is unscoped; `--org` selects
 each workspace operation without granting access. Legacy scoped credentials and

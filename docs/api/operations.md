@@ -51,9 +51,6 @@ remain in the [API guide](README.md) and [OpenAPI](../../openapi.yaml).
 | `grantPermission` 1.1.0 | `POST /entries/{entry_id}/permissions` | `grant` | `share` |
 | `revokePermission` 1.0.0 | `DELETE /entries/{entry_id}/permissions/{grant_id}` | `revoke` | `unshare` |
 | `inspectEffectivePermissions` 1.0.0 | `POST /permissions/effective` | `effective_access` | `access` |
-| `requestAccess` 1.0.0 | `POST /entries/{entry_id}/access-requests` | `request_access` | `request <UUID>` |
-| `requestAccessByPath` 1.0.0 | `POST /access-requests` | `request_access_by_path` | `request <path>` |
-| `decideAccessRequest` 1.0.0 | `POST /access-requests/{request_id}/decision` | `decide_access_request` | `decide` |
 | `searchFiles` 1.1.0 | `GET /search` | `search` | `search` |
 | `listNotifications` 1.0.0 | `GET /notifications` | `notifications` | `inbox` |
 | `readNotifications` 1.0.0 | `POST /notifications/read` | `mark_notifications_read` | `inbox --read` |

@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 53] = [
+pub const OPERATIONS: [OperationVersion; 50] = [
     operation(
         "reserveDelegatedUpload",
         "1.0.0",
@@ -229,19 +229,6 @@ pub const OPERATIONS: [OperationVersion; 53] = [
         "1.0.0",
         "POST",
         "/permissions/effective",
-    ),
-    operation(
-        "requestAccess",
-        "1.0.0",
-        "POST",
-        "/entries/{entry_id}/access-requests",
-    ),
-    operation("requestAccessByPath", "1.0.0", "POST", "/access-requests"),
-    operation(
-        "decideAccessRequest",
-        "1.0.0",
-        "POST",
-        "/access-requests/{request_id}/decision",
     ),
     operation("searchFiles", "1.1.0", "GET", "/search"),
     operation("listNotifications", "1.0.0", "GET", "/notifications"),

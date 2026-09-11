@@ -46,10 +46,6 @@ pub enum IamAction {
     GrantPermission,
     /// Revoke explicit permission.
     RevokePermission,
-    /// Request entry access.
-    CreateAccessRequest,
-    /// Decide an access request.
-    DecideAccessRequest,
     /// Search visible content.
     Search,
     /// Read the notification inbox.
@@ -91,8 +87,6 @@ impl IamAction {
             Self::InspectPermissions => "briefcase.permissions.inspect",
             Self::GrantPermission => "briefcase.permissions.grant",
             Self::RevokePermission => "briefcase.permissions.revoke",
-            Self::CreateAccessRequest => "briefcase.access_request.create",
-            Self::DecideAccessRequest => "briefcase.access_request.decide",
             Self::Search => "briefcase.search",
             Self::ListNotifications => "briefcase.notifications.list",
             Self::ReadNotifications => "briefcase.notifications.read",
@@ -370,14 +364,6 @@ mod tests {
             ),
             (IamAction::GrantPermission, "briefcase.permissions.grant"),
             (IamAction::RevokePermission, "briefcase.permissions.revoke"),
-            (
-                IamAction::CreateAccessRequest,
-                "briefcase.access_request.create",
-            ),
-            (
-                IamAction::DecideAccessRequest,
-                "briefcase.access_request.decide",
-            ),
             (IamAction::Search, "briefcase.search"),
             (IamAction::ListNotifications, "briefcase.notifications.list"),
             (IamAction::ReadNotifications, "briefcase.notifications.read"),

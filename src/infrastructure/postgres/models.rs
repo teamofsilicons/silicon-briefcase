@@ -202,41 +202,6 @@ pub struct PermissionGrantRow {
     pub created_at: OffsetDateTime,
 }
 
-/// Pending or decided request for entry access.
-#[derive(Clone, Debug, sqlx::FromRow)]
-pub struct AccessRequestRow {
-    /// Owning organization.
-    pub org_id: String,
-    /// Request identifier.
-    pub access_request_id: Uuid,
-    /// Requested entry.
-    pub entry_id: Uuid,
-    /// Requesting actor kind.
-    pub requested_by_type: String,
-    /// Requesting actor identifier.
-    pub requested_by_id: String,
-    /// Bitmask of requested rights.
-    pub requested_access_mask: i16,
-    /// Optional user-supplied reason.
-    pub reason: Option<String>,
-    /// Pending, approved, or denied state.
-    pub status: String,
-    /// Bitmask of rights actually granted on approval.
-    pub granted_access_mask: Option<i16>,
-    /// Decision actor kind.
-    pub decided_by_type: Option<String>,
-    /// Decision actor identifier.
-    pub decided_by_id: Option<String>,
-    /// Decision timestamp.
-    pub decided_at: Option<OffsetDateTime>,
-    /// Grant atomically created by approval.
-    pub permission_grant_id: Option<Uuid>,
-    /// Request creation timestamp.
-    pub created_at: OffsetDateTime,
-    /// Last state-change timestamp.
-    pub updated_at: OffsetDateTime,
-}
-
 /// Validated organization-owned object storage configuration.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct OrganizationStorageConfigRow {

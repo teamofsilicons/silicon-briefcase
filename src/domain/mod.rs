@@ -4,7 +4,6 @@
 //! IAM wire formats, or S3 clients. Adapters translate external data into these
 //! types only after authenticating it and validating its source.
 
-pub mod access;
 pub mod actor;
 pub mod entry;
 pub mod filter;

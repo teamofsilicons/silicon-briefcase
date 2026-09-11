@@ -7,7 +7,7 @@ CLI, or work inside an IAM-paired testing environment.
 
 | Guide | Audience and contents |
 | --- | --- |
-| [Browser app](browser.md) | IAM sign-in, file links, browsing, sharing, access requests, notifications, previews, and sessions |
+| [Browser app](browser.md) | IAM sign-in, file links, browsing, sharing, notifications, previews, and sessions |
 | [OBO for applications](obo.md) | Hand this to another Application: prerequisites, proof exchange, every `/obo/` operation, retries, errors, SDK and CLI |
 | [Delegated uploads](api/delegated-uploads.md) | Exact IAM manifests, private staging, fresh-authorized publication and recovery |
 | [API](api/README.md) | HTTP authentication, request/response conventions, all public operations, permissions, filters, uploads, errors, and retention |

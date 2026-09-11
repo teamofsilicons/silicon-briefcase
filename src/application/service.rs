@@ -3,7 +3,6 @@
 //! This module owns use-case orchestration and keeps HTTP, `SQLx`, and object
 //! storage details behind explicit ports.
 
-mod access_requests;
 mod applications;
 mod bin;
 mod entries;

@@ -101,7 +101,6 @@ import { fileLocation, readFileLocation } from '@/lib/file-location';
 import { textPreview } from '@/lib/text-preview';
 import { textFormat } from '@/lib/preview-document';
 import { richPreview } from '@/lib/rich-preview';
-import RequestAccess from './request-access';
 import Notifications from './notifications';
 import OrganizationSettings from './organization-settings';
 import TestingEnvironments from './testing-environments';
@@ -931,11 +930,9 @@ export default function Workspace({
             </p>
           )}
           {missingPath && (
-            <RequestAccess
-              key={missingPath}
-              path={missingPath}
-              onError={fail}
-            />
+            <p className="error-box" role="alert">
+              File not found
+            </p>
           )}
           {parent &&
             (parent.visibility === 'traversal' ||

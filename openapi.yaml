@@ -681,50 +681,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PermissionInspectionResult' }
         default: { $ref: '#/components/responses/Error' }
-  /entries/{entry_id}/access-requests:
-    post:
-      tags: [Permissions]
-      operationId: requestAccess
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/EntryId'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [access], properties: { access: { $ref: '#/components/schemas/AccessRights' }, reason: { type: string, maxLength: 1000 } } } } } }
-      responses:
-        '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
-        default: { $ref: '#/components/responses/Error' }
-  /access-requests:
-    post:
-      tags: [Permissions]
-      operationId: requestAccessByPath
-      summary: Request access using the path from a permanent URL
-      description: >-
-        Resolves the exact organization-relative path without requiring read
-        access, then creates the same opaque access request as the UUID route.
-        It returns no entry metadata beyond the created request; a missing path
-        and a path outside the authenticated tenant both return 404.
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PathAccessRequestCreate' }
-      responses:
-        '201': { description: Access request created, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
-        '404': { description: The exact path does not resolve in the authenticated tenant }
-        default: { $ref: '#/components/responses/Error' }
-  /access-requests/{request_id}/decision:
-    post:
-      tags: [Permissions]
-      operationId: decideAccessRequest
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - { name: request_id, in: path, required: true, schema: { type: string, format: uuid } }
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { type: string, enum: [approve, deny] }, access: { $ref: '#/components/schemas/AccessRights' } } } } } }
-      responses:
-        '200': { description: Decision recorded, content: { application/json: { schema: { $ref: '#/components/schemas/AccessRequest' } } } }
-        default: { $ref: '#/components/responses/Error' }
   /search:
     get:
       tags: [Search]
@@ -1689,18 +1645,6 @@ components:
         - type: object
           required: [id, granted_by, created_at]
           properties: { id: { type: string, format: uuid }, granted_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
-    PathAccessRequestCreate:
-      type: object
-      additionalProperties: false
-      required: [path, access]
-      properties:
-        path: { type: string, minLength: 1, maxLength: 2048, description: Exact organization-relative path from the permanent URL }
-        access: { $ref: '#/components/schemas/AccessRights' }
-        reason: { type: string, maxLength: 1000 }
-    AccessRequest:
-      type: object
-      required: [id, entry_id, requested_by, access, status, created_at]
-      properties: { id: { type: string, format: uuid }, entry_id: { type: string, format: uuid }, requested_by: { $ref: '#/components/schemas/ActorRef' }, access: { $ref: '#/components/schemas/AccessRights' }, status: { type: string, enum: [pending, approved, denied] }, created_at: { type: string, format: date-time } }
     ActivityEvent:
       type: object
       required: [action, actor, occurred_at]

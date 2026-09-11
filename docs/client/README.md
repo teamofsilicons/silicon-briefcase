@@ -14,7 +14,7 @@ This changes the next build, not the running program.
 
 ```toml
 [dependencies]
-briefcase-client = "0.2"
+briefcase-client = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -318,26 +318,6 @@ let grant = client
 client.revoke(notes.id, grant.id).await?;
 ```
 
-Request access to a permanent-URL path without first resolving metadata the
-caller is not allowed to see:
-
-```rust
-use briefcase_client::{AccessRight, NewAccessRequest};
-
-let wanted = NewAccessRequest::new([AccessRight::Read])
-    .because("reviewing the handbook");
-let pending = client
-    .request_access_by_path("private/cos:owner/handbook.pdf", &wanted)
-    .await?;
-# let _ = pending;
-```
-
-The path operation returns the same access-request record as
-`request_access(entry_id, ...)`, without returning the entry's name, owner, or
-other metadata. Use `request_access_by_path_with_key` with a key persisted
-beside the exact path, rights, and reason when the caller must safely recover
-an uncertain result.
-
 For a caller-managed crash retry, attach a persisted key with
 `NewFolder::with_idempotency_key`, and use `update_entry_with_key` for rename or
 move. Reuse both the same key and the same request after an uncertain result.
@@ -503,7 +483,6 @@ recorded storage location; subsequent versions use the activated configuration.
 | Bytes | `upload`, `read_content`, `read_content_at`, `download`, `download_to_file` |
 | Versions | `versions`, `restore_version` |
 | Sharing | `permissions`, `grant`, `revoke`, `effective_access` |
-| Access requests | `request_access`, `request_access_by_path`, `decide_access_request` |
 | Inbox | `notifications`, `mark_notifications_read` |
 | History | `activity` |
 | Search | `search` |

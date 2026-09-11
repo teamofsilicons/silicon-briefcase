@@ -18,21 +18,19 @@ use crate::{
     application::{
         context::ExecutionContext,
         service::{
-            AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
-            CreateFolderMutation, DecideAccessRequestCommand, ENTRY_ACTIVITY_HISTORY_SIZE,
+            ActivityEvent, AuthorizableEntry, CreateFolderMutation, ENTRY_ACTIVITY_HISTORY_SIZE,
             FileVersionView, GrantPermissionCommand, ListBinQuery, ListEntriesQuery,
             ListPermissionsQuery, ListVersionsQuery, MetadataRepository, MetadataRepositoryError,
-            MutationMetadata, Page, ProjectedIdentity, RequestAccessCommand,
-            RevokePermissionCommand, SearchCandidate, SearchQuery, UpdateEntryCommand,
+            MutationMetadata, Page, ProjectedIdentity, RevokePermissionCommand, SearchCandidate,
+            SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
-        access::{AccessDecision, AccessRequestStatus},
         actor::{ActorId, ActorRef, ApplicationId, OrganizationRole, TagName},
         entry::{EntryKind, EntryPath},
         filter::{FilterQuery, SortOrder},
-        ids::{AccessRequestId, EntryId, GrantId, VersionId},
-        notification::{NotificationDecision, NotificationInbox, NotificationKind},
+        ids::{EntryId, GrantId, VersionId},
+        notification::{NotificationInbox, NotificationKind},
         permission::{AccessRight, Capability, GrantedAccess, PermissionGrant},
         quota::OrganizationUsage,
         version::{VersionNumber, VersionSource},
@@ -40,8 +38,7 @@ use crate::{
 };
 
 use super::{
-    AccessRequestRow, EntryRow, PermissionGrantRow, PostgresRepository, TenantContext,
-    models::entry_columns, roots,
+    EntryRow, PermissionGrantRow, PostgresRepository, TenantContext, models::entry_columns, roots,
 };
 use common::{
     IdempotencyClaim, OwnedAncestorPrincipal, Result, actor_kind, actor_ref, begin,
@@ -971,280 +968,6 @@ impl MetadataRepository for PostgresRepository {
         Ok(())
     }
 
-    async fn create_access_request(
-        &self,
-        context: &ExecutionContext,
-        command: &RequestAccessCommand,
-        metadata: &MutationMetadata,
-    ) -> Result<AccessRequestView> {
-        const OPERATION: &str = "create_access_request";
-        let mut request = begin(self, context).await?;
-        let entry = load_entry(
-            &mut request.transaction,
-            context,
-            command.entry_id,
-            false,
-            true,
-        )
-        .await?
-        .ok_or(MetadataRepositoryError::NotFound)?;
-        let authorization = entry.authorization(context.authorization());
-        let effective = authorization.capabilities().effective_access();
-        let already_allowed = command
-            .access
-            .rights()
-            .all(|right| effective.contains(&right.satisfied_by()));
-        if already_allowed {
-            return Err(MetadataRepositoryError::Conflict);
-        }
-        let proposed_request_id = AccessRequestId::new();
-        let request_id = match claim_idempotency(
-            &mut request.transaction,
-            &request.context,
-            OPERATION,
-            metadata,
-            Some(proposed_request_id.as_uuid()),
-        )
-        .await?
-        {
-            IdempotencyClaim::Replay(Some(id)) => {
-                let row = find_access_request_row(&mut request.transaction, id, false)
-                    .await?
-                    .ok_or(MetadataRepositoryError::Conflict)?;
-                let result = access_request_view(row)?;
-                request.transaction.commit().await.map_err(map_sql)?;
-                return Ok(result);
-            }
-            IdempotencyClaim::Acquired(Some(id)) => {
-                AccessRequestId::from_uuid(id).map_err(internal_data)?
-            }
-            IdempotencyClaim::Replay(None) | IdempotencyClaim::Acquired(None) => {
-                return Err(MetadataRepositoryError::Conflict);
-            }
-        };
-        let actor = context.authorization().actor();
-        let row = sqlx::query_as::<_, AccessRequestRow>(
-            "INSERT INTO briefcase.access_requests ( \
-                    org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
-                    requested_access_mask, reason \
-             ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6) \
-             RETURNING org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
-                       requested_access_mask, reason, status, granted_access_mask, decided_by_type, \
-                       decided_by_id, decided_at, permission_grant_id, created_at, updated_at",
-        )
-        .bind(request_id.as_uuid())
-        .bind(command.entry_id.as_uuid())
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .bind(encode_access(command.access))
-        .bind(command.reason.as_deref())
-        .fetch_one(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
-        record_change(
-            &mut request.transaction,
-            &request.context,
-            Some(command.entry_id.as_uuid()),
-            "access_request.created.v1",
-            "access_request",
-            &request_id.to_string(),
-            json!({
-                "entry_id": command.entry_id,
-                "requested_access": access_rights(command.access),
-            }),
-        )
-        .await?;
-        complete_idempotency(
-            &mut request.transaction,
-            &request.context,
-            OPERATION,
-            metadata,
-            Some(request_id.as_uuid()),
-        )
-        .await?;
-        // The people who can approve this are the entry owner and every
-        // organization owner or admin. The requester never notifies itself.
-        let subject = notifications::snapshot(&entry.entry);
-        let recipients =
-            notifications::decision_recipients(&mut request.transaction, &entry.entry.owner, actor)
-                .await?;
-        for recipient in &recipients {
-            notifications::insert(
-                &mut request.transaction,
-                &notifications::NewNotification {
-                    recipient,
-                    kind: NotificationKind::AccessRequested,
-                    actor: Some(actor),
-                    subject: Some(&subject),
-                    access: Some(command.access),
-                    access_request_id: Some(request_id),
-                    decision: None,
-                },
-            )
-            .await?;
-        }
-        let result = access_request_view(row)?;
-        request.transaction.commit().await.map_err(map_sql)?;
-        Ok(result)
-    }
-
-    async fn find_access_request(
-        &self,
-        context: &ExecutionContext,
-        request_id: AccessRequestId,
-    ) -> Result<Option<AuthorizableAccessRequest>> {
-        let mut request = begin(self, context).await?;
-        let row =
-            find_access_request_row(&mut request.transaction, request_id.as_uuid(), false).await?;
-        let result = if let Some(row) = row {
-            let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
-            let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
-                .await?
-                .ok_or(MetadataRepositoryError::NotFound)?;
-            Some(AuthorizableAccessRequest {
-                request: access_request_view(row)?,
-                entry,
-            })
-        } else {
-            None
-        };
-        request.transaction.commit().await.map_err(map_sql)?;
-        Ok(result)
-    }
-
-    async fn decide_access_request(
-        &self,
-        context: &ExecutionContext,
-        command: DecideAccessRequestCommand,
-        metadata: &MutationMetadata,
-        required_capability: Capability,
-    ) -> Result<AccessRequestView> {
-        const OPERATION: &str = "decide_access_request";
-        let mut request = begin(self, context).await?;
-        let row =
-            find_access_request_row(&mut request.transaction, command.request_id.as_uuid(), true)
-                .await?
-                .ok_or(MetadataRepositoryError::NotFound)?;
-        let entry_id = EntryId::from_uuid(row.entry_id).map_err(internal_data)?;
-        let entry = load_entry(&mut request.transaction, context, entry_id, false, true)
-            .await?
-            .ok_or(MetadataRepositoryError::NotFound)?;
-        require_capability(&entry, context, required_capability)?;
-        if let IdempotencyClaim::Replay(_) = claim_idempotency(
-            &mut request.transaction,
-            &request.context,
-            OPERATION,
-            metadata,
-            Some(command.request_id.as_uuid()),
-        )
-        .await?
-        {
-            let result = access_request_view(row)?;
-            request.transaction.commit().await.map_err(map_sql)?;
-            return Ok(result);
-        }
-        if row.status != "pending" {
-            return Err(MetadataRepositoryError::Conflict);
-        }
-        let actor = context.authorization().actor();
-        let (status, access, grant_id) = match command.decision {
-            AccessDecision::Deny => ("denied", None, None),
-            AccessDecision::Approve { access } => {
-                let requester = actor_ref(&row.requested_by_type, &row.requested_by_id)?;
-                if !current_member(&mut request.transaction, &requester).await? {
-                    return Err(MetadataRepositoryError::Conflict);
-                }
-                let grant_id = GrantId::new();
-                sqlx::query(
-                    "INSERT INTO briefcase.permission_grants ( \
-                            org_id, entry_id, grant_id, principal_type, principal_id, \
-                            access_mask, inherits_to_descendants, granted_by_type, granted_by_id \
-                     ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, true, $6, $7)",
-                )
-                .bind(row.entry_id)
-                .bind(grant_id.as_uuid())
-                .bind(&row.requested_by_type)
-                .bind(&row.requested_by_id)
-                .bind(encode_access(access))
-                .bind(actor_kind(actor.kind()))
-                .bind(actor.id().as_str())
-                .execute(&mut *request.transaction)
-                .await
-                .map_err(map_sql)?;
-                ("approved", Some(access), Some(grant_id))
-            }
-        };
-        let updated = sqlx::query_as::<_, AccessRequestRow>(
-            "UPDATE briefcase.access_requests \
-                SET status = $2, granted_access_mask = $3, decided_by_type = $4, \
-                    decided_by_id = $5, decided_at = clock_timestamp(), permission_grant_id = $6 \
-              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1 \
-                AND status = 'pending' \
-             RETURNING org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
-                       requested_access_mask, reason, status, granted_access_mask, decided_by_type, \
-                       decided_by_id, decided_at, permission_grant_id, created_at, updated_at",
-        )
-        .bind(command.request_id.as_uuid())
-        .bind(status)
-        .bind(access.map(encode_access))
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .bind(grant_id.map(GrantId::as_uuid))
-        .fetch_one(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
-        record_change(
-            &mut request.transaction,
-            &request.context,
-            Some(row.entry_id),
-            "access_request.decided.v1",
-            "access_request",
-            &command.request_id.to_string(),
-            json!({"status": status, "grant_id": grant_id}),
-        )
-        .await?;
-        complete_idempotency(
-            &mut request.transaction,
-            &request.context,
-            OPERATION,
-            metadata,
-            Some(command.request_id.as_uuid()),
-        )
-        .await?;
-        let requester = actor_ref(&row.requested_by_type, &row.requested_by_id)?;
-        let entry = load_entry(
-            &mut request.transaction,
-            context,
-            EntryId::from_uuid(row.entry_id).map_err(internal_data)?,
-            false,
-            false,
-        )
-        .await?;
-        notifications::insert(
-            &mut request.transaction,
-            &notifications::NewNotification {
-                recipient: &requester,
-                kind: NotificationKind::AccessRequestDecided,
-                actor: Some(actor),
-                subject: entry
-                    .as_ref()
-                    .map(|entry| notifications::snapshot(&entry.entry))
-                    .as_ref(),
-                access,
-                access_request_id: Some(command.request_id),
-                decision: Some(if access.is_some() {
-                    NotificationDecision::Approved
-                } else {
-                    NotificationDecision::Denied
-                }),
-            },
-        )
-        .await?;
-        let result = access_request_view(updated)?;
-        request.transaction.commit().await.map_err(map_sql)?;
-        Ok(result)
-    }
-
     async fn search(
         &self,
         context: &ExecutionContext,
@@ -2020,38 +1743,6 @@ async fn find_grant(
     }
 }
 
-async fn find_access_request_row(
-    transaction: &mut Transaction<'_, Postgres>,
-    request_id: Uuid,
-    lock: bool,
-) -> Result<Option<AccessRequestRow>> {
-    if lock {
-        sqlx::query_as::<_, AccessRequestRow>(
-            "SELECT org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
-                    requested_access_mask, reason, status, granted_access_mask, decided_by_type, \
-                    decided_by_id, decided_at, permission_grant_id, created_at, updated_at \
-               FROM briefcase.access_requests \
-              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1 FOR UPDATE",
-        )
-        .bind(request_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(map_sql)
-    } else {
-        sqlx::query_as::<_, AccessRequestRow>(
-            "SELECT org_id, access_request_id, entry_id, requested_by_type, requested_by_id, \
-                    requested_access_mask, reason, status, granted_access_mask, decided_by_type, \
-                    decided_by_id, decided_at, permission_grant_id, created_at, updated_at \
-               FROM briefcase.access_requests \
-              WHERE org_id = briefcase.current_org_id() AND access_request_id = $1",
-        )
-        .bind(request_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(map_sql)
-    }
-}
-
 /// Renders an access set as the right names used in audit and event payloads.
 fn access_rights(access: GrantedAccess) -> Vec<&'static str> {
     access
@@ -2063,38 +1754,6 @@ fn access_rights(access: GrantedAccess) -> Vec<&'static str> {
             AccessRight::Delete => "delete",
         })
         .collect()
-}
-
-fn access_request_view(row: AccessRequestRow) -> Result<AccessRequestView> {
-    let status = match row.status.as_str() {
-        "pending" => AccessRequestStatus::Pending,
-        "approved" => AccessRequestStatus::Approved,
-        "denied" => AccessRequestStatus::Denied,
-        _ => return Err(internal("invalid persisted access-request status")),
-    };
-    let decided_by = match (row.decided_by_type.as_deref(), row.decided_by_id.as_deref()) {
-        (Some(kind), Some(id)) => Some(actor_ref(kind, id)?),
-        (None, None) => None,
-        _ => return Err(internal("incomplete access-request decision actor")),
-    };
-    Ok(AccessRequestView {
-        id: AccessRequestId::from_uuid(row.access_request_id).map_err(internal_data)?,
-        entry_id: EntryId::from_uuid(row.entry_id).map_err(internal_data)?,
-        requested_by: actor_ref(&row.requested_by_type, &row.requested_by_id)?,
-        requested_access: decode_access(row.requested_access_mask)?,
-        reason: row.reason,
-        status,
-        granted_access: row.granted_access_mask.map(decode_access).transpose()?,
-        decided_by,
-        decided_at: row.decided_at,
-        permission_grant_id: row
-            .permission_grant_id
-            .map(GrantId::from_uuid)
-            .transpose()
-            .map_err(internal_data)?,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
 }
 
 fn require_capability(

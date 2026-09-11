@@ -22,7 +22,7 @@ use crate::{
     },
     domain::{
         entry::EntryPath,
-        ids::{AccessRequestId, EntryId, GrantId, VersionId},
+        ids::{EntryId, GrantId, VersionId},
     },
     error::AppError,
     infrastructure::{
@@ -379,10 +379,6 @@ pub(crate) fn entry_id(value: Uuid) -> Result<EntryId, AppError> {
 
 pub(crate) fn grant_id(value: Uuid) -> Result<GrantId, AppError> {
     GrantId::from_uuid(value).map_err(|_| AppError::NotFound)
-}
-
-pub(crate) fn access_request_id(value: Uuid) -> Result<AccessRequestId, AppError> {
-    AccessRequestId::from_uuid(value).map_err(|_| AppError::NotFound)
 }
 
 pub(crate) fn version_id(value: &str) -> Result<VersionId, AppError> {

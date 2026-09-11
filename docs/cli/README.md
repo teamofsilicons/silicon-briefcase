@@ -15,14 +15,13 @@ The SLT/session login and paired testing-environment commands require CLI
 0.1.2 or newer. Use 0.1.3 or newer for renaming and replacing individually
 shared files without needing independent access to their parent folder.
 
-This guide targets CLI 0.2 and API contract 0.5. Top-level folder placement
-changed in this release; see the [migration guide](../migration-0.2.md).
+This guide targets CLI 0.3 and API contract 0.5. Top-level folder placement
+changed in CLI 0.2; see the [migration guide](../migration-0.2.md).
 Use CLI 0.2.2 or later for unscoped sandbox login.
 
 See the [documentation index](../) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
 
-Set uppercase shell variables such as `VERSION_ID`, `ENTRY_ID`, `GRANT_ID`,
-and `REQUEST_ID` from the corresponding listing/creation response before using
+Set uppercase shell variables such as `VERSION_ID`, `ENTRY_ID`, and `GRANT_ID` from the corresponding listing/creation response before using
 those examples. Lifecycle, delete, grant and restore examples change state;
 run them individually and use a disposable sandbox for experimentation.
 
@@ -401,22 +400,12 @@ are a comma-separated set of `read`, `write`, `update`, `delete`. They are
 independent: `write` adds files to a folder, `update` changes a file that is
 already there, and neither conveys `delete`.
 
-When you cannot read something and want to:
+Read and clear sharing notifications:
 
 ```bash
-briefcase request public/handbook/private-draft.md --access read --reason "reviewing"
-briefcase inbox                        # requests waiting on you, decisions on yours
-briefcase decide "$REQUEST_ID" approve --access read
-briefcase decide "$REQUEST_ID" deny
-briefcase inbox --read                 # clear the badge
+briefcase inbox
+briefcase inbox --read                 # clear the unread badge
 ```
-
-A path target is sent directly to the privacy-preserving access-request route;
-the CLI does not try to inspect or resolve the hidden entry first. A missing
-path and one outside the organization remain indistinguishable. A UUID target
-continues to use the UUID-addressed route. Path requests persist their
-idempotency key before the call, so rerunning the exact path, rights, and reason
-after an uncertain outcome recovers the same request instead of duplicating it.
 
 ## Everything else
 

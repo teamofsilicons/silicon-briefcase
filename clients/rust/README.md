@@ -91,6 +91,10 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
+Release 0.3 removes access-request creation and decisions from the SDK and CLI.
+Use direct permission grants (`grant` / `briefcase share`) to give a member access.
+Historical inbox records remain readable.
+
 The crates version together but publish separately, package first:
 
 ```bash

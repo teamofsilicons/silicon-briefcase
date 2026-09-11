@@ -65,10 +65,7 @@ or accepted from a client.
   beyond reading it. Tag members may read entries and add children to folders
   inside their tag tree, while mutating a peer's existing entry requires an
   explicit grant; organization owners and admins hold every operation everywhere.
-  A member holding only a clean permanent URL can request access with
-  `POST /access-requests` and its organization-relative path; hidden metadata
-  remains undisclosed until a grant is approved.
-- **A central inbox.** Grants, revocations, access requests, and decisions each
+- **A central inbox.** Grants and revocations each
   write a notification in the same transaction as the change, so the inbox
   cannot disagree with the permissions it describes.
 - **A filter language.** Folder contents page a hundred newest-first — pages

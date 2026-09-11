@@ -8,10 +8,9 @@ use serde_json::Value;
 use crate::domain::filter::MAX_FILTER_LENGTH;
 
 use super::dto::{
-    AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, ActorTypeDto,
-    BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto, GrantAccessDto,
-    ListEntriesQuery, PageQuery, PathAccessRequestCreateDto, PermissionGrantCreateDto,
-    PermissionInspectionDto, RootTypeDto, SearchQueryDto,
+    ActorTypeDto, BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
+    GrantAccessDto, ListEntriesQuery, PageQuery, PermissionGrantCreateDto, PermissionInspectionDto,
+    RootTypeDto, SearchQueryDto,
 };
 
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
@@ -218,74 +217,6 @@ pub fn inspect_permissions(request: &PermissionInspectionDto) -> Result<(), Vali
     errors.finish()
 }
 
-/// Validates an access request.
-///
-/// # Errors
-///
-/// Returns all invalid access-request fields.
-pub fn request_access(request: &AccessRequestCreateDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    validate_access_request_fields(&request.access, request.reason.as_deref(), &mut errors);
-    errors.finish()
-}
-
-/// Validates a path-addressed access request.
-///
-/// # Errors
-///
-/// Returns all invalid path and access-request fields.
-pub fn request_access_by_path(
-    request: &PathAccessRequestCreateDto,
-) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    if request.path.trim().is_empty() {
-        errors.push("path", "must not be blank");
-    }
-    if request.path.len() > 2_048 {
-        errors.push("path", "must contain at most 2048 bytes");
-    }
-    validate_access_request_fields(&request.access, request.reason.as_deref(), &mut errors);
-    errors.finish()
-}
-
-fn validate_access_request_fields(
-    access: &[GrantAccessDto],
-    reason: Option<&str>,
-    errors: &mut ValidationErrors,
-) {
-    validate_access_rights(access, "access", errors);
-    if let Some(reason) = reason {
-        if reason.trim().is_empty() {
-            errors.push("reason", "must not be blank when provided");
-        }
-        if reason.chars().count() > 1_000 {
-            errors.push("reason", "must contain at most 1000 characters");
-        }
-    }
-}
-
-/// Validates the conditional decision payload.
-///
-/// # Errors
-///
-/// Returns all inconsistent access-decision fields.
-pub fn decide_access(request: &AccessRequestDecisionDto) -> Result<(), ValidationErrors> {
-    let mut errors = ValidationErrors::default();
-    match (request.decision, request.access.as_deref()) {
-        (AccessDecisionDto::Approve, None) => {
-            errors.push("access", "is required when approving");
-        }
-        (AccessDecisionDto::Approve, Some(access)) => {
-            validate_access_rights(access, "access", &mut errors);
-        }
-        (AccessDecisionDto::Deny, Some(_)) => {
-            errors.push("access", "must be omitted when denying");
-        }
-        (AccessDecisionDto::Deny, None) => {}
-    }
-    errors.finish()
-}
-
 /// Validates a search request.
 ///
 /// # Errors
@@ -462,10 +393,9 @@ fn valid_kms_key_arn(value: &str, region: &str, account_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bucket_configuration, create_folder, decide_access};
+    use super::{bucket_configuration, create_folder};
     use crate::api::dto::{
-        AccessDecisionDto, AccessRequestDecisionDto, BucketConfigurationDto, EncryptionModeDto,
-        FolderCreateDto, RootTypeDto,
+        BucketConfigurationDto, EncryptionModeDto, FolderCreateDto, RootTypeDto,
     };
 
     #[test]
@@ -490,15 +420,6 @@ mod tests {
             root_type: None,
             tag: Some("engineering".to_owned()),
             invitees: Vec::new(),
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn approval_requires_an_access_level() {
-        let result = decide_access(&AccessRequestDecisionDto {
-            decision: AccessDecisionDto::Approve,
-            access: None,
         });
         assert!(result.is_err());
     }

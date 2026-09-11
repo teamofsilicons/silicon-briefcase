@@ -187,7 +187,7 @@ For private folders, you can also explictly state the carbon_id's or silicon_id'
 
 Similar to how linux_filesystem works, we would also have a very similar workflow. For each private or tag based file or folder it would be possible to invite someone, while inviting the invite could either be just read access or also update access or also write access. So the scope of the invited person would be defined there. Based on the scope it should appear accordingly in the user's directory. 
 
-Each carbon/silicon that gets access to the permanent url and still don't have the access to the file, would see a button to request access clicking on request access would create a request for the owner of the file/org_admin/org_owner which they can approve and would give that carbon/silicon a view access or update access based on the request. 
+A member without access to a permanent URL sees File not found. An owner or authorized administrator can grant access through sharing.
 
 I should be able to request permissions of file(s) or folder(s) so that it's clear what all actions can be performed on this. 
 

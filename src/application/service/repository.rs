@@ -9,7 +9,7 @@ use crate::{
     domain::{
         actor::{ActorKind, OrganizationId},
         entry::{EntryBoundary, EntryPath},
-        ids::{AccessRequestId, EntryId, GrantId},
+        ids::{EntryId, GrantId},
         notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
         quota::OrganizationUsage,
@@ -17,11 +17,10 @@ use crate::{
 };
 
 use super::model::{
-    AccessRequestView, ActivityEvent, AuthorizableAccessRequest, AuthorizableEntry,
-    CreateFolderMutation, DecideAccessRequestCommand, FileVersionView, GrantPermissionCommand,
-    ListBinQuery, ListEntriesQuery, ListPermissionsQuery, ListVersionsQuery, MutationMetadata,
-    Page, ProjectedIdentity, RequestAccessCommand, RevokePermissionCommand, SearchCandidate,
-    SearchQuery, UpdateEntryCommand,
+    ActivityEvent, AuthorizableEntry, CreateFolderMutation, FileVersionView,
+    GrantPermissionCommand, ListBinQuery, ListEntriesQuery, ListPermissionsQuery,
+    ListVersionsQuery, MutationMetadata, Page, ProjectedIdentity, RevokePermissionCommand,
+    SearchCandidate, SearchQuery, UpdateEntryCommand,
 };
 
 /// Persistence failures classified without exposing SQL or tenant details.
@@ -177,30 +176,6 @@ pub trait MetadataRepository: Send + Sync {
         metadata: &MutationMetadata,
         required_capability: Capability,
     ) -> Result<(), MetadataRepositoryError>;
-
-    /// Creates a pending access request without returning target metadata.
-    async fn create_access_request(
-        &self,
-        context: &ExecutionContext,
-        command: &RequestAccessCommand,
-        metadata: &MutationMetadata,
-    ) -> Result<AccessRequestView, MetadataRepositoryError>;
-
-    /// Loads a pending or decided request with its target authorization facts.
-    async fn find_access_request(
-        &self,
-        context: &ExecutionContext,
-        request_id: AccessRequestId,
-    ) -> Result<Option<AuthorizableAccessRequest>, MetadataRepositoryError>;
-
-    /// Atomically records a decision and creates an approval grant.
-    async fn decide_access_request(
-        &self,
-        context: &ExecutionContext,
-        command: DecideAccessRequestCommand,
-        metadata: &MutationMetadata,
-        required_capability: Capability,
-    ) -> Result<AccessRequestView, MetadataRepositoryError>;
 
     /// Finds already permission-filtered candidates; service policy rechecks them.
     async fn search(

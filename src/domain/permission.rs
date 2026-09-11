@@ -10,7 +10,7 @@ use super::{
     ids::{EntryId, GrantId},
 };
 
-/// One right that an invitation or an access request can convey.
+/// One right that a permission grant can convey.
 ///
 /// The rights are independent, exactly as the product contract requires:
 /// update authority never implies deletion, and write authority never implies

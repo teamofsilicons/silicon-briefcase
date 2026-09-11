@@ -120,11 +120,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/browser/login/start", post(session::start))
         .route("/browser/notifications", get(access::inbox))
         .route("/browser/notifications/read", post(access::mark_read))
-        .route("/browser/access-requests", post(access::request))
-        .route(
-            "/browser/access-requests/{id}/decision",
-            post(access::decide),
-        )
         .route("/auth/callback", get(session::callback))
         .route("/browser/entries", get(files::list).post(files::mkdir))
         .route(

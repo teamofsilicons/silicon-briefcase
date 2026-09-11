@@ -24,8 +24,8 @@ use silicon_briefcase::{
         service::{
             CreateFolderCommand, EntryListItem, GrantPermissionCommand, ListEntriesQuery,
             MetadataRepository, MetadataRepositoryError, MetadataService, MetadataServiceError,
-            MutationMetadata, PageRequest, RequestAccessByPathCommand, RestoreBinEntryCommand,
-            RevokePermissionCommand, SearchQuery, TokenAuthorizationQuery,
+            MutationMetadata, PageRequest, RestoreBinEntryCommand, RevokePermissionCommand,
+            SearchQuery, TokenAuthorizationQuery,
         },
     },
     config::DatabaseSettings,
@@ -36,7 +36,6 @@ use silicon_briefcase::{
         },
         entry::{EntryName, EntryPath},
         filter::FilterQuery,
-        notification::NotificationKind,
         permission::{AccessRight, Capability, GrantedAccess},
     },
     infrastructure::postgres::{self, PostgresRepository},
@@ -414,96 +413,9 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
     let hidden_path = EntryPath::new(format!(
         "private/{VIEWER_ID}/owned-search-container/ancestorneedle.txt"
     ))?;
-    let hidden_request = RequestAccessByPathCommand::new(
-        hidden_path.clone(),
-        GrantedAccess::READ_ONLY,
-        Some("permanent URL access".to_owned()),
-    )?;
-    let hidden_request_metadata = MutationMetadata::new(
-        Some(IdempotencyKey::new("path-access-request-proof")?),
-        [71; 32],
-    );
-    let created_request = metadata
-        .request_access_by_path(&outsider_context, &hidden_request, &hidden_request_metadata)
-        .await?;
-    assert_eq!(created_request.entry_id.as_uuid(), peer_file_id);
-    let replayed_request = metadata
-        .request_access_by_path(&outsider_context, &hidden_request, &hidden_request_metadata)
-        .await?;
-    assert_eq!(replayed_request.id, created_request.id);
-
-    let missing_request = RequestAccessByPathCommand::new(
-        EntryPath::new(format!(
-            "private/{VIEWER_ID}/owned-search-container/not-there.txt"
-        ))?,
-        GrantedAccess::READ_ONLY,
-        None,
-    )?;
     assert!(matches!(
         metadata
-            .request_access_by_path(
-                &outsider_context,
-                &missing_request,
-                &MutationMetadata::new(None, [72; 32]),
-            )
-            .await,
-        Err(MetadataServiceError::NotFound)
-    ));
-
-    // A real path in another tenant is indistinguishable from the missing
-    // path above, even when the public actor identifier is the same.
-    let foreign_organization = format!("foreign-{}", Uuid::now_v7().simple());
-    let foreign_context = ExecutionContext::new(
-        authorization_with_role(
-            &foreign_organization,
-            OUTSIDER_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::Bearer,
-        ),
-        "postgres-foreign-path-owner",
-    );
-    repository
-        .list_active_children(
-            &foreign_context,
-            &ListEntriesQuery {
-                parent_id: None,
-                filter: None,
-                page: PageRequest::new(None, 100)?,
-            },
-        )
-        .await?;
-    let foreign_root_path = EntryPath::new(format!("private/{OUTSIDER_ID}"))?;
-    let foreign_root = repository
-        .find_active_entry_by_path(&foreign_context, &foreign_root_path)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the foreign actor root must exist"))?;
-    metadata
-        .create_folder(
-            &foreign_context,
-            CreateFolderCommand::new(
-                EntryName::new("foreign-only")?,
-                Some(foreign_root.entry.id),
-                None,
-                Vec::new(),
-            )?,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("foreign-path-folder-proof")?),
-                [73; 32],
-            ),
-        )
-        .await?;
-    let foreign_only_request = RequestAccessByPathCommand::new(
-        EntryPath::new(format!("private/{OUTSIDER_ID}/foreign-only"))?,
-        GrantedAccess::READ_ONLY,
-        None,
-    )?;
-    assert!(matches!(
-        metadata
-            .request_access_by_path(
-                &outsider_context,
-                &foreign_only_request,
-                &MutationMetadata::new(None, [74; 32]),
-            )
+            .get_entry_by_path(&outsider_context, &hidden_path)
             .await,
         Err(MetadataServiceError::NotFound)
     ));
@@ -591,14 +503,6 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         )
         .await?;
     assert_eq!(batch.len(), 1, "one target resolved twice stays one row");
-
-    // The path-addressed request notifies organization decision-makers without
-    // requiring the requester to resolve hidden metadata first.
-    let inbox = repository.load_notification_inbox(&context).await?;
-    assert_eq!(inbox.unread_count, 1);
-    assert_eq!(inbox.items.len(), 1);
-    assert_eq!(inbox.items[0].kind, NotificationKind::AccessRequested);
-    assert_eq!(inbox.items[0].access_request_id, Some(created_request.id));
 
     // A webhook snapshot adds IAM's immutable identifiers. Bearer authority is
     // returned only for the exact principal, membership, and epoch tuple.

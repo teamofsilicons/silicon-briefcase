@@ -4,7 +4,7 @@ The browser app uses Silicon IAM for sign-in and the official Briefcase Rust
 client for file operations through the `briefcase-web` gateway.
 
 See the [browser user guide](../docs/browser.md) for file management, links,
-sharing, access requests, and notifications.
+sharing, and notifications.
 
 ## Sign-in
 

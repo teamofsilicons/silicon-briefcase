@@ -306,18 +306,6 @@ fn ordinary_routes() -> Router<AppState> {
             "/api/v1/permissions/effective",
             post(permissions::inspect_permissions),
         )
-        .route(
-            "/api/v1/entries/{entry_id}/access-requests",
-            post(permissions::request_access),
-        )
-        .route(
-            "/api/v1/access-requests",
-            post(permissions::request_access_by_path),
-        )
-        .route(
-            "/api/v1/access-requests/{request_id}/decision",
-            post(permissions::decide_access_request),
-        )
         .route("/api/v1/search", get(entries::search))
         .route(
             "/api/v1/notifications",
@@ -456,7 +444,7 @@ mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 53] = [
+    const CONTRACT: [(&str, &str, &str); 50] = [
         ("/version", "get", "200"),
         ("/iam", "get", "200"),
         ("/auth/status", "get", "200"),
@@ -537,9 +525,6 @@ mod tests {
             "204",
         ),
         ("/permissions/effective", "post", "200"),
-        ("/entries/{entry_id}/access-requests", "post", "201"),
-        ("/access-requests", "post", "201"),
-        ("/access-requests/{request_id}/decision", "post", "200"),
         ("/search", "get", "200"),
         ("/usage", "get", "200"),
         ("/notifications", "get", "200"),
@@ -656,6 +641,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_access_request_routes_are_not_registered() -> anyhow::Result<()> {
+        let application = test_router()?;
+        let identifier = Uuid::now_v7();
+        for path in [
+            format!("/api/v1/entries/{identifier}/access-requests"),
+            "/api/v1/access-requests".to_owned(),
+            format!("/api/v1/access-requests/{identifier}/decision"),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(&path)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn every_contracted_method_is_registered_by_the_runtime_router() -> anyhow::Result<()> {
         let application = test_router()?;
         let identifier = Uuid::now_v7().to_string();
@@ -664,7 +672,6 @@ mod tests {
             let path = path
                 .replace("{entry_id}", &identifier)
                 .replace("{grant_id}", &identifier)
-                .replace("{request_id}", &identifier)
                 .replace("{environment_id}", &identifier)
                 .replace("{org_id}", "tos")
                 .replace("{upload_id}", &identifier)

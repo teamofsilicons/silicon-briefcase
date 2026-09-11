@@ -1,4 +1,4 @@
-//! Permission grants and access-request workflow handlers.
+//! Permission grant handlers.
 
 use axum::{
     Json,
@@ -12,11 +12,10 @@ use uuid::Uuid;
 
 use crate::{
     application::service::{
-        DecideAccessRequestCommand, GrantPermissionCommand, InspectPermissionsQuery,
-        ListPermissionsQuery, PageRequest, RequestAccessByPathCommand, RequestAccessCommand,
+        GrantPermissionCommand, InspectPermissionsQuery, ListPermissionsQuery, PageRequest,
         RevokePermissionCommand,
     },
-    domain::{access::AccessDecision, entry::EntryPath},
+    domain::entry::EntryPath,
     error::AppError,
 };
 
@@ -24,9 +23,8 @@ use super::{
     super::{
         auth::IamAction,
         dto::{
-            AccessDecisionDto, AccessRequestCreateDto, AccessRequestDecisionDto, AccessRequestDto,
-            PathAccessRequestCreateDto, PermissionGrantCreateDto, PermissionGrantDto,
-            PermissionGrantPageDto, PermissionInspectionDto, PermissionInspectionResultDto,
+            PermissionGrantCreateDto, PermissionGrantDto, PermissionGrantPageDto,
+            PermissionInspectionDto, PermissionInspectionResultDto,
         },
         extract,
         mapping::metadata_error,
@@ -160,106 +158,4 @@ pub(crate) async fn revoke_permission(
     .await
     .map_err(metadata_error)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-pub(crate) async fn request_access(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    path: Result<Path<Uuid>, PathRejection>,
-    body: Result<Json<AccessRequestCreateDto>, JsonRejection>,
-) -> Result<(StatusCode, Json<AccessRequestDto>), AppError> {
-    let entry_id = extract::entry_id(extract::path(path)?)?;
-    let body = extract::json(body)?;
-    extract::validation(validation::request_access(&body))?;
-    let resource = entry_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::CreateAccessRequest, &resource).await?;
-    let metadata = extract::mutation(&headers, "request_access", &resource, &body, false)?;
-    let access = granted_access(&body.access)?;
-    let command = RequestAccessCommand::new(entry_id, access, body.reason)
-        .map_err(|_| AppError::validation("invalid_access_request"))?;
-    let request = extract::scoped(
-        &context,
-        state.metadata.request_access(&context, &command, &metadata),
-    )
-    .await
-    .map_err(metadata_error)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(super::super::mapping::ResponseMapper::access_request(
-            &request,
-        )),
-    ))
-}
-
-/// Creates an access request from the path embedded in a permanent URL.
-pub(crate) async fn request_access_by_path(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Result<Json<PathAccessRequestCreateDto>, JsonRejection>,
-) -> Result<(StatusCode, Json<AccessRequestDto>), AppError> {
-    let body = extract::json(body)?;
-    extract::validation(validation::request_access_by_path(&body))?;
-    let path = EntryPath::new(&body.path).map_err(|_| AppError::validation("invalid_path"))?;
-    let resource = path.as_str().to_owned();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::CreateAccessRequest, &resource).await?;
-    let metadata = extract::mutation(&headers, "request_access_by_path", &resource, &body, true)?;
-    let command = RequestAccessByPathCommand::new(path, granted_access(&body.access)?, body.reason)
-        .map_err(|_| AppError::validation("invalid_access_request"))?;
-    let request = extract::scoped(
-        &context,
-        state
-            .metadata
-            .request_access_by_path(&context, &command, &metadata),
-    )
-    .await
-    .map_err(metadata_error)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(super::super::mapping::ResponseMapper::access_request(
-            &request,
-        )),
-    ))
-}
-
-pub(crate) async fn decide_access_request(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    path: Result<Path<Uuid>, PathRejection>,
-    body: Result<Json<AccessRequestDecisionDto>, JsonRejection>,
-) -> Result<Json<AccessRequestDto>, AppError> {
-    let request_id = extract::access_request_id(extract::path(path)?)?;
-    let body = extract::json(body)?;
-    extract::validation(validation::decide_access(&body))?;
-    let resource = request_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::DecideAccessRequest, &resource).await?;
-    let metadata = extract::mutation(&headers, "decide_access_request", &resource, &body, false)?;
-    let decision = match body.decision {
-        AccessDecisionDto::Approve => AccessDecision::Approve {
-            access: granted_access(
-                body.access
-                    .as_deref()
-                    .ok_or_else(|| AppError::validation("missing_approved_access"))?,
-            )?,
-        },
-        AccessDecisionDto::Deny => AccessDecision::Deny,
-    };
-    let request = extract::scoped(
-        &context,
-        state.metadata.decide_access_request(
-            &context,
-            DecideAccessRequestCommand {
-                request_id,
-                decision,
-            },
-            &metadata,
-        ),
-    )
-    .await
-    .map_err(metadata_error)?;
-    Ok(Json(super::super::mapping::ResponseMapper::access_request(
-        &request,
-    )))
 }
