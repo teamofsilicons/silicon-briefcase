@@ -93,3 +93,29 @@ Browser sessions last at most eight hours and are held in gateway memory.
 Restarting the gateway signs users out. HTTPS cookies use `Secure`, `HttpOnly`,
 and the `__Host-` prefix. Pending sign-ins expire after ten minutes.
 Exclude callback query strings and authentication headers from proxy access logs.
+
+## Viewing test files
+
+Production environment managers can select **View as testing environment** and
+enter a short-lived token for the paired test IAM application. The gateway
+authorizes environment access and root-key retrieval, then exchanges the token
+through the SDK using that environment. Root keys and session tokens are never
+returned by the view endpoint.
+
+The production cookie identifies a parent session. Test identities are child
+sessions bound to that parent, selected per tab by a public UUID in sessionStorage.
+API, preview, download, and upload URLs carry `test_environment=<uuid>`; this is
+a selector, never a credential. Missing child sessions, invalid selectors, or an
+expired parent fail closed. The production tab retains its original identity.
+Test logout removes the child only; **Return to production** clears the tab
+selection. Cached reentry checks environment version, root-key generation, and
+live test authentication before reuse.
+
+Gateway regression checks:
+
+```sh
+cargo test --locked --manifest-path clients/rust/Cargo.toml -p briefcase-web
+```
+
+Run from the repository root. Tests cover parent binding, production/test
+isolation, expiry, malformed selectors, and independent test logout.

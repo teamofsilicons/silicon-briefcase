@@ -4,6 +4,7 @@ export type BrowserSession = {
   organizations: string[];
   actor: { type: string; public_id: string };
   testing: boolean;
+  test_environment?: { id: string; name: string } | null;
 };
 export type AccountSession = Omit<BrowserSession, 'org'> & { org: null };
 export type Entry = {
@@ -38,6 +39,28 @@ let workspaceOrganization: string | null = null;
 export function setWorkspaceOrganization(org: string | null) {
   workspaceOrganization = org;
 }
+export function testingEnvironment(): string | null {
+  return typeof window === 'undefined'
+    ? null
+    : sessionStorage.getItem('briefcase-test-environment');
+}
+export function enterTestingEnvironment(id: string) {
+  sessionStorage.setItem('briefcase-test-environment', id);
+  window.location.assign('/');
+}
+export function returnToProduction() {
+  sessionStorage.removeItem('briefcase-test-environment');
+  window.location.assign('/');
+}
+export function browserUrl(path: string): string {
+  const id = testingEnvironment();
+  return id
+    ? path +
+        (path.includes('?') ? '&' : '?') +
+        'test_environment=' +
+        encodeURIComponent(id)
+    : path;
+}
 export async function api<T>(
   path: string,
   method = 'GET',
@@ -60,7 +83,7 @@ export async function api<T>(
       throw new Error('A read request cannot have a body.');
     options.body = JSON.stringify(body);
   }
-  const response = await fetch('/browser' + path, options);
+  const response = await fetch(browserUrl('/browser' + path), options);
   const value = (await response.json().catch(() => null)) as {
     error?: { message?: string };
   } | null;

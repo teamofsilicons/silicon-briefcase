@@ -143,8 +143,17 @@ recovering an uncertain request. The operation ID is displayed for reference.
 ## Test environments
 
 Open **Test environments** from the sidebar while signed in to your production
-organisation. This panel manages isolated environments; it does not switch the
-file manager's identity or move production files into a test environment.
+organisation. Select **View as testing environment** on an active environment
+to open its files using a test Carbon or Silicon identity. On your first visit,
+enter a fresh IAM sign-in token for the application and paired IAM testing
+environment shown in the dialog. A production sign-in token cannot be used.
+Later visits can reuse that test session until it expires.
+
+The file manager supports the same browsing, previews, downloads, uploads, and
+sharing controls, subject to the test identity's permissions. A banner identifies
+the environment and account. **Return to production** restores the production
+workspace without signing it out. Selection is per tab; production files are
+never copied into the testing environment.
 
 You can create an environment paired with an IAM test environment, edit its
 name and description, and list active or retired environments. Creation requires
@@ -166,14 +175,15 @@ clears that displayed key; store a needed key in your secret manager.
 
 Clean, retire, rotation, and re-pairing require typing the selected environment's
 name. If a response is uncertain, keep the dialog open and retry the same
-operation: its target, inputs, and operation ID remain fixed. Use the
-[CLI or client](testing-environments.md) with the paired test identity for file
-operations inside an environment.
+operation: its target, inputs, and operation ID remain fixed. You can also use
+the [CLI or client](testing-environments.md) with the paired test identity.
 
 ## Sessions and local operation
 
 Session tokens stay in the Rust browser gateway. The browser stores only an
-HttpOnly session cookie. Sessions expire after at most eight hours; gateway
+HttpOnly session cookie and, in a test tab, the public environment ID in
+sessionStorage. Environment root keys stay on the gateway during test sign-in.
+Signing out of a test session preserves production access. Sessions expire after at most eight hours; gateway
 restarts require signing in again. HTTPS uses Secure, host-only cookies.
 
 See the [browser development guide](../web/README.md) for build commands, local

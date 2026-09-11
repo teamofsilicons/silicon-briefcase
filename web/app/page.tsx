@@ -9,7 +9,14 @@ import {
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
 import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link';
-import { api, setWorkspaceOrganization, type AccountSession, type BrowserSession } from '@/lib/api';
+import {
+  api,
+  setWorkspaceOrganization,
+  testingEnvironment,
+  returnToProduction,
+  type AccountSession,
+  type BrowserSession,
+} from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
 export default function Home() {
   const [busy, setBusy] = useState(false),
@@ -52,10 +59,14 @@ export default function Home() {
         // user's grants. It never contributes consent or scopes login.
         if (value.authenticated && target && value.org !== target.org) {
           if (value.organizations.includes(target.org)) {
-            value = await api<BrowserSession>('/session', 'PATCH', { org: target.org });
+            value = await api<BrowserSession>('/session', 'PATCH', {
+              org: target.org,
+            });
           } else {
             setChoosingOrganization(true);
-            setError('This workspace was not granted to Briefcase. Continue with IAM to review your organisation selection.');
+            setError(
+              'This workspace was not granted to Briefcase. Continue with IAM to review your organisation selection.',
+            );
           }
         }
         setWorkspaceOrganization(value.authenticated ? value.org : null);
@@ -68,6 +79,10 @@ export default function Home() {
   }, []);
   async function login(event: SubmitEvent) {
     event.preventDefault();
+    if (testingEnvironment()) {
+      returnToProduction();
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -98,13 +113,21 @@ export default function Home() {
     setBusy(true);
     setError('');
     try {
-      const next = await api<BrowserSession>('/session', 'PATCH', { org: selected });
+      const next = await api<BrowserSession>('/session', 'PATCH', {
+        org: selected,
+      });
       setWorkspaceOrganization(next.org);
-      history.replaceState(null, '', '/org/' + encodeURIComponent(next.org) + '/');
+      history.replaceState(
+        null,
+        '',
+        '/org/' + encodeURIComponent(next.org) + '/',
+      );
       setSession(next);
       setChoosingOrganization(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to choose that workspace.');
+      setError(
+        e instanceof Error ? e.message : 'Unable to choose that workspace.',
+      );
     } finally {
       setBusy(false);
     }
@@ -127,6 +150,15 @@ export default function Home() {
     );
   return (
     <div className="entry-screen">
+      {testingEnvironment() && (
+        <aside className="testing-view-banner">
+          <span>
+            Your testing session needs a new sign-in. Return to production and
+            open the environment again.
+          </span>
+          <Button onClick={returnToProduction}>Return to production</Button>
+        </aside>
+      )}
       <header className="masthead">
         {/* Full-page navigation resets a deep-link sign-in attempt. */}
         {/* eslint-disable-next-line next/no-html-link-for-pages */}
@@ -204,7 +236,11 @@ export default function Home() {
               )}
               <IamOrganizationsLink />
               <form onSubmit={login}>
-                <Button className="primary-action" disabled={busy} type="submit">
+                <Button
+                  className="primary-action"
+                  disabled={busy}
+                  type="submit"
+                >
                   {busy ? 'Continuing…' : 'Review organisation access in IAM'}
                   <ArrowRight size={18} />
                 </Button>
@@ -252,7 +288,11 @@ export default function Home() {
                   type="submit"
                   disabled={busy}
                 >
-                  {busy ? 'Continuing to IAM…' : 'Continue with IAM'}
+                  {testingEnvironment()
+                    ? 'Return to production to sign in'
+                    : busy
+                      ? 'Continuing to IAM…'
+                      : 'Continue with IAM'}
                   <ArrowRight size={18} />
                 </Button>
               </form>
