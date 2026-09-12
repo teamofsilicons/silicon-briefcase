@@ -94,7 +94,7 @@ export default function Notifications({
         {inbox.unread_count > 0 && <span>{inbox.unread_count}</span>}
       </Button>
       <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent className="details-sheet sm:max-w-xl">
+        <SheetContent className="details-sheet data-[side=right]:sm:max-w-xl">
           <SheetHeader>
             <SheetTitle>Notifications</SheetTitle>
             <SheetDescription>

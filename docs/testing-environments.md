@@ -28,6 +28,13 @@ Or `POST /organizations/{org_id}/testing-environments` with a production bearer,
 
 An optional `iam_test_key` joins an existing IAM dependency environment. The JSON result contains the environment metadata (`id`, `name`, `iam_environment_id`, and other fields) alongside `key`; **key is the IAM test application secret**, not a separate Briefcase-generated credential. The CLI stores it privately under the environment UUID. Reuse the same idempotency key and request after an uncertain response.
 
+The optional key is the **32-character alphanumeric IAM environment root key**,
+not an `ask_…` Application secret. Omit it to provision a new IAM test world.
+For the CLI, supply `--iam-test-key` or set `BRIEFCASE_IAM_TEST_KEY` from your
+secret manager before running `briefcase env create`. The Rust client exposes
+the same option as `TestingEnvironmentCreate.iam_test_key`, typed as
+`Option<IamEnvironmentKey>`.
+
 IAM currently requires its environment root key together with the test Application secret when a service validates the testing context. Briefcase stores that pairing encrypted, so callers only pass the app secret. A secret from an arbitrary, unregistered IAM environment cannot independently bootstrap Briefcase: create/register the paired environment through this flow first. The backend uses the official IAM SDK for provisioning and verification.
 
 ## CLI
@@ -69,7 +76,18 @@ let page = client.list_entries(&ListEntries::default()).await?;
 
 ## Browser
 
-In organization settings, open Testing environments. Enter the test app secret and a fresh IAM test sign-in token. The gateway keeps credentials server-side and attaches the test session to the existing browser session. A persistent testing banner identifies the environment. Exit returns the tab to production without signing out the production session. A tab stores only the public environment UUID, never its app secret.
+Open **Test environments** in the sidebar. Choose **Create**, provide a name
+and optional description, and optionally enter an existing root key in
+**IAM test key (optional)**. Leave it blank for a new IAM test world. The field
+is masked, validates the root-key format, and is cleared when its dialog closes.
+An uncertain create request keeps its exact input and operation ID for retry.
+
+Under **Enter with an app secret**, enter the test app secret and a fresh IAM
+test sign-in token. The gateway keeps credentials server-side and attaches the
+test session to the existing browser session. A persistent testing banner
+identifies the environment. Exit returns the tab to production without signing
+out the production session. A tab stores only the public environment UUID,
+never its app secret. The drawer clears entered credentials when it closes.
 
 ## Lifecycle and authority
 

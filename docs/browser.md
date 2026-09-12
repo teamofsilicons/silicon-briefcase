@@ -145,13 +145,24 @@ recovering an uncertain request. The operation ID is displayed for reference.
 
 ## Test environments
 
-Open Testing environments in organization settings. Create a paired environment
-by name, or enter an IAM test Application secret and a fresh test sign-in token.
+Open **Test environments** in the sidebar and choose **Create**. Enter a name
+and optional description. **IAM test key (optional)** accepts the 32-character
+IAM environment root key to join an existing IAM test world; leave it blank to
+provision a new one. This key is different from the `ask_…` Application secret
+returned after creation. The form masks the key and does not save it in browser
+storage. If a request has an uncertain outcome, retry the same operation with
+its fields unchanged.
+
+To use an existing paired environment, enter its IAM test Application secret
+and a fresh test sign-in token in **Enter with an app secret**.
 A persistent banner identifies the active test plane, and Exit returns to
 production. The server stores the secret; the tab remembers only the public
 UUID. Limits are 2 GiB per environment and 10 active environments. Rotate
 secrets in IAM and replace the pairing to invalidate old selectors.
 See [Testing environments](testing-environments.md).
+
+**Help** in the sidebar and **Documentation** on the sign-in page open
+[Briefcase Docs](https://docs.briefcase.teamofsilicons.com/).
 
 ## Sessions and local operation
 

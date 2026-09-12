@@ -902,7 +902,7 @@ export default function Workspace({
           />
           <a
             className="docs-link"
-            href="https://github.com/teamofsilicons/silicon-briefcase/tree/main/docs"
+            href="https://docs.briefcase.teamofsilicons.com/"
             target="_blank"
             rel="noreferrer"
           >
@@ -1410,7 +1410,7 @@ export default function Workspace({
           if (!open) closeDetails();
         }}
       >
-        <SheetContent className="details-sheet sm:max-w-2xl">
+        <SheetContent className="details-sheet data-[side=right]:sm:max-w-2xl">
           <SheetHeader>
             <SheetTitle>{selected?.name}</SheetTitle>
             <SheetDescription>{selected?.path}</SheetDescription>

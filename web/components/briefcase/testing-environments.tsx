@@ -65,6 +65,7 @@ type Draft = {
   environment?: Environment;
   name: string;
   description: string;
+  iam_test_key: string;
   pairing: Pairing;
   confirmation: string;
   operation_id: string;
@@ -114,7 +115,8 @@ export default function TestingEnvironments({
     [showSecret, setShowSecret] = useState(false),
     [copied, setCopied] = useState(false);
   const [directSecret, setDirectSecret] = useState(''),
-    [directSlt, setDirectSlt] = useState('');
+    [directSlt, setDirectSlt] = useState(''),
+    [directError, setDirectError] = useState('');
   const directOperation = useRef('');
   const generation = useRef(0),
     intent = useRef<{ path: string; method: string; body?: unknown } | null>(
@@ -132,7 +134,7 @@ export default function TestingEnvironments({
   async function enterSecret() {
     if (!directOperation.current) directOperation.current = crypto.randomUUID();
     setBusy(true);
-    setListError('');
+    setDirectError('');
     try {
       const value = await api<BrowserSession>('/environments/enter', 'POST', {
         app_secret: directSecret,
@@ -145,7 +147,7 @@ export default function TestingEnvironments({
       if (value.test_environment)
         enterTestingEnvironment(value.test_environment.id);
     } catch (e) {
-      setListError(
+      setDirectError(
         e instanceof Error ? e.message : 'Unable to enter testing mode.',
       );
     } finally {
@@ -213,6 +215,7 @@ export default function TestingEnvironments({
       environment,
       name: environment?.name || '',
       description: environment?.description || '',
+      iam_test_key: '',
       pairing: {
         ...blankPairing(),
         iam_environment_id: environment?.iam_environment_id || '',
@@ -260,7 +263,7 @@ export default function TestingEnvironments({
           body: {
             name: draft.name,
             description: draft.description || null,
-            iam_test_key: draft.pairing.iam_environment_key || undefined,
+            iam_test_key: draft.iam_test_key || undefined,
             operation_id: draft.operation_id,
           },
         };
@@ -364,65 +367,27 @@ export default function TestingEnvironments({
       <Sheet
         open={open}
         onOpenChange={(value) => {
-          if (!busy) setOpen(value);
+          if (!busy) {
+            setOpen(value);
+            if (!value) {
+              setDirectSecret('');
+              setDirectSlt('');
+              setDirectError('');
+              directOperation.current = '';
+            }
+          }
         }}
       >
-        <SheetContent className="details-sheet sm:max-w-3xl">
+        <SheetContent className="details-sheet data-[side=right]:sm:max-w-2xl">
           <SheetHeader>
             <SheetTitle>Test environments</SheetTitle>
             <SheetDescription>
-              {session.org} · Management using your production identity. These
-              actions target only the selected test environment.
+              {session.org} · Create and manage isolated workspaces for testing
+              files, permissions, and app integrations.
             </SheetDescription>
           </SheetHeader>
-          <form
-            className="settings-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void enterSecret();
-            }}
-          >
-            <h3>Enter with an IAM test app secret</h3>
-            <label htmlFor="direct-app-secret">
-              App secret
-              <Input
-                id="direct-app-secret"
-                type="password"
-                autoComplete="off"
-                required
-                pattern="ask_[A-Za-z0-9_-]{43}"
-                value={directSecret}
-                onChange={(e) => {
-                  setDirectSecret(e.target.value);
-                  directOperation.current = '';
-                }}
-                placeholder="ask_…"
-              />
-            </label>
-            <label htmlFor="direct-test-slt">
-              IAM test sign-in token
-              <Input
-                id="direct-test-slt"
-                type="password"
-                autoComplete="off"
-                required
-                value={directSlt}
-                onChange={(e) => {
-                  setDirectSlt(e.target.value);
-                  directOperation.current = '';
-                }}
-              />
-            </label>
-            <p>
-              The secret selects the environment. Your test IAM account
-              determines file permissions. Limit: 2 GiB.
-            </p>
-            <Button type="submit" disabled={busy}>
-              Enter testing mode
-            </Button>
-          </form>
-
           <div className="detail-body">
+            <h3 className="environment-section-title">Your environments</h3>
             <div className="environment-toolbar">
               <Select
                 value={filter}
@@ -446,18 +411,18 @@ export default function TestingEnvironments({
               </Select>
               <Button
                 variant="outline"
-                disabled={loading}
+                disabled={loading || busy}
                 onClick={() => void load()}
               >
                 <RefreshCw size={15} /> Refresh
               </Button>
-              <Button onClick={() => begin('create')}>
+              <Button disabled={busy} onClick={() => begin('create')}>
                 <Plus size={15} /> Create
               </Button>
             </div>
             <p className="detail-hint">
               Each environment has its own paired IAM test world and up to 2 GiB
-              of storage. Inactivity for one day retires it; retired
+              of storage. Inactivity for 30 days retires it; retired
               environments have a two-day recovery window. Briefcase supports up
               to 10 active environments across the deployment.
             </p>
@@ -473,10 +438,18 @@ export default function TestingEnvironments({
             )}
             {notice && <output className="notice">{notice}</output>}
             {!loading && !listError && !items.length && (
-              <p className="detail-hint">
-                No {filter === 'active' ? 'active' : 'recoverable retired'}{' '}
-                environments.
-              </p>
+              <div className="environment-empty">
+                <FlaskConical size={24} aria-hidden="true" />
+                <h3>
+                  No {filter === 'active' ? 'active' : 'recoverable retired'}{' '}
+                  environments
+                </h3>
+                <p>
+                  {filter === 'active'
+                    ? 'Create an environment to test without changing your production files.'
+                    : 'Retired environments appear here while they can still be restored.'}
+                </p>
+              </div>
             )}
             {items.map((environment) => (
               <article className="environment-record" key={environment.id}>
@@ -561,6 +534,71 @@ export default function TestingEnvironments({
                 </div>
               </article>
             ))}
+            <form
+              className="settings-form environment-entry"
+              aria-labelledby="environment-entry-heading"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void enterSecret();
+              }}
+            >
+              <div className="environment-section-heading">
+                <h3 id="environment-entry-heading">Enter with an app secret</h3>
+                <p className="detail-hint">
+                  Already have a paired environment? Sign in with its app secret
+                  and a fresh IAM test sign-in token.
+                </p>
+              </div>
+              <fieldset disabled={busy} className="environment-fields">
+                <legend className="sr-only">Test environment sign-in</legend>
+                <label htmlFor="direct-app-secret">
+                  App secret
+                  <Input
+                    id="direct-app-secret"
+                    type="password"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    pattern="ask_[A-Za-z0-9_-]{43}"
+                    value={directSecret}
+                    onChange={(e) => {
+                      setDirectSecret(e.target.value);
+                      directOperation.current = '';
+                    }}
+                    placeholder="ask_…"
+                  />
+                </label>
+                <label htmlFor="direct-test-slt">
+                  IAM test sign-in token
+                  <Input
+                    id="direct-test-slt"
+                    type="password"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    value={directSlt}
+                    onChange={(e) => {
+                      setDirectSlt(e.target.value);
+                      directOperation.current = '';
+                    }}
+                  />
+                </label>
+              </fieldset>
+              <p className="detail-hint">
+                The secret selects the environment. Your test IAM account
+                determines file permissions. Limit: 2 GiB.
+              </p>
+              {directError && (
+                <p role="alert" className="error-box">
+                  {directError}
+                </p>
+              )}
+              <Button type="submit" disabled={busy}>
+                {busy ? 'Opening…' : 'Enter testing mode'}
+              </Button>
+            </form>
           </div>
         </SheetContent>
       </Sheet>
@@ -584,7 +622,7 @@ export default function TestingEnvironments({
             environment’s test account.
           </p>
           <form
-            className="space-y-4"
+            className="settings-form"
             onSubmit={(event) => {
               event.preventDefault();
               if (viewEnvironment)
@@ -639,7 +677,7 @@ export default function TestingEnvironments({
                   {draft.environment.name} · <code>{draft.environment.id}</code>
                 </>
               ) : (
-                'Create an empty Briefcase test environment paired with an existing IAM test environment.'
+                'Create an empty Briefcase workspace with a new or existing IAM test environment.'
               )}
             </DialogDescription>
           </DialogHeader>
@@ -680,6 +718,39 @@ export default function TestingEnvironments({
                   </label>
                 </>
               )}
+              {draft?.kind === 'create' && (
+                <div className="environment-optional-field">
+                  <label htmlFor="environment-iam-test-key">
+                    IAM test key (optional)
+                    <Input
+                      id="environment-iam-test-key"
+                      type="password"
+                      pattern="[A-Za-z0-9]{32}"
+                      minLength={32}
+                      maxLength={32}
+                      title="Enter the 32-character alphanumeric IAM environment root key."
+                      aria-describedby="environment-iam-test-key-hint"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={draft.iam_test_key}
+                      onChange={(event) =>
+                        setDraft((previous) =>
+                          previous
+                            ? { ...previous, iam_test_key: event.target.value }
+                            : null,
+                        )
+                      }
+                    />
+                  </label>
+                  <p id="environment-iam-test-key-hint" className="detail-hint">
+                    Use the 32-character IAM environment root key to join an
+                    existing IAM test world. Leave blank to create a new one.
+                    This is different from the app secret beginning with{' '}
+                    <code>ask_</code>.
+                  </p>
+                </div>
+              )}
               {draft?.kind === 'pairing' && (
                 <>
                   <p className="detail-hint">
@@ -702,7 +773,7 @@ export default function TestingEnvironments({
                     />
                   </label>
                   <label htmlFor="pairing-key">
-                    IAM test app secret
+                    IAM environment root key
                     <Input
                       id="pairing-key"
                       type="password"
@@ -769,16 +840,16 @@ export default function TestingEnvironments({
               )}
               {draft?.kind === 'pairing' && (
                 <p className="detail-hint">
-                  This replaces the complete IAM pairing and the selected app
-                  key. Existing IAM projection and cross-environment migration
-                  safeguards still apply.
+                  Use the replacement credentials after rotating them in IAM.
+                  The new app secret replaces the old one immediately. This
+                  environment’s files stay in place.
                 </p>
               )}
               {draft?.kind === 'key' && (
                 <p className="detail-hint">
-                  This audited operation retrieves the current Briefcase root
-                  key. It selects the test plane; test actor authentication is
-                  still separate. Store it in a secret manager.
+                  This audited operation retrieves the current IAM test app
+                  secret. It selects the test plane; test actor authentication
+                  is still separate. Store it in a secret manager.
                 </p>
               )}
               {draft && destructive(draft.kind) && (

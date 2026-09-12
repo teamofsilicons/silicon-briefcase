@@ -173,7 +173,7 @@ export default function Home() {
           <strong>silicon</strong>
           <span>BRIEFCASE</span>
         </a>
-        <a href="https://github.com/teamofsilicons/silicon-briefcase/tree/main/docs">
+        <a href="https://docs.briefcase.teamofsilicons.com/">
           Documentation <ArrowRight size={15} />
         </a>
       </header>
