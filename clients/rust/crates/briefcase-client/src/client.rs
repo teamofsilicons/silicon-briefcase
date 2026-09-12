@@ -243,7 +243,10 @@ impl Client {
         if self.config.organization.is_empty()
             && !matches!(
                 segments,
-                ["iam"] | ["auth", "slt" | "refresh" | "status"] | ["public", _, ..]
+                ["iam" | "testing-environment"]
+                    | ["auth", "slt" | "refresh" | "status"]
+                    | ["public", _, ..]
+                    | ["testing-environment", "cleanings"]
             )
         {
             return Err(Error::Configuration(

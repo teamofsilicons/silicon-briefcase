@@ -1,6 +1,6 @@
 # API version policy
 
-**1.0.0 is the first official Briefcase release.** The service, Rust client, CLI and web gateway use release 1.0.0, API major `v1`, and the published OpenAPI contract 1.0.0. Earlier development releases are unsupported; this release includes breaking changes.
+**1.0.0 is the first official Briefcase release.** The service uses release 1.0.0, API major `v1`, and the published OpenAPI contract 1.0.0. The Rust client, CLI and web gateway use patch release 1.0.1, which fixes app-secret resolution before organization selection without changing the API contract. Earlier development releases are unsupported; this release includes breaking changes.
 
 ## Negotiation
 
@@ -12,7 +12,7 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 | API contract | Backend | Rust client | CLI | Browser gateway | IAM SDK |
 | --- | --- | --- | --- | --- | --- |
-| 1.0.0 / v1 | 1.0.0 | 1.0.0 | 1.0.0 | 1.0.0 | silicon-iam-client 1.7.0 |
+| 1.0.0 / v1 | 1.0.0 | 1.0.1 | 1.0.1 | 1.0.1 | silicon-iam-client 1.7.0 |
 | Development 0.x | Unsupported | Unsupported | Unsupported | Unsupported | Not a release target |
 
 The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference. All initial official operation revisions are 1.0.0. Future observable request, response, and behavior changes must update the affected operation revision and its consumers together. Breaking API-major changes use a new versioned namespace.

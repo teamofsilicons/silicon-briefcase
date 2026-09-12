@@ -91,7 +91,7 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-Release 1.0.0 is the first official version. The client, CLI and gateway share
+The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.1 share
 one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
 See the [official documentation](https://docs.briefcase.teamofsilicons.com/).

@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-client"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "futures-core",
  "libc",

@@ -983,7 +983,7 @@ async fn the_complete_environment_lifecycle_matches_the_server_contract() {
     assert_eq!(restored.key.expose_secret(), root_key);
 
     let sandbox = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+        Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
             .unwrap()
             .with_environment(EnvironmentKey::new(root_key).unwrap())
             .with_auto_update(false),
@@ -1019,6 +1019,25 @@ async fn the_complete_environment_lifecycle_matches_the_server_contract() {
         )
         .await
         .unwrap();
+    assert!(matches!(
+        sandbox.list_entries(&ListEntries::default()).await,
+        Err(briefcase_client::Error::Configuration(_))
+    ));
+    for request in server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request
+                .url
+                .path()
+                .starts_with("/api/v1/testing-environment")
+        })
+    {
+        assert!(!request.headers.contains_key("authorization"));
+        assert!(!request.headers.contains_key("x-org-id"));
+    }
 }
 
 #[tokio::test]

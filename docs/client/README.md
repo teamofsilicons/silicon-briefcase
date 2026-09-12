@@ -1,15 +1,15 @@
 # Official Rust client
 
-`briefcase-client` **1.0.0** speaks Briefcase API contract 1.0.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
+`briefcase-client` **1.0.1** speaks Briefcase API contract 1.0.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
 
 ```toml
 [dependencies]
-briefcase-client = "1.0.0"
+briefcase-client = "1.0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 ```
 
-Until 1.0.0 is published to crates.io, build this repository or use its local crate path. This change prepares the release; it does not publish packages.
+Install the published crate from crates.io, or use the local crate path when developing this repository.
 
 ## Connect and authenticate
 

@@ -261,7 +261,7 @@ instance started them.
 
 ## First official release deployment
 
-Build backend, official client, CLI and browser gateway at **1.0.0** together.
+Deploy backend **1.0.0** with official client, CLI and browser gateway **1.0.1**.
 Development 0.x consumers are unsupported. Apply all forward migrations to
 both configured databases before starting the new binaries. Keep the role grants
 for the API and worker separate. The first release introduces app namespace

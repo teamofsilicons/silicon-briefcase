@@ -19,7 +19,7 @@ process. Disable maintenance explicitly when a caller owns dependency updates.
 
 ```toml
 [dependencies]
-briefcase-client = "1.0.0"
+briefcase-client = "1.0.1"
 ```
 
 ```rust

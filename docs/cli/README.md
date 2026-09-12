@@ -11,9 +11,9 @@ briefcase --help                 # every command, every option
 briefcase ls --help              # one command in detail
 ```
 
-This guide targets the first official release, CLI **1.0.0** and API contract
-**1.0.0**. Development 0.x releases are unsupported. Until the release is
-published, install with `cargo install --path clients/rust/crates/briefcase-cli`.
+This guide targets CLI **1.0.1** and the first official API contract **1.0.0**.
+Development 0.x releases are unsupported. For local development, install with
+`cargo install --path clients/rust/crates/briefcase-cli`.
 
 ## Signing in
 
