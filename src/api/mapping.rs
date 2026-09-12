@@ -25,10 +25,11 @@ use crate::{
 use super::dto::{
     ActivityEventDto, ActivityPageDto, ActorRefDto, ActorTypeDto, DailyUsageMeasureDto,
     EffectiveAccessDto, EffectivePermissionDto, EntryDto, EntryPageDto, EntryTypeDto,
-    EntryVisibilityDto, FileVersionDto, GrantAccessDto, NotificationDecisionDto, NotificationDto,
-    NotificationInboxDto, NotificationKindDto, NotificationSubjectDto, OrganizationUsageDto,
-    PermissionGrantDto, PermissionGrantPageDto, PermissionInspectionResultDto, RenderKindDto,
-    RootTypeDto, SearchPageDto, SearchResultDto, UsageMeasureDto,
+    EntryVisibilityDto, FileVersionDto, FileVersionSourceDto, GrantAccessDto,
+    NotificationDecisionDto, NotificationDto, NotificationInboxDto, NotificationKindDto,
+    NotificationSubjectDto, OrganizationUsageDto, PermissionGrantDto, PermissionGrantPageDto,
+    PermissionInspectionResultDto, RenderKindDto, RootTypeDto, SearchPageDto, SearchResultDto,
+    UsageMeasureDto,
 };
 
 /// Returns the next midnight UTC, when a daily allowance returns.
@@ -433,7 +434,17 @@ impl ResponseMapper {
             .map(|version| {
                 Ok(FileVersionDto {
                     sha256: version.sha256,
-                    source: version.source,
+                    source: match version.source {
+                        crate::domain::version::VersionSource::InitialUpload => {
+                            FileVersionSourceDto::InitialUpload
+                        }
+                        crate::domain::version::VersionSource::Upload => {
+                            FileVersionSourceDto::Upload
+                        }
+                        crate::domain::version::VersionSource::Restore { .. } => {
+                            FileVersionSourceDto::Restore
+                        }
+                    },
                     id: version.id.as_uuid(),
                     number: version.number.get(),
                     size: version.size,

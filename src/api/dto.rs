@@ -498,7 +498,7 @@ pub struct FileVersionDto {
     /// SHA-256 of the entire file, independent of multipart layout.
     pub sha256: Option<String>,
     /// Creation provenance: `initial_upload`, upload, or restore.
-    pub source: crate::domain::version::VersionSource,
+    pub source: FileVersionSourceDto,
     /// Version identifier.
     pub id: Uuid,
     /// Monotonic per-file number.
@@ -510,6 +510,18 @@ pub struct FileVersionDto {
     /// Creation timestamp.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+/// Wire provenance of a retained version; source IDs remain internal metadata.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileVersionSourceDto {
+    /// The first upload of this file.
+    InitialUpload,
+    /// A subsequent upload replacing the current content.
+    Upload,
+    /// A historical version copied into a new current version.
+    Restore,
 }
 
 /// File version collection.
@@ -580,6 +592,44 @@ const fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{GrantAccessDto, PermissionGrantCreateDto};
+
+    #[test]
+    fn all_version_sources_decode_with_the_official_client() -> anyhow::Result<()> {
+        use crate::{
+            api::mapping::ResponseMapper,
+            application::service::FileVersionView,
+            domain::{
+                actor::{ActorId, ActorKind, ActorRef},
+                ids::VersionId,
+                version::{VersionNumber, VersionSource},
+            },
+        };
+        for (source, expected) in [
+            (VersionSource::InitialUpload, "initial_upload"),
+            (VersionSource::Upload, "upload"),
+            (
+                VersionSource::Restore {
+                    source_version_id: VersionId::new(),
+                },
+                "restore",
+            ),
+        ] {
+            let view = FileVersionView {
+                id: VersionId::new(),
+                number: VersionNumber::FIRST,
+                size: 0,
+                sha256: Some("0".repeat(64)),
+                created_by: ActorRef::new(ActorKind::Carbon, ActorId::new("release-check")?),
+                source,
+                created_at: time::OffsetDateTime::UNIX_EPOCH,
+            };
+            let values = serde_json::to_value(ResponseMapper::versions(vec![view])?)?;
+            let decoded: Vec<briefcase_client::models::FileVersion> =
+                serde_json::from_value(values)?;
+            assert_eq!(decoded[0].source, expected);
+        }
+        Ok(())
+    }
 
     #[test]
     fn permission_inheritance_defaults_to_true() {
