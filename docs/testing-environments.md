@@ -26,7 +26,7 @@ Or `POST /organizations/{org_id}/testing-environments` with a production bearer,
 {"name":"integration","description":"Release integration tests"}
 ```
 
-An optional `iam_test_key` joins an existing IAM dependency environment. The result contains `environment` and `key`; **key is the IAM test application secret**, not a separate Briefcase-generated credential. The CLI stores it privately under the environment UUID. Reuse the same idempotency key and request after an uncertain response.
+An optional `iam_test_key` joins an existing IAM dependency environment. The JSON result contains the environment metadata (`id`, `name`, `iam_environment_id`, and other fields) alongside `key`; **key is the IAM test application secret**, not a separate Briefcase-generated credential. The CLI stores it privately under the environment UUID. Reuse the same idempotency key and request after an uncertain response.
 
 IAM currently requires its environment root key together with the test Application secret when a service validates the testing context. Briefcase stores that pairing encrypted, so callers only pass the app secret. A secret from an arbitrary, unregistered IAM environment cannot independently bootstrap Briefcase: create/register the paired environment through this flow first. The backend uses the official IAM SDK for provisioning and verification.
 
