@@ -597,7 +597,7 @@ pub enum EnvCommand {
         #[arg(long)]
         status: Option<String>,
     },
-    /// Create a Briefcase plane coupled to an existing IAM test plane.
+    /// Provision paired IAM and Briefcase testing environments.
     Create {
         /// Human-readable environment name.
         name: String,
@@ -637,7 +637,7 @@ pub enum EnvCommand {
         /// Public environment UUID.
         environment_id: Uuid,
     },
-    /// Retrieve and securely remember an environment root key.
+    /// Retrieve and securely remember an environment's IAM app secret.
     Key {
         /// Public environment UUID.
         environment_id: Uuid,
@@ -664,7 +664,7 @@ pub enum EnvCommand {
         /// Managed environment UUID; omit for the selected `--test` plane.
         environment_id: Option<Uuid>,
     },
-    /// Describe the environment selected by `--test`, using only its root key.
+    /// Describe the selected testing environment using its IAM app secret.
     Current,
 }
 
@@ -699,7 +699,7 @@ pub enum SystemCommand {
     Update,
 }
 
-/// Accepts only a hyphenated UUID, never a 32-character root key.
+/// Accepts only a hyphenated UUID, never an IAM app secret.
 fn parse_testing_environment_id(value: &str) -> Result<Uuid, String> {
     let bytes = value.as_bytes();
     let hyphenated = bytes.len() == 36
@@ -708,7 +708,7 @@ fn parse_testing_environment_id(value: &str) -> Result<Uuid, String> {
             .all(|index| bytes.get(index) == Some(&b'-'));
     if !hyphenated {
         return Err(
-            "expected a hyphenated testing-environment UUID, never its root key".to_owned(),
+            "expected a hyphenated testing-environment UUID, never its app secret".to_owned(),
         );
     }
     Uuid::parse_str(value).map_err(|_| "expected a valid testing-environment UUID".to_owned())
