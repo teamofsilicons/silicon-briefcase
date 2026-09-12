@@ -1,4 +1,8 @@
-# Silicon Briefcase backend
+# Silicon Briefcase — first official release 1.0.0
+
+Documentation: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
+API/client/CLI/gateway target contract 1.0.0 (`v1`); development releases are unsupported.
+
 
 Silicon Briefcase is the organization-scoped file service used by Carbons,
 Silicons, and IAM-authorized applications. The backend is written in Rust and
@@ -48,7 +52,7 @@ or accepted from a client.
   size and decides internally whether the bytes travel as a single provider
   request or as a durable multipart transfer, so a client never drives parts.
   Uploading over an existing file name is how a file is updated: the bytes
-  become that file's next version and the history keeps the previous fifty.
+  become that file's next version, retaining every version and its SHA-256 hash.
 - **Bounded volume, reported in bytes.** Every organization may upload 100 GiB
   per UTC day and store 1 PiB, both configurable per organization in the
   database. The daily counter is charged in the same transaction that publishes
@@ -57,7 +61,7 @@ or accepted from a client.
   storage without knowing the counter exists. `GET /usage` reports exact byte
   counts rather than percentages.
 - **Independent access rights.** A grant conveys any set of `read`, `write`,
-  `update`, and `delete`. Update never implies deletion, write never implies
+  `update`. Delete belongs to creators and organization administrators. Write never implies
   update — write on a folder adds files to it and never replaces one already
   there — and `POST /permissions/effective` answers what the caller may
   actually do on up to a hundred named targets at once. Owning a folder always
@@ -78,7 +82,7 @@ or accepted from a client.
   [Staged uploads](docs/api/delegated-uploads.md) separate private byte transfer
   from fresh-authorized publication and support logical-operation recovery.
   The one-shot `POST /obo/files` remains available for small immediate uploads.
-  Empty destinations default to `private/{actor}/apps/{app_id}`.
+  Empty destinations default to `apps/{app_id}/private/{actor}`.
 
 ## Clients
 
@@ -140,20 +144,12 @@ tests use an explicit mock IAM server and isolated credentials.
 
 ## Deploying
 
-Production runs on private EC2 behind the shared Team of Silicons load
-balancer, with RDS and S3, defined as one CloudFormation stack and shipped by
-one script:
-
-```bash
-cp deploy/aws/production.env.example deploy/aws/production.env   # once
-./deploy/deploy.sh                                               # build, push, deploy, replace
-./deploy/dns.sh --value "$ALB_DNS_NAME" --apply                 # point Namecheap at it
-```
-
-[docs/deployment.md](./docs/deployment.md) has the runbook: the secret the instance
-reads, what a first deploy needs, how to roll back, and the two things that
-make Briefcase different from its neighbours — the worker's `BYPASSRLS` role
-and the local disk uploads are staged on.
+Production uses one ARM64 EC2 host with Nginx TLS, systemd-managed API, worker
+and browser containers, RDS, and S3. Follow the current
+[base-tier deployment guide](deploy/base-tier/README.md) for immutable images,
+both database migrations, documentation hosting, and rollback. The
+[deployment runbook](docs/deployment.md) also retains the historical
+load-balancer topology; its stack/refresh commands do not update this host.
 
 ## Object cleanup and retention
 
@@ -176,8 +172,7 @@ so exact-version deletes and multipart aborts must remain idempotent.
 - `initiated` and `uploading` multipart sessions use their persisted fixed
   24-hour `expires_at` deadline. `completing` and `completed` sessions are never
   provider-aborted by retention.
-- Active files retain their newest 50 versions. The current version is excluded
-  from cleanup independently of its rank.
+- Active files retain every immutable version until permanent bin purge. Logs retain 365 days; the activity view returns the latest 100 events.
 - Deleted subtrees remain recoverable until their persisted 45-day
   `purge_after`. Permanent metadata deletion occurs only after every version in
   the deletion batch has an `object_deleted` cleanup result.

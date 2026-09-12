@@ -241,7 +241,10 @@ impl Client {
     /// Builds a URL under the versioned API base from already-safe segments.
     pub(crate) fn api_url(&self, segments: &[&str]) -> Result<Url> {
         if self.config.organization.is_empty()
-            && !matches!(segments, ["iam"] | ["auth", "slt" | "refresh" | "status"])
+            && !matches!(
+                segments,
+                ["iam"] | ["auth", "slt" | "refresh" | "status"] | ["public", _, ..]
+            )
         {
             return Err(Error::Configuration(
                 "choose an authorised organisation before using workspace APIs".into(),
@@ -298,7 +301,7 @@ impl Client {
     /// Adds the testing-plane selector to a manually constructed request.
     pub(crate) fn apply_environment(&self, mut request: RequestBuilder) -> RequestBuilder {
         if let Some(environment) = self.config.environment() {
-            request = request.header("x-testing-environment-key", environment.expose());
+            request = request.header("x-briefcase-app-secret", environment.expose());
         }
         request
     }

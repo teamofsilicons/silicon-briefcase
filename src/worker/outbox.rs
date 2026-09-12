@@ -14,6 +14,7 @@ struct ClaimedEvent {
     org_id: String,
     event_id: Uuid,
     topic: String,
+    payload: serde_json::Value,
     attempt_count: i32,
 }
 
@@ -36,16 +37,35 @@ impl BatchError {
 
 pub(super) async fn process_batch(
     pool: &PgPool,
+    email: &super::email::Sender,
+    testing: bool,
     settings: &WorkerSettings,
     batch_size: i64,
     lease_duration_millis: i64,
 ) -> Result<(), BatchError> {
     let lease_token = Uuid::now_v7();
-    let events = claim(pool, batch_size, lease_token, lease_duration_millis).await?;
-
-    for event in events {
-        process_event(pool, settings, lease_token, &event).await?;
+    // Claim only as many events as can begin delivery immediately. Renewing
+    // each lease while dispatching prevents duplicate sends during slow I/O.
+    let events = claim(pool, batch_size.min(4), lease_token, lease_duration_millis).await?;
+    let results=futures::future::join_all(events.iter().map(|event| async move {
+        let dispatch=process_event(pool,email,testing,settings,lease_token,event);
+        tokio::pin!(dispatch);
+        let interval=std::time::Duration::from_millis(u64::try_from((lease_duration_millis/3).max(1)).unwrap_or(1));
+        loop {
+            tokio::select! {
+                result=&mut dispatch=>break result,
+                ()=tokio::time::sleep(interval)=>{
+                    let renewed=sqlx::query("UPDATE briefcase.outbox_events SET lease_expires_at=clock_timestamp()+($4::bigint*interval '1 millisecond') WHERE org_id=$1 AND event_id=$2 AND lease_token=$3 AND status='processing' AND lease_expires_at>clock_timestamp()")
+                        .bind(&event.org_id).bind(event.event_id).bind(lease_token).bind(lease_duration_millis).execute(pool).await?;
+                    if renewed.rows_affected()!=1 {break Ok(());}
+                }
+            }
+        }
+    })).await;
+    for result in results {
+        result?;
     }
+
     Ok(())
 }
 
@@ -75,7 +95,7 @@ async fn claim(
            FROM candidates \
           WHERE event.org_id = candidates.org_id \
             AND event.event_id = candidates.event_id \
-         RETURNING event.org_id, event.event_id, event.topic, event.attempt_count",
+         RETURNING event.org_id, event.event_id, event.topic, event.attempt_count, event.payload",
     )
     .bind(batch_size)
     .bind(lease_token)
@@ -88,11 +108,27 @@ async fn claim(
 
 async fn process_event(
     pool: &PgPool,
+    email: &super::email::Sender,
+    testing: bool,
     settings: &WorkerSettings,
     lease_token: Uuid,
     event: &ClaimedEvent,
 ) -> Result<(), BatchError> {
-    let failure = classify_topic(&event.topic);
+    let failure = if event.topic == "briefcase.invitation-email.v1" {
+        match email
+            .send(pool, &event.org_id, event.event_id, &event.payload, testing)
+            .await
+        {
+            Ok(()) => {
+                sqlx::query("UPDATE briefcase.outbox_events SET status='delivered',delivered_at=clock_timestamp(),lease_token=NULL,lease_expires_at=NULL,last_error=NULL WHERE org_id=$1 AND event_id=$2 AND lease_token=$3")
+                    .bind(&event.org_id).bind(event.event_id).bind(lease_token).execute(pool).await?;
+                return Ok(());
+            }
+            Err(code) => code,
+        }
+    } else {
+        classify_topic(&event.topic).code()
+    };
     let attempt = match u16::try_from(event.attempt_count) {
         Ok(attempt) => attempt,
         Err(_) => settings.max_attempts,
@@ -111,7 +147,7 @@ async fn process_event(
         event,
         lease_token,
         retry_delay_millis,
-        failure.code(),
+        failure,
         terminal,
     )
     .await?;
@@ -127,7 +163,7 @@ async fn process_event(
             event = "outbox_event_dead_lettered",
             event_id = %event.event_id,
             attempt,
-            error_code = failure.code(),
+            error_code = failure,
             "outbox event reached its terminal attempt"
         );
     } else {
@@ -135,7 +171,7 @@ async fn process_event(
             event = "outbox_event_retry_scheduled",
             event_id = %event.event_id,
             attempt,
-            error_code = failure.code(),
+            error_code = failure,
             "outbox event scheduled for retry"
         );
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 50] = [
+const EXPECTED_OPERATIONS: [&str; 58] = [
     "cancelDelegatedUpload",
     "cleanCurrentTestingEnvironment",
     "cleanTestingEnvironment",
@@ -48,13 +48,21 @@ const EXPECTED_OPERATIONS: [&str; 50] = [
     "restoreTestingEnvironment",
     "restoreVersion",
     "revokePermission",
-    "rotateTestingEnvironmentKey",
     "searchFiles",
     "transferDelegatedUpload",
     "trashEntryOnBehalfOfMember",
     "updateEntry",
     "updateTestingEnvironment",
     "uploadFile",
+    "listInvitations",
+    "createInvitation",
+    "revokeInvitation",
+    "readLinkAccess",
+    "setLinkAccess",
+    "listEntryLogs",
+    "readPublicEntry",
+    "inviteOnBehalfOfMember",
+    "setLinkAccessOnBehalfOfMember",
 ];
 
 #[test]
@@ -138,6 +146,49 @@ fn testing_environment_listing_and_root_self_cache_contract_are_exact() -> anyho
             ["Cache-Control"]["schema"]["const"]
             .as_str(),
         Some("private, no-store")
+    );
+    Ok(())
+}
+
+#[test]
+fn official_client_consumes_the_exact_published_operations() -> anyhow::Result<()> {
+    let document: Value = serde_yaml::from_str(include_str!("../openapi.yaml"))?;
+    let mut actual = BTreeSet::new();
+    for (path, item) in document["paths"]
+        .as_mapping()
+        .ok_or_else(|| anyhow::anyhow!("missing paths"))?
+    {
+        for (method, operation) in item
+            .as_mapping()
+            .ok_or_else(|| anyhow::anyhow!("missing path item"))?
+        {
+            if let Some(id) = operation["operationId"].as_str() {
+                actual.insert((
+                    id.to_owned(),
+                    method.as_str().unwrap_or_default().to_uppercase(),
+                    path.as_str().unwrap_or_default().to_owned(),
+                    operation["x-operation-version"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+    let consumers: BTreeSet<_> = briefcase_client::OPERATIONS
+        .iter()
+        .map(|op| {
+            (
+                op.id.to_owned(),
+                op.method.to_owned(),
+                op.path.to_owned(),
+                op.version.to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, consumers,
+        "SDK consumers must agree on each method, path, and operation revision"
     );
     Ok(())
 }

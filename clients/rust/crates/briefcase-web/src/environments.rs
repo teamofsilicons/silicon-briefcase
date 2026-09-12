@@ -82,7 +82,7 @@ impl Pairing {
 pub(crate) struct Create {
     name: String,
     description: Option<String>,
-    pairing: Pairing,
+    iam_test_key: Option<String>,
     operation_id: Uuid,
 }
 pub(crate) async fn create(
@@ -92,14 +92,8 @@ pub(crate) async fn create(
 ) -> Result<Json<Value>> {
     let operation = key(input.operation_id)?;
     let client = management(&app, &headers).await?;
-    let pairing = input.pairing.into_sdk()?;
-    let mut create = TestingEnvironmentCreate::new(
-        input.name,
-        pairing.iam_environment_id,
-        pairing.iam_environment_key,
-        pairing.iam_app_id,
-        pairing.iam_app_secret,
-    );
+    let mut create = TestingEnvironmentCreate::new(input.name);
+    create.iam_test_key = input.iam_test_key.map(IamEnvironmentKey::new).transpose()?;
     create.description = input.description;
     json(
         client
@@ -189,11 +183,7 @@ pub(crate) async fn action(
                 .restore_testing_environment_with_key(id, &operation)
                 .await?,
         ),
-        "rotate-key" => json(
-            client
-                .rotate_testing_environment_key_with_key(id, &operation)
-                .await?,
-        ),
+
         "clean" => json(
             client
                 .clean_testing_environment_with_key(id, &operation)

@@ -189,8 +189,7 @@ impl PostgresRepository {
 
     /// Inserts an audit event in the same transaction as its domain action.
     ///
-    /// The schema serializes retention per entry and keeps only its latest 100
-    /// events.
+    /// Events are retained for 365 days; the activity view returns the newest 100.
     ///
     /// # Errors
     ///

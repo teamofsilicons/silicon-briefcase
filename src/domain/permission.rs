@@ -344,9 +344,7 @@ impl CapabilitySet {
             capabilities.insert(Capability::UpdateMetadata);
             capabilities.insert(Capability::WriteContent);
         }
-        if access.contains(AccessRight::Delete) {
-            capabilities.insert(Capability::Delete);
-        }
+
         capabilities
     }
 
@@ -477,6 +475,15 @@ pub struct EffectiveAuthorization {
 }
 
 impl EffectiveAuthorization {
+    /// Opaque denial for an entry outside the delegated application namespace.
+    #[must_use]
+    pub const fn hidden() -> Self {
+        Self {
+            visibility: EntryVisibility::Hidden,
+            capabilities: CapabilitySet::empty(),
+        }
+    }
+
     /// Returns entry visibility independently from operation permissions.
     #[must_use]
     pub const fn visibility(self) -> EntryVisibility {
@@ -518,6 +525,7 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
             SystemEntryKind::PublicContainer
                 | SystemEntryKind::PrivateContainer
                 | SystemEntryKind::TagRoot
+                | SystemEntryKind::ApplicationContainer
         )
     );
 
@@ -581,6 +589,10 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
         capabilities.remove(Capability::CreateChild);
     }
 
+    if input.system_kind == Some(SystemEntryKind::ApplicationContainer) {
+        capabilities.remove(Capability::CreateChild);
+    }
+
     if input.system_kind.is_some() {
         // Reserved containers are structure, not content: IAM reconciliation
         // owns their existence, name, and place, so nobody renames, moves,
@@ -601,14 +613,6 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
         if input.entry_kind == EntryKind::Folder {
             capabilities.remove(Capability::WriteContent);
         }
-    }
-
-    if let Some(application_id) = input.context.originating_application()
-        && input.origin_application_id != Some(application_id)
-    {
-        // An application acts with its own authority as well as the member's,
-        // and it may only delete what it created — even for an administrator.
-        capabilities.remove(Capability::Delete);
     }
 
     let visibility = if capabilities.contains(Capability::Read) {
@@ -929,7 +933,7 @@ mod tests {
             required_for_traversal: false,
         });
 
-        assert!(authorization.allows(Capability::Delete));
+        assert!(!authorization.allows(Capability::Delete));
         assert!(authorization.allows(Capability::UpdateMetadata));
         assert!(!authorization.allows(Capability::ManagePermissions));
     }
@@ -1157,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn obo_application_cannot_delete_an_entry_created_by_another_origin() {
+    fn obo_subject_authority_is_independent_of_the_entries_origin() {
         let application_id = external_id(ApplicationId::new("silicon-dm"));
         let other_application_id = external_id(ApplicationId::new("silicon-remind"));
         let represented_actor = actor("carbon-a");
@@ -1185,7 +1189,7 @@ mod tests {
 
         assert!(authorization.allows(Capability::Read));
         assert!(authorization.allows(Capability::WriteContent));
-        assert!(!authorization.allows(Capability::Delete));
+        assert!(authorization.allows(Capability::Delete));
     }
 
     #[test]

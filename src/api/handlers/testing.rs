@@ -18,6 +18,7 @@ use crate::{
         TestingEnvironmentCreate, TestingEnvironmentIamPairing, TestingEnvironmentPatch,
         TestingEnvironmentStatus,
     },
+    domain::actor::RequestAuthContext,
     error::AppError,
     infrastructure::{iam::IamEnvironmentCredential, testing::TestingEnvironmentStore},
     request_context,
@@ -95,16 +96,31 @@ pub(crate) async fn list(
     Ok(Json(page))
 }
 
-/// Creates an empty Briefcase testing environment and returns its root key.
+/// IAM provisions the application and its dependency graph together.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateRequest {
+    name: String,
+    description: Option<String>,
+    iam_test_key: Option<String>,
+}
+
+/// Creates an empty Briefcase testing environment and returns its IAM app secret.
 pub(crate) async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
-    body: Result<Json<TestingEnvironmentCreate>, JsonRejection>,
+    body: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let org_id = extract::path(path)?;
     require_path_organization(&headers, &org_id)?;
     let body = extract::json(body)?;
+    if body.name.trim().is_empty()
+        || body.name.len() > 100
+        || body.description.as_ref().is_some_and(|d| d.len() > 1000)
+    {
+        return Err(AppError::validation("invalid_testing_environment"));
+    }
     let mutation = extract::mutation(
         &headers,
         "createTestingEnvironment",
@@ -112,10 +128,7 @@ pub(crate) async fn create(
         &(
             body.name.as_str(),
             body.description.as_deref(),
-            body.iam_environment_id,
-            body.iam_environment_key.expose_secret(),
-            body.iam_app_id.as_str(),
-            body.iam_app_secret.expose_secret(),
+            body.iam_test_key.as_deref(),
         ),
         true,
     )?;
@@ -129,6 +142,25 @@ pub(crate) async fn create(
             true,
         );
     }
+    let key = extract::required_idempotency_key(&headers)?;
+    let upstream_key = provisioning_key(context.authorization(), key.as_str())?;
+    let provisioned = state
+        .iam
+        .provision_testing_environment(
+            body.name,
+            body.description,
+            body.iam_test_key,
+            &upstream_key,
+        )
+        .await?;
+    let body = TestingEnvironmentCreate {
+        name: provisioned.name,
+        description: provisioned.description,
+        iam_environment_id: provisioned.environment_id,
+        iam_environment_key: SecretString::from(provisioned.iam_test_key),
+        iam_app_id: provisioned.app_id,
+        iam_app_secret: SecretString::from(provisioned.app_secret),
+    };
     let iam_environment = IamEnvironmentCredential::new(
         body.iam_environment_key.clone(),
         body.iam_app_id.clone(),
@@ -146,6 +178,17 @@ pub(crate) async fn create(
         created,
         true,
     )
+}
+
+/// IAM sees the service's application credential, so preserve the local tenant
+/// and actor scope before forwarding an idempotency key across that boundary.
+fn provisioning_key(auth: &RequestAuthContext, key: &str) -> Result<String, AppError> {
+    extract::request_fingerprint(
+        "briefcase.provisionTestingEnvironment",
+        auth.organization_id().as_str(),
+        &(auth.actor(), auth.originating_application(), key),
+    )
+    .map(hex::encode)
 }
 
 /// Reads one testing environment without revealing any credential.
@@ -285,29 +328,6 @@ pub(crate) async fn key(
     Ok(secret_json(StatusCode::OK, key))
 }
 
-/// Rotates the root key and returns the replacement exactly once per response.
-pub(crate) async fn rotate_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    path: Result<Path<(String, Uuid)>, PathRejection>,
-) -> Result<Response, AppError> {
-    let (org_id, environment_id) = extract::path(path)?;
-    require_path_organization(&headers, &org_id)?;
-    let resource = format!("{org_id}/{environment_id}");
-    let mutation = extract::mutation(
-        &headers,
-        "rotateTestingEnvironmentKey",
-        &resource,
-        &(),
-        true,
-    )?;
-    let context = extract::production_authenticate(&state, &headers).await?;
-    let rotated = testing_store(&state)?
-        .rotate_key(&context, environment_id, &mutation)
-        .await?;
-    response_with_etag(StatusCode::OK, rotated.environment.version, rotated, true)
-}
-
 /// Erases an environment's isolated Briefcase state through the control plane.
 pub(crate) async fn clean(
     State(state): State<AppState>,
@@ -343,6 +363,19 @@ pub(crate) async fn restore(
     let resource = format!("{org_id}/{environment_id}");
     let mutation = extract::mutation(&headers, "restoreTestingEnvironment", &resource, &(), true)?;
     let context = extract::production_authenticate(&state, &headers).await?;
+    let pairing = testing_store(&state)?
+        .management_pairing(&context, environment_id)
+        .await?;
+    let credential = IamEnvironmentCredential::new(
+        pairing.iam_environment_key,
+        pairing.iam_app_id,
+        pairing.iam_app_secret,
+    )
+    .map_err(|_| AppError::Unauthenticated)?;
+    state
+        .iam
+        .validate_environment_credential(&credential, pairing.iam_environment_id)
+        .await?;
     let restored = testing_store(&state)?
         .restore(&context, environment_id, &mutation)
         .await?;
@@ -475,7 +508,37 @@ fn private_json<T: serde::Serialize>(status: StatusCode, value: T) -> Response {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
-    use super::{DescriptionPatch, PatchRequest, private_json, strong_if_match};
+    use crate::domain::actor::{
+        ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
+        RequestAuthContext,
+    };
+
+    use super::{DescriptionPatch, PatchRequest, private_json, provisioning_key, strong_if_match};
+
+    #[test]
+    fn upstream_provisioning_retries_are_isolated_by_tenant_and_actor() -> anyhow::Result<()> {
+        let context = |org: &str, actor: &str, kind| -> anyhow::Result<RequestAuthContext> {
+            Ok(RequestAuthContext::new(
+                OrganizationId::new(org)?,
+                ActorRef::new(kind, ActorId::new(actor)?),
+                OrganizationRole::Member,
+                [],
+                AuthenticationMode::Bearer,
+            ))
+        };
+        let first = context("tos", "member:tos", ActorKind::Carbon)?;
+        let key = provisioning_key(&first, "create-integration")?;
+        assert_eq!(key, provisioning_key(&first, "create-integration")?);
+        for other in [
+            context("another-org", "member:tos", ActorKind::Carbon)?,
+            context("tos", "other:tos", ActorKind::Carbon)?,
+            context("tos", "member:tos", ActorKind::Silicon)?,
+        ] {
+            assert_ne!(key, provisioning_key(&other, "create-integration")?);
+        }
+        assert_ne!(key, provisioning_key(&first, "another-operation")?);
+        Ok(())
+    }
 
     #[test]
     fn if_match_requires_one_strong_positive_integer_etag() {

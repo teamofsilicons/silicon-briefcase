@@ -120,6 +120,17 @@ pub(super) async fn reconcile_system_roots(
     )
     .await?;
 
+    ensure_app_node(
+        transaction,
+        None,
+        "apps",
+        "public",
+        "apps_root",
+        (&custodian.actor_type, &custodian.actor_id),
+        None,
+    )
+    .await?;
+
     let active_tags = load_active_tags(transaction).await?;
     for tag in &active_tags {
         ensure_tag_root(transaction, tag, &custodian).await?;
@@ -261,6 +272,7 @@ pub(super) async fn system_roots_are_consistent(
                         END) IS NOT TRUE \
                     ) \
              ) \
+             AND EXISTS (SELECT 1 FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND system_kind='apps_root' AND deleted_at IS NULL) \
              AND EXISTS ( \
                  SELECT 1 FROM briefcase.entries AS public \
                   WHERE public.org_id = briefcase.current_org_id() \
@@ -748,112 +760,127 @@ async fn find_tag_root(
     .await
 }
 
-/// Name of the reserved folder that holds one member's application data.
-const APPLICATION_CONTAINER_NAME: &str = "apps";
-
-/// Materializes `private/{actor}/apps/{app_id}` for one member and application.
-///
-/// The product contract gives every application its own folder inside the
-/// represented member's private folder, and that is where app-created files
-/// land by default. Both levels are reserved system folders, so nobody can
-/// rename, move, delete, or share them out from under the application.
+/// Materializes the application's public and private namespace and returns the caller's folder.
 pub(super) async fn ensure_application_container(
     transaction: &mut Transaction<'_, Postgres>,
     actor: (&str, &str),
     application_id: &str,
 ) -> Result<Uuid, sqlx::Error> {
-    lock_organization_reconciliation(transaction).await?;
-    let member = ProjectedMember {
-        actor_type: actor.0.to_owned(),
-        actor_id: actor.1.to_owned(),
-    };
-    let custodian = Custodian {
-        actor_type: member.actor_type.clone(),
-        actor_id: member.actor_id.clone(),
-    };
-    let private_root_id = find_system_root(
-        transaction,
-        SystemRootExpectation {
-            system_kind: "private_root",
-            root_type: "private",
-            parent_id: None,
-            tag_id: None,
-            actor_owner: None,
-        },
+    // The common path is read-only: structural nodes are immutable through the
+    // API. A new/missing member root falls through to serialized reconciliation.
+    let existing = sqlx::query_scalar::<_, Uuid>(
+        "SELECT own.entry_id \
+         FROM briefcase.entries apps \
+         JOIN briefcase.entries app ON app.org_id=apps.org_id AND app.parent_id=apps.entry_id \
+         JOIN briefcase.entries private ON private.org_id=app.org_id AND private.parent_id=app.entry_id \
+         JOIN briefcase.entries public ON public.org_id=app.org_id AND public.parent_id=app.entry_id \
+         JOIN briefcase.entries own ON own.org_id=private.org_id AND own.parent_id=private.entry_id \
+         WHERE apps.org_id=briefcase.current_org_id() AND apps.system_kind='apps_root' \
+           AND apps.parent_id IS NULL AND apps.name='apps' AND apps.deleted_at IS NULL \
+           AND app.system_kind='app_root' AND app.name=$3 AND app.origin_app_id=$3 AND app.deleted_at IS NULL \
+           AND private.system_kind='app_private' AND private.name='private' AND private.deleted_at IS NULL \
+           AND public.system_kind='app_public' AND public.name='public' AND public.deleted_at IS NULL \
+           AND own.system_kind='app_actor' AND own.owner_type=$1 AND own.owner_id=$2 \
+           AND own.name=$2 AND own.deleted_at IS NULL \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM briefcase.organization_members member \
+                WHERE member.org_id=apps.org_id AND member.membership_status='active' \
+                  AND NOT EXISTS ( \
+                      SELECT 1 FROM briefcase.entries root \
+                       WHERE root.org_id=member.org_id AND root.parent_id=private.entry_id \
+                         AND root.system_kind='app_actor' AND root.deleted_at IS NULL \
+                         AND root.owner_type=member.actor_type AND root.owner_id=member.actor_id \
+                  ) \
+           )",
     )
-    .await?
-    .ok_or_else(|| reconciliation_error("private root is missing"))?;
-    let actor_root_id =
-        ensure_actor_root(transaction, private_root_id, &member, &custodian).await?;
-
-    let apps_id = ensure_container(
-        transaction,
-        actor_root_id,
-        APPLICATION_CONTAINER_NAME,
-        &member,
-        &custodian,
-    )
-    .await?;
-    ensure_container(transaction, apps_id, application_id, &member, &custodian).await
-}
-
-/// Finds or creates one reserved application folder below a parent.
-async fn ensure_container(
-    transaction: &mut Transaction<'_, Postgres>,
-    parent_id: Uuid,
-    name: &str,
-    member: &ProjectedMember,
-    custodian: &Custodian,
-) -> Result<Uuid, sqlx::Error> {
-    if let Some(entry_id) = find_container(transaction, parent_id, name, member).await? {
-        return Ok(entry_id);
-    }
-    let entry_id = Uuid::now_v7();
-    let inserted = insert_root(
-        transaction,
-        entry_id,
-        &RootInsert {
-            parent_id: Some(parent_id),
-            name,
-            root_type: "private",
-            tag_id: None,
-            system_kind: "app_container",
-            owner_type: &member.actor_type,
-            owner_id: &member.actor_id,
-        },
-        custodian,
-    )
-    .await?;
-    if inserted {
-        return Ok(entry_id);
-    }
-    // A concurrent request created it, or a user folder already owns the name.
-    find_container(transaction, parent_id, name, member)
-        .await?
-        .ok_or_else(|| reconciliation_error("application container name is taken"))
-}
-
-async fn find_container(
-    transaction: &mut Transaction<'_, Postgres>,
-    parent_id: Uuid,
-    name: &str,
-    member: &ProjectedMember,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT entry_id FROM briefcase.entries \
-          WHERE org_id = briefcase.current_org_id() \
-            AND parent_id = $1 AND name = $2 \
-            AND entry_type = 'folder' AND root_type = 'private' \
-            AND system_kind = 'app_container' \
-            AND owner_type = $3 AND owner_id = $4 \
-            AND deleted_at IS NULL",
-    )
-    .bind(parent_id)
-    .bind(name)
-    .bind(&member.actor_type)
-    .bind(&member.actor_id)
+    .bind(actor.0)
+    .bind(actor.1)
+    .bind(application_id)
     .fetch_optional(&mut **transaction)
-    .await
+    .await?;
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+    lock_organization_reconciliation(transaction).await?;
+    let apps = ensure_app_node(
+        transaction,
+        None,
+        "apps",
+        "public",
+        "apps_root",
+        actor,
+        None,
+    )
+    .await?;
+    let app = ensure_app_node(
+        transaction,
+        Some(apps),
+        application_id,
+        "public",
+        "app_root",
+        actor,
+        Some(application_id),
+    )
+    .await?;
+    ensure_app_node(
+        transaction,
+        Some(app),
+        "public",
+        "public",
+        "app_public",
+        actor,
+        Some(application_id),
+    )
+    .await?;
+    let private = ensure_app_node(
+        transaction,
+        Some(app),
+        "private",
+        "private",
+        "app_private",
+        actor,
+        Some(application_id),
+    )
+    .await?;
+    let members = sqlx::query_as::<_, ProjectedMember>(
+        "SELECT actor_type, actor_id FROM briefcase.organization_members WHERE org_id=briefcase.current_org_id() AND membership_status='active'"
+    ).fetch_all(&mut **transaction).await?;
+    let mut own = None;
+    for member in members {
+        let id = ensure_app_node(
+            transaction,
+            Some(private),
+            &member.actor_id,
+            "private",
+            "app_actor",
+            (&member.actor_type, &member.actor_id),
+            Some(application_id),
+        )
+        .await?;
+        if member.actor_type == actor.0 && member.actor_id == actor.1 {
+            own = Some(id);
+        }
+    }
+    own.ok_or_else(|| reconciliation_error("application member is inactive"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_app_node(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent: Option<Uuid>,
+    name: &str,
+    boundary: &str,
+    kind: &str,
+    owner: (&str, &str),
+    app: Option<&str>,
+) -> Result<Uuid, sqlx::Error> {
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT entry_id FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND parent_id IS NOT DISTINCT FROM $1 AND name=$2 AND system_kind=$3 AND deleted_at IS NULL"
+    ).bind(parent).bind(name).bind(kind).fetch_optional(&mut **transaction).await? { return Ok(id); }
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO briefcase.entries(org_id,entry_id,parent_id,entry_type,name,root_type,system_kind,owner_type,owner_id,origin_app_id,created_by_type,created_by_id,updated_by_type,updated_by_id) VALUES(briefcase.current_org_id(),$1,$2,'folder',$3,$4,$5,$6,$7,$8,$6,$7,$6,$7) RETURNING entry_id"
+    ).bind(Uuid::now_v7()).bind(parent).bind(name).bind(boundary).bind(kind).bind(owner.0).bind(owner.1).bind(app)
+        .fetch_one(&mut **transaction).await
 }
 
 async fn find_actor_root(

@@ -11,6 +11,21 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: briefcase
+          POSTGRES_PASSWORD: briefcase-ci
+          POSTGRES_DB: briefcase
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U briefcase"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      BRIEFCASE_TEST_DATABASE_URL: postgres://briefcase:briefcase-ci@localhost:5432/briefcase
+      BRIEFCASE_TEST_CONTROL_DATABASE_URL: postgres://briefcase:briefcase-ci@localhost:5432/briefcase
+      BRIEFCASE_TEST_DATA_DATABASE_URL: postgres://briefcase:briefcase-ci@localhost:5432/briefcase_test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -20,7 +35,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-targets --all-features
+      - run: PGPASSWORD=briefcase-ci psql -h localhost -U briefcase -d briefcase -f deploy/postgres/001_runtime_roles.sql
+      - run: PGPASSWORD=briefcase-ci psql -h localhost -U briefcase -d briefcase -c 'CREATE DATABASE briefcase_test'
+      - run: cargo test --locked --all-targets --all-features -- --test-threads=1
 
   rust-client:
     runs-on: ubuntu-latest
@@ -38,4 +55,37 @@ jobs:
           workspaces: clients/rust
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: cargo build --locked --workspace
+      - run: cargo test --locked --workspace --all-targets --all-features
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run build
+
+  docs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check

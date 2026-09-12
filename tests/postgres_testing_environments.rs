@@ -64,7 +64,6 @@ use uuid::Uuid;
 
 const ROOT_LIMIT: i64 = 10;
 const TEST_STORAGE_LIMIT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
-const IAM_APPLICATION_SECRET: &str = "ask_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const REPLACEMENT_IAM_APPLICATION_SECRET: &str = "ask_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -308,7 +307,11 @@ fn create_input(organization: &str, name: String) -> TestingEnvironmentCreate {
         iam_environment_id: Uuid::now_v7(),
         iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
         iam_app_id: format!("{organization}>briefcase"),
-        iam_app_secret: SecretString::from(IAM_APPLICATION_SECRET),
+        iam_app_secret: SecretString::from(format!(
+            "ask_{}{}",
+            Uuid::new_v4().simple(),
+            "a".repeat(11)
+        )),
     }
 }
 
@@ -349,8 +352,8 @@ async fn reconcile_roots(
         .await?;
     assert_eq!(
         page.items.len(),
-        2,
-        "public and private roots are reconciled"
+        3,
+        "public, private, and apps roots are reconciled"
     );
     for entry in &page.items {
         assert_eq!(
@@ -982,7 +985,7 @@ async fn assert_initialized_pairing_is_preserved(
         .await?;
     assert_eq!(rotated.version, existing.control_version + 1);
     assert_eq!(rotated.iam_environment_id, existing.iam_environment_id);
-    assert_eq!(rotated.key_generation, existing.key_generation);
+    assert_eq!(rotated.key_generation, existing.key_generation + 1);
     let replayed = store
         .replace_iam_pairing(control_context, environment_id, &rotated_input, &rotation)
         .await?;
@@ -1361,8 +1364,8 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
             .create(&control_context, &create_a, &create_a_mutation)
             .await?;
         created_environment_ids.push(environment_a.environment.id);
-        assert_eq!(environment_a.key.len(), 32);
-        assert!(environment_a.key.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert_eq!(environment_a.key.len(), 47);
+        assert_eq!(environment_a.key, create_a.iam_app_secret.expose_secret());
         assert_eq!(environment_a.environment.status, TestingEnvironmentStatus::Active);
         assert_eq!(environment_a.environment.created_by.actor_type, "carbon");
         assert_eq!(environment_a.environment.created_by.id, actor_id);
@@ -1511,8 +1514,8 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         assert_eq!(paired_a.version, environment_a.environment.version + 1);
         assert_eq!(
             paired_a.key_generation,
-            environment_a.environment.key_generation,
-            "re-pairing must preserve the Briefcase root key"
+            environment_a.environment.key_generation + 1,
+            "re-pairing replaces the IAM app-secret selector"
         );
         assert_eq!(
             paired_a.iam_environment_id,
@@ -1591,7 +1594,7 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         .await?;
         tokio::time::sleep(Duration::from_millis(2)).await;
         let access_a = store
-            .resolve_root_key(&SecretString::from(environment_a.key.clone()))
+            .resolve_root_key(&replacement_pairing.iam_app_secret)
             .await?;
         assert_eq!(
             stored_last_activity(
@@ -1717,32 +1720,16 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         let expected_erased_rows = cleanable_row_count(&data, &context_a).await?;
 
         let rotate_mutation = mutation(format!("rotate-a-{suffix}"), b"rotate-a")?;
-        let rotated = store
-            .rotate_key(
-                &control_context,
-                environment_a.environment.id,
-                &rotate_mutation,
-            )
-            .await?;
-        let rotated_replay = store
-            .rotate_key(
-                &control_context,
-                environment_a.environment.id,
-                &rotate_mutation,
-            )
-            .await?;
-        assert_same_secret_response(&rotated, &rotated_replay);
-        assert_ne!(rotated.key, environment_a.key);
-        assert_eq!(rotated.environment.key_generation, 2);
-        assert!(matches!(
-            store
-                .resolve_root_key(&SecretString::from(environment_a.key.clone()))
-                .await,
-            Err(AppError::Unauthenticated)
-        ));
-        let rotated_access = store
-            .resolve_root_key(&SecretString::from(rotated.key.clone()))
-            .await?;
+        let mut rotation=store.management_pairing(&control_context,environment_a.environment.id).await?;
+        rotation.iam_app_secret=SecretString::from(format!("ask_{}", "R".repeat(43)));
+        let rotated=silicon_briefcase::application::testing::TestingEnvironmentWithKey{
+            environment:store.replace_iam_pairing(&control_context,environment_a.environment.id,&rotation,&rotate_mutation).await?,
+            key:rotation.iam_app_secret.expose_secret().to_owned(),
+        };
+        let replay=store.replace_iam_pairing(&control_context,environment_a.environment.id,&rotation,&rotate_mutation).await?;
+        assert_eq!(replay.version,rotated.environment.version);
+        assert_ne!(rotated.key,environment_a.key);
+        let rotated_access=store.resolve_root_key(&SecretString::from(rotated.key.clone())).await?;
 
         let clean_mutation = mutation(format!("clean-a-{suffix}"), b"clean-a")?;
         let stale_context = execution(
@@ -1933,8 +1920,8 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         reconcile_roots(&repository, &refreshed_context_a).await?;
         assert_eq!(
             entry_count(&data, &refreshed_context_a).await?,
-            3,
-            "the next authenticated request rebuilds both containers and the retained member root"
+            4,
+            "the next authenticated request rebuilds three containers and the retained member root"
         );
         assert_eq!(
             testing_storage_state(&data, &refreshed_context_a).await?,
@@ -2013,19 +2000,14 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
             )
             .await?;
         assert_same_secret_response(&restored, &restored_replay);
-        assert_ne!(restored.key, rotated.key);
-        assert_eq!(restored.environment.key_generation, 3);
-        assert!(matches!(
-            store
-                .resolve_root_key(&SecretString::from(rotated.key.clone()))
-                .await,
-            Err(AppError::Unauthenticated)
-        ));
+        assert_eq!(restored.key, rotated.key);
+        assert_eq!(restored.environment.key_generation, rotated.environment.key_generation + 1);
+        assert!(store.resolve_root_key(&SecretString::from(restored.key.clone())).await.is_ok());
         let current_key = store
             .key(&control_context, environment_a.environment.id)
             .await?;
         assert_eq!(current_key.key, restored.key);
-        assert_eq!(current_key.key_generation, 3);
+        assert_eq!(current_key.key_generation, restored.environment.key_generation);
 
         // Maintenance uses the same fence as broker and data-plane work. An
         // idle retirement cannot linearize until an accepted generation has
@@ -2054,7 +2036,7 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
             .await?;
         sqlx::query(
             "UPDATE briefcase.testing_environments \
-                SET last_activity_at = clock_timestamp() - INTERVAL '23 hours' \
+                SET last_activity_at = clock_timestamp() - INTERVAL '29 days' \
               WHERE environment_id = $1",
         )
         .bind(environment_c.environment.id)
@@ -2067,10 +2049,10 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         .bind(environment_c.environment.id)
         .fetch_one(&production)
         .await?;
-        assert_eq!(still_active, "active", "less than one idle day is retained");
+        assert_eq!(still_active, "active", "less than thirty idle days is retained");
         sqlx::query(
             "UPDATE briefcase.testing_environments \
-                SET last_activity_at = clock_timestamp() - INTERVAL '25 hours' \
+                SET last_activity_at = clock_timestamp() - INTERVAL '31 days' \
               WHERE environment_id = $1",
         )
         .bind(environment_c.environment.id)
@@ -2111,7 +2093,7 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         assert!(
             idle_recovery >= time::Duration::days(2)
                 && idle_recovery < time::Duration::days(2) + time::Duration::seconds(1),
-            "one-day idle retirement starts its own two-day recovery window"
+            "thirty-day idle retirement starts its own two-day recovery window"
         );
 
         sqlx::query(
@@ -2168,16 +2150,11 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
                 )
                 .await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut restore_c_task)
-                .await
-                .is_err(),
-            "restore must wait behind an in-progress physical purge"
-        );
+        let restore_result = tokio::time::timeout(Duration::from_secs(1), &mut restore_c_task).await?;
+        assert!(restore_result?.is_err(), "purging environments must fail before restoring their IAM pairing");
         delete_barrier.wait().await;
         let (_, purged_count) = purge_task.await??;
         assert!(purged_count >= 1);
-        assert!(restore_c_task.await?.is_err());
         let control_exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM briefcase.testing_environments \
               WHERE environment_id = $1)",

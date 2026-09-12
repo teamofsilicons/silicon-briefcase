@@ -185,8 +185,14 @@ pub(crate) async fn versions(
     State(app): State<App>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    Query(page): Query<crate::access::Page>,
 ) -> Result<Json<Value>> {
-    json_value(session::client(&app, &headers).await?.versions(id).await?)
+    json_value(
+        session::client(&app, &headers)
+            .await?
+            .versions_page(id, page.cursor.as_deref())
+            .await?,
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,34 +309,7 @@ pub(crate) async fn content(
 ) -> Result<Response> {
     let client = session::client(&app, &headers).await?;
     let entry = client.entry(id).await?;
-    let range = if let Some(raw) = headers.get(header::RANGE) {
-        let raw = raw
-            .to_str()
-            .map_err(|_| bad("Invalid byte range"))?
-            .strip_prefix("bytes=")
-            .ok_or_else(|| bad("Invalid byte range"))?;
-        let (start, end) = raw
-            .split_once('-')
-            .ok_or_else(|| bad("Only one byte range is supported"))?;
-        let size = entry.size.unwrap_or(0);
-        let start = if start.is_empty() {
-            let tail: u64 = end.parse().map_err(|_| bad("Invalid byte range"))?;
-            if tail == 0 {
-                return Err(bad("Invalid byte range"));
-            }
-            size.saturating_sub(tail)
-        } else {
-            start.parse().map_err(|_| bad("Invalid byte range"))?
-        };
-        let end = if raw.starts_with('-') || end.is_empty() {
-            None
-        } else {
-            Some(end.parse().map_err(|_| bad("Invalid byte range"))?)
-        };
-        Some(ByteRange { start, end })
-    } else {
-        None
-    };
+    let range = requested_range(&headers, entry.size.unwrap_or(0))?;
     let content = if q.download && range.is_none() {
         client.download(id).await
     } else {
@@ -388,7 +367,12 @@ pub(crate) async fn content(
         );
     }
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    let name: String = url::form_urlencoded::byte_serialize(entry.name.as_bytes()).collect();
+    let filename = if entry.entry_type == briefcase_client::EntryType::Folder {
+        format!("{}.tar.zst", entry.name)
+    } else {
+        entry.name
+    };
+    let name: String = url::form_urlencoded::byte_serialize(filename.as_bytes()).collect();
     h.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!(
@@ -568,4 +552,35 @@ pub(crate) async fn upload(
         .with_content_type(q.content_type)
         .with_idempotency_key(IdempotencyKey::new(q.operation_id.to_string())?);
     json_value(client.upload(&upload).await?)
+}
+
+pub(crate) fn requested_range(headers: &HeaderMap, size: u64) -> Result<Option<ByteRange>> {
+    let range = if let Some(raw) = headers.get(header::RANGE) {
+        let raw = raw
+            .to_str()
+            .map_err(|_| bad("Invalid byte range"))?
+            .strip_prefix("bytes=")
+            .ok_or_else(|| bad("Invalid byte range"))?;
+        let (start, end) = raw
+            .split_once('-')
+            .ok_or_else(|| bad("Only one byte range is supported"))?;
+        let start = if start.is_empty() {
+            let tail: u64 = end.parse().map_err(|_| bad("Invalid byte range"))?;
+            if tail == 0 {
+                return Err(bad("Invalid byte range"));
+            }
+            size.saturating_sub(tail)
+        } else {
+            start.parse().map_err(|_| bad("Invalid byte range"))?
+        };
+        let end = if raw.starts_with('-') || end.is_empty() {
+            None
+        } else {
+            Some(end.parse().map_err(|_| bad("Invalid byte range"))?)
+        };
+        Some(ByteRange { start, end })
+    } else {
+        None
+    };
+    Ok(range)
 }

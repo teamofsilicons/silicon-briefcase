@@ -6,3 +6,6 @@
 
 # Deployment configuration names real infrastructure and may carry an API key.
 /deploy/aws/production.env
+
+/docs-site/node_modules/
+/docs-site/dist/

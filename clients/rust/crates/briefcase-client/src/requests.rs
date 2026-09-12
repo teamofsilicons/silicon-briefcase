@@ -19,33 +19,19 @@ pub struct TestingEnvironmentCreate {
     /// Optional purpose or run description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Public UUID of the existing IAM testing environment.
-    pub iam_environment_id: Uuid,
-    /// IAM root key Briefcase must attach to every IAM call in this plane.
-    pub iam_environment_key: IamEnvironmentKey,
-    /// Canonical test-only Briefcase Application ID inside IAM.
-    pub iam_app_id: ApplicationId,
-    /// Test-only Application secret; stored encrypted and never echoed.
-    pub iam_app_secret: IamApplicationSecret,
+    /// Optionally join an existing IAM dependency testing environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iam_test_key: Option<IamEnvironmentKey>,
 }
 
 impl TestingEnvironmentCreate {
-    /// Builds a test environment request with its matching IAM plane key.
+    /// Provisions IAM and Briefcase together with a single request.
     #[must_use]
-    pub fn new(
-        name: impl Into<String>,
-        iam_environment_id: Uuid,
-        iam_environment_key: IamEnvironmentKey,
-        iam_app_id: ApplicationId,
-        iam_app_secret: IamApplicationSecret,
-    ) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             description: None,
-            iam_environment_id,
-            iam_environment_key,
-            iam_app_id,
-            iam_app_secret,
+            iam_test_key: None,
         }
     }
 

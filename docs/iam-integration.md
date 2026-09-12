@@ -10,7 +10,7 @@ The [delegated-upload protocol](api/delegated-uploads.md) documents endpoint
 registration, exact manifests, narrow staging capabilities and fresh commit
 proofs. It never turns an IAM authorization snapshot into a reusable grant.
 
-The backend imports registry `silicon-iam-client = "=1.4.0"`. Its typed methods
+The backend imports registry `silicon-iam-client = "=1.7.0"`. Its typed methods
 own all IAM network calls, API-version negotiation, redirects, and transport.
 Runtime dependency auto-updates are disabled for the backend: upgrading the
 dependency requires a deliberate build and deployment. This is distinct from
@@ -79,7 +79,7 @@ caused the original live IAM delay.
 | Webhook signing secret and key version | Verify IAM's exact signed body | IAM and Briefcase backend secret stores |
 | Test Application secret | Fresh credential for the imported Application in one IAM test plane | Encrypted Briefcase pairing; never substitute production secret |
 | IAM test root | Select outbound IAM test plane and match signed test webhooks | Encrypted pairing |
-| Briefcase test root | Select the Briefcase sandbox; key-authorized self-service | Authorized operator/client secret storage |
+| Briefcase test selector | The paired IAM test Application secret; selects the sandbox and key-authorized self-service | Authorized operator/client secret storage |
 
 Do not log credentials, persist raw webhook envelopes, copy secrets into docs,
 or place them in build context. The provisioned production secret is named
@@ -196,10 +196,34 @@ proof separately authorizes publication. See [delegated uploads](api/delegated-u
 
 Webhook approval and OBO catalog registration are separate operations.
 Confirm the Briefcase Application's required scope disclosure (`profile`,
-`organizations.read`, `memberships.read`, `roles.read`) and catalog registration
+`self.organizations.read`, `self.identity.read`, `self.membership.read`) and catalog registration
 before making OBO calls. The issuing member's Application token needs
-`obo.issue`; `memberships.read` and `roles.read` must also be present in both
-that token and the recipient's approved scopes. The [API](api/README.md#applications)
+`obo.issue`; `self.identity.read` and `self.membership.read` must also be present in both
+that token and the recipient's approved scopes. The [API](obo.md#choose-an-operation)
 documents the exact request bodies and recovery behavior. Proofs remain
 dependent on current initiator authorization; storing a verified snapshot does
 not create permission for later requests.
+
+## First official release requirements
+
+Use IAM client 1.7.0 and the corresponding deployed IAM contract. Subject
+snapshots require `self.identity.read`, `self.membership.read`, and
+`self.tags.read`. Use `self.organizations.read` for organization selection.
+Recipient/tag discovery uses `directory.carbons.read`, `directory.silicons.read`,
+`directory.memberships.read`, and `directory.tags.read`. Scope-projected
+responses must not be parsed as complete admin-directory models.
+
+Optional `self.email.read` lets Briefcase learn the signed-in subject's verified
+contact for invitation mail. IAM does not reveal other members' emails; see
+[Sharing](sharing.md) for the resulting recipient-resolution limits.
+
+Register `briefcase.invitations.create` (`POST /api/v1/obo/invitations`) and
+`briefcase.link_access.update` (`POST /api/v1/obo/link-access`) as critical,
+user-approved endpoints with empty metadata schemas. All other existing file
+CRUD endpoints remain noncritical. Every OBO path stays inside the calling
+app's namespace and the represented actor's permissions. See [OBO](obo.md).
+
+Testing callers now pass only the paired IAM test app secret. The backend
+retains the IAM environment key needed by the SDK's `application.testing-context`
+verification. Production and testing Application credentials are never
+interchangeable. Rotate in IAM and replace the Briefcase pairing together.

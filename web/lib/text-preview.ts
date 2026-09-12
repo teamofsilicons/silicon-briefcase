@@ -7,20 +7,31 @@ export async function textPreview(
   signal: AbortSignal,
   emptyHint = false,
 ): Promise<{ text: string; truncated: boolean }> {
+  return readTextPreview(
+    browserUrl('/browser/entries/' + encodeURIComponent(id) + '/content'),
+    signal,
+    emptyHint,
+  );
+}
+
+/** Read a bounded excerpt, sharing the same parser for member and public views. */
+export async function readTextPreview(
+  url: string,
+  signal: AbortSignal,
+  emptyHint = false,
+  credentials: RequestCredentials = 'same-origin',
+): Promise<{ text: string; truncated: boolean }> {
   // Ask for one byte beyond the display budget to distinguish an exact fit.
   // Independently cap the reader even if a proxy ignores Range or the entry
   // changes between metadata lookup and this request.
-  const response = await fetch(
-    browserUrl('/browser/entries/' + encodeURIComponent(id) + '/content'),
-    {
-      signal,
-      credentials: 'same-origin',
-      redirect: 'error',
-      // A zero-byte file has no satisfiable range. Still fetch it so stale
-      // metadata cannot suppress the current content/authorization check.
-      headers: emptyHint ? {} : { Range: `bytes=0-${PREVIEW_BYTES}` },
-    },
-  );
+  const response = await fetch(url, {
+    signal,
+    credentials,
+    redirect: 'error',
+    // A zero-byte file has no satisfiable range. Still fetch it so stale
+    // metadata cannot suppress the current content/authorization check.
+    headers: emptyHint ? {} : { Range: `bytes=0-${PREVIEW_BYTES}` },
+  });
   if (!response.ok)
     throw new ApiError('Preview is unavailable.', response.status);
   if (!response.body) return { text: '', truncated: false };

@@ -234,7 +234,14 @@ pub(crate) async fn list_entries(
         (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
         (Some(id), None) => Some(extract::entry_id(id)?),
         (None, Some(path)) => Some(existing_folder(&state, &context, path).await?),
-        (None, None) => None,
+        (None, None) => {
+            let folder = state
+                .metadata
+                .application_folder(&context)
+                .await
+                .map_err(metadata_error)?;
+            Some(folder.entry.id)
+        }
     };
     let page = PageRequest::new(query.cursor, query.limit.unwrap_or(CONTENTS_PAGE_SIZE))
         .map_err(|_| AppError::validation("invalid_pagination"))?;
@@ -329,6 +336,11 @@ pub(super) async fn destination_folder(
     context: &ExecutionContext,
     path: &str,
 ) -> Result<EntryId, AppError> {
+    state
+        .metadata
+        .application_folder(context)
+        .await
+        .map_err(metadata_error)?;
     if path.is_empty() {
         let folder = extract::scoped(context, state.metadata.application_folder(context))
             .await
@@ -354,7 +366,7 @@ async fn existing_folder(
     Ok(parent.id())
 }
 
-fn logical_mutation<T: Serialize>(
+pub(super) fn logical_mutation<T: Serialize>(
     operation: &'static str,
     resource: &str,
     operation_id: Uuid,

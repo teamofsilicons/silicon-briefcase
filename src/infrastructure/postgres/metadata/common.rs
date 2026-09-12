@@ -513,7 +513,7 @@ pub(in crate::infrastructure::postgres) fn push_owned_ancestor_access(
     builder.push(
         " AND ( \
                     owned_ancestor.system_kind IS NULL \
-                    OR owned_ancestor.system_kind = 'actor_root' \
+                    OR owned_ancestor.system_kind IN ('actor_root', 'app_actor') \
                 ) \
          )",
     );
@@ -549,7 +549,7 @@ async fn load_relevant_grants(
                 access_grant.granted_by_type, access_grant.granted_by_id, access_grant.revoked_at, \
                 access_grant.revoked_by_type, access_grant.revoked_by_id, access_grant.created_at, path.depth \
            FROM briefcase.entry_closure AS path \
-           JOIN briefcase.permission_grants AS access_grant \
+           JOIN briefcase.effective_permission_grants AS access_grant \
              ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
           WHERE path.org_id = briefcase.current_org_id() \
             AND path.descendant_id = $1 \
@@ -627,7 +627,7 @@ async fn has_visible_descendant(
                     OR EXISTS ( \
                         SELECT 1 \
                           FROM briefcase.entry_closure AS grant_path \
-                          JOIN briefcase.permission_grants AS access_grant \
+                          JOIN briefcase.effective_permission_grants AS access_grant \
                             ON access_grant.org_id = grant_path.org_id \
                            AND access_grant.entry_id = grant_path.ancestor_id \
                          WHERE grant_path.org_id = child.org_id \
@@ -789,10 +789,13 @@ pub(in crate::infrastructure::postgres) fn system_kind(
 ) -> Result<Option<SystemEntryKind>> {
     match value {
         None => Ok(None),
-        Some("public_root") => Ok(Some(SystemEntryKind::PublicContainer)),
-        Some("private_root") => Ok(Some(SystemEntryKind::PrivateContainer)),
+        Some("public_root" | "app_public") => Ok(Some(SystemEntryKind::PublicContainer)),
+        Some("private_root" | "app_private") => Ok(Some(SystemEntryKind::PrivateContainer)),
         Some("tag_root") => Ok(Some(SystemEntryKind::TagRoot)),
-        Some("actor_root" | "app_container") => Ok(Some(SystemEntryKind::PrivateActorFolder)),
+        Some("actor_root" | "app_container" | "app_actor") => {
+            Ok(Some(SystemEntryKind::PrivateActorFolder))
+        }
+        Some("apps_root" | "app_root") => Ok(Some(SystemEntryKind::ApplicationContainer)),
         Some(_) => Err(internal("invalid persisted system entry kind")),
     }
 }

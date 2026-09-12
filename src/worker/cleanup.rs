@@ -15,8 +15,6 @@ use crate::{
 
 use super::policy::retry_delay;
 
-const RETAINED_VERSION_COUNT: i64 = 50;
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CleanupStats {
     pub(super) multipart_jobs_scheduled: u64,
@@ -221,8 +219,7 @@ async fn schedule_multipart_aborts(pool: &PgPool, batch_size: i64) -> Result<u64
 async fn schedule_version_deletions(pool: &PgPool, batch_size: i64) -> Result<u64, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let sources = sqlx::query_as::<_, CleanupSource>(
-        "WITH ranked_versions AS MATERIALIZED ( \
-             SELECT version.org_id, version.entry_id, version.version_id, \
+        "         SELECT version.org_id, version.entry_id, version.version_id, \
                     row_number() OVER ( \
                         PARTITION BY version.org_id, version.entry_id \
                         ORDER BY version.version_number DESC, version.version_id DESC \
@@ -238,24 +235,14 @@ async fn schedule_version_deletions(pool: &PgPool, batch_size: i64) -> Result<u6
                 version.storage_encryption_mode, version.storage_kms_key_arn, \
                 version.object_key, version.object_version_id, \
                 NULL::text AS provider_upload_id \
-           FROM ranked_versions AS ranked \
-           JOIN briefcase.entry_versions AS version \
-             ON version.org_id = ranked.org_id \
-            AND version.entry_id = ranked.entry_id \
-            AND version.version_id = ranked.version_id \
+           FROM briefcase.entry_versions AS version \
            JOIN briefcase.entries AS entry \
              ON entry.org_id = version.org_id \
             AND entry.entry_id = version.entry_id \
            LEFT JOIN briefcase.organization_storage_configs AS configuration \
              ON configuration.org_id = version.org_id \
             AND configuration.storage_config_id = version.storage_config_id \
-          WHERE ( \
-                    (entry.deleted_at IS NOT NULL \
-                        AND entry.purge_after <= clock_timestamp()) \
-                    OR (entry.deleted_at IS NULL \
-                        AND ranked.retention_rank > $2 \
-                        AND entry.current_version_id <> version.version_id) \
-                ) \
+          WHERE entry.deleted_at IS NOT NULL AND entry.purge_after <= clock_timestamp() \
             AND NOT EXISTS ( \
                 SELECT 1 FROM briefcase.object_cleanup_jobs AS cleanup \
                  WHERE cleanup.org_id = version.org_id \
@@ -269,7 +256,6 @@ async fn schedule_version_deletions(pool: &PgPool, batch_size: i64) -> Result<u6
           LIMIT $1",
     )
     .bind(batch_size)
-    .bind(RETAINED_VERSION_COUNT)
     .fetch_all(&mut *transaction)
     .await?;
 
@@ -495,18 +481,7 @@ async fn preflight(
                 return Ok(Preflight::Cancel);
             };
             let eligible = sqlx::query_scalar::<_, bool>(
-                "SELECT CASE \
-                            WHEN entry.deleted_at IS NOT NULL \
-                                THEN entry.purge_after <= clock_timestamp() \
-                            ELSE entry.current_version_id <> version.version_id \
-                                AND ( \
-                                    SELECT count(*) \
-                                      FROM briefcase.entry_versions AS newer \
-                                     WHERE newer.org_id = version.org_id \
-                                       AND newer.entry_id = version.entry_id \
-                                       AND newer.version_number > version.version_number \
-                                ) >= $4 \
-                        END \
+                "SELECT entry.deleted_at IS NOT NULL AND entry.purge_after <= clock_timestamp() \
                    FROM briefcase.entry_versions AS version \
                    JOIN briefcase.entries AS entry \
                      ON entry.org_id = version.org_id \
@@ -518,7 +493,6 @@ async fn preflight(
             .bind(&job.org_id)
             .bind(entry_id)
             .bind(version_id)
-            .bind(RETAINED_VERSION_COUNT)
             .fetch_optional(pool)
             .await?;
             match eligible {

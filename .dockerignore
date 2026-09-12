@@ -7,6 +7,8 @@ deploy/aws/production.env
 target
 **/target
 web/node_modules
+docs-site/node_modules
+docs-site/dist
 web/dist/*
 !web/dist/client/
 !web/dist/client/**

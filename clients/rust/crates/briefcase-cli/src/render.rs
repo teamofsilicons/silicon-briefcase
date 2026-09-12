@@ -8,7 +8,7 @@ use std::io::Write as _;
 
 use briefcase_client::{
     ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, Notification,
-    NotificationInbox, OrganizationUsage, PermissionGrant, PermissionInspection, SearchResult,
+    NotificationInbox, OrganizationUsage, PermissionInspection, SearchResult,
 };
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::BorrowedFormatItem, macros::format_description};
@@ -203,41 +203,6 @@ impl Output {
                 );
             }
         }
-    }
-
-    /// Prints the explicit grants on an entry.
-    pub fn grants(self, grants: &[PermissionGrant]) {
-        if self.json {
-            self.json(&grants);
-            return;
-        }
-        if grants.is_empty() {
-            println!(
-                "(no explicit grants; access here comes from ownership, a tag, Public visibility, or administration)"
-            );
-            return;
-        }
-        let rows: Vec<Vec<String>> = grants
-            .iter()
-            .map(|grant| {
-                vec![
-                    grant.principal.to_string(),
-                    grant
-                        .access
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    if grant.inherit { "yes" } else { "no" }.to_owned(),
-                    grant.granted_by.to_string(),
-                    grant.id.to_string(),
-                ]
-            })
-            .collect();
-        print_table(
-            &["MEMBER", "RIGHTS", "INHERITS", "GRANTED BY", "GRANT"],
-            &rows,
-        );
     }
 
     /// Prints what the caller may do on a batch of targets.

@@ -12,6 +12,62 @@ use uuid::Uuid;
 
 use crate::{error::AppError, request_context};
 
+/// Negotiates and enforces the contract on every versioned request.
+pub(crate) async fn contract(
+    axum::extract::State(state): axum::extract::State<super::state::AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    use super::versioning::{self, SELECTED_VERSION_HEADER, SUPPORTED_VERSIONS_HEADER};
+    if request.uri().path() != "/api/version" && !request.uri().path().starts_with("/api/v1/") {
+        return next.run(request).await;
+    }
+    let values = request.headers().get_all(&SUPPORTED_VERSIONS_HEADER);
+    let mut values = values.iter();
+    let advertised = values.next();
+    if values.next().is_some() || advertised.is_some_and(|v| v.to_str().is_err()) {
+        return AppError::bad_request("invalid_api_versions").into_response();
+    }
+    let Some(selected) = versioning::select(advertised.and_then(|v| v.to_str().ok())) else {
+        return AppError::UnsupportedApiVersion.into_response();
+    };
+    let status = if let Some(database) = &state.contract_database {
+        sqlx::query_scalar::<_, Option<String>>("SELECT briefcase.observe_api_contract($1)")
+            .bind(selected)
+            .fetch_one(database)
+            .await
+    } else {
+        Ok(Some("active".to_owned()))
+    };
+    let deprecated=match status {
+        Ok(Some(status)) if status=="active" => false,
+        Ok(Some(status)) if status=="deprecated" => true,
+        Ok(_) => return (axum::http::StatusCode::GONE, axum::Json(serde_json::json!({"error":{"code":"api_version_sunset","message":"This API version has been retired."}}))).into_response(),
+        Err(_) => return AppError::DependencyUnavailable{dependency:"contract_registry"}.into_response(),
+    };
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        SELECTED_VERSION_HEADER,
+        axum::http::HeaderValue::from_static("v1"),
+    );
+    response.headers_mut().append(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static("Briefcase-Supported-API-Versions"),
+    );
+    if deprecated {
+        response
+            .headers_mut()
+            .insert("deprecation", axum::http::HeaderValue::from_static("true"));
+        response.headers_mut().append(
+            axum::http::header::LINK,
+            axum::http::HeaderValue::from_static(
+                "<https://docs.briefcase.teamofsilicons.com/version-policy/>; rel=\"deprecation\"",
+            ),
+        );
+    }
+    response
+}
+
 /// Runs one request inside a validated request-ID scope and tracing span.
 pub async fn request_scope(mut request: Request, next: Next) -> Response {
     let request_id = validated_request_id(&request).unwrap_or_else(|| Uuid::now_v7().to_string());

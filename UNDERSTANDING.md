@@ -1,3 +1,6 @@
+# This file is only meant to be changed by carbons (humans), if you are an agent DONT EDIT THIS FILE.  
+
+
 # UNDERSTANIDNG.md - briefcase
 
 This is the understanding of briefcase - our file management system. This is the platform that all the other apps, and the entire organisation would use to manage all their files. 
@@ -145,7 +148,11 @@ For if a file is shared inside a folder, then fetching that folder directly as a
 For each tag based folder, by default at the same level of public and private there would be a folder for each tag, a user should only see the folder of the tags that belong to their tag. 
 
 `Frontend note: If a specific user is invited to a file/folder that doesen't belong to their tag, display the same info note as we show in private folder.`
-`
+
+### Inside Apps
+
+Apps maintain a first level copy of the main layer. For each application it would maintain it's public which can be viewed by anyone, private which would have specific carbon and silicons folder, which would follow the same concept to how normal private folder works.
+
 
 For eg: For an Org TOS with 3 carbons and 2 silicons and 2 tags this would be the structure. With carbon A, B and silicon A with the access of Tag 1, and Carbon  C and Silicon B with Tag 2 
 
@@ -172,6 +179,17 @@ Tag 1 (accessible by carbon a, b, and silicon a):
 Tag 2: (accessibly by carbon c, and silicon b):
 	tag_2.mp4
 
+Apps:
+	`<app-id>`:
+		public:
+			X Folder
+			Y.txt
+		private:
+			Carbon A (same concept as normal A)
+			Carbon B
+			Carbon C
+	`<app-id-2>`:
+
 
 
 # Folder creation
@@ -182,6 +200,9 @@ For the folders at the base directory it would require you to define the folder 
 
 For private folders, you can also explictly state the carbon_id's or silicon_id's for the members you wanna invite. Inviting should only be possible for the carbons and silicons that are already part of the org.
 
+# Update
+
+When in the CRUD someone is performing U(updating) a file it means that they are adding in a new version for the file, this should update the file in it's own place with the new version of the file, and from that point on the new version of the file should be displayed. 
 
 # Permissions
 
@@ -230,9 +251,13 @@ There would also be user specific search, for these searches it should be possib
 For org_admins and org_owners they would have gods eye view, any file or folder, private, or non private, org_admins and owners should be able to do all the CRUD operations on them. They should also be able to see ALL the files and folders. 
 
 
-# Version History
+# Version Management
 
-For all the updates in a file, a version history should be maintained for it for the last 50 versions. 
+For all the updates in a file we maintain a version history for it all. Everytime there's a new version for each file when it's updated is when a new version is added the version must be managed. For managing versions we use file hashing. Also store the current version number that would be incremental 1, 2, 3, 4, and so on. 
+
+# Folder retrieval 
+
+It should be possible to retrieve or download entire folders that can be done and that would download the folder in the tar.zst format. This should be doable even via the api, the cli or the client where we will send them the tar.zst format over. 
 
 # Bin 
 
@@ -243,6 +268,12 @@ For any file deleted, they should be stored in the bin for 45 days before being 
 I should be able to navigate and also request for every file inside that folder if i have access to it, i should be able to print all the contents. 
 
 For each content return the latest 100 entries, it's paginated so should be possible to ask for the next batch in case of more results. 
+
+# Invite
+
+I should be able to invite other silicons or carbons or specific email to view my file/folder, i can invite them to a folder or i can invite them to a specific file. During invitation i can invite any carbon/silicon of my org using their id or invite tags so anyone with the tag should be able to view the file, during inviting i can also set the permissions by default they just have the Read permission but i should be able to individually configure if i wanna give them any other permission like Create or Update. Create would only be valid for folder invites. Delete is still reserved to the creator and org admin and org owner. 
+
+For each invited carbon or silicon also send them a mail that you have been invited to this file/folder. We use postmark to send the emails. You would send the email via `briefcase@teamofsilicons.com`. 
 
 
 # Filter
@@ -281,14 +312,49 @@ the permissions:/permission: value set (read, write, update, delete, manage_perm
 
 the boolean grammar (implicit AND, or, not, leading -, parentheses); last:/first:/sort: being top-level only; and the limits — take ≤ 100, expression ≤ 1,024 bytes, ≤ 32 predicates.
 
+# Anyone with link can view
+
+For each file or folder i should be able to set that anyone with the link can view which would make it truly public and the user doesent need to be of the organisation to be able to view this file. Anyone with the link can view just gives the view and download permissions to the file/folder. 
+
+For configuring a folder/file for anyone with the link can view i should have the org_admin, org_owner or the creator of the file permissions. 
+
+Just having the link would give them permission to view the file if any file or folder has anyone with the link can view configured. 
+
+For a folder if it's turned into anyone with the link can view, all the files and folders inside it automatically get turned into anyone with the link can view. 
+
+It shouldn't be possible to turn someone's entire private folder to anyone with the link can view, so org/private or org/private/<carbon/silicon-id> can't be turned into anyone with link can view under that it's possible to turn all file and folders that the user has correct access to into anyone with link can view. 
+
+# Logs
+
+For each file or folder maintain logs, in logs maintain every carbon/silicon who was invited, if someone's permission was updated, if any files were deleted inside folder maintain the logs for it as well, any file added should also be stored in the folder logs. And in the file logs maintain specific update logs, version rollback logs, permissions, inviitation, anyone with the link can view, etc. Maintain logs for past 365 days. 
+
+# Versioning
+
+For versioning we have Contract Governance/API/service contract lifecycle management. We will have:
+
+1) Contract versioning / API versioning
+2) Protocol Negotiation
+3) Backward compatibility
+4) Consumer-driven contract testing
+5) Deprecation and sunset management - if 0 requests for 7 days, sunset that version
+6) Compatibility matrix
+7) Version policy
+
+
 # How other apps would use Briefcase
 
-Refer to the OBO access on [https://github.com/teamofsilicons/silicon-iam/tree/main/docs/client], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
-1) create a new file at any location for that user.
+Refer to how OBO access works on [https://docs.iam.teamofsilicons.com/api/obo/], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
+1) Create a new file for that user in the private folder - non critical endpoint
+2) Create a new file in public folder for that user - non critical endpoint
+3) Read/Update/Delete the file of that user in the specific app directory - non critical endpoint. This only let's the app perform actions inside the specific app directory only for the files that carbon/silicon has the appropriate access to. 
+4) Invite other carbons/silicons to a file/folder of that user - Critical endpoint
+5) Make the file/folder anyone with the link can view - Critical endpoint
+
+For all of these actions they can only be performed as the user in the specific app directory that app has. 
 
 ### How to store app specific data
 
-For everything created by a specific application inside the authenticated silicon/carbon folder  create an apps folder where based on the app_id you create a folder and store everything there by default.
+For all the app specific data and even the scope of the said application is just for that specific application folder inside the app/ directory, and even inside that they should only be able to perform actions the user should have been able to perform. 
 
 
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
@@ -298,41 +364,11 @@ For everything created by a specific application inside the authenticated silico
 
 We will have an test enviorment for briefcase itself, this would be an exact replica of the main application, so when the test enviorment is created it would be initiated empty, for the said test enviorment actions can be performed, as this is an exact same replica of the main prod.
 
-Refer to this to know how to create testing enviorment compatible with iam. 
-https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html
-
-For creating a test enviorment on briefcase, it would require the name of the test enviorment and also the test enviroment key of iam, this test iam key would be used in the each request it sends to the IAm as this is in test enviorment, it would in no way be possible to send request to it without attaching the test enviorment. 
-
-So briefcase testing wouldn't support briefcase testing on the prod IAm, it would only support it in the testing enviorment of IAm.
-
-Once the name and the test-key to silicon iam is given, the briefcase would also generate a test key, this test key can be used by any one to perform any action in silicon-briefcase. 
-
-For each testing enviorment they would be sharing a shared test database (that's not the prod database, this is just responsible for storing all the test data). For this testing enviorment each entry would be associated with the testing env id. 
+Refer to this on how iam manages testing enviorments.
+https://docs.iam.teamofsilicons.com/api/testing-environments/
 
 A test enviorment is basically the exact same briefcase with all the functions and everything else, so this is the briefcase where i can test uploading files, deleting stuff, seeing if the correct person has the correct set of permissions, etc. 
 
-
-### Creating Test Env
-
-For creating a test enviorment, it can be created by any carbon or silicon in the organisation and it would be owned by the organisation with the user marked as the creator of the test enviorment. The test enviorment is created at the silicon-briefcase level itself. For creating a test enviorment it would need the name, an optional description, and the iam test enviorment. 
-
-In return it would return the key for the test enviorment, this key is what's gonna be used to be able to access that test enviorment, anyone with this key would be able to access the test enviorment as the god of the test enviorment, this key would be stored along side with the test enviorment, and can anytime be retrieved by the said carbon/silicon/org_admin/org_owner. The key would be 32 digit alpha numeric. 
-
-### Rotate Key
-
-The creator of the test enviorment and org_admin/org_head should be able to rotate the key of the test enviroment, which would give them a new key to the test enviorment.  
-
-### Clean Test Enviorment
-
-There should be an option to clean the test enviorment, which would allow the test enviorment to be there, but would clear every signle data stored for the said test enviorment. Anyone with the key should be able to execute this action. 
-
-### Delete Test Env
-
-The org admins, owners or the creator should be able to delete the test enviorment, deleting a test enviorment would delete the key, and the instance that the test enviorment even existed. For all the logs it should also be limited to the test enviorment itself. Each deleted Test Env would have a ttl of 2 days before getting deleted permanently. From this point the test env should be recoverable.
-
-### Auto Delete Test Env
-
-If there's no new activity in the test enviorment for 1 days, auto delete the test enviorment. 
 
 ### Using a Test Enviorment
 
@@ -340,7 +376,9 @@ For using a test enviorment anyone with the key would have the god view for that
 
 In the briefcase test enviorment there's only a total storage of maximum 2gb for an test enviorment. For files that exceed that just return `In test enviorment you are limited to a total storage of 2gb per enviorment.` and also a maximum of 10 possible simultaneous enviorments at silicon-briefcase level.
 
-Read [(https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html)] to understand how exactly are webhooks gonna work for this, etc. 
+Read [https://docs.iam.teamofsilicons.com/api/testing-environments/] to understand how exactly are webhooks gonna work for this, etc. 
+
+In briefcase itself for the client app, website, cli or api just passing in the app_secret for the test enviorment would let me use the entire application as if it's in the test enviorment. For website in settings i should be able to put in this app_secret in settings if no app_secret is provided it would be in prod, otherwise the specific test enviorment. When in test enviorment in website always show in top you are currently in test enviorment with a button to exit test enviorment. in cli at end always display you are in test envioment.
 
 ---
 ---

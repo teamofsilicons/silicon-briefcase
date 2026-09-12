@@ -431,13 +431,11 @@ impl ResponseMapper {
         versions
             .into_iter()
             .map(|version| {
-                let number =
-                    u32::try_from(version.number.get()).map_err(|_| AppError::Internal {
-                        category: "version_number",
-                    })?;
                 Ok(FileVersionDto {
+                    sha256: version.sha256,
+                    source: version.source,
                     id: version.id.as_uuid(),
-                    number,
+                    number: version.number.get(),
                     size: version.size,
                     created_by: actor(&version.created_by),
                     created_at: version.created_at,

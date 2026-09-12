@@ -1,69 +1,64 @@
-# API / Rust / CLI operation map
+# Operation inventory
 
-This inventory describes the 51 entries in `src/api/versioning.rs`.
-Paths are relative to `/api/v1`; the version handshake is also
-available anonymously at host-root `/api/version`. Operation revisions, not
-just the crate's release number, determine client compatibility.
+Contract **1.0.0**, API major **v1**. All 58 operations initially carry revision **1.0.0**. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
 
-The CLI column omits arguments except where they distinguish routes; use the
-[CLI guide](../cli/README.md) and command help for full syntax. The Rust column
-names the primary method; convenience and durable `_with_key` forms are
-explained in the [client guide](../client/README.md). Request/response details
-remain in the [API guide](README.md) and [OpenAPI](../../openapi.yaml).
-
-| Operation / revision | HTTP route | Rust method | CLI surface |
-| --- | --- | --- | --- |
-| `readApiVersion` 1.0.0 | `GET /version` | `version` | `version` |
-| `exchangeShortLivedToken` 1.0.0 | `POST /auth/slt` | `login_with_slt` | `login` |
-| `refreshApplicationSession` 1.0.0 | `POST /auth/refresh` | `refresh_session` | `automatic session refresh` |
-| `listTestingEnvironments` 1.0.0 | `GET /organizations/{org_id}/testing-environments` | `testing_environments` | `env list` |
-| `createTestingEnvironment` 1.0.0 | `POST /organizations/{org_id}/testing-environments` | `create_testing_environment` | `env create` |
-| `getTestingEnvironment` 1.0.0 | `GET /organizations/{org_id}/testing-environments/{environment_id}` | `testing_environment` | `env show` |
-| `updateTestingEnvironment` 1.0.0 | `PATCH /organizations/{org_id}/testing-environments/{environment_id}` | `update_testing_environment` | `env update` |
-| `deleteTestingEnvironment` 1.0.0 | `DELETE /organizations/{org_id}/testing-environments/{environment_id}` | `delete_testing_environment` | `env delete` |
-| `getTestingEnvironmentKey` 1.0.0 | `GET /organizations/{org_id}/testing-environments/{environment_id}/key` | `testing_environment_key` | `env key` |
-| `rotateTestingEnvironmentKey` 1.0.0 | `POST /organizations/{org_id}/testing-environments/{environment_id}/key-rotations` | `rotate_testing_environment_key` | `env rotate-key` |
-| `replaceTestingEnvironmentIamPairing` 1.0.0 | `POST /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings` | `replace_testing_environment_iam_pairing` | `env pair-iam` |
-| `cleanTestingEnvironment` 1.0.0 | `POST /organizations/{org_id}/testing-environments/{environment_id}/cleanings` | `clean_testing_environment` | `env clean <UUID>` |
-| `restoreTestingEnvironment` 1.0.0 | `POST /organizations/{org_id}/testing-environments/{environment_id}/restorations` | `restore_testing_environment` | `env restore` |
-| `describeCurrentTestingEnvironment` 1.0.0 | `GET /testing-environment` | `current_testing_environment` | `--test <UUID> env current` |
-| `cleanCurrentTestingEnvironment` 1.0.0 | `POST /testing-environment/cleanings` | `clean_current_testing_environment` | `--test <UUID> env clean` |
-| `listEntries` 1.1.0 | `GET /entries` | `list_entries` | `ls / find` |
-| `createFolder` 2.0.0 | `POST /entries` | `create_folder` | `mkdir` |
-| `getEntry` 1.1.0 | `GET /entries/{entry_id}` | `entry` | `stat <UUID>` |
-| `updateEntry` 1.0.0 | `PATCH /entries/{entry_id}` | `update_entry` | `mv` |
-| `moveEntryToBin` 1.0.0 | `DELETE /entries/{entry_id}` | `delete_entry` | `rm` |
-| `readEntryContent` 1.1.0 | `GET /entries/{entry_id}/content` | `read_content` | `cat` |
-| `downloadEntry` 1.1.0 | `GET /entries/{entry_id}/download` | `download` | `get` |
-| `resolvePermanentUrl` 1.1.0 | `GET /org/{org_id}/{path}` | `entry_at` | `stat <path>` |
-| `uploadFile` 1.1.0 | `POST /uploads` | `upload` | `put` |
-| `createFileOnBehalfOfMember` 1.0.0 | `POST /obo/files` | `create_file_on_behalf_of` | `app upload` |
-| `createFolderOnBehalfOfMember` 1.0.0 | `POST /obo/folders/create` | `create_folder_on_behalf_of` | `app request folder-create` |
-| `listEntriesOnBehalfOfMember` 1.0.0 | `POST /obo/entries/list` | `list_entries_on_behalf_of` | `app request entries-list` |
-| `readFileOnBehalfOfMember` 1.0.0 | `POST /obo/files/read` | `read_file_on_behalf_of` | `app request file-read` |
-| `trashEntryOnBehalfOfMember` 1.0.0 | `POST /obo/entries/trash` | `trash_entry_on_behalf_of` | `app request entry-trash` |
-| `reserveDelegatedUpload` 1.0.0 | `POST /obo/uploads/reserve` | `reserve_delegated_upload` | `app request upload-reserve` |
-| `commitDelegatedUpload` 1.0.0 | `POST /obo/uploads/commit` | `commit_delegated_upload` | `app request upload-commit` |
-| `getDelegatedUploadStatus` 1.0.0 | `POST /obo/uploads/status` | `delegated_upload_status` | `app request upload-status` |
-| `cancelDelegatedUpload` 1.0.0 | `POST /obo/uploads/cancel` | `cancel_delegated_upload` | `app request upload-cancel` |
-| `transferDelegatedUpload` 1.0.0 | `PUT /obo/uploads/{upload_id}/content` | `transfer_delegated_upload` | `app transfer` |
-| `listPermissions` 1.0.0 | `GET /entries/{entry_id}/permissions` | `permissions` | `shares` |
-| `grantPermission` 1.1.0 | `POST /entries/{entry_id}/permissions` | `grant` | `share` |
-| `revokePermission` 1.0.0 | `DELETE /entries/{entry_id}/permissions/{grant_id}` | `revoke` | `unshare` |
-| `inspectEffectivePermissions` 1.0.0 | `POST /permissions/effective` | `effective_access` | `access` |
-| `searchFiles` 1.1.0 | `GET /search` | `search` | `search` |
-| `listNotifications` 1.0.0 | `GET /notifications` | `notifications` | `inbox` |
-| `readNotifications` 1.0.0 | `POST /notifications/read` | `mark_notifications_read` | `inbox --read` |
-| `listEntryActivity` 1.0.0 | `GET /entries/{entry_id}/activity` | `activity` | `history` |
-| `listVersions` 1.0.0 | `GET /entries/{entry_id}/versions` | `versions` | `versions` |
-| `restoreVersion` 1.1.0 | `POST /entries/{entry_id}/versions/{version_id}/restore` | `restore_version` | `restore` |
-| `readOrganizationUsage` 1.0.0 | `GET /usage` | `usage` | `usage` |
-| `listBin` 1.0.0 | `GET /bin` | `bin` | `bin list` |
-| `restoreEntry` 1.0.0 | `POST /bin/{entry_id}/restore` | `restore_from_bin` | `bin restore` |
-| `configureOrganizationBucket` 1.0.0 | `PUT /storage/configuration` | `configure_storage` | `storage configure` |
-
-`health` and `ready` are additional public operational methods for host-root
-`/healthz` and `/readyz`; signed `/webhook/` delivery is a backend receiver,
-not a public member SDK mutation. IAM's privileged approval API is intentionally
-absent from the Briefcase catalog. Client-only configuration, credential storage,
-logout, update controls, and media-type helpers are not extra backend endpoints.
+| Operation | Method and path | Revision |
+| --- | --- | --- |
+| `readIamInfo` | `GET /iam` | 1.0.0 |
+| `readLoginStatus` | `GET /auth/status` | 1.0.0 |
+| `readApiVersion` | `GET /version` | 1.0.0 |
+| `exchangeShortLivedToken` | `POST /auth/slt` | 1.0.0 |
+| `refreshApplicationSession` | `POST /auth/refresh` | 1.0.0 |
+| `listTestingEnvironments` | `GET /organizations/{org_id}/testing-environments` | 1.0.0 |
+| `createTestingEnvironment` | `POST /organizations/{org_id}/testing-environments` | 1.0.0 |
+| `getTestingEnvironment` | `GET /organizations/{org_id}/testing-environments/{environment_id}` | 1.0.0 |
+| `updateTestingEnvironment` | `PATCH /organizations/{org_id}/testing-environments/{environment_id}` | 1.0.0 |
+| `deleteTestingEnvironment` | `DELETE /organizations/{org_id}/testing-environments/{environment_id}` | 1.0.0 |
+| `getTestingEnvironmentKey` | `GET /organizations/{org_id}/testing-environments/{environment_id}/key` | 1.0.0 |
+| `replaceTestingEnvironmentIamPairing` | `POST /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings` | 1.0.0 |
+| `cleanTestingEnvironment` | `POST /organizations/{org_id}/testing-environments/{environment_id}/cleanings` | 1.0.0 |
+| `restoreTestingEnvironment` | `POST /organizations/{org_id}/testing-environments/{environment_id}/restorations` | 1.0.0 |
+| `describeCurrentTestingEnvironment` | `GET /testing-environment` | 1.0.0 |
+| `cleanCurrentTestingEnvironment` | `POST /testing-environment/cleanings` | 1.0.0 |
+| `listEntries` | `GET /entries` | 1.0.0 |
+| `createFolder` | `POST /entries` | 1.0.0 |
+| `getEntry` | `GET /entries/{entry_id}` | 1.0.0 |
+| `updateEntry` | `PATCH /entries/{entry_id}` | 1.0.0 |
+| `moveEntryToBin` | `DELETE /entries/{entry_id}` | 1.0.0 |
+| `readEntryContent` | `GET /entries/{entry_id}/content` | 1.0.0 |
+| `downloadEntry` | `GET /entries/{entry_id}/download` | 1.0.0 |
+| `uploadFile` | `POST /uploads` | 1.0.0 |
+| `listPermissions` | `GET /entries/{entry_id}/permissions` | 1.0.0 |
+| `grantPermission` | `POST /entries/{entry_id}/permissions` | 1.0.0 |
+| `revokePermission` | `DELETE /entries/{entry_id}/permissions/{grant_id}` | 1.0.0 |
+| `inspectEffectivePermissions` | `POST /permissions/effective` | 1.0.0 |
+| `searchFiles` | `GET /search` | 1.0.0 |
+| `listNotifications` | `GET /notifications` | 1.0.0 |
+| `readNotifications` | `POST /notifications/read` | 1.0.0 |
+| `listEntryActivity` | `GET /entries/{entry_id}/activity` | 1.0.0 |
+| `createFileOnBehalfOfMember` | `POST /obo/files` | 1.0.0 |
+| `reserveDelegatedUpload` | `POST /obo/uploads/reserve` | 1.0.0 |
+| `commitDelegatedUpload` | `POST /obo/uploads/commit` | 1.0.0 |
+| `getDelegatedUploadStatus` | `POST /obo/uploads/status` | 1.0.0 |
+| `cancelDelegatedUpload` | `POST /obo/uploads/cancel` | 1.0.0 |
+| `transferDelegatedUpload` | `PUT /obo/uploads/{upload_id}/content` | 1.0.0 |
+| `createFolderOnBehalfOfMember` | `POST /obo/folders/create` | 1.0.0 |
+| `listEntriesOnBehalfOfMember` | `POST /obo/entries/list` | 1.0.0 |
+| `readFileOnBehalfOfMember` | `POST /obo/files/read` | 1.0.0 |
+| `trashEntryOnBehalfOfMember` | `POST /obo/entries/trash` | 1.0.0 |
+| `listVersions` | `GET /entries/{entry_id}/versions` | 1.0.0 |
+| `restoreVersion` | `POST /entries/{entry_id}/versions/{version_id}/restore` | 1.0.0 |
+| `readOrganizationUsage` | `GET /usage` | 1.0.0 |
+| `listBin` | `GET /bin` | 1.0.0 |
+| `restoreEntry` | `POST /bin/{entry_id}/restore` | 1.0.0 |
+| `configureOrganizationBucket` | `PUT /storage/configuration` | 1.0.0 |
+| `resolvePermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 |
+| `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 |
+| `createInvitation` | `POST /entries/{entry_id}/invitations` | 1.0.0 |
+| `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 |
+| `readLinkAccess` | `GET /entries/{entry_id}/link-access` | 1.0.0 |
+| `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.0.0 |
+| `listEntryLogs` | `GET /entries/{entry_id}/logs` | 1.0.0 |
+| `readPublicEntry` | `GET /public/{org_id}/{path}` | 1.0.0 |
+| `inviteOnBehalfOfMember` | `POST /obo/invitations` | 1.0.0 |
+| `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 1.0.0 |

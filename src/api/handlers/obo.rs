@@ -192,6 +192,11 @@ async fn destination_folder(
     context: &ExecutionContext,
     destination: Option<&EntryPath>,
 ) -> Result<EntryId, AppError> {
+    state
+        .metadata
+        .application_folder(context)
+        .await
+        .map_err(metadata_error)?;
     let Some(path) = destination else {
         let folder = extract::scoped(context, state.metadata.application_folder(context))
             .await

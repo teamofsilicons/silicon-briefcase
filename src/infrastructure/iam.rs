@@ -960,7 +960,7 @@ mod tests {
             "authorization_epoch": 7,
             "audience": audience,
             "testing_environment_id": if testing { Some(TEST_ENVIRONMENT_ID) } else { None },
-            "scopes": ["memberships.read", "profile", "roles.read"],
+            "scopes": ["self.identity.read", "self.membership.read", "self.tags.read"],
             "org_role": "member",
             "tags": []
         })
@@ -1040,11 +1040,12 @@ mod tests {
     async fn environment_validation_binds_the_key_id_and_test_application() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/testing-environment"))
+            .and(path("/api/v1/application/testing-context"))
             .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
             .and(header("silicon-iam-supported-api-versions", "v1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": TEST_ENVIRONMENT_ID,
+                "environment_id": TEST_ENVIRONMENT_ID,
+                "application": {"app_id": TEST_APP_ID,"base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30},
                 "name": "briefcase integration",
                 "description": null,
                 "key_generation": 1,
@@ -1082,10 +1083,11 @@ mod tests {
     async fn environment_validation_stops_before_application_auth_on_id_mismatch() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/testing-environment"))
+            .and(path("/api/v1/application/testing-context"))
             .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "01990a9d-86f1-7000-8000-000000000011",
+                "environment_id": "01990a9d-86f1-7000-8000-000000000011",
+                "application": {"app_id": TEST_APP_ID,"base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30},
                 "name": "different environment",
                 "description": null,
                 "key_generation": 1,
@@ -1164,7 +1166,7 @@ mod tests {
                         "org_id": "tos",
                         "membership_id": MEMBERSHIP_ID,
                         "session_id": SESSION_ID,
-                        "scope": "memberships.read profile roles.read",
+                        "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": IAM_APP_ID,
                         "authorization": authorization_snapshot(IAM_APP_ID, false),
                         "authorization_epoch": 7,
@@ -1217,7 +1219,7 @@ mod tests {
                         "org_id": "tos",
                         "membership_id": MEMBERSHIP_ID,
                         "session_id": SESSION_ID,
-                        "scope": "memberships.read profile roles.read",
+                        "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": TEST_APP_ID,
                         "authorization": authorization_snapshot(TEST_APP_ID, true),
                         "authorization_epoch": 7,
@@ -1263,7 +1265,7 @@ mod tests {
                 let response = ResponseTemplate::new(200).set_body_json(json!({
                     "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
                     "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": MEMBERSHIP_ID,
-                    "session_id": SESSION_ID, "scope": "memberships.read profile roles.read",
+                    "session_id": SESSION_ID, "scope": "self.identity.read self.membership.read self.tags.read",
                     "audience": TEST_APP_ID, "authorization": authorization_snapshot(TEST_APP_ID, true),
                     "authorization_epoch": 7, "issued_at": 1_700_000_000_i64, "expires_at": 4_070_908_800_i64
                 }));

@@ -10,7 +10,7 @@ use super::{
 impl MetadataService {
     /// Returns the calling application's own folder for the represented actor.
     ///
-    /// The folder is `private/{actor}/apps/{app_id}`, created on first use and
+    /// The folder is `apps/{app_id}/private/{actor}`, created on first use and
     /// reserved from then on.
     ///
     /// # Errors

@@ -493,9 +493,13 @@ pub struct FileVersion {
     /// Version identifier.
     pub id: Uuid,
     /// Monotonic version number.
-    pub number: u32,
+    pub number: u64,
     /// Size in bytes.
     pub size: u64,
+    /// SHA-256 of the complete file bytes.
+    pub sha256: Option<String>,
+    /// How the immutable version was created.
+    pub source: String,
     /// Who created it.
     pub created_by: ActorRef,
     /// When it was created.
@@ -506,8 +510,10 @@ pub struct FileVersion {
 /// A file's retained versions.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileVersionPage {
-    /// Newest-first versions, capped at fifty.
+    /// Newest-first versions, up to 100 per page.
     pub items: Vec<FileVersion>,
+    /// Continue without losing access to older retained versions.
+    pub next_cursor: Option<String>,
 }
 
 /// Server-side encryption for an organization bucket.

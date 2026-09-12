@@ -1,0 +1,4 @@
+# syntax=docker/dockerfile:1.7
+# A content-only release artifact; the production host serves these files with Nginx.
+FROM scratch
+COPY docs-site/dist/ /docs/

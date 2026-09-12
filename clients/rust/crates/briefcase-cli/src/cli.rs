@@ -59,6 +59,16 @@ pub struct GlobalArgs {
     )]
     pub test: Option<Uuid>,
 
+    /// Select an IAM testing application directly by its secret.
+    #[arg(
+        long,
+        global = true,
+        env = "BRIEFCASE_APP_SECRET",
+        hide_env_values = true,
+        conflicts_with = "test"
+    )]
+    pub app_secret: Option<String>,
+
     /// IAM access token, overriding the saved one.
     #[arg(
         long,
@@ -112,7 +122,7 @@ pub enum Command {
     Mkdir(MkdirArgs),
     /// Upload one or more local files.
     Put(PutArgs),
-    /// Download a file.
+    /// Download a file or a folder as tar.zst.
     Get(GetArgs),
     /// Write a file's bytes to standard output.
     Cat(TargetArgs),
@@ -124,17 +134,45 @@ pub enum Command {
     #[command(subcommand)]
     Bin(BinCommand),
     /// List a file's retained versions.
-    Versions(TargetArgs),
+    Versions {
+        /// File path or ID.
+        target: Target,
+        /// Continue through older retained versions.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Restore an older version of a file.
     Restore(RestoreArgs),
     /// Show an entry's recorded history.
     History(TargetArgs),
+    /// Read the preceding 365 days of file or folder logs.
+    Logs {
+        /// File or folder path or ID.
+        target: Target,
+        /// Continue from an earlier page.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Read or change anyone-with-link access.
+    Link {
+        /// File or folder path or ID.
+        target: Target,
+        /// Set the explicit link policy to true or false; omit to inspect.
+        #[arg(long)]
+        enabled: Option<bool>,
+    },
     /// Grant a member access to an entry.
     Share(ShareArgs),
     /// Revoke one grant.
     Unshare(UnshareArgs),
     /// List the explicit grants on an entry.
-    Shares(TargetArgs),
+    Shares {
+        /// File/folder UUID or path.
+        target: Target,
+        /// Continue listing invitations from an opaque cursor.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Show what you may do with named entries.
     Access(AccessArgs),
     /// Read the notification inbox.
@@ -368,8 +406,8 @@ pub struct ShareArgs {
     /// Entry to share.
     pub target: Target,
 
-    /// Member to share it with, as `carbon:cos:tos` or `silicon:atlas`.
-    pub principal: Principal,
+    /// Recipient: carbon:ID, silicon:ID, email:ADDRESS, or tag:TAG.
+    pub principal: String,
 
     /// Rights to convey, comma separated. Read is always included.
     #[arg(long, value_name = "RIGHTS", default_value = "read")]
@@ -504,6 +542,10 @@ pub enum DelegatedOperation {
     FileRead,
     /// Move one entry to the recoverable bin using a stable operation UUID.
     EntryTrash,
+    /// Invite a member using a critical IAM-approved proof.
+    Invite,
+    /// Change anonymous read access using a critical IAM-approved proof.
+    LinkAccess,
     /// Reserve an exact private upload and save its capability in a new private file.
     UploadReserve,
     /// Publish staged bytes using a fresh proof and the original logical UUID.
@@ -562,18 +604,9 @@ pub enum EnvCommand {
         /// Optional purpose or run description.
         #[arg(long)]
         description: Option<String>,
-        /// Public UUID from `iam env create`.
-        #[arg(long)]
-        iam_environment_id: Uuid,
-        /// IAM environment root key. Prompted for when omitted.
-        #[arg(long, env = "BRIEFCASE_IAM_ENVIRONMENT_KEY", hide_env_values = true)]
-        iam_environment_key: Option<String>,
-        /// Canonical IAM ID of the imported Briefcase app (`org>handle`).
-        #[arg(long)]
-        iam_app_id: ApplicationId,
-        /// Test-only imported IAM Application secret. Prompted for when omitted.
-        #[arg(long, env = "BRIEFCASE_IAM_APP_SECRET", hide_env_values = true)]
-        iam_app_secret: Option<String>,
+        /// Optional IAM root key for joining a dependency testing environment.
+        #[arg(long, env = "BRIEFCASE_IAM_TEST_KEY", hide_env_values = true)]
+        iam_test_key: Option<String>,
     },
     /// Show one environment without disclosing its key.
     Show {
@@ -606,11 +639,6 @@ pub enum EnvCommand {
     },
     /// Retrieve and securely remember an environment root key.
     Key {
-        /// Public environment UUID.
-        environment_id: Uuid,
-    },
-    /// Rotate, print, and securely remember an environment root key.
-    RotateKey {
         /// Public environment UUID.
         environment_id: Uuid,
     },

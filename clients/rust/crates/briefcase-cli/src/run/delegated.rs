@@ -9,10 +9,11 @@ use std::{
 use briefcase_client::{
     ApplicationId, Client, ContentStream, UploadSource,
     delegated::{
-        DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedListEntries,
-        DelegatedManifest, DelegatedOperation as ManifestOperation, DelegatedReadFile,
-        DelegatedReserveUpload, DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadStatus,
-        OboProof, UploadCapability,
+        DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedInvite,
+        DelegatedLinkAccess, DelegatedListEntries, DelegatedManifest,
+        DelegatedOperation as ManifestOperation, DelegatedReadFile, DelegatedReserveUpload,
+        DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadStatus, OboProof,
+        UploadCapability,
     },
 };
 use serde::de::DeserializeOwned;
@@ -34,6 +35,8 @@ enum Prepared {
     List(DelegatedManifest<DelegatedListEntries>),
     Read(DelegatedManifest<DelegatedReadFile>),
     Trash(DelegatedManifest<DelegatedTrashEntry>),
+    Invite(DelegatedManifest<DelegatedInvite>),
+    Link(DelegatedManifest<DelegatedLinkAccess>),
     Reserve(DelegatedManifest<DelegatedReserveUpload>),
     Commit(DelegatedManifest<DelegatedCommitUpload>),
     Status(DelegatedManifest<DelegatedUploadQuery>),
@@ -62,6 +65,14 @@ impl Prepared {
             DelegatedOperation::FileRead => {
                 Self::Read(parse::<DelegatedReadFile>(&bytes)?.prepare()?)
             }
+            DelegatedOperation::Invite => {
+                Self::Invite(DelegatedManifest::new(&parse::<DelegatedInvite>(&bytes)?)?)
+            }
+            DelegatedOperation::LinkAccess => {
+                Self::Link(DelegatedManifest::new(&parse::<DelegatedLinkAccess>(
+                    &bytes,
+                )?)?)
+            }
             DelegatedOperation::EntryTrash => {
                 Self::Trash(parse::<DelegatedTrashEntry>(&bytes)?.prepare()?)
             }
@@ -86,6 +97,8 @@ impl Prepared {
             Self::List(manifest) => describe(manifest, output),
             Self::Read(manifest) => describe(manifest, output),
             Self::Trash(manifest) => describe(manifest, output),
+            Self::Invite(manifest) => describe(manifest, output),
+            Self::Link(manifest) => describe(manifest, output),
             Self::Reserve(manifest) => describe(manifest, output),
             Self::Commit(manifest) => describe(manifest, output),
             Self::Status(manifest) => describe(manifest, output),
@@ -103,6 +116,14 @@ impl Prepared {
         output: Output,
     ) -> Result<()> {
         match self {
+            Self::Invite(manifest) => {
+                output.json(&client.invite_on_behalf_of(app, proof, manifest).await?);
+            }
+            Self::Link(manifest) => output.json(
+                &client
+                    .set_link_access_on_behalf_of(app, proof, manifest)
+                    .await?,
+            ),
             Self::Folder(manifest) => {
                 let entry = client
                     .create_folder_on_behalf_of(app, proof, manifest)

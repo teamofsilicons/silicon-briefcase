@@ -26,7 +26,7 @@ use super::{MetadataServiceError, ValidationError};
 /// Maximum page size for entry, permission, version, and bin listing.
 pub const MAX_PAGE_SIZE: u16 = 100;
 /// Default page size from the `OpenAPI` contract.
-pub const DEFAULT_PAGE_SIZE: u16 = 50;
+pub const DEFAULT_PAGE_SIZE: u16 = 100;
 /// Contents are returned in pages of a hundred, newest first.
 pub const CONTENTS_PAGE_SIZE: u16 = 100;
 /// Maximum search result count.
@@ -195,6 +195,12 @@ impl AuthorizableEntry {
     /// Evaluates shared domain policy against this repository snapshot.
     #[must_use]
     pub fn authorization(&self, context: &RequestAuthContext) -> EffectiveAuthorization {
+        if let Some(app) = context.originating_application() {
+            let mut segments = self.entry.path.segments();
+            if segments.next() != Some("apps") || segments.next() != Some(app.as_str()) {
+                return EffectiveAuthorization::hidden();
+            }
+        }
         let grants: Vec<_> = self
             .grants
             .iter()
@@ -374,6 +380,13 @@ impl CreateFolderCommand {
                 "root_boundary",
                 "is required exactly when parent_id is omitted",
             ));
+        }
+        if invitees.iter().any(|invite| {
+            invite
+                .access
+                .contains(crate::domain::permission::AccessRight::Delete)
+        }) {
+            return Err(ValidationError::new("invitees", "delete cannot be shared"));
         }
         Ok(Self {
             name,
@@ -564,6 +577,8 @@ pub struct SearchResultView {
 /// Immutable file-version metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileVersionView {
+    /// Lowercase SHA-256 of the complete file content.
+    pub sha256: Option<String>,
     /// Version identifier.
     pub id: VersionId,
     /// Monotonic one-based number.
@@ -583,7 +598,7 @@ pub struct FileVersionView {
 pub struct ListVersionsQuery {
     /// Current file entry.
     pub entry_id: EntryId,
-    /// Cursor pagination, capped by the 50-version retention rule.
+    /// Cursor pagination across the complete version history.
     pub page: PageRequest,
 }
 

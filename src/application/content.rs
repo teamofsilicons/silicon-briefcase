@@ -105,6 +105,8 @@ pub struct InitiateMultipartCommand {
 /// Multipart completion command.
 #[derive(Clone, Debug)]
 pub struct CompleteMultipartCommand {
+    /// Locally computed SHA-256 of the entire uploaded byte stream.
+    pub content_sha256: [u8; 32],
     /// Briefcase multipart identifier.
     pub upload_id: MultipartUploadId,
     /// Client-retained ordered provider `ETags`.
@@ -820,6 +822,7 @@ where
         self.complete_multipart(
             context,
             &CompleteMultipartCommand {
+                content_sha256: staged.sha256,
                 upload_id: receipt.upload_id,
                 parts,
                 idempotency_key: command.idempotency_key.clone(),
@@ -1901,7 +1904,7 @@ async fn sha256_file(path: &Path) -> Result<[u8; 32], AppError> {
 /// A range that starts at or past the end is unsatisfiable, which is how a
 /// media player learns the real size; an open-ended request is truncated to
 /// the final byte, and a suffix request is anchored to it.
-fn resolve_range(request: RangeRequest, total_size: u64) -> Result<ByteRange, AppError> {
+pub(crate) fn resolve_range(request: RangeRequest, total_size: u64) -> Result<ByteRange, AppError> {
     if total_size == 0 {
         return Err(AppError::RangeNotSatisfiable { total_size });
     }
@@ -1936,7 +1939,7 @@ fn map_plan_error(error: &MultipartPlanError) -> AppError {
     }
 }
 
-pub(super) fn map_object_error(error: &ObjectStoreError) -> AppError {
+pub(crate) fn map_object_error(error: &ObjectStoreError) -> AppError {
     match error {
         ObjectStoreError::NotFound => AppError::NotFound,
         ObjectStoreError::Conflict => AppError::conflict("storage_conflict"),

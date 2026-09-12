@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
+import PublicEntryView from '@/components/briefcase/public-entry';
 import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link';
 import {
   api,
@@ -25,6 +26,8 @@ export default function Home() {
       BrowserSession | AccountSession | null
     >(null),
     [checking, setChecking] = useState(true);
+  const [publicDismissed, setPublicDismissed] = useState(false);
+  const openPrivate = useCallback(() => setPublicDismissed(true), []);
   const [returnTo, setReturnTo] = useState('/');
   const [choosingOrganization, setChoosingOrganization] = useState(false);
   const signOut = useCallback(() => {
@@ -132,6 +135,8 @@ export default function Home() {
       setBusy(false);
     }
   }
+  if (!checking && !publicDismissed && returnTo.startsWith('/org/'))
+    return <PublicEntryView authenticated={!!session} onSignIn={openPrivate} />;
   if (checking)
     return (
       <main className="loading-page">

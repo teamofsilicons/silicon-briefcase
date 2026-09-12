@@ -57,7 +57,6 @@ type Kind =
   | 'edit'
   | 'pairing'
   | 'key'
-  | 'rotate-key'
   | 'clean'
   | 'retire'
   | 'restore';
@@ -80,8 +79,7 @@ const labels: Record<Kind, string> = {
   create: 'Create environment',
   edit: 'Edit environment',
   pairing: 'Replace IAM pairing',
-  key: 'Reveal root key',
-  'rotate-key': 'Rotate root key',
+  key: 'Reveal app secret',
   clean: 'Clean environment',
   retire: 'Retire environment',
   restore: 'Restore environment',
@@ -93,7 +91,7 @@ const blankPairing = (): Pairing => ({
   iam_app_secret: '',
 });
 const destructive = (kind: Kind) =>
-  ['clean', 'retire', 'rotate-key', 'pairing'].includes(kind);
+  ['clean', 'retire', 'pairing'].includes(kind);
 
 export default function TestingEnvironments({
   session,
@@ -115,6 +113,9 @@ export default function TestingEnvironments({
   const [secret, setSecret] = useState<Secret | null>(null),
     [showSecret, setShowSecret] = useState(false),
     [copied, setCopied] = useState(false);
+  const [directSecret, setDirectSecret] = useState(''),
+    [directSlt, setDirectSlt] = useState('');
+  const directOperation = useRef('');
   const generation = useRef(0),
     intent = useRef<{ path: string; method: string; body?: unknown } | null>(
       null,
@@ -128,6 +129,29 @@ export default function TestingEnvironments({
   const [viewError, setViewError] = useState('');
   const [viewBusy, setViewBusy] = useState(false);
   const viewOperation = useRef('');
+  async function enterSecret() {
+    if (!directOperation.current) directOperation.current = crypto.randomUUID();
+    setBusy(true);
+    setListError('');
+    try {
+      const value = await api<BrowserSession>('/environments/enter', 'POST', {
+        app_secret: directSecret,
+        slt: directSlt,
+        org: session.org,
+        operation_id: directOperation.current,
+      });
+      setDirectSecret('');
+      setDirectSlt('');
+      if (value.test_environment)
+        enterTestingEnvironment(value.test_environment.id);
+    } catch (e) {
+      setListError(
+        e instanceof Error ? e.message : 'Unable to enter testing mode.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
   async function openView(environment: Environment, slt?: string) {
     setViewBusy(true);
     setViewError('');
@@ -236,7 +260,7 @@ export default function TestingEnvironments({
           body: {
             name: draft.name,
             description: draft.description || null,
-            pairing: { ...draft.pairing },
+            iam_test_key: draft.pairing.iam_environment_key || undefined,
             operation_id: draft.operation_id,
           },
         };
@@ -279,11 +303,11 @@ export default function TestingEnvironments({
         request.method,
         request.body,
       );
-      if (['create', 'restore', 'rotate-key', 'key'].includes(draft.kind)) {
+      if (['create', 'restore', 'key'].includes(draft.kind)) {
         const id = result.environment_id || result.id || draft.environment?.id;
         if (typeof result.key !== 'string' || !id)
           throw new Error(
-            'The root-key response was incomplete. Recover the same operation.',
+            'The app-secret response was incomplete. Recover the same operation.',
           );
         setSecret({
           environment: id,
@@ -297,7 +321,7 @@ export default function TestingEnvironments({
         draft.kind === 'clean'
           ? `Cleaned ${draft.environment!.name}: ${result.erased_rows ?? 0} records erased. Stored objects are queued for deletion.`
           : draft.kind === 'retire'
-            ? `${draft.environment!.name} retired. Its root key is invalid; recovery is available for two days.`
+            ? `${draft.environment!.name} retired. Its app secret is invalid; recovery is available for two days.`
             : draft.kind === 'key'
               ? ''
               : labels[draft.kind] + ' completed.',
@@ -351,6 +375,53 @@ export default function TestingEnvironments({
               actions target only the selected test environment.
             </SheetDescription>
           </SheetHeader>
+          <form
+            className="settings-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void enterSecret();
+            }}
+          >
+            <h3>Enter with an IAM test app secret</h3>
+            <label htmlFor="direct-app-secret">
+              App secret
+              <Input
+                id="direct-app-secret"
+                type="password"
+                autoComplete="off"
+                required
+                pattern="ask_[A-Za-z0-9_-]{43}"
+                value={directSecret}
+                onChange={(e) => {
+                  setDirectSecret(e.target.value);
+                  directOperation.current = '';
+                }}
+                placeholder="ask_…"
+              />
+            </label>
+            <label htmlFor="direct-test-slt">
+              IAM test sign-in token
+              <Input
+                id="direct-test-slt"
+                type="password"
+                autoComplete="off"
+                required
+                value={directSlt}
+                onChange={(e) => {
+                  setDirectSlt(e.target.value);
+                  directOperation.current = '';
+                }}
+              />
+            </label>
+            <p>
+              The secret selects the environment. Your test IAM account
+              determines file permissions. Limit: 2 GiB.
+            </p>
+            <Button type="submit" disabled={busy}>
+              Enter testing mode
+            </Button>
+          </form>
+
           <div className="detail-body">
             <div className="environment-toolbar">
               <Select
@@ -472,14 +543,7 @@ export default function TestingEnvironments({
                     </Button>
                   ) : (
                     (
-                      [
-                        'edit',
-                        'key',
-                        'rotate-key',
-                        'pairing',
-                        'clean',
-                        'retire',
-                      ] as Kind[]
+                      ['edit', 'key', 'pairing', 'clean', 'retire'] as Kind[]
                     ).map((kind) => (
                       <Button
                         key={kind}
@@ -616,7 +680,7 @@ export default function TestingEnvironments({
                   </label>
                 </>
               )}
-              {(draft?.kind === 'create' || draft?.kind === 'pairing') && (
+              {draft?.kind === 'pairing' && (
                 <>
                   <p className="detail-hint">
                     Use credentials from the same IAM test environment.
@@ -638,7 +702,7 @@ export default function TestingEnvironments({
                     />
                   </label>
                   <label htmlFor="pairing-key">
-                    IAM test root key
+                    IAM test app secret
                     <Input
                       id="pairing-key"
                       type="password"
@@ -686,32 +750,26 @@ export default function TestingEnvironments({
                 <p className="error-box">
                   This erases all disposable data in this environment and queues
                   its stored objects for deletion. Cleaning cannot be undone by
-                  restoring the environment. Its configuration and root key
+                  restoring the environment. Its configuration and app secret
                   remain.
                 </p>
               )}
               {draft?.kind === 'retire' && (
                 <p className="detail-hint">
-                  This disables the environment and invalidates its current root
-                  key. It can be restored for two days; restoration produces a
-                  replacement key.
+                  This disables access to the environment. It can be restored
+                  for two days using its current IAM app secret, provided the
+                  IAM environment is still active.
                 </p>
               )}
               {draft?.kind === 'restore' && (
                 <p className="detail-hint">
                   Restore this environment before its purge deadline. The
-                  replacement root key will be shown after success.
-                </p>
-              )}
-              {draft?.kind === 'rotate-key' && (
-                <p className="error-box">
-                  The old root key stops working immediately. Update any CLI or
-                  client using this environment with the replacement key.
+                  current IAM app secret will be shown after success.
                 </p>
               )}
               {draft?.kind === 'pairing' && (
                 <p className="detail-hint">
-                  This replaces the complete IAM pairing, not the Briefcase root
+                  This replaces the complete IAM pairing and the selected app
                   key. Existing IAM projection and cross-environment migration
                   safeguards still apply.
                 </p>
@@ -803,7 +861,7 @@ export default function TestingEnvironments({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Briefcase test root key</DialogTitle>
+            <DialogTitle>Briefcase test app secret</DialogTitle>
             <DialogDescription>
               {secret?.name} · <code>{secret?.environment}</code>
             </DialogDescription>
@@ -813,7 +871,7 @@ export default function TestingEnvironments({
             and disappears when it closes.
           </p>
           <Input
-            aria-label="Test root key"
+            aria-label="Test app secret"
             type={showSecret ? 'text' : 'password'}
             readOnly
             value={secret?.key || ''}

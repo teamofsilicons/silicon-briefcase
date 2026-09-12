@@ -11,24 +11,14 @@ briefcase --help                 # every command, every option
 briefcase ls --help              # one command in detail
 ```
 
-The SLT/session login and paired testing-environment commands require CLI
-0.1.2 or newer. Use 0.1.3 or newer for renaming and replacing individually
-shared files without needing independent access to their parent folder.
-
-This guide targets CLI 0.3 and API contract 0.5. Top-level folder placement
-changed in CLI 0.2; see the [migration guide](../migration-0.2.md).
-Use CLI 0.2.2 or later for unscoped sandbox login.
-
-See the [documentation index](../) and [testing guide](../testing-environments.md). Example paths containing `cos:tos` or `cos:test` are placeholders for actual IAM public member IDs; use `ls` to discover your roots.
-
-Set uppercase shell variables such as `VERSION_ID`, `ENTRY_ID`, and `GRANT_ID` from the corresponding listing/creation response before using
-those examples. Lifecycle, delete, grant and restore examples change state;
-run them individually and use a disposable sandbox for experimentation.
+This guide targets the first official release, CLI **1.0.0** and API contract
+**1.0.0**. Development 0.x releases are unsupported. Until the release is
+published, install with `cargo install --path clients/rust/crates/briefcase-cli`.
 
 ## Signing in
 
 First use Silicon IAM to sign in and request a short-lived token for the
-canonical Briefcase Application ID. Briefcase never asks for your IAM
+canonical Briefcase Application ID. Production sign-in never asks for your IAM
 password, verification code, or Application secret, and it never redirects a
 terminal login:
 
@@ -94,8 +84,7 @@ session also stays bound to its organization; an unscoped production session can
 select another currently reachable organization with `--org`. A test root
 always retains its owning organization, even with an unscoped IAM session.
 An incompatible `--url` or scoped/root `--org` override therefore fails before
-forwarding a stored credential. Older state is migrated only against that
-profile's existing saved destination. An explicit `--token` authorizes its own
+forwarding a stored credential. An explicit `--token` authorizes its own
 production destination override; it never authorizes forwarding a stored test
 root.
 
@@ -152,7 +141,7 @@ without a home directory, saved profile, network connection, or login.
 sending a member access token. It returns `app_id`, `test_environment_id`, and
 `iam_environment_id`. Use the `app_id` when requesting the single-use SLT from
 IAM. Production returns null for both environment IDs. No app secret or
-root key is printed. URL/profile overrides apply as usual.
+app secret is printed. URL/profile overrides apply as usual.
 
 `login status --json` checks the session with IAM and returns one JSON object:
 
@@ -197,108 +186,23 @@ upload flow for ordinary member uploads.
 Each paired testing environment is isolated from production IAM, limited to
 2 GiB of aggregate content and at most 10 active environments per deployment;
 deleted environments remain recoverable for two days. A Briefcase test bearer
-and its Briefcase root key are both required for test-plane requests.
+and its IAM testing app secret are both required for test-plane requests.
 
-## Disposable testing environments
+## Testing environments
 
-A Briefcase test plane must be paired with an IAM test plane; Briefcase test
-data can never call production IAM. Bootstrap in this order:
+Create IAM and Briefcase together: `briefcase env create integration`.
+The result is stored as a UUID-to-IAM-test-app-secret mapping. Use
+`briefcase --test <environment-id> login <test-slt>` and then the same file
+commands with `--test`. Alternatively, set `BRIEFCASE_APP_SECRET` or pass
+`--app-secret`; the CLI resolves the environment and keeps its login separate.
+The testing footer is always printed to stderr, including on errors.
 
-1. From production IAM, run `iam env create` and securely keep its public UUID
-   and 32-character root key.
-2. Enter that IAM plane with `iam --test <iam-uuid> ...`, create/sign in a test
-   Carbon or Silicon, then import the production Briefcase Application with
-   `iam --test <iam-uuid> -o json app import 'tos>briefcase'`. Import
-   preserves the canonical `org>handle` ID but returns a fresh test-only
-   `ask_...` Application secret.
-3. Sign in to production Briefcase, then create its paired plane. The two IAM
-   secrets are hidden prompts by default:
-
-```bash
-briefcase env create checkout-e2e \
-  --description 'ephemeral integration run' \
-  --iam-environment-id "$IAM_TEST_ID" \
-  --iam-app-id 'tos>briefcase'
-# prompts: IAM environment root key; IAM Application secret
-```
-
-Online IAM authorization snapshots bootstrap the caller's projection on first
-use. Do not change profile metadata to force a webhook. Obtain an unscoped SLT
-inside the paired IAM test plane, then use CLI 0.2.2 or later:
-
-```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login
-briefcase --test "$BRIEFCASE_TEST_ID" ls
-```
-
-Paste only the test SLT at the hidden prompt. A successful `ls` verifies the test bearer and projection; it does not by itself prove webhook delivery.
-
-`BRIEFCASE_IAM_ENVIRONMENT_KEY` and `BRIEFCASE_IAM_APP_SECRET` are available
-for a secret-injected CI environment. Supplying those values as flags also
-works but can expose them through the process list. The create response never
-echoes either IAM secret; it returns a distinct Briefcase root key. The CLI
-stores that key under the public Briefcase UUID in the owner-only credentials
-file.
-
-Every production command then works unchanged in the isolated plane:
-
-```bash
-briefcase --test "$BRIEFCASE_TEST_ID" login
-briefcase --test "$BRIEFCASE_TEST_ID" mkdir private/cos:test/reports
-briefcase --test "$BRIEFCASE_TEST_ID" put report.pdf private/cos:test/reports
-briefcase --test "$BRIEFCASE_TEST_ID" ls --all
-```
-
-`--test` accepts a hyphenated public UUID only, never a root key. It also reads
-`BRIEFCASE_TEST`. Production and every test environment have independent
-stored sessions. The CLI looks up the secret key locally and sends it as
-`X-Testing-Environment-Key` alongside, not instead of, the test IAM bearer.
-An unknown UUID fails before a network request and tells you to retrieve the
-key.
-
-Environment management mirrors IAM's command grammar:
-
-```bash
-briefcase env list --status all
-briefcase env show "$BRIEFCASE_TEST_ID"
-briefcase env update "$BRIEFCASE_TEST_ID" --name renamed
-briefcase env key "$BRIEFCASE_TEST_ID"          # retrieves and stores it
-briefcase env rotate-key "$BRIEFCASE_TEST_ID"   # old key stops immediately
-briefcase env pair-iam "$BRIEFCASE_TEST_ID" \
-  --iam-environment-id "$REPLACEMENT_IAM_TEST_ID" \
-  --iam-app-id 'tos>briefcase'
-briefcase env clean "$BRIEFCASE_TEST_ID"        # production management plane
-briefcase --test "$BRIEFCASE_TEST_ID" env current
-briefcase --test "$BRIEFCASE_TEST_ID" env clean # root-key-only self service
-briefcase env delete "$BRIEFCASE_TEST_ID"
-briefcase env restore "$BRIEFCASE_TEST_ID"
-```
-
-`env current` and UUID-less `env clean` fail locally with `this action is only
-possible for a test environment` without `--test`. Retirement is recoverable
-until the service's purge deadline; cleaning keeps the environment/key but
-erases its disposable contents.
-
-All UUID-addressed management commands run only from the production plane and
-fail locally when combined with `--test`. `pair-iam` atomically replaces the
-IAM environment UUID/root key and imported Application ID/secret while keeping
-the Briefcase UUID, root key, and data. Once an IAM organization projection
-exists, keep the same IAM UUID for credential updates; create a new Briefcase
-sandbox to use another IAM plane. A different UUID on a used sandbox returns
-`testing_environment_iam_rebind_requires_new_environment` without changing its
-pairing or data. After an accepted update, obtain a fresh test SLT and verify a
-test bearer request. The CLI removes the obsolete saved session only when
-re-pairing succeeds.
-
-The CLI persists an idempotency key plus a SHA-256 fingerprint before every
-environment mutation. Environment updates also persist the original optimistic
-version. A retry of the same command therefore uses the same request, key, and
-version; create/restore/rotation responses can recover their generated root
-key. The pending record is removed only after the successful result and any
-new root key have been atomically saved. Do not manually remove pending records
-from `credentials.json` after an uncertain outcome—rerun the exact command.
-Root-key retrieval and rotation share that same lock through fetch and save,
-so a delayed key read cannot replace a concurrently rotated key.
+Use `env list`, `env show`, `env key`, `env edit`, `env clean`, `env delete`, and
+`env restore` to manage the local Briefcase plane. Rotate credentials in IAM
+and run `env pair-iam` with the replacement pairing. There is no independent
+Briefcase key rotation. IAM test actors retain their real role/tag permissions.
+See [Testing environments](../testing-environments.md) for provisioning,
+lifecycle, storage isolation, and exact HTTP/Rust equivalents.
 
 ## Addressing entries
 
@@ -361,7 +265,7 @@ requiring either old path to remain visible. Pending state is cleared only
 after the CLI observes success.
 
 Uploading a name that an active file already carries publishes that file's next
-version. The previous fifty are kept:
+version. Every version is retained:
 
 ```bash
 briefcase versions private/cos:tos/notes/quarterly/report.pdf
@@ -396,7 +300,7 @@ briefcase access private/cos:tos/notes public/handbook   # what may I do here?
 ```
 
 Members are written `kind:id` — `carbon:cos:tos`, `silicon:atlas` — and rights
-are a comma-separated set of `read`, `write`, `update`, `delete`. They are
+are a comma-separated set of `read`, `write`, `update`. Delete cannot be granted. They are
 independent: `write` adds files to a folder, `update` changes a file that is
 already there, and neither conveys `delete`.
 
@@ -406,6 +310,26 @@ Read and clear sharing notifications:
 briefcase inbox
 briefcase inbox --read                 # clear the unread badge
 ```
+
+## Public links, audit logs, and complete versions
+
+```bash
+briefcase share private/me:tos/report.pdf email:alex@example.com --access read,update
+briefcase share private/me:tos/reports tag:engineering --access read,write --inherit
+briefcase link private/me:tos/reports --enabled true
+briefcase link private/me:tos/reports
+briefcase logs private/me:tos/reports --json
+briefcase logs private/me:tos/reports --cursor '<next-cursor>' --json
+briefcase versions private/me:tos/report.pdf --cursor '<next-cursor>' --json
+briefcase get private/me:tos/reports --output reports.tar.zst
+```
+
+Folder downloads are streamed `.tar.zst` archives of authorized contents.
+Versions are retained without a count limit; logs retain 365 days, while
+`history` shows the latest 100 events. Read is always included, write adds new
+children to folders, and update changes existing content. Only creators and
+organization administrators can delete or manage sharing. See [Sharing](../sharing.md)
+for verified-email limitations, tag membership, and inherited link settings.
 
 ## Everything else
 
@@ -450,7 +374,7 @@ selected operation, and prints its canonical `body` string, HTTP `method`,
 not read profiles or credentials, contact a server, or check for updates.
 Give IAM those exact binding values, then repeat the command with the same
 JSON file and a fresh proof at the hidden prompt or through `--proof-stdin`.
-Unknown JSON fields are rejected. See the [API request schemas](../api/README.md#delegated-json-operations)
+Unknown JSON fields are rejected. See the [API request schemas](../obo.md#json-controls-and-recoverable-uploads)
 for the body fields.
 
 The available operations are `folder-create`, `entries-list`, `file-read`,
@@ -549,7 +473,7 @@ mismatch stops the command and names what moved:
 
 ```text
 briefcase: briefcase serves a contract this client was not built for (serving v1);
-listEntries is 1.1.0 here and 1.0.0 there
+listEntries is 1.0.0 here and 2.0.0 there
 briefcase: upgrade the CLI, or pass --no-verify to call it anyway at your own risk
 ```
 
@@ -585,3 +509,5 @@ background after an ordinary operation completes. Download streams defer it
 until EOF, failure, or abandonment. Clients targeting the same Cargo manifest
 share the in-process throttle. Neither updater replaces code already loaded
 in a running process.
+
+Invitation, revocation, and link-setting commands save their exact operation identity and entry ID before sending. Repeating an interrupted command reuses that intent; it cannot silently target a new file that moved into the old path. `briefcase shares TARGET --cursor CURSOR --json` retrieves further invitation pages (100 per page).

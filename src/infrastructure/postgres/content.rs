@@ -61,6 +61,63 @@ pub struct PostgresContentRepository {
 }
 
 impl PostgresContentRepository {
+    pub(crate) async fn public_download(
+        &self,
+        tenant: &super::TenantContext,
+        path: &str,
+    ) -> Result<DownloadTarget, AppError> {
+        let mut tx = self
+            .repository
+            .begin(tenant)
+            .await
+            .map_err(database_error)?;
+        let entry = super::sharing::public_entry(&mut tx, path).await?;
+        if entry.entry_type != "file" {
+            return Err(AppError::NotFound);
+        }
+        let version_id: Uuid = sqlx::query_scalar("SELECT current_version_id FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND entry_id=$1")
+            .bind(entry.id).fetch_one(&mut *tx).await.map_err(database_error)?;
+        let row = find_version(&mut tx, entry.id, version_id, false)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let role = if let Some(id) = row.storage_config_id {
+            Some(
+                find_storage_configuration(&mut tx, id)
+                    .await?
+                    .ok_or_else(internal_integrity)?
+                    .role_arn,
+            )
+        } else {
+            None
+        };
+        let target = StorageTarget {
+            bucket: row.bucket_name,
+            region: row.storage_region,
+            prefix: row.storage_prefix,
+            external_id: role.as_ref().map(|_| {
+                crate::infrastructure::s3::organization_storage_external_id(
+                    tenant
+                        .org_id()
+                        .rsplit_once(':')
+                        .filter(|_| tenant.testing_environment_id().is_some())
+                        .map_or(tenant.org_id(), |(_, org)| org),
+                )
+            }),
+            role_arn: role,
+            encryption: parse_encryption(&row.storage_encryption_mode)?,
+            kms_key_arn: row.storage_kms_key_arn,
+        };
+        tx.commit().await.map_err(database_error)?;
+        Ok(DownloadTarget {
+            entry_id: EntryId::from_uuid(entry.id).map_err(internal_error)?,
+            filename: entry.name,
+            content_type: row.content_type,
+            size: to_u64(row.size_bytes)?,
+            target,
+            key: object_key(row.object_key)?,
+            provider_version_id: row.object_version_id,
+        })
+    }
     /// Composes PostgreSQL with validated platform-storage settings.
     #[must_use]
     pub const fn new(repository: PostgresRepository, platform: S3Settings) -> Self {
@@ -73,6 +130,10 @@ impl PostgresContentRepository {
     /// Returns the shared metadata repository.
     #[must_use]
     pub const fn metadata(&self) -> &PostgresRepository {
+        &self.repository
+    }
+
+    pub(crate) fn metadata_repository(&self) -> &PostgresRepository {
         &self.repository
     }
 
@@ -185,6 +246,7 @@ impl ContentRepository for PostgresContentRepository {
             command.name.as_str(),
             &command.content_type,
             staged.size,
+            &hex::encode(staged.sha256),
             &checksum,
             &preparation.target,
             &preparation.key,
@@ -637,6 +699,7 @@ impl ContentRepository for PostgresContentRepository {
             &row.name,
             &row.content_type,
             preparation.plan.file_size(),
+            &hex::encode(command.content_sha256),
             &checksum,
             &preparation.target,
             &preparation.key,
@@ -961,9 +1024,9 @@ impl ContentRepository for PostgresContentRepository {
                     storage_region, storage_prefix, storage_encryption_mode, storage_kms_key_arn, \
                     object_key, object_version_id, etag, checksum_algorithm, checksum_type, \
                     checksum_value, size_bytes, \
-                    content_type, created_by_type, created_by_id \
+                    content_type, created_by_type, created_by_id, content_sha256 \
              ) VALUES (briefcase.current_org_id(), $1, $2, $3, 'restore', $4, $5, $6, $7, \
-                       $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+                       $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, (SELECT content_sha256 FROM briefcase.entry_versions WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND version_id=$4))",
         )
         .bind(command.entry_id.as_uuid())
         .bind(preparation.new_version_id.as_uuid())
@@ -1715,6 +1778,7 @@ async fn publish_file_content(
     name: &str,
     content_type: &str,
     size: u64,
+    content_sha256: &str,
     checksum: &ObjectChecksum,
     target: &StorageTarget,
     key: &ObjectKey,
@@ -1739,6 +1803,7 @@ async fn publish_file_content(
             existing_id,
             content_type,
             size,
+            content_sha256,
             checksum,
             target,
             key,
@@ -1789,9 +1854,9 @@ async fn publish_file_content(
                 storage_config_id, bucket_name, storage_region, storage_prefix, \
                 storage_encryption_mode, storage_kms_key_arn, object_key, object_version_id, etag, \
                 checksum_algorithm, checksum_type, checksum_value, size_bytes, content_type, \
-                created_by_type, created_by_id \
+                created_by_type, created_by_id, content_sha256 \
          ) VALUES (briefcase.current_org_id(), $1, $2, 1, 'upload', $3, $4, $5, $6, $7, \
-                   $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+                   $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
     )
     .bind(entry_id.as_uuid())
     .bind(version_id.as_uuid())
@@ -1812,6 +1877,7 @@ async fn publish_file_content(
     .bind(content_type)
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
+    .bind(content_sha256)
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -1847,6 +1913,7 @@ async fn publish_next_version(
     entry_id: EntryId,
     content_type: &str,
     size: u64,
+    content_sha256: &str,
     checksum: &ObjectChecksum,
     target: &StorageTarget,
     key: &ObjectKey,
@@ -1875,9 +1942,9 @@ async fn publish_next_version(
                 storage_config_id, bucket_name, storage_region, storage_prefix, \
                 storage_encryption_mode, storage_kms_key_arn, object_key, object_version_id, etag, \
                 checksum_algorithm, checksum_type, checksum_value, size_bytes, content_type, \
-                created_by_type, created_by_id \
+                created_by_type, created_by_id, content_sha256 \
          ) VALUES (briefcase.current_org_id(), $1, $2, $3, 'upload', $4, $5, $6, $7, $8, \
-                   $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                   $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
     )
     .bind(entry_id.as_uuid())
     .bind(version_id.as_uuid())
@@ -1899,6 +1966,7 @@ async fn publish_next_version(
     .bind(content_type)
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
+    .bind(content_sha256)
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -1916,6 +1984,7 @@ async fn publish_next_version(
     .bind(to_i64(size)?)
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
+    .bind(content_sha256)
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;

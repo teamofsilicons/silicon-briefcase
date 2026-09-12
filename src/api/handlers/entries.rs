@@ -192,7 +192,24 @@ pub(crate) async fn resolve_path(
     query: Result<Query<PathContentQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
     let query = extract::query(query)?;
-    let (organization, entry_path) = extract::entry_location(extract::path(path)?, &headers)?;
+    let location = extract::path(path)?;
+    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+        return super::sharing::read_public(
+            &state,
+            &headers,
+            &location.0,
+            &location.1,
+            super::sharing::PublicQuery {
+                view: query.disposition.map(|value| match value {
+                    DispositionDto::Inline => "inline".to_owned(),
+                    DispositionDto::Attachment => "attachment".to_owned(),
+                }),
+                cursor: None,
+            },
+        )
+        .await;
+    }
+    let (organization, entry_path) = extract::entry_location(location, &headers)?;
     let resource = format!("{organization}/{entry_path}");
     let intent = query.disposition.map(content_intent);
     let action = intent.map_or(IamAction::ReadEntry, |intent| match intent {
@@ -209,7 +226,7 @@ pub(crate) async fn resolve_path(
     let Some(intent) = intent else {
         return Ok(Json(state.mapper.entry_item(&organization, entry)?).into_response());
     };
-    if entry.is_folder() {
+    if entry.is_folder() && !matches!(intent, ContentIntent::Download) {
         return Err(AppError::NotFound);
     }
     content::serve(&state, &headers, &context, entry.id(), intent).await

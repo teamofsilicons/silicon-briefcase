@@ -95,6 +95,31 @@ pub(crate) async fn status(
         Err(error) => return Err(error),
     };
     extract::touch_testing_access(&state, access.as_ref()).await?;
+    if let Some(identity) = &identity {
+        let token =
+            super::super::auth::parse_bearer(super::super::auth::require_bearer_only(&headers)?)?;
+        if let Some(email) = state.iam.self_email(&token, environment.as_ref()).await? {
+            for organization in &identity.organizations {
+                let mut scoped_headers = headers.clone();
+                scoped_headers.insert(
+                    "x-org-id",
+                    HeaderValue::from_str(organization.as_str()).map_err(|_| AppError::NotFound)?,
+                );
+                let context = extract::authenticate(
+                    &state,
+                    &scoped_headers,
+                    super::super::auth::IamAction::ReadEntry,
+                    "self-contact",
+                )
+                .await?;
+                state
+                    .content_adapter
+                    .metadata_repository()
+                    .record_self_contact(&context, &email)
+                    .await?;
+            }
+        }
+    }
     Ok(private_json(match identity {
         Some(identity) => serde_json::json!({
             "authenticated": true,

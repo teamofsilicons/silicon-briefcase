@@ -1,6 +1,25 @@
 //! Fresh, versioned recipients from IAM's read-only membership surface.
 
-use silicon_iam_client::{Paging, api::members::MemberFilter};
+use serde::Deserialize;
+use silicon_iam_client::Paging;
+
+#[derive(Deserialize)]
+struct MemberPage {
+    items: Vec<DirectoryMember>,
+    page: models::PageInfo,
+}
+#[derive(Deserialize)]
+struct DirectoryMember {
+    id: Uuid,
+    org_id: String,
+    principal: models::ActorRef,
+    status: models::MembershipStatus,
+    org_role: models::MembershipOrgRole,
+    tags: Vec<models::TagSummary>,
+    removed_at: Option<time::OffsetDateTime>,
+    version: i64,
+    authorization_epoch: i64,
+}
 
 use super::{
     ActorId, ActorKind, ActorRef, Credential, IamClient, IamClientError, IamEnvironmentCredential,
@@ -24,19 +43,17 @@ impl IamClient {
             .scoped_client(environment)?
             .with_credential(Credential::Bearer(token.clone()));
         let mut paging = Paging::new().limit(100);
-        let filter = MemberFilter {
-            status: Some("active".to_owned()),
-            ..MemberFilter::default()
-        };
         let mut found = Vec::new();
         let mut cursors = std::collections::BTreeSet::new();
         // Bounded work: never silently treat an incomplete directory as empty.
         for _ in 0..100 {
-            let page = client
-                .members()
-                .list(caller.organization_id().as_str(), &filter, &paging)
+            let value = client
+                .application_reads()
+                .members(caller.organization_id().as_str(), &paging)
                 .await
                 .map_err(|error| sdk_error(error, Operation::Service))?;
+            let page: MemberPage = serde_json::from_value(value)
+                .map_err(|_| invalid_response("directory.membership_fields"))?;
             for member in page.items {
                 if member.org_id != caller.organization_id().as_str() {
                     return Err(binding_mismatch("directory.organization"));
@@ -51,7 +68,7 @@ impl IamClient {
                     ActorId::new(member.principal.public_id.clone())
                         .map_err(|_| invalid_response("directory.public_id"))?,
                 );
-                if recipients.contains(&actor) {
+                if recipients.is_empty() || recipients.contains(&actor) {
                     if found
                         .iter()
                         .any(|value: &RequestAuthContext| value.actor() == &actor)
@@ -66,14 +83,19 @@ impl IamClient {
                     )?);
                 }
             }
-            if recipients
-                .iter()
-                .all(|actor| found.iter().any(|value| value.actor() == actor))
+            if !recipients.is_empty()
+                && recipients
+                    .iter()
+                    .all(|actor| found.iter().any(|value| value.actor() == actor))
             {
                 return Ok(Some(found));
             }
             if !page.page.has_more {
-                return Ok(None);
+                return Ok(if recipients.is_empty() {
+                    Some(found)
+                } else {
+                    None
+                });
             }
             let cursor = page
                 .page
@@ -89,7 +111,7 @@ impl IamClient {
 }
 
 fn directory_member(
-    member: models::Membership,
+    member: DirectoryMember,
     actor: ActorRef,
     organization: &OrganizationId,
     organization_id: Uuid,

@@ -125,13 +125,17 @@ type Usage = {
 type Version = {
   id: string;
   number: number;
+  sha256: string | null;
+  source: string;
   size: number;
   created_at: string;
   created_by: { id: string };
 };
 type Activity = {
   action: string;
-  actor: { type: string; id: string };
+  actor_type: string;
+  actor_id: string;
+  metadata: Record<string, unknown>;
   app_id: string | null;
   occurred_at: string;
 };
@@ -175,8 +179,22 @@ export default function Workspace({
     [confirm, setConfirm] = useState<Entry | null>(null),
     [working, setWorking] = useState(false),
     [rights, setRights] = useState<string[]>(['read']);
+  const [versionCursor, setVersionCursor] = useState<string | null>(null);
+  const [logCursor, setLogCursor] = useState<string | null>(null);
+  const [linkAccess, setLinkAccess] = useState<{
+    can_manage: boolean;
+    enabled: boolean;
+    effective: boolean;
+    inherited_from: string | null;
+  } | null>(null);
+  const linkIntent = useRef<{
+    id: string;
+    enabled: boolean;
+    operation: string;
+  } | null>(null);
   const [versions, setVersions] = useState<Version[]>([]),
     [grants, setGrants] = useState<Grant[]>([]),
+    [grantCursor, setGrantCursor] = useState<string | null>(null),
     [activity, setActivity] = useState<Activity[]>([]),
     [detailError, setDetailError] = useState(''),
     [detailLoading, setDetailLoading] = useState(false);
@@ -436,11 +454,17 @@ export default function Workspace({
       }
       if (editor.kind === 'share') {
         const [type, ...name] = editor.value.split(':');
-        if (!['carbon', 'silicon'].includes(type) || !name.join(':'))
-          throw new Error('Use carbon:member-id or silicon:member-id.');
-        await api('/entries/' + editor.entry!.id + '/permissions', 'POST', {
+        if (
+          !['carbon', 'silicon', 'email', 'tag'].includes(type) ||
+          !name.join(':')
+        )
+          throw new Error(
+            'Use carbon:ID, silicon:ID, email:address, or tag:tag.',
+          );
+        await api('/entries/' + editor.entry!.id + '/invitations', 'POST', {
           principal: { type, id: name.join(':') },
           access: rights,
+          operation_id: editor.operation,
           inherit: editor.entry!.type === 'folder',
         });
       }
@@ -560,7 +584,11 @@ export default function Workspace({
     setDetailError('');
     setPreview(null);
     setVersions([]);
+    setVersionCursor(null);
+    setLogCursor(null);
+    setLinkAccess(null);
     setGrants([]);
+    setGrantCursor(null);
     setActivity([]);
     if (!selected || scope === 'bin') {
       setDetailLoading(false);
@@ -570,20 +598,39 @@ export default function Workspace({
     const run = async () => {
       try {
         if (tab === 'versions') {
-          const v = await api<Version[]>(
+          const v = await api<{ items: Version[]; next_cursor: string | null }>(
             '/entries/' + selected.id + '/versions',
           );
-          if (current) setVersions(v);
+          if (current) {
+            setVersions(v.items);
+            setVersionCursor(v.next_cursor);
+          }
         } else if (tab === 'access') {
-          const g = await api<Grant[]>(
-            '/entries/' + selected.id + '/permissions',
-          );
-          if (current) setGrants(g);
+          const link = await api<{
+            can_manage: boolean;
+            enabled: boolean;
+            effective: boolean;
+            inherited_from: string | null;
+          }>('/entries/' + selected.id + '/link-access');
+          if (current) setLinkAccess(link);
+          if (selected.effective_access.includes('manage_permissions')) {
+            const g = await api<{ items: Grant[]; next_cursor: string | null }>(
+              '/entries/' + selected.id + '/invitations',
+            );
+            if (current) {
+              setGrants(g.items);
+              setGrantCursor(g.next_cursor);
+            }
+          }
         } else if (tab === 'activity') {
-          const a = await api<Activity[]>(
-            '/entries/' + selected.id + '/activity',
-          );
-          if (current) setActivity(a);
+          const a = await api<{
+            items: Activity[];
+            next_cursor: string | null;
+          }>('/entries/' + selected.id + '/logs');
+          if (current) {
+            setActivity(a.items);
+            setLogCursor(a.next_cursor);
+          }
         } else if (selected.type === 'file') {
           const format = textFormat(selected);
           if (format) {
@@ -1059,7 +1106,7 @@ export default function Workspace({
                             >
                               Details & history
                             </DropdownMenuItem>
-                            {entry.type === 'file' && (
+                            {
                               <DropdownMenuItem
                                 onClick={() =>
                                   window.location.assign(
@@ -1073,7 +1120,7 @@ export default function Workspace({
                               >
                                 Download
                               </DropdownMenuItem>
-                            )}
+                            }
                             {entry.effective_access.includes('update') && (
                               <>
                                 <DropdownMenuItem
@@ -1288,7 +1335,10 @@ export default function Workspace({
             />
             {editor?.kind === 'share' && (
               <div className="rights">
-                {['read', 'write', 'update', 'delete'].map((right) => (
+                {(editor.entry?.type === 'folder'
+                  ? ['read', 'write', 'update']
+                  : ['read', 'update']
+                ).map((right) => (
                   <label key={right}>
                     <Checkbox
                       checked={rights.includes(right)}
@@ -1368,7 +1418,7 @@ export default function Workspace({
           {selected && (
             <div className="detail-body">
               <div className="detail-actions">
-                {selected.type === 'file' && scope !== 'bin' && (
+                {scope !== 'bin' && (
                   <a
                     className="download-link"
                     href={
@@ -1411,7 +1461,7 @@ export default function Workspace({
                   {selected.type === 'file' && (
                     <TabsTrigger value="versions">Versions</TabsTrigger>
                   )}
-                  <TabsTrigger value="activity">History</TabsTrigger>
+                  <TabsTrigger value="activity">Logs · 365 days</TabsTrigger>
                 </TabsList>
                 {detailError && <p className="error-box">{detailError}</p>}
                 {detailLoading && <output>Loading…</output>}
@@ -1495,10 +1545,19 @@ export default function Workspace({
                   </dl>
                 </TabsContent>
                 <TabsContent value="versions">
+                  <p className="detail-hint">
+                    Every version is retained. Restoring creates a new version.
+                  </p>
                   {versions.map((version) => (
                     <div className="detail-record" key={version.id}>
                       <div>
                         <strong>Version {version.number}</strong>
+                        <p>{version.source}</p>
+                        {version.sha256 && (
+                          <p title={version.sha256}>
+                            SHA-256: {version.sha256.slice(0, 16)}…
+                          </p>
+                        )}
                         <p>
                           {bytes(version.size)} · {date(version.created_at)}
                         </p>
@@ -1547,8 +1606,95 @@ export default function Workspace({
                       )}
                     </div>
                   ))}
+                  {versionCursor && (
+                    <Button
+                      variant="outline"
+                      disabled={working}
+                      onClick={async () => {
+                        setWorking(true);
+                        try {
+                          const page = await api<{
+                            items: Version[];
+                            next_cursor: string | null;
+                          }>(
+                            '/entries/' +
+                              selected.id +
+                              '/versions?cursor=' +
+                              encodeURIComponent(versionCursor),
+                          );
+                          setVersions((v) => [...v, ...page.items]);
+                          setVersionCursor(page.next_cursor);
+                        } catch (e) {
+                          fail(e);
+                        } finally {
+                          setWorking(false);
+                        }
+                      }}
+                    >
+                      Older versions
+                    </Button>
+                  )}
                 </TabsContent>
                 <TabsContent value="access">
+                  {linkAccess && (
+                    <div className="detail-record">
+                      <div>
+                        <strong>Anyone with the link</strong>
+                        <p>
+                          {linkAccess.effective
+                            ? 'Can view and download'
+                            : 'Requires an authorized account'}
+                        </p>
+                        {linkAccess.inherited_from && (
+                          <p>
+                            Access is inherited from a shared parent folder.
+                            Change the parent to remove inherited access.
+                          </p>
+                        )}
+                      </div>
+                      {linkAccess.can_manage && (
+                        <Button
+                          variant="outline"
+                          disabled={working}
+                          onClick={async () => {
+                            const enabled = !linkAccess.enabled;
+                            if (
+                              !linkIntent.current ||
+                              linkIntent.current.id !== selected.id ||
+                              linkIntent.current.enabled !== enabled
+                            )
+                              linkIntent.current = {
+                                id: selected.id,
+                                enabled,
+                                operation: crypto.randomUUID(),
+                              };
+                            setWorking(true);
+                            try {
+                              const result = await api<typeof linkAccess>(
+                                '/entries/' + selected.id + '/link-access',
+                                'PUT',
+                                {
+                                  enabled,
+                                  operation_id: linkIntent.current.operation,
+                                },
+                              );
+                              setLinkAccess(result);
+                              linkIntent.current = null;
+                            } catch (e) {
+                              fail(e);
+                            } finally {
+                              setWorking(false);
+                            }
+                          }}
+                        >
+                          {linkAccess.enabled
+                            ? 'Disable link sharing'
+                            : 'Enable link sharing'}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
                   <p className="detail-hint">
                     {selected.root_type === 'public'
                       ? 'Everyone in your organisation can read this entry.'
@@ -1559,7 +1705,7 @@ export default function Workspace({
                       variant="outline"
                       onClick={() => edit('share', selected)}
                     >
-                      <Plus size={15} /> Share with a member
+                      <Plus size={15} /> Invite member, email, or tag
                     </Button>
                   )}
                   {grants.map((grant) => (
@@ -1580,9 +1726,10 @@ export default function Workspace({
                               await api(
                                 '/entries/' +
                                   selected.id +
-                                  '/permissions/' +
+                                  '/invitations/' +
                                   grant.id,
                                 'DELETE',
+                                { operation_id: crypto.randomUUID() },
                               );
                               setGrants((v) =>
                                 v.filter((g) => g.id !== grant.id),
@@ -1597,6 +1744,30 @@ export default function Workspace({
                       )}
                     </div>
                   ))}
+                  {grantCursor && (
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          const page = await api<{
+                            items: Grant[];
+                            next_cursor: string | null;
+                          }>(
+                            '/entries/' +
+                              selected.id +
+                              '/invitations?cursor=' +
+                              encodeURIComponent(grantCursor),
+                          );
+                          setGrants((value) => [...value, ...page.items]);
+                          setGrantCursor(page.next_cursor);
+                        } catch (error) {
+                          fail(error);
+                        }
+                      }}
+                    >
+                      More invitations
+                    </Button>
+                  )}
                   {!grants.length && !detailLoading && (
                     <p className="detail-hint">No explicit grants.</p>
                   )}
@@ -1612,13 +1783,41 @@ export default function Workspace({
                             .replaceAll('_', ' ')}
                         </strong>
                         <p>
-                          {item.actor.type}:{item.actor.id}
+                          {item.actor_type}:{item.actor_id}
                           {item.app_id ? ' · ' + item.app_id : ''}
                         </p>
                         <p>{new Date(item.occurred_at).toLocaleString()}</p>
                       </div>
                     </div>
                   ))}
+                  {logCursor && (
+                    <Button
+                      variant="outline"
+                      disabled={working}
+                      onClick={async () => {
+                        setWorking(true);
+                        try {
+                          const page = await api<{
+                            items: Activity[];
+                            next_cursor: string | null;
+                          }>(
+                            '/entries/' +
+                              selected.id +
+                              '/logs?cursor=' +
+                              encodeURIComponent(logCursor),
+                          );
+                          setActivity((v) => [...v, ...page.items]);
+                          setLogCursor(page.next_cursor);
+                        } catch (e) {
+                          fail(e);
+                        } finally {
+                          setWorking(false);
+                        }
+                      }}
+                    >
+                      Older logs
+                    </Button>
+                  )}
                   {!activity.length && !detailLoading && (
                     <p>No recorded activity.</p>
                   )}

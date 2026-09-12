@@ -1,290 +1,97 @@
-# Paired IAM and Briefcase testing environments
+# Testing environments
 
-Use the same member operations against an isolated dataset, with identities
-issued by a paired IAM test plane. A test environment is not a second public
-hostname, a new EC2 per run, or a flag that disables permissions.
-
-The hosted deployment has one Briefcase API/worker EC2 and two separate RDS
-instances. Production holds normal data and environment control records; the
-shared testing database holds all sandbox data, namespaced by environment UUID.
-Creating a sandbox uses that existing infrastructure; it does not provision RDS.
-
-## Four values that must not be confused
-
-| Value | Where it is used | Secret? |
-| --- | --- | --- |
-| IAM environment UUID | `iam --test`, Briefcase pairing request | No |
-| IAM root key | Outbound calls to IAM; signed test webhook matching | Yes |
-| Briefcase environment UUID | `briefcase --test`, production lifecycle URLs | No |
-| Briefcase root key | `X-Testing-Environment-Key`, Rust `EnvironmentKey` | Yes |
-
-Pairing additionally needs the canonical imported Application ID (`tos>briefcase`
-on this deployment) and its fresh **test-only** IAM Application secret. IAM's
-root key selects a plane; it is not an Application credential. Briefcase's root
-key selects its sandbox; it is not a Carbon/Silicon bearer token.
-
-Never paste a root key into `--test`, put a test UUID in the root-key header, or
-reuse the production app secret in a test plane. Omitting the test selector
-selects production, not a default sandbox. Production and test sessions do not
-interchange, and unknown selectors fail closed.
-
-## Prepare IAM
-
-These commands create state. Run them deliberately in the intended profile,
-with secret output kept out of logs and shared terminals.
-
-1. From a production IAM session in the organization, create the IAM sandbox:
-
-   ```bash
-   iam --url https://backend.iam.teamofsilicons.com --org tos \
-     env create briefcase-manual-e2e --description 'Disposable integration data'
-   ```
-
-   Record the returned UUID as `IAM_TEST_ID`; keep its root key in private
-   storage. The IAM CLI stores environment keys per profile. Production
-   lifecycle commands must not inherit `SILICON_IAM_TEST`.
-2. Use `iam --test "$IAM_TEST_ID" signup --help` or `login --help` to establish
-   a test Carbon. A production account/session is not automatically copied.
-   Keep the same IAM URL/profile throughout setup.
-3. In that signed-in test session, import the production Briefcase Application:
-
-   ```bash
-   iam --url https://backend.iam.teamofsilicons.com --test "$IAM_TEST_ID" \
-     app import 'tos>briefcase'
-   ```
-
-   Import preserves the canonical Application ID and returns a fresh test-only
-   Application secret. The test Carbon must administer an existing target
-   organization; import does not grant access to an unrelated existing one.
-   Keep the returned secret separate from production credentials.
-
-The IAM CLI's `env key` command retrieves a key in the production control
-plane if an authorized caller needs it again. Handle its output as a secret.
-Do not create or replace test webhook destinations merely to get first login
-working: IAM 1.2 online snapshots support first-use bootstrap directly.
-
-## Create the Briefcase sandbox through the CLI
-
-First log into production Briefcase with an SLT for `tos>briefcase`; normal
-unscoped login is sufficient. Select the sandbox's owning organization on the
-management command; see [CLI login](cli/README.md). Then:
-
-```bash
-briefcase --org tos env create briefcase-manual-e2e \
-  --description 'Disposable integration data' \
-  --iam-environment-id "$IAM_TEST_ID" \
-  --iam-app-id 'tos>briefcase'
-# Hidden prompts: IAM root key, then the imported test Application secret.
-```
-
-Any current Carbon/Silicon organization member can create a sandbox. The
-organization owns it and the actor is recorded as creator. Creation validates
-the complete IAM pairing and returns an independent Briefcase UUID/root key.
-The CLI saves the root privately; set `BRIEFCASE_TEST_ID` to the returned UUID.
-
-For non-interactive jobs, inject `BRIEFCASE_IAM_ENVIRONMENT_KEY` and
-`BRIEFCASE_IAM_APP_SECRET` through the job's secret store. Those variables
-refer to the **test pairing**, not production server credentials. Do not echo
-them or put literal credentials into shell history.
-
-Now obtain an unscoped Briefcase-targeted SLT inside the paired IAM plane for
-the member whose permissions you want to exercise. Use CLI 0.2.2 or later for
-unscoped sandbox login; the saved root retains the sandbox's owner-tenant
-binding even if IAM discovers additional organizations:
-
-```bash
-iam --url https://backend.iam.teamofsilicons.com --test "$IAM_TEST_ID" \
-  login --app-id 'tos>briefcase'
-briefcase --test "$BRIEFCASE_TEST_ID" login
-# Paste the test SLT at the hidden prompt.
-briefcase --test "$BRIEFCASE_TEST_ID" env current
-briefcase --test "$BRIEFCASE_TEST_ID" ls
-```
-
-`env current` proves root-key selection only. `ls` also exercises the test
-bearer and current IAM authorization. Neither proves that webhooks work.
-The CLI uses the hosted Briefcase URL automatically unless a saved profile or
-an explicit URL override selects another deployment; the test UUID selects
-the isolated dataset on that deployment.
-Do not use the old profile-photo mutation workaround: it is obsolete.
-
-## The same setup through HTTP
-
-All paths below are relative to `/api/v1`. Send production bearer authentication
-and `X-Org-ID: tos` to create/manage an environment. Do not include a test root
-on these UUID-addressed lifecycle routes.
+An IAM testing Application secret selects an isolated Briefcase environment:
 
 ```http
-POST /api/v1/organizations/tos/testing-environments
-Authorization: Bearer <production-Briefcase-access-token>
+X-Briefcase-App-Secret: ask_<43 base64url characters>
+Authorization: Bearer <IAM test access token>
 X-Org-ID: tos
-Idempotency-Key: <persisted-unique-request-key>
-Content-Type: application/json
-
-{
-  "name": "briefcase-manual-e2e",
-  "description": "Disposable integration data",
-  "iam_environment_id": "<IAM-environment-UUID>",
-  "iam_environment_key": "<IAM-root-key>",
-  "iam_app_id": "tos>briefcase",
-  "iam_app_secret": "<test-only-Application-secret>"
-}
 ```
 
-Angle-bracket values are placeholders, not usable credentials. The response
-contains flat environment metadata (`id`, `name`, and the other fields)
-alongside `key`; it never echoes the IAM root or Application secret. The Rust
-model groups those metadata fields under `.environment` through Serde flattening.
-Persist the request and idempotency key securely before
-submission; retry an uncertain result with the exact same request/key.
+The secret selects the environment; the test actor's current IAM membership, role, tags and permissions determine what it can do. Production credentials do not authenticate a test actor. Unknown, invalid, deleted, or mismatched secrets never fall back to production.
 
-To exchange a test SLT, call `POST /auth/slt` with `X-Org-ID`, the Briefcase root
-header and an idempotency key, body `{"slt":"<test-SLT>"}`. For ordinary file
-operations send:
+Each environment has a **2 GiB** storage ceiling, including retained versions and reservations. Briefcase permits **10 active environments** across the deployment. Exceeding the test storage ceiling returns `In test enviorment you are limited to a total storage of 2gb per enviorment.`
 
-```http
-GET /api/v1/entries
-X-Org-ID: tos
-X-Testing-Environment-Key: <Briefcase-root-key>
-Authorization: Bearer <paired-test-member-access-token>
+## Create a paired environment
+
+The API provisions the IAM application testing environment and then creates the empty Briefcase plane. Configure the production Briefcase application and its dependency catalog in IAM first. Production members authorized by IAM can create environments using:
+
+```bash
+briefcase env create integration --description 'Release integration tests'
 ```
 
-Only `/testing-environment` and its `/cleanings` self-service operation use the
-root key without a member bearer. The latter is destructive. Full endpoint
-shapes, ETags, status codes and lifecycle routes are in the [API guide](api/README.md).
+Or `POST /organizations/{org_id}/testing-environments` with a production bearer, matching `X-Org-ID`, an `Idempotency-Key`, and:
 
-## The same setup through Rust
+```json
+{"name":"integration","description":"Release integration tests"}
+```
 
-The [Rust guide](client/README.md) includes `TestingEnvironmentCreate` and all
-lifecycle methods. Use a production `Client` for creation, then construct a
-separate client for data-plane calls:
+An optional `iam_test_key` joins an existing IAM dependency environment. The result contains `environment` and `key`; **key is the IAM test application secret**, not a separate Briefcase-generated credential. The CLI stores it privately under the environment UUID. Reuse the same idempotency key and request after an uncertain response.
 
-```rust
+IAM currently requires its environment root key together with the test Application secret when a service validates the testing context. Briefcase stores that pairing encrypted, so callers only pass the app secret. A secret from an arbitrary, unregistered IAM environment cannot independently bootstrap Briefcase: create/register the paired environment through this flow first. The backend uses the official IAM SDK for provisioning and verification.
+
+## CLI
+
+```bash
+briefcase --test <environment-id> login <test-slt>
+briefcase --test <environment-id> ls
+briefcase --test <environment-id> put ./fixture.txt private/me:tos
+briefcase --test <environment-id> usage --json
+```
+
+Pass the app secret directly when the UUID is not saved locally:
+
+```bash
+export BRIEFCASE_APP_SECRET='ask_…'
+briefcase --org tos login <test-slt>
+briefcase --org tos ls
+unset BRIEFCASE_APP_SECRET
+```
+
+`--app-secret` is the equivalent explicit option. The CLI resolves and stores the environment mapping, then uses that environment's own login session. Production sessions remain separate. Every invocation selected into testing prints a footer on **stderr**, including errors; JSON and file bytes on stdout remain parseable.
+
+## Rust client
+
+```rust,no_run
 use briefcase_client::{Client, Config, EnvironmentKey, ListEntries};
-
-let sandbox = Client::connect(
+# async fn example() -> briefcase_client::Result<()> {
+let client = Client::connect(
     Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
-        .with_auto_update(false)
-        .with_environment(EnvironmentKey::new(briefcase_root_key)?)
-        .with_token(test_member_access_token),
+        .with_environment(EnvironmentKey::new(std::env::var("BRIEFCASE_APP_SECRET").unwrap())?)
+        .with_token(std::env::var("BRIEFCASE_TEST_TOKEN").unwrap()),
 ).await?;
-let metadata = sandbox.current_testing_environment().await?;
-let entries = sandbox.list_entries(&ListEntries::default()).await?;
+let page = client.list_entries(&ListEntries::default()).await?;
+# Ok(())
+# }
 ```
 
-The root and bearer variables come from private caller-owned storage. The
-package neither logs in behind your back nor stores sessions globally.
-Environment mutation methods have `_with_key` variants for durable retries.
-Use the [complete read-only example](client/examples/sandbox.rs) to inspect an
-already prepared plane without creating, cleaning, or deleting anything.
+`EnvironmentKey` validates and redacts the app secret. `IamEnvironmentKey` is the distinct 32-character IAM root key used only for optional dependency provisioning or pairing replacement. The library holds no session store; callers own token refresh and persistence.
+
+## Browser
+
+In organization settings, open Testing environments. Enter the test app secret and a fresh IAM test sign-in token. The gateway keeps credentials server-side and attaches the test session to the existing browser session. A persistent testing banner identifies the environment. Exit returns the tab to production without signing out the production session. A tab stores only the public environment UUID, never its app secret.
 
 ## Lifecycle and authority
 
-Normal test login can also use an unscoped IAM SLT. With CLI 0.2.2 or later,
-omit `--org` from `briefcase --test <UUID> login`: the saved test root selects
-the sandbox's tenant independently of the session's IAM organization scope.
-The login reports every organization IAM discloses; the sandbox still accepts
-file operations only for its owning organization. Use `--org` at login only
-when intentionally exchanging an organization-bound SLT.
-
-| Action | Authority / effect |
+| Action | Route beneath `/organizations/{org_id}/testing-environments` |
 | --- | --- |
-| Create | Current production organization member; empty sandbox and new root |
-| Retrieve/rotate key, edit, clean, retire, restore, re-pair | Creator or current organization owner/admin through production management |
-| Describe current / clean current | The selected Briefcase root is sufficient |
-| Ordinary file calls | Root plus valid paired test bearer; actual member permissions apply |
-| OBO file creation | Root plus a valid proof from the paired IAM plane, not a bearer alongside it |
+| List active/deleted/all | `GET /?status=active|deleted|all` |
+| Read metadata | `GET /{id}` |
+| Rename/describe | `PATCH /{id}` with strong `If-Match` |
+| Read selected app secret | `GET /{id}/key` |
+| Replace IAM pairing | `POST /{id}/iam-pairings` |
+| Erase Briefcase data | `POST /{id}/cleanings` |
+| Retire locally | `DELETE /{id}` |
+| Restore during recovery window | `POST /{id}/restorations` |
 
-```bash
-briefcase env show "$BRIEFCASE_TEST_ID"
-briefcase env key "$BRIEFCASE_TEST_ID"             # retrieves and stores secret
-briefcase env rotate-key "$BRIEFCASE_TEST_ID"      # immediately invalidates old root
-briefcase env pair-iam "$BRIEFCASE_TEST_ID" \
-  --iam-environment-id "$REPLACEMENT_IAM_TEST_ID" --iam-app-id 'tos>briefcase'
-```
+Management uses a production actor session and creator/administrator authorization. Data cleaning is also available to a holder of the test secret at `POST /testing-environment/cleanings`; it requires an idempotency key. This erases isolated Briefcase data and schedules provider cleanup without deleting the IAM dependency environment.
 
-Re-pairing validates and replaces the complete IAM UUID/root/app-ID/app-secret
-tuple while preserving Briefcase UUID, root and data. Once the sandbox has an
-IAM organization projection, keep the same IAM environment UUID when updating
-its root or Application secret. To use a different IAM environment, create a
-new Briefcase sandbox. A used sandbox rejects that switch with HTTP409
-`testing_environment_iam_rebind_requires_new_environment`; its existing pairing
-and data remain unchanged. Cleaning does not remove the IAM projection.
+Rotate test credentials **in IAM**, then replace the entire paired credential set using `briefcase env pair-iam`. The new app secret immediately replaces the selector; the old one fails. There is no independent Briefcase key-rotation endpoint. Pairing replacement cannot transfer existing identity-bound data to a different IAM environment. Use a new environment when identities change.
 
-A different UUID can be selected before the first IAM projection is created.
-This restriction prevents identical public handles in different IAM planes
-from silently inheriting existing file ownership and grants. Accepted pairing
-updates fence old in-flight configuration; the CLI discards the obsolete test
-session. Obtain a fresh SLT from the paired IAM plane. Rotating an IAM root or
-app secret without updating the pairing makes outbound IAM requests fail;
-there is no production fallback.
+Retirement immediately invalidates local access. Restoration requires an active, valid IAM pairing and reactivates its current app secret. IAM retirement or secret invalidation also prevents further data-plane requests because Briefcase validates the live testing context. Briefcase does not silently restore or erase a shared IAM dependency graph. Idle Briefcase planes retire after 30 days and retain their recorded recovery deadline; metadata responses report the authoritative `purge_after`.
 
-Destructive actions below are for disposable test data only:
+## Storage and webhook isolation
 
-```bash
-briefcase --test "$BRIEFCASE_TEST_ID" env clean    # root-authorized content erasure
-briefcase env delete "$BRIEFCASE_TEST_ID"          # retire; current root destroyed
-briefcase env restore "$BRIEFCASE_TEST_ID"         # restore during recovery; new root
-```
+Use a separate PostgreSQL database for testing, distinct roles, encrypted environment credentials, and environment-specific S3 prefixes. Startup verifies that production and test DSNs resolve to different actual databases. IAM signs test webhook envelopes; Briefcase verifies the raw signature, matches the encrypted IAM root, and routes only to the paired environment. A public UUID is never an authorization credential.
 
-Clean retains the environment/key and paired IAM identity projection but erases
-file data, versions, grants, activity, notifications, storage settings and usage.
-It queues exact S3 cleanup descriptors before removing source metadata. Logical
-completion does not imply all physical object deletion has already finished;
-the worker retries cleanup. The operation cannot be undone by environment restore.
-
-Retirement is different: data remains recoverable for two days, the root stops
-working immediately, and restoration generates a new root. After purge, restore
-is unavailable. At most ten environments may be active across the deployment;
-retained deleted rows may make `env list --status all` longer than ten.
-Previously retired environments keep their already recorded `purge_after`
-deadline; a newer retention policy does not shorten that existing window.
-
-Each sandbox is capped at 2 GiB (2,147,483,648 bytes). Exceeding it returns
-`testing_environment_storage_limit_exhausted` with the product's current message:
-`In test enviorment you are limited to a total storage of 2gb per enviorment.`
-
-Idle environments are automatically retired after one day without accepted
-test-plane activity. The separate two-day recovery window starts when retirement occurs.
-
-## Signed webhook routing
-
-IAM test events use the normal backend `/webhook/` URL and an authenticated
-outer test wrapper. Briefcase verifies its signature before using the embedded
-IAM root to find the active pairing. Test rows cannot be written into production
-merely by changing an unsigned routing field. Do not log the wrapper/root or
-send the Briefcase root as if it were an IAM root.
-
-Production webhook review and test-plane event routing are separate concerns.
-IAM test registrations can activate without a production platform review, but
-imported webhook configuration and signing keys must still be checked against
-the actual IAM import contract. The shared Briefcase receiver uses its configured
-signing-key ring; do not invent a per-environment signing secret unsupported by
-that receiver. See [IAM integration](iam-integration.md).
-
-## Manual verification checklist
-
-Run these intentionally against named disposable environments; this page is a
-checklist, not an automated suite or a claim they have all passed on hosting.
-
-- Confirm contract negotiation, root self-description, and first SLT login/`ls`
-  without forcing a webhook. Record environment IDs, versions and request IDs.
-- Upload a known small file, download it and compare bytes; replace the same
-  name and inspect versions; restore one and verify its content.
-- Exercise Public, own Private, a second actor's shared folder, and a tag folder.
-  Verify hidden paths return 404, read-only cannot write, and update cannot delete.
-- Switch among two separate test actors and two separate sandboxes. Wrong roots,
-  wrong-plane tokens, stale rotated roots and cross-organization paths must fail.
-- Verify current role/tag removal denies subsequent requests. Separately cause a
-  signed test event, check IAM delivery and the correct projection, and verify
-  duplicate/stale events do not restore removed authority.
-- Exercise clean, rotation, re-pair, retirement and restoration on disposable
-  data; confirm old keys/sessions fail and uncertain mutations replay safely.
-- Check quota errors without creating oversized production objects. Ensure
-  another environment and production remain unchanged.
-- Test OBO only after registering the endpoint catalog; exact-body proof success
-  and replay/tampered-body rejection are separate checks.
-
-For each check record expected versus actual behavior and failures. Do not mark
-complete solely because `/healthz` or one listing succeeds. Never record raw
-tokens, roots, app secrets or signed test wrappers in the evidence report.
+Testing notifications and email outbox records are local to the test plane. The worker does not send test invitations to real email addresses. Cleaning, retirement and in-flight requests use database lifecycle fences so an old request cannot repopulate a cleaned plane.

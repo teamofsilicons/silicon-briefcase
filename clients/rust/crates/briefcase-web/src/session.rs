@@ -167,7 +167,7 @@ pub(crate) struct Session {
     organizations: Vec<String>,
     testing: bool,
     rejected: bool,
-    test_environment: Option<briefcase_client::TestingEnvironment>,
+    test_environment: Option<TestSelection>,
     test_sessions: std::collections::HashMap<Uuid, String>,
 }
 #[derive(Deserialize, Serialize)]
@@ -602,7 +602,12 @@ pub(crate) async fn enter_test(
         return Err(bad("The test account has no access to this organization."));
     }
     child.deadline = child.deadline.min(parent.deadline);
-    child.test_environment = Some(environment);
+    child.test_environment = Some(TestSelection {
+        id: environment.id,
+        name: environment.name,
+        version: environment.version,
+        key_generation: environment.key_generation,
+    });
     parent.test_sessions.insert(id, child_id);
     Ok(Json(view(&child)))
 }
@@ -629,7 +634,8 @@ mod tests {
     fn session(test: Option<Uuid>) -> Session {
         let mut config = Config::new("http://127.0.0.1:9/api/v1/", "tos").unwrap();
         if test.is_some() {
-            config = config.with_environment(EnvironmentKey::new("a".repeat(32)).unwrap());
+            config = config
+                .with_environment(EnvironmentKey::new(format!("ask_{}", "a".repeat(43))).unwrap());
         }
         let environment = test.map(|id| serde_json::from_value(json!({
             "id":id,"org_id":"tos","name":"Demo","description":null,"status":"active",
@@ -763,4 +769,70 @@ mod tests {
         );
         assert!(selected_environment(&h).is_err());
     }
+}
+
+#[derive(serde::Deserialize)]
+struct TestSelection {
+    id: Uuid,
+    name: String,
+    version: i64,
+    key_generation: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnterSecret {
+    app_secret: String,
+    slt: String,
+    org: String,
+    operation_id: Uuid,
+}
+/// Attaches a secret-selected testing session to the production browser session.
+pub(crate) async fn enter_secret(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<EnterSecret>,
+) -> Result<Json<Value>> {
+    if selected_environment(&headers)?.is_some() {
+        return Err(bad(
+            "Return to production before selecting another environment.",
+        ));
+    }
+    let parent = production_session(&app, &headers).await?;
+    let config = Config::for_sign_in(&app.upstream)?
+        .with_environment(EnvironmentKey::new(input.app_secret.clone())?)
+        .with_auto_update(false);
+    let current = Client::new_unchecked(config)?
+        .current_testing_environment()
+        .await?;
+    let (child_id, _) = establish(
+        &app,
+        Login {
+            org: Some(input.org),
+            slt: input.slt,
+            test_key: Some(input.app_secret),
+            operation_id: input.operation_id,
+        },
+    )
+    .await?;
+    let child = app
+        .sessions
+        .lock()
+        .await
+        .get(&child_id)
+        .cloned()
+        .ok_or_else(unauthenticated)?;
+    let mut parent = parent.lock().await;
+    if parent.rejected || parent.deadline <= Instant::now() {
+        return Err(unauthenticated());
+    }
+    let mut child = child.lock().await;
+    child.deadline = child.deadline.min(parent.deadline);
+    child.test_environment = Some(TestSelection {
+        id: current.id,
+        name: current.name,
+        version: 0,
+        key_generation: current.key_generation,
+    });
+    parent.test_sessions.insert(current.id, child_id);
+    Ok(Json(view(&child)))
 }

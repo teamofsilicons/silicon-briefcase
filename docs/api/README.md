@@ -1,850 +1,120 @@
-# Silicon Briefcase API documentation
+# Briefcase HTTP API
 
-This document explains every operation in the Silicon Briefcase OpenAPI contract. The machine-readable contract is in [`openapi.yaml`](../../openapi.yaml).
+Official contract **1.0.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 58 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
 
-See also the [documentation index](../README.md), [testing-environment guide](../testing-environments.md), and [IAM integration runbook](../iam-integration.md).
+## Authentication and negotiation
 
-## API conventions
+A normal request presents `Authorization: Bearer <IAM access token>` and `X-Org-ID: <organization>`. IAM owns identities, organizations, roles, tags and active membership. Briefcase uses the official `silicon-iam-client` 1.7.0 and verifies live IAM authorization. Missing or conflicting identity, organization, audience, role, tag, or testing-plane facts fail closed. Signed webhooks update local projections but do not replace request authentication.
 
-The [operation map](operations.md) cross-references all 51 contracted operations
-with their Rust methods and CLI commands.
+`GET /iam` discovers the public application ID. `POST /auth/slt` exchanges a Briefcase-targeted short-lived IAM token; `POST /auth/refresh` rotates a refresh token. Both require a durable `Idempotency-Key`. `GET /auth/status` reports current identity and authorized organizations. IAM chooses the user's organization grants during login; a client-supplied organization cannot manufacture consent.
 
-For private byte staging followed by a fresh-authorized commit, see the
-[delegated-upload guide](delegated-uploads.md).
+Negotiate before sending secrets: `GET /api/version` (host-root) with `Briefcase-Supported-API-Versions: v1`. The equivalent versioned path is `/version`. Check the service identity, selected major, and exact operation catalog. Versioned calls also enforce negotiation. See the [version policy](../version-policy.md).
 
-### Base URL
+The optional `X-Briefcase-App-Secret` header selects an IAM-paired test plane. It is an `ask_` test application secret and never replaces the actor bearer or OBO proof. See [testing environments](../testing-environments.md).
 
-```text
-https://backend.briefcase.teamofsilicons.com/api/v1
-```
+## Requests, retries and errors
 
-Clean permanent URLs are served by the application host,
-`https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
+Use JSON except for multipart uploads and streaming content. Never put credentials in a query string. The API rejects ambiguous security headers and wrong-plane credentials. Errors use the documented JSON error envelope and include a request ID. Hidden entries and nonexistent entries both return 404; do not infer an entry exists from a failed access check.
 
-Briefcase is an organization-scoped filesystem for Carbons and Silicons. Every request is evaluated against the represented actor's organization membership and effective file permissions.
+Supply an `Idempotency-Key` on create, upload, invitation writes, link updates, version/bin restore, storage validation, and environment mutations. Keep the exact key, body and resource across retries. Reusing a key for a different request returns conflict. A replay still checks current authorization. OBO operations instead bind a stable `operation_id` into a new single-use proof on every attempt.
 
-### Authentication
-
-- **Bearer authentication:** An IAM access token for a Carbon or Silicon on ordinary member operations. Session exchange, root-key self-service, OBO, public health/version, and signed webhook routes have their own explicit authentication rules below.
-- **OBO Access:** `X-IAM-OBO-Access-Proof` plus `X-App-ID`, accepted only by
-  the documented `/obo/` application operations. Never send a bearer alongside
-  a proof; ordinary member endpoints do not accept these credentials.
-- **Organization context:** Ordinary authenticated operations require `X-Org-ID`; OBO derives the organization from IAM and checks any optional header against it.
-- **Unscoped sessions:** Login is always unscoped. `/auth/slt` and
-  `/auth/refresh` return `org_id: null` and only the user's explicitly selected,
-  active IAM grants in `organizations`. Callers choose an `X-Org-ID` for each
-  file request; that header cannot add consent. Empty grants require IAM
-  reauthorisation. New memberships are not implicitly granted.
-- **Private staging:** `PUT /obo/uploads/{upload_id}/content` requires a narrow
-  upload capability and `X-Org-ID`, not a bearer or proof. Fresh proof-authorized
-  control operations reserve and publish the bytes separately.
-- **Idempotency:** Ordinary creation and upload-finalization operations use `Idempotency-Key`; delegated JSON mutations use the proof-bound `operation_id` UUID so retries do not create duplicate resources.
-
-Briefcase uses the official registry-published `silicon-iam-client` 1.4.0 for
-all IAM operations, with runtime dependency auto-updates disabled. At startup
-it performs IAM's mandatory `GET /api/version` handshake,
-advertises support for `v1`, verifies the selected version in both the response
-header and body, and pins every later IAM request to that major. For a bearer,
-it posts the token to `/api/v1/oauth/introspect` using the Briefcase
-Application's HTTP Basic credentials and `X-Org-ID`. It validates the active
-token's expiry, `principal_id`, actor type, membership ID, authorization epoch,
-and organization, then cross-binds the synchronous `authorization` snapshot
-for public actor ID, role, canonical tag IDs/names, membership version and test
-environment UUID. Missing or undisclosed authority fails closed. First use
-does not require a webhook; there is no userinfo call. Complete snapshots update
-the caller's local directory projection under the webhook reconciliation lock,
-without rolling back newer membership versions or authorization epochs.
-
-For OBO, Briefcase submits the published single-use binding — the canonical
-method, the registered path, and the lowercase hexadecimal SHA-256 digest of
-the exact body bytes it received — with HTTP Basic authentication and nothing
-else: no `X-Org-ID`, no `Idempotency-Key`, and no retry, because IAM consumes
-the proof exactly once and a retry is indistinguishable from a replay. A
-successful result must bind the issuer, the audience (Briefcase), the actor
-reference (`principal_id`, `type`, `public_id`), the organization, and the
-registered endpoint path, which must equal the path Briefcase served.
-
-The IAM 1.2 OBO result includes current delegated `authorization`, limited to
-the parent token's scopes intersected with the audience's approved scopes.
-Briefcase requires `roles.read` and `memberships.read` disclosure, cross-binds
-the actor/organization/audience/environment, and uses that role and tag set
-only for the exact verified request. It never adds authority from webhooks.
-
-### Application login and refresh broker
-
-Briefcase exposes two stateless session endpoints so first-party clients never
-need the Briefcase Application secret:
-
-| Method | Path | Body |
-| --- | --- | --- |
-| `POST` | `/auth/slt` | `{ "slt": "oac_…" }` |
-| `POST` | `/auth/refresh` | `{ "refresh_token": "ort_…" }` |
-
-Both require an `Idempotency-Key` of 16–255 visible ASCII bytes. Briefcase
-forwards the key to IAM unchanged. The official SDK does not expose replay
-response headers, so Briefcase does not emit `Idempotency-Replayed`. A
-successful no-store response mirrors IAM's Application token response:
-`access_token`, rotating `refresh_token`, `token_type`, `expires_in`, `scope`,
-the represented actor (`principal_id`, `type`, and `public_id`), and nullable
-`org_id`.
-
-The SLT is the only credential that can start an Application login. Clients do
-not submit an IAM password, OTP, Application ID, or Application secret to
-Briefcase. Refresh tokens rotate on every success; serialize refresh per token
-family, atomically replace the stored token, and retry an uncertain outcome
-only with the exact same token and idempotency key. A rejected refresh is
-terminal.
-
-Adding a valid Briefcase `X-Testing-Environment-Key` selects the mapped IAM
-test plane for either operation. Briefcase then uses that environment's stored
-IAM root key and test-only Briefcase Application credential together. It never
-falls back to production credentials, and production/test SLTs, access tokens,
-and refresh tokens are mutually rejected.
-
-### IAM webhook receiver
-
-`POST https://backend.briefcase.teamofsilicons.com/webhook/` (outside `/api/v1`) accepts IAM's published application-event envelope. It
-requires `X-Silicon-IAM-Event-ID`, `X-Silicon-IAM-Timestamp`,
-`X-Silicon-IAM-Key-Version`, and
-`X-Silicon-IAM-Signature: v1=<64 lowercase hex characters>`. The signature is
-HMAC-SHA-256 over `{timestamp}.{exact raw body bytes}`. Briefcase rejects an
-unexpected key version, a timestamp outside the configured five-minute window,
-duplicate header values, a signature mismatch, any envelope version other than
-`1.0`, or a body `event_id` that differs from the signed header.
-
-Briefcase keeps a keyring indexed by `X-Silicon-IAM-Key-Version`, so the prior
-secret can remain active during rotation. It projects IAM's scoped
-`data.current` snapshots: the organization handle comes from
-`current.organization.org_id` or a member's `organization.org_id`, while each
-organization, tag, and membership uses its own resource version for ordering.
-Known events without the required scoped identity fail closed. Authenticated
-unknown event types are acknowledged and ignored for forward compatibility.
-
-The same receiver also accepts IAM's signed testing-environment envelope,
-`{"test":{"testing_key":"…","metadata":{…},"data":{…}}}`. It verifies the
-HMAC over the exact outer bytes before parsing, then compares the authenticated
-root key against active environments without timing leakage. Only the matched
-environment UUID is used for routing; the root key and outer payload are never
-logged or persisted. The receiver normalizes `test.metadata` plus `test.data`
-to the production event shape and applies it in the separately configured
-shared test database under the `<environment_uuid>:<public_org_id>` tenant.
-
-### Briefcase testing environments
-
-Testing environments are full Briefcase data planes backed by a shared test
-database whose rows are isolated by environment ID and PostgreSQL row-level
-security. Each environment is capped at 2 GiB, and a deployment permits at most
-ten simultaneously active environments.
-
-Lifecycle operations are always production-plane bearer operations. They
-require `X-Org-ID`, and the organization in the URL must match it:
-
-| Method | Path | Result |
-| --- | --- | --- |
-| `GET`, `POST` | `/organizations/{org_id}/testing-environments` | List or create |
-| `GET`, `PATCH`, `DELETE` | `/organizations/{org_id}/testing-environments/{environment_id}` | Read, update, or retire |
-| `GET` | `…/{environment_id}/key` | Retrieve the current Briefcase root key |
-| `POST` | `…/{environment_id}/key-rotations` | Replace the key immediately |
-| `POST` | `…/{environment_id}/iam-pairings` | Replace the paired IAM environment credentials |
-| `POST` | `…/{environment_id}/cleanings` | Erase isolated data, retaining the environment |
-| `POST` | `…/{environment_id}/restorations` | Restore before purge and issue a new key |
-| `GET` | `/testing-environment` | Describe the environment selected by its key |
-| `POST` | `/testing-environment/cleanings` | Clean using the key as sole authority |
-
-All mutations require `Idempotency-Key`. `PATCH` additionally requires the
-strong ETag returned by reads, in the exact form `If-Match: "{version}"`.
-Secret-bearing create, key-read, rotation, restoration, and auth responses use
-`Cache-Control: no-store`. The root-authorized self-description is always
-`Cache-Control: private, no-store` even though its body contains only metadata.
-
-Creation accepts `name`, optional `description`, and the already-created IAM
-testing environment's `iam_environment_id`, `iam_environment_key`, canonical
-test Briefcase `iam_app_id`, and fresh test-only `iam_app_secret`. The paired
-IAM key and Application secret are encrypted at rest. Both are necessary:
-IAM's environment key selects a plane but does not replace normal Application
-authentication, and IAM rejects the production Briefcase secret in a test
-plane. The test Application uses a different secret, but its canonical
-Application ID must equal the Briefcase service Application ID configured by
-this deployment. One IAM testing-environment UUID can be paired with only one
-Briefcase environment at a time. A retry of a completed create is recovered from encrypted
-idempotency state before the supplied IAM credentials are contacted again, and
-only for the exact organization, actor, originating Application, request body,
-and idempotency key that completed it.
-
-If IAM rotates the environment root or test-only Application secret, the
-creator or a current organization admin/owner can submit the complete
-replacement tuple to `POST …/{environment_id}/iam-pairings`. Briefcase first
-validates the replacement environment and Application in IAM, then atomically
-replaces the encrypted UUID, environment key, Application ID, and Application
-secret. The Briefcase root key and sandbox data remain intact. The operation is
-idempotent, and advancing the control version fences requests that had loaded
-the prior IAM credentials.
-
-After an IAM organization projection exists in the Briefcase sandbox, the IAM
-environment UUID cannot change. A different UUID returns HTTP409 with code
-`testing_environment_iam_rebind_requires_new_environment`, leaving the pairing,
-control version, and data unchanged. Create a new Briefcase sandbox for a
-different IAM plane. Same-UUID root/Application-secret updates remain allowed;
-changing UUID is also allowed before the first projection. Cleaning retains
-the projection and therefore does not enable a different-plane switch.
-
-Briefcase returns its own independent 32-character alphanumeric root key. That
-key selects the Briefcase sandbox and is root authority for it, but ordinary
-file operations still require a bearer or OBO proof issued inside the paired
-IAM plane. Pass it as `X-Testing-Environment-Key` on ordinary API, auth-broker,
-and OBO calls, including capability-only private upload transfers. Omitting it selects production; there is no cross-plane lookup
-or fallback.
-
-The creator and current organization admins/owners can read or rotate the key,
-clean, retire, restore, and edit the environment. A key holder can inspect and
-clean its own environment without a bearer. Cleaning erases content, versions,
-permissions, activity, notifications, idempotency records, storage settings,
-and consumption atomically while retaining the paired IAM identity projection,
-so the next test-plane request can rebuild deterministic roots without waiting
-for a new IAM event. Before source metadata is removed, exact provider delete
-and multipart-abort descriptors are committed to the durable cleanup queue;
-the worker performs and retries that physical work afterward. `erased_rows`
-counts logically removed database rows. Retirement destroys the current key
-immediately and keeps data recoverable for two days; restoration issues a new
-key. An environment is automatically retired after one day without accepted
-test-plane activity. Retirement starts a separate two-day recovery window.
-Previously retired environments retain their recorded `purge_after` deadline;
-policy updates do not shorten that existing recovery window.
-
-The ten-environment ceiling counts active environments only. Listings can also
-include retained soft-deleted environments, so `status=all` may return more
-than ten records during the recovery window.
-
-### Entry model
-
-Files and folders are both entries. Every entry has an owner, an
-organization-relative `path`, the clean `permanent_url` built from it — always
-carrying the organization, as `https://briefcase.teamofsilicons.com/org/{org_id}/{path}` —
-a parent, effective access, timestamps, and one of three inherited root types:
-
-- **Public:** Readable by every current organization member.
-- **Private:** Visible only to its owner and explicitly authorized members.
-- **Tag:** Matching tag members may read and add children. Updating or deleting another member's existing entry still requires explicit rights or organization-admin/owner authority; tag membership alone does not grant those operations.
-
-A file additionally carries `render` — the renderer a client should open
-(`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`,
-`archive`, `code`, or `unsupported`) — and the authenticated `content_url` and
-`download_url` for its bytes.
-
-`effective_access` answers "what can I do here?" with independent labels:
-`read`, `write` (add content that does not exist yet), `update` (change what
-does), `delete`, and `manage_permissions`. Update never implies delete, and
-write never implies update — so write on a folder adds new files to it and
-never replaces a file that is already there, which is an update on that file.
-
-The owner of a folder can always read what is inside it, including files
-another member added through a grant. Reading is all that ownership of the
-folder conveys: renaming, replacing, and deleting an entry stay with whoever
-created it, so a shared folder cannot be quietly rewritten by the member who
-happens to own it.
-
-The reserved containers carry no `owner`. They are structure that IAM
-reconciliation maintains, so no member is named as their proprietor.
-
-Organization owners and authorized administrators hold every operation on
-every piece of content in their organization: read, write, update, delete, and
-permission management, anywhere, without needing a grant. The reserved
-containers themselves — the Public, Private, and Tag bases and the per-member
-folders IAM keeps in step with membership — are structure rather than content,
-so nobody renames, moves, deletes, or shares those, an administrator included. Anything the caller may not read is reported as `404`, never as a
-permission error, so the API never confirms that a hidden entry exists.
-
-### Errors
-
-Errors use the standard `error.code`, `error.message`, and `error.request_id`
-envelope. Two codes are specific to organization limits:
-`daily_upload_limit_exhausted` (`429`, with `Retry-After`) and
-`storage_limit_exhausted` (`507`).
-
-## Version and compatibility
-
-### `GET /api/version`
-
-Reports the API majors this build serves and every operation's contract
-revision. Also served at `/api/v1/version`.
-
-- **Authentication:** none; this is what a client reads before it has anything else.
-- **Request header:** optional `Briefcase-Supported-API-Versions`, the client's majors newest first, comma separated.
-- **Returns:** `service`, `selected_api_version`, `supported_api_versions`, `contract_version`, `build`, and `operations`.
-
-The server selects the newest major both sides support, names it in
-`Briefcase-API-Version`, and answers `406` when there is no overlap rather than
-guessing. `Vary` names the request header, so a cache never serves one client's
-selection to another.
-
-Each operation carries a `version`, bumped whenever its request or response
-shape changes observably; adding an operation leaves the others alone. A client
-that checks its own operations against this list fails at startup instead of at
-the first call that no longer means what it did.
-
-### Public health endpoints
-
-`GET /healthz` returns `{"status":"ok"}` when the API process serves requests. `GET /readyz` checks the production pool and, when configured, the test pool; success returns `{"status":"ready"}`. These are host-root paths, outside `/api/v1`, and require no credential. Readiness is not proof of successful webhook delivery, OBO registration, S3 CRUD, or a complete user workflow.
-
-## Browsing and folder management
-
-### `GET /entries`
-
-Lists folder contents, or filters everything the caller can reach.
-
-- **Authentication:** Bearer.
-- **Required header:** `X-Org-ID`.
-- **Query:** Optional `parent_id` or `path`, optional `filter`, cursor, and limit (default and maximum 100).
-- **Returns:** Permission-filtered entries, newest first, and `next_cursor`.
-
-Entries the caller may not see are filtered after the page is read, and the
-page is refilled from the next position rather than answered short, so a full
-page means what it says. A cursor that Briefcase did not issue is a request
-error (`400`), never a conflict.
-
-Without `filter`, the listing browses one level: the organization roots, or the
-contents of `parent_id`/`path`. With `filter` and no parent, it searches every
-entry the caller may reach, which is how a `location:` predicate selects a
-subtree. Private folders belonging to other actors stay hidden unless at least
-one descendant has been shared with the caller.
-
-#### The filter language
-
-Terms combine with `and` unless separated by `or`; `not` or a leading `-`
-negates; parentheses group. A bare word is shorthand for `contains:`.
-
-| Filter | Meaning |
+| Status | Meaning |
 | --- | --- |
-| `last:N` / `first:N` | Take N entries chronologically, 1-100, in a single page |
-| `sort:newest` / `sort:oldest` | Presentation order; newest first by default, so the oldest is last |
-| `between:DD-MM-YYYY=DD-MM-YYYY` | Last changed within the range, both days inclusive |
-| `after:DD-MM-YYYY` / `before:DD-MM-YYYY` | Last changed on or after / strictly before a day |
-| `from:@{carbon:id}` | Created by that member |
-| `to:@{silicon:id}` | Explicitly shared with that member |
-| `for:@{id}` | Reachable by that member |
-| `contains:'term'` | Name or extracted content matches; `*` is a wildcard |
-| `has:'term'` | Extracted content matches |
-| `name:'term'` | Name matches |
-| `location:'private/cos:tos'` | Path prefix |
-| `is:X` | `file`, `folder`, a renderer, or an extension such as `md` |
-| `permissions:X` | The caller's own effective access: `read`, `write`, `update`, `delete`, `manage_permissions` |
+| 400 / 422 | Invalid input or incompatible parameters |
+| 401 | Missing, invalid, expired, or wrongly bound authentication |
+| 403 | Visible resource, insufficient authority |
+| 404 | Absent or hidden resource |
+| 406 | No shared API major |
+| 409 | Conflict, stale operation, or changed idempotent request |
+| 410 | Retired API major |
+| 413 | Request exceeds an applicable size limit |
+| 416 | Unsatisfiable file byte range |
+| 429 | Rate/capacity limit; honor Retry-After |
+| 503 | IAM, storage, or another dependency unavailable |
+| 507 | Organization or testing storage exhausted |
 
-The first segment of `@{...}` may name a principal kind; identifiers may
-themselves contain colons, so only that first segment is ever consumed.
-Filtering never returns anything the caller could not already see.
+## Organization folders and app isolation
 
 ```text
-GET /entries?filter=last:5 location:'private' (contains:'apple' or contains:'cat') is:md
+public/
+private/<carbon-or-silicon-id>/
+<tag-folder>/
+apps/<app-id>/public/
+apps/<app-id>/private/<carbon-or-silicon-id>/
 ```
 
-### `POST /entries`
+Public means readable within the organization. Anyone-with-link sharing is an independent explicit setting. Members may create content in the public container. Private roots remain hidden unless the viewer owns them or can traverse them to a shared descendant. Tag folders follow current IAM tags. An ancestor needed for traversal returns only safe navigation metadata and reachable descendants; access to one child never reveals its siblings.
 
-Creates a folder.
+The org base and private container do not accept file uploads. A new folder at the org base requires a public/private/tag boundary; nested folders inherit their parent's boundary. Reserved containers cannot be renamed, moved or deleted. Apps and app namespaces are materialized on first delegated use.
 
-- **Authentication:** Bearer.
-- **Required:** `name` and `Idempotency-Key`.
-- **Optional:** `parent_id` or `parent_path`, `root_type`, `tag`, and initial invitees.
-- **Returns:** The created folder entry.
+Every OBO action is restricted to `apps/<calling-app-id>/…`, even when the represented member is an organization owner. Inside that namespace the normal member permissions still apply. App origin metadata is attribution, not a substitute for path and user authorization. See [OBO](../obo.md).
 
-`root_type` is required only when creating at the organization base. A tag root
-also requires its IAM tag. Below an existing folder, the child inherits the
-parent's root type and permission boundary.
+## Listing, filtering and search
 
-The organization base contains the reserved Public, Private, and tag containers
-and any visible user-created typed folders. Without a parent, a new folder stays
-at that base: its `parent_id` is null and its path is its name. The type defines
-access, not placement. To create inside Public or your own Private folder, pass
-that destination explicitly. Existing folders are never relocated by this rule.
+`GET /entries` lists the organization base or a `parent_id`, with `limit` from 1 to 100 and an opaque `cursor`. Responses contain `items` and `next_cursor`. Continue until the cursor is null, including after a short page. `GET /entries/{id}` reads an entry. The permanent path endpoint resolves by organization-relative path, including traversal folders. `PATCH /entries/{id}` renames or moves; `DELETE /entries/{id}` moves the authorized subtree to the bin.
 
-Any current member can create a Public or Private root. A tag root requires
-current access to that tag's canonical space; an inaccessible or unknown tag
-returns `404`. Ordinary ownership, grants, tag rights, and administrator access
-apply to the new folder. Active sibling names must be unique, including reserved
-container names; a collision returns `409` without disclosing hidden metadata.
-
-Below the base the caller needs write access to the parent, and invitees must
-already belong to the organization. Two destinations are always refused:
-directly inside the Private container, and any folder assigned to another
-member — the latter is reported as `404`.
-
-### `GET /entries/{entry_id}`
-
-Returns metadata for one visible file or folder.
-
-- **Authentication:** Bearer.
-- **Returns:** Entry metadata and effective access.
-
-Reading metadata must still require visibility. Possessing an entry ID or permanent URL does not grant access.
-
-### `PATCH /entries/{entry_id}`
-
-Renames or moves an entry.
-
-- **Authentication:** Bearer.
-- **Input:** New `name`, new `parent_id`, or both.
-- **Returns:** Updated entry.
-
-The caller needs write access to the entry and destination folder. Moving an entry across Public, Private, or Tag boundaries requires permission recalculation and must not accidentally broaden access.
-
-### `DELETE /entries/{entry_id}`
-
-Moves an entry to the bin.
-
-- **Authentication:** Bearer.
-- **Returns:** `204 No Content`.
-
-Deletion is recoverable for 45 days and needs the `delete` right specifically;
-being able to update an entry is not enough. Recursive folder deletion
-preserves every descendant for recovery.
-
-### `GET /entries/{entry_id}/content`
-
-Streams the current file bytes for in-place rendering.
-
-- **Authentication:** Bearer.
-- **Optional header:** `Range`, as a single `bytes=` range.
-- **Returns:** The bytes, or `206 Partial Content` for a range.
-
-Briefcase relays the bytes itself rather than signing a provider URL, so every
-read stays bound to a current IAM identity and a permanent URL never becomes a
-bearer capability. Responses are hardened for untrusted content:
-`Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`,
-`X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`,
-`Referrer-Policy: no-referrer`, and `Cross-Origin-Resource-Policy: same-origin`.
-Range support is what lets a media player seek.
-
-Attachment responses add only `allow-downloads` to the CSP sandbox so browsers
-can save the file. Inline previews retain the stricter policy above; scripts,
-same-origin privileges, and network access are not enabled.
-
-### `GET /entries/{entry_id}/download`
-
-Streams the same bytes as an attachment, as `application/octet-stream`, for
-anyone with read access.
-
-### `GET /org/{org_id}/{path}`
-
-Serves the clean permanent URL, for example
-`/org/tos/private/cos:tos/top_secret/this_secret.md`.
-
-- **Authentication:** Bearer.
-- **Query:** Optional `disposition` of `inline` or `attachment`.
-- **Returns:** The entry and its effective access, or the file bytes when a disposition is requested.
-
-The organization segment must match `X-Org-ID`. Anything the caller cannot read
-answers `404`, so the URL is safe to share: a recipient without access sees
-exactly what they would see for a path that never existed, and can then request
-access.
-
-A folder shared only through something inside it resolves as a traversal view:
-`visibility` is `traversal`, the folder opens, and it lists exactly the entries
-the caller was given. Its owner, timestamps, and effective access are withheld,
-because being able to walk to a share is not the same as being a member of the
-folder. When nothing inside it remains accessible, the folder answers `404`
-like anything else the caller may not see.
-
-## Uploads
-
-### `POST /uploads`
-
-Uploads a file of any supported size in one request.
-
-- **Authentication:** Bearer.
-- **Content type:** `multipart/form-data`.
-- **Required:** binary `file`, `Idempotency-Key`, and exactly one of `parent_id` or `path`.
-- **Returns:** The created file entry, or the updated entry when the upload published a new version.
-
-The destination folder is named either by identifier or by the same path its
-permanent URL shows, which is how a client stores a file at an exact location.
-
-There is one upload endpoint because a client should not have to know how large
-"large" is. Briefcase stages the bytes, then decides internally: a file within
-the single-request limit goes to storage in one call, and anything above it is
-split into parts by the sizing formula, targeting roughly 1,000 parts clamped
-between 8 MiB and 5 GiB, up to the 5 TiB maximum. The provider multipart session is durable for backend cleanup and reconciliation. There is no public resumable-upload session or part API; clients must not assume they can resume an interrupted HTTP body from an arbitrary byte offset. A file
-beyond 5 TiB receives `413`.
-
-Uploading a name an active file already carries is how that file is updated:
-the bytes become its next version, the response is that same entry, and the
-history keeps the previous fifty versions. Creating a file needs write access
-on the folder; replacing one needs update access on the file itself. A folder
-of the same name is a conflict.
-
-Two organization limits apply: **100 GiB of uploads per UTC day** and **1 PiB
-of storage**, both configurable per organization. The daily figure counts
-uploaded bytes and returns at midnight UTC; the storage figure counts what is
-currently kept, so deleting content returns capacity as soon as the bytes are
-really gone — which is after the 45-day bin, not when the entry is binned.
-Restoring a historical version uploads nothing but does store a second copy, so
-it answers to the storage ceiling alone.
-
-An upload that does not fit is refused before its bytes are stored: a spent day
-answers `429` with `Retry-After` set to the seconds remaining until 00:00 UTC,
-and a full organization answers `507`. Concurrent uploads racing for the last
-of a limit serialize on the organization's counter row, so neither limit can be
-overshot.
-
-The two limits interact: a single file larger than the daily allowance can
-never be uploaded, whatever the 5 TiB per-file maximum allows, because no day
-has room for it.
-
-Because the whole file arrives in one request, a very large upload occupies a
-connection and temporary disk for its duration. `BRIEFCASE_UPLOAD_TIMEOUT_SECONDS`
-and the staging volume are sized for the largest file an operator expects.
-
-## Permissions
-
-### `GET /entries/{entry_id}/permissions`
-
-Lists explicit permission grants on an entry.
-
-- **Authentication:** Bearer.
-- **Returns:** Principal, conveyed rights, inheritance, grantor, and creation time.
-
-This returns explicit grants, not every effective permission derived from Public, Tag, ownership, ancestry, or administrator status.
-
-### `POST /entries/{entry_id}/permissions`
-
-Grants another organization member access.
-
-- **Authentication:** Bearer.
-- **Input:** Principal, a non-empty set of `read`, `write`, `update`, and `delete`, and whether the grant inherits.
-- **Returns:** Created permission grant.
-
-Every set implicitly includes `read`. The rights are independent: granting
-`update` does not allow deletion, and granting `write` does not allow renaming
-or replacing what already exists.
-
-Only the owner or an actor with permission-management authority may grant access. The principal must be a current Carbon or Silicon in the same organization.
-
-Briefcase resolves recipients through IAM's live, read-only membership directory
-using the caller's app token. Recipients do not need to sign into Briefcase first.
-The same lookup applies to initial folder invitees; missing, removed, or
-cross-organization members are rejected instead of using a stale local record.
-
-Granting a principal who already holds a grant amends that grant in place and
-returns it: the rights and inheritance become exactly what this request named.
-There is no separate edit operation, and widening access never has to pass
-through a revocation that would briefly remove it and tell the recipient their
-access was taken away.
-
-### `DELETE /entries/{entry_id}/permissions/{grant_id}`
-
-Revokes an explicit permission grant.
-
-- **Authentication:** Bearer.
-- **Returns:** `204 No Content`.
-
-Revocation removes that grant and any inherited access produced by it. Access derived independently from another grant, tag, Public visibility, ownership, or administrative rights remains.
-
-### `POST /permissions/effective`
-
-Reports what the caller may do on named files and folders.
-
-- **Authentication:** Bearer.
-- **Input:** `entry_ids`, `paths`, or both, naming at least one and at most 100 targets.
-- **Returns:** Effective access per readable target, plus the identifiers and paths that stayed unresolved.
-
-A target that does not exist and one the caller cannot read are both reported as
-unresolved, so a batch answer cannot be used to probe for hidden entries.
-
-## Notifications
-
-### `GET /notifications`
-
-Reads the central notification inbox.
-
-- **Authentication:** Bearer.
-- **Returns:** The twenty newest notifications, newest first, and `unread_count` for the badge.
-
-A notification is written in the same transaction as the change that caused it,
-so the inbox can never claim access that was rolled back or miss access that
-was committed. New notifications are `access_granted` and `access_revoked`. Historical
-`access_requested` and `access_request_decided` records remain readable, but
-requests can no longer be created or decided. Each carries the acting
-member, the rights involved, and a snapshot of the entry — name, path, kind, and
-permanent URL — as it was at that moment, so the recipient can still read their
-own history after losing access to it.
-
-### `POST /notifications/read`
-
-Marks the entire inbox read.
-
-- **Authentication:** Bearer.
-- **Returns:** The inbox afterwards, with `unread_count` at zero.
-
-## History
-
-### `GET /entries/{entry_id}/activity`
-
-Reads the retained action history of one entry.
-
-- **Authentication:** Bearer.
-- **Returns:** Up to the last hundred recorded actions, newest first.
-
-Each record names the stable action (`entry.file_created.v1`,
-`entry.content_read.v1`, `entry.downloaded.v1`, `entry.metadata_updated.v1`,
-`entry.subtree_deleted.v1`, `entry.subtree_restored.v1`, and so on), the actor
-who performed it, the application that acted on their behalf when there was
-one, and when it happened.
-
-## Applications
-
-Calling applications should start with the [OBO guide](../obo.md), which
-collects the prerequisites, the exchange, and every operation below in one
-place.
-
-### `POST /obo/files`
-
-Creates a file for a member on behalf of another application using the
-compatible one-shot raw-byte upload contract.
-
-- **Authentication:** `X-IAM-OBO-Access-Proof` and `X-App-ID`.
-- **Content type:** `application/octet-stream`; the body is the raw file bytes.
-- **Returns:** Created file entry.
-
-Register the endpoint in IAM as `briefcase.files.create` at the path
-`/api/v1/obo/files`, with metadata keys `path`, `name`, and `content_type`.
-Exchange the proof over the SHA-256 digest of the exact bytes, then send those
-bytes here. Because the destination travels as proof-bound metadata rather than
-a header or query parameter, an application cannot redirect a proof it
-legitimately obtained to another destination.
-
-An empty `path` stores the file in the application's own folder,
-`private/{actor}/apps/{app_id}`, created on first use and reserved from then
-on. Any other path must name an existing folder the represented member may add
-content to; their own permissions still decide. The proof identifier doubles as
-the idempotency key. The raw endpoint has a 5 TiB size ceiling, but its proof
-must remain valid until verification after the complete body arrives. Use the
-[staged protocol](delegated-uploads.md) for large, slow or recoverable uploads.
-A name an active file already carries publishes that file's next version. The
-organization's upload allowances apply exactly as they do to a member's own
-upload.
-
-### Delegated JSON operations
-
-These operations use `POST` with `application/json`. Register each fixed path
-and endpoint below with an **empty IAM metadata schema** (`{}`). Serialize the
-complete body once, hash those exact bytes, obtain a fresh proof, and send the
-same bytes. `X-IAM-OBO-Access-Proof` and `X-App-ID` are required; `X-Org-ID` is
-optional but must agree with IAM. In a sandbox, also send the Briefcase root
-for the plane paired with the proof's IAM environment.
-
-| Endpoint ID | Path | JSON body | Success |
-| --- | --- | --- | --- |
-| `briefcase.folders.create` | `/obo/folders/create` | `operation_id`, `parent_path`, `name` | `201` entry |
-| `briefcase.entries.list` | `/obo/entries/list` | Optional `parent_id` or `path`, `filter`, `cursor`, `limit` | `200` entry page |
-| `briefcase.files.read` | `/obo/files/read` | `entry_id`; optional `range`, `download` | `200`/`206` file bytes |
-| `briefcase.entries.trash` | `/obo/entries/trash` | `operation_id`, `entry_id` | `204` |
-
-Folder creation accepts a single child name. An empty `parent_path` selects
-`private/{actor}/apps/{app_id}`; another path must already exist and be writable.
-The created folder records the originating application. Listing uses the
-ordinary member endpoint's pagination and filters, including traversal-only
-folders; without a parent it lists roots or searches the visible tree when a
-filter is present. The page limit is 1–100, default 100.
-
-File reads use only the range and disposition in the proof-bound JSON body.
-For example, `{"entry_id":"<UUID>","range":"bytes=0-1023","download":true}`
-requests an attachment containing that byte range. The HTTP `Range` header and
-query parameters cannot override the body. Malformed or multi-range syntax
-falls back to the complete file, as on ordinary reads. All content retains
-the normal sandbox CSP, `nosniff`, and private no-store delivery headers.
-
-`operation_id` is a required non-nil caller-generated UUID for folder creation
-and trash. Keep it and the logical input unchanged after an uncertain response,
-but mint a fresh proof for every attempt; never replay the consumed proof.
-Mutation results are scoped by organization, represented actor, originating
-application and operation. Current authorization is checked before replay.
-An old successful trash operation cannot delete an entry restored since then.
-
-All normal permissions still apply. An application may trash only content it
-created, and the represented member must have delete authority across the
-subtree. Missing and unreadable targets remain indistinguishable. The bin's
-normal retention and recovery rules apply; this is not permanent deletion.
-
-Each proof is valid for at most 60 seconds and depends on the initiating IAM
-token, membership and session remaining active at verification. A consumed
-authorization snapshot is never reused for another call. When that authority
-expires or is revoked, obtain fresh initiator authorization before continuing;
-ending a recording session by itself does not extend or revoke IAM authority.
-
-## Search
-
-### `GET /search`
-
-Searches visible filenames and supported document contents.
-
-- **Authentication:** Bearer.
-- **Query:** `q` and optional limit from 1 to 20.
-- **Returns:** Between zero and twenty ranked, permission-filtered results.
-
-Filename matches rank first, then documents by how many content hits they have,
-falling off from there. `content_hits` is the real number of matching
-occurrences in the extracted text, not a flag. Authorization is applied again in
-the search query, so permission changes do not rely on duplicating content into
-ACL-specific indexes.
-
-A filename is searched by the words inside it: `notes` finds `notes.md`,
-because the separators a filename uses are split on both sides of the
-comparison. Content search covers files that already are text — anything under
-`text/*` plus the structured text types such as JSON, YAML, and XML — up to the
-first megabyte of each. Other formats are stored and served identically and are
-recorded as `unsupported` in the index rather than left waiting for an
-extractor that does not exist yet.
-
-## File versions
-
-### `GET /entries/{entry_id}/versions`
-
-Lists up to the last 50 versions of a file.
-
-- **Authentication:** Bearer.
-- **Returns:** Version ID, number, size, author, and time.
-
-The caller must be able to read the current file. Historical versions inherit
-the current entry's authorization boundary and do not carry independent ACLs.
-
-### `POST /entries/{entry_id}/versions/{version_id}/restore`
-
-Restores an older version.
-
-- **Authentication:** Bearer.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Updated file entry.
-
-Restoration does not erase later history. It copies the selected content into a new current version and records the restoring actor.
-The v1 contract is synchronous. Deployments therefore give this route a
-separate, configurable deadline and concurrency budget; large cross-target
-restores stream one bounded multipart range at a time and may keep the request
-open substantially longer than an ordinary upload.
-
-## Usage
-
-### `GET /usage`
-
-Reports what the organization is actually consuming.
-
-- **Authentication:** Bearer.
-- **Returns:** Exact byte counts for storage and for today's uploads, each with its limit and what remains.
-
-Every figure is a byte count, never a percentage, so a client renders whichever
-unit or proportion it prefers. `storage.used_bytes` is what every retained
-version currently weighs, binned entries included, because those bytes are
-still stored; `daily_uploads.resets_at` is the next midnight UTC.
-
-Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and
-either may be set for one organization by writing its row — there is no API for
-raising a limit, deliberately, because that is an operator decision rather than
-a tenant one:
-
-```sql
-INSERT INTO briefcase.organization_usage (org_id, daily_window, storage_limit_bytes)
-VALUES ('tos', (clock_timestamp() AT TIME ZONE 'UTC')::date, 2251799813685248)
-ON CONFLICT (org_id) DO UPDATE SET storage_limit_bytes = EXCLUDED.storage_limit_bytes;
-```
-
-A null limit means the platform default, so an organization that never asked
-for anything special follows the default if it later changes.
-
-## Bin
-
-### `GET /bin`
-
-Lists deleted entries visible to the caller, newest deletion first.
-
-- **Authentication:** Bearer.
-- **Query:** Optional `cursor` and `limit` from 1 to 100.
-- **Returns:** A page of deleted entries and the cursor for the next one.
-
-The owner sees their recoverable entries. Administrators see entries allowed by
-administrative policy. Deleted entries remain recoverable for 45 days.
-
-A binned entry still occupies the organization's storage, because its bytes are
-still stored — that is what makes it recoverable. The space returns when the
-entry is permanently discarded at the end of the 45 days, and `GET /usage`
-reports the larger figure until then.
-
-### `POST /bin/{entry_id}/restore`
-
-Restores a deleted entry.
-
-- **Authentication:** Bearer.
-- **Idempotency:** Optional `Idempotency-Key`. A completed retry must match the
-  original actor, originating application, entry and request, and still requires
-  current restore permission. It returns current metadata without restoring or
-  recording the action a second time. An old restore key cannot undo a later deletion.
-- **Returns:** Restored entry.
-
-If the original parent no longer exists or cannot accept the entry, Briefcase
-uses the actor's Private folder and chooses a deterministic collision-safe name.
-A restore targets a recoverable deletion-batch root, not a child deleted as part
-of the same subtree. A folder restore atomically restores its retained descendants and permission
-structure. Once the persisted 45-day `purge_after` deadline has elapsed, the
-entry is no longer restorable and is returned as not found.
-
-## Organization storage
-
-### `PUT /storage/configuration`
-
-Configures an organization-provided S3 bucket.
-
-- **Authentication:** Bearer token.
-- **Caller:** Organization owner or authorized administrator.
-- **Input:** Bucket, region, role ARN, prefix, AWS account, encryption mode, and optional KMS key.
-- **Returns:** Configuration validation status.
-
-Briefcase assumes the configured role and performs a temporary create, read, update, and delete test. The organization bucket becomes active only when all checks succeed. IAM credentials or static AWS secret keys must not be accepted.
-
-Send an `Idempotency-Key` and retain it with the exact configuration to recover
-an uncertain result. Reusing a key with different input returns a conflict.
-A completed failed probe is also replayed: after fixing external bucket or role
-settings, use a new key to perform a new validation. The status body distinguishes
-`configured` from `failed`; HTTP 200 alone does not mean the bucket was activated.
-
-## Complete flows
-
-### Upload, of any size
+The filter language applies only to authorized data. Quote a complete expression in shells:
 
 ```text
-Name the destination by parent_id or path
-  -> POST /uploads with the whole file
-  -> Briefcase sizes it and picks single-request or multipart storage
-  -> store the returned permanent URL
-  -> render with GET /entries/{id}/content, save with /download
+location:private/* is:md (contains:apple or contains:cat) last:5
+is:file not is:archive permissions:update
 ```
 
-### Update a file
+| Predicate | Meaning |
+| --- | --- |
+| `is:file`, `is:folder`, `is:directory` | Entry kind |
+| `is:image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported` | Renderer category |
+| `is:md`, `is:pdf` | Exact extension fallback, up to 16 alphanumeric characters |
+| `has:term` | Extracted document content |
+| `contains:term` | Filename or extracted content |
+| `name:term` | Filename only |
+| `location:private/*` | Anchored path prefix and wildcard |
+| `permissions:read`, `write`, `update`, `delete`, `manage_permissions` | The caller's effective capability |
+
+Boolean expressions support implicit AND, `or`, `not`, leading `-`, and parentheses. `last:`, `first:` and `sort:` are top-level modifiers. Maximum expression length is 1,024 bytes, with 32 predicates and a take limit of 100. Date filters accept `between:DD-MM-YYYY=DD-MM-YYYY` (inclusive), `after:DD-MM-YYYY`, and `before:DD-MM-YYYY`. `from:@{ID}` selects creators, `to:@{ID}` explicit recipients, and `for:@{ID}` accessible-to members. `first:N` and `last:N` select chronological windows; `sort:oldest` / `sort:newest` choose ordering. Unsupported syntax returns validation errors.
+
+`GET /search?q=…` returns at most 20 relevant visible files from names and extracted document text. Extraction is asynchronous; a new file's name is immediately available while extracted content may arrive later.
+
+## Upload and download
+
+`POST /uploads` is multipart form data with one `file` and exactly one destination: `parent_id` or `path`. The client submits one upload; the server chooses storage transfer internally. Files through **100 MiB inclusive** use a single S3 upload. Larger files use S3 multipart with:
 
 ```text
-POST /uploads to the same folder with the same file name
-  -> the bytes become that file's next version
-  -> the same entry and permanent URL come back
-  -> GET /entries/{id}/versions lists the history, up to fifty versions
+part_size = clamp(round_up_to_MiB(ceil(file_size / 1000)), 8 MiB, 5 GiB)
+part_count = ceil(file_size / part_size)
 ```
 
-### Application file creation
+The server stages and hashes incoming bytes, validates storage constraints, and publishes atomically. Uploading an existing file name updates that file ID in place; replacing content requires update authority independently of create authority. A same-name folder conflicts. All immutable versions remain retained.
 
-```text
-Discover briefcase.files.create in IAM
-  -> hash the exact bytes
-  -> exchange a proof with {path, name, content_type} metadata
-  -> POST /obo/files with the bytes
-  -> Briefcase verifies once, then creates the file for the member
-```
+`GET /entries/{id}/content` streams a file for preview; `GET /entries/{id}/download` downloads a file or a **tar.zst folder archive**. Folder archives contain only readable files and required traversal directories. Compression and S3 reads are backpressured; there is no whole-file or whole-archive buffer. Four simultaneous archives per API process bound compression and blocking-thread usage; additional requests receive a retryable capacity response. Disconnecting stops compression. An archive walks live state: concurrent deletion or revoked access can interrupt it. Treat any interrupted response as an incomplete download.
 
-## IAM discovery and session inspection
+File delivery supports one byte range for seeking, returns 206 or 416 where appropriate, and stays on the Briefcase origin. Folder archives reject Range. Content is served with safe content disposition, no-store, nosniff, and a sandbox policy; provider URLs and storage credentials never reach clients. The web UI renders supported formats in its sandboxed preview pipeline and offers download for unsupported formats. Folder downloads stay compressed; opening an archive does not execute its contents.
 
-`GET /api/v1/iam` returns public `app_id`, `test_environment_id`, and
-`iam_environment_id`, without a bearer or organization header. Production
-returns null environment IDs; an optional `X-Testing-Environment-Key` selects
-the paired test identity. No secret is returned.
+## Invitations, links and logs
 
-`GET /api/v1/auth/status` verifies an optional Bearer access token online with
-IAM, without requiring `X-Org-ID`. It returns `authenticated`, nullable `actor`
-(`principal_id`, `type`, nullable `public_id`), current granted `organizations`,
-and nullable Unix `expires_at`. Missing or inactive member tokens return HTTP
-200 with `authenticated: false` and no identity. An active session can have no
-organization grants; its principal UUID and Carbon/Silicon type are still
-returned. IAM outages and malformed authority remain errors. Both responses
-use `Cache-Control: no-store`. See [OpenAPI](../../openapi.yaml) for schemas.
+See [Sharing and audit logs](../sharing.md) for complete behavior, Postmark setup, email-directory limitations and examples.
+
+- `GET/POST /entries/{id}/invitations`: member ID, verified email or dynamic IAM tag.
+- `DELETE /entries/{id}/invitations/{grant_id}`: revoke a grant.
+- `GET/PUT /entries/{id}/link-access`: inspect or set anonymous read/download access.
+- `GET /public/{org}/{path}`: anonymous metadata, folder listing, inline file, or download.
+- `GET /entries/{id}/logs`: preceding 365 days, paginated, including descendant folder changes.
+- `GET /entries/{id}/activity`: latest 100 events.
+
+The explicit member-grant endpoints `/entries/{id}/permissions` remain part of v1 for typed member-only callers. Invitations add email/tag resolution. Effective access can be inspected in bulk with `POST /permissions/effective`, for up to 100 entry IDs and/or paths. Delete and manage-permission capabilities belong to the creator or organization administration and cannot be granted through invitations.
+
+The notification inbox returns the latest 20 notifications and an unread count. `POST /notifications/read` marks the entire inbox read. Durable email delivery is asynchronous; the permission grant does not depend on Postmark availability.
+
+## Versions, bin and storage
+
+`GET /entries/{id}/versions` returns up to 100 immutable versions and `next_cursor`. Every version reports its monotonic number, SHA-256, byte length, creator, timestamp and source. `POST /entries/{id}/versions/{version_id}/restore` copies that content into a new current version. It requires update authority, an idempotency key and quota capacity.
+
+`GET /bin` is paginated. Files and folders remain recoverable for **45 days**. `POST /bin/{id}/restore` restores a deletion-batch root and its retained subtree atomically, rechecking current authority and destination constraints. The worker deletes provider objects only after the recovery window and durable cleanup checks; old active versions are never pruned by count.
+
+Default per-organization limits are **100 GiB uploaded per UTC day** and **1 PiB total storage**. They are configurable per organization in PostgreSQL. `GET /usage` reports actual consumed and allowed bytes, including retained versions. Reservations and concurrent uploads count toward quota before publication. The daily window resets at midnight UTC.
+
+Organization admins can `PUT /storage/configuration` with bucket, region, role ARN, prefix, account ID and encryption mode. Briefcase assumes the role and performs a temporary create/read/update/delete probe before activating the bucket. Use a new operation key after correcting a failed configuration. Static AWS access keys are not accepted from clients.
+
+## Operational surfaces
+
+Host-root `GET /healthz` checks liveness; `GET /readyz` checks configured database readiness. Host-root `POST /webhook/` receives IAM-signed events. Verify timestamp, signature/key version, exact raw body and event replay rules; see [IAM integration](../iam-integration.md). Internal S3 multipart operations, cleanup controls and worker leases are not public client APIs.

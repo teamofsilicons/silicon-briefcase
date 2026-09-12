@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::{
-        Multipart, Path, State,
+        Multipart, Path, Query, State,
         multipart::{Field, MultipartRejection},
         rejection::{JsonRejection, PathRejection},
     },
@@ -36,7 +36,7 @@ use super::super::{
     delivery,
     dto::{
         BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
-        EncryptionModeDto, EntryDto, FileVersionPageDto,
+        EncryptionModeDto, EntryDto, FileVersionPageDto, PageQuery,
     },
     extract,
     mapping::metadata_error,
@@ -90,6 +90,16 @@ pub(crate) async fn serve(
     entry_id: EntryId,
     intent: ContentIntent,
 ) -> Result<Response, AppError> {
+    if matches!(intent, ContentIntent::Download) {
+        let entry = state
+            .metadata
+            .visible_entry(context, entry_id)
+            .await
+            .map_err(metadata_error)?;
+        if entry.is_folder() {
+            return super::archive::serve(state, context, entry_id, headers).await;
+        }
+    }
     let range = delivery::requested_range(headers)?;
     let delivery = extract::scoped(
         context,
@@ -155,6 +165,7 @@ pub(crate) async fn list_versions(
     State(state): State<AppState>,
     headers: HeaderMap,
     path: Result<Path<Uuid>, PathRejection>,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<FileVersionPageDto>, AppError> {
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
@@ -166,9 +177,8 @@ pub(crate) async fn list_versions(
             &context,
             &ListVersionsQuery {
                 entry_id,
-                page: PageRequest::new(None, 50).map_err(|_| AppError::Internal {
-                    category: "version_page_limit",
-                })?,
+                page: PageRequest::new(query.cursor, query.limit.unwrap_or(100))
+                    .map_err(|_| AppError::validation("invalid_pagination"))?,
             },
         ),
     )
@@ -176,6 +186,7 @@ pub(crate) async fn list_versions(
     .map_err(metadata_error)?;
     Ok(Json(FileVersionPageDto {
         items: super::super::mapping::ResponseMapper::versions(page.items)?,
+        next_cursor: page.next_cursor,
     }))
 }
 

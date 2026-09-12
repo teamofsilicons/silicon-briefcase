@@ -213,7 +213,7 @@ fn push_content_match(builder: &mut QueryBuilder<Postgres>, term: &GlobTerm) {
 fn push_shared_with(builder: &mut QueryBuilder<Postgres>, selector: &ActorSelector) {
     builder.push(
         "EXISTS (SELECT 1 FROM briefcase.entry_closure AS shared_path \
-                   JOIN briefcase.permission_grants AS shared_grant \
+                   JOIN briefcase.effective_permission_grants AS shared_grant \
                      ON shared_grant.org_id = shared_path.org_id \
                     AND shared_grant.entry_id = shared_path.ancestor_id \
                   WHERE shared_path.org_id = entry.org_id \
@@ -252,7 +252,7 @@ fn push_accessible_to(builder: &mut QueryBuilder<Postgres>, selector: &ActorSele
                        AND reader_tag.tag_id = entry.tag_id)) \
              OR EXISTS ( \
                     SELECT 1 FROM briefcase.entry_closure AS reader_path \
-                      JOIN briefcase.permission_grants AS reader_grant \
+                      JOIN briefcase.effective_permission_grants AS reader_grant \
                         ON reader_grant.org_id = reader_path.org_id \
                        AND reader_grant.entry_id = reader_path.ancestor_id \
                      WHERE reader_path.org_id = entry.org_id \

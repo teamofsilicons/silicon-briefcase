@@ -2,6 +2,7 @@
 
 mod cleanup;
 mod delegated_cleanup;
+mod email;
 mod extraction;
 mod maintenance;
 mod outbox;
@@ -114,6 +115,7 @@ impl WorkerRuntime {
     where
         O: ObjectStore + ?Sized,
     {
+        let email = email::Sender::from_environment()?;
         let mut poll_timer = interval(self.settings.poll_interval);
         let mut maintenance = interval(self.settings.maintenance_interval);
         poll_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -133,6 +135,7 @@ impl WorkerRuntime {
                 _ = poll_timer.tick() => {
                     if let Err(error) = outbox::process_batch(
                         pool,
+                        &email, false,
                         &self.settings,
                         self.batch_size,
                         self.lease_duration_millis,
@@ -146,6 +149,7 @@ impl WorkerRuntime {
                     if let Some(test_pool) = test_pool
                         && let Err(error) = outbox::process_batch(
                             test_pool,
+                            &email, true,
                             &self.settings,
                             self.batch_size,
                             self.lease_duration_millis,

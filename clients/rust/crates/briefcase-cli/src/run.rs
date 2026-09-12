@@ -90,7 +90,43 @@ type Result<T> = std::result::Result<T, CliError>;
 /// # Errors
 ///
 /// Returns whatever stopped the command, carrying the exit code it deserves.
-pub async fn run(cli: Cli) -> Result<()> {
+pub async fn run(mut cli: Cli) -> Result<()> {
+    if let Some(secret) = cli.global.app_secret.take() {
+        let state = StateDirectory::locate()?;
+        let saved = state.configuration()?;
+        let profile_name = cli
+            .global
+            .profile
+            .clone()
+            .unwrap_or_else(|| saved.current_profile.clone());
+        let profile = saved.profiles.get(&profile_name);
+        let url = deployment_url(&cli.global, profile);
+        let environment_key = EnvironmentKey::new(secret)?;
+        let probe = Client::new_unchecked(
+            Config::for_sign_in(&url)?
+                .with_environment(environment_key.clone())
+                .with_auto_update(false),
+        )?;
+        let environment = probe.current_testing_environment().await?;
+        let _lock = state.lock_credentials()?;
+        let mut credentials = state.credentials()?;
+        credentials.set_testing_environment_key(&profile_name, environment.id, environment_key);
+        let org = cli
+            .global
+            .org
+            .clone()
+            .or_else(|| profile.map(|p| p.org.clone()))
+            .unwrap_or_default();
+        let scope = if org.is_empty() {
+            scope_for_unscoped(&url)?
+        } else {
+            scope_for(&url, &org)?
+        };
+        credentials.set_credential_scope(&profile_name, Some(environment.id), scope);
+        state.save_credentials(&credentials)?;
+        cli.global.test = Some(environment.id);
+    }
+
     let output = Output::new(cli.global.json);
     match cli.command {
         Command::Login(args) => match args.command {
@@ -111,12 +147,23 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Mv(args) => move_entry(&cli.global, &args, output).await,
         Command::Rm(args) => remove(&cli.global, &args, output).await,
         Command::Bin(command) => bin(&cli.global, &command, output).await,
-        Command::Versions(args) => versions(&cli.global, &args, output).await,
+        Command::Versions { target, cursor } => {
+            versions(&cli.global, &target, cursor.as_deref(), output).await
+        }
         Command::Restore(args) => restore_version(&cli.global, &args, output).await,
         Command::History(args) => history(&cli.global, &args, output).await,
+        Command::Logs { target, cursor } => {
+            let client = connect(&cli.global).await?;
+            let id = entry_id(&client, &target).await?;
+            output.json(&client.logs(id, cursor.as_deref()).await?);
+            Ok(())
+        }
+        Command::Link { target, enabled } => link(&cli.global, &target, enabled, output).await,
         Command::Share(args) => share(&cli.global, &args, output).await,
         Command::Unshare(args) => unshare(&cli.global, &args, output).await,
-        Command::Shares(args) => shares(&cli.global, &args, output).await,
+        Command::Shares { target, cursor } => {
+            shares(&cli.global, &target, cursor.as_deref(), output).await
+        }
         Command::Access(args) => access(&cli.global, &args.targets, output).await,
         Command::Inbox(args) => inbox(&cli.global, args.read, output).await,
         Command::Usage => usage(&cli.global, output).await,
@@ -1241,10 +1288,13 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
 async fn get(global: &GlobalArgs, args: &GetArgs, output: Output) -> Result<()> {
     let client = connect(global).await?;
     let entry = resolve_entry(&client, &args.target).await?;
-    let destination = args
-        .output
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from(&entry.name));
+    let destination = args.output.clone().unwrap_or_else(|| {
+        std::path::PathBuf::from(if entry.entry_type == briefcase_client::EntryType::Folder {
+            format!("{}.tar.zst", entry.name)
+        } else {
+            entry.name.clone()
+        })
+    });
     let written = client.download_to_file(entry.id, &destination).await?;
     if output.is_json() {
         output.json(&serde_json::json!({
@@ -1417,11 +1467,23 @@ async fn list_every_bin_entry(
     }
 }
 
-async fn versions(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<()> {
+async fn versions(
+    global: &GlobalArgs,
+    target: &Target,
+    cursor: Option<&str>,
+    output: Output,
+) -> Result<()> {
     let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    let versions = client.versions(id).await?;
-    output.versions(&versions);
+    let id = entry_id(&client, target).await?;
+    let versions = client.versions_page(id, cursor).await?;
+    if output.is_json() {
+        output.json(&versions);
+    } else {
+        output.versions(&versions.items);
+        if let Some(cursor) = versions.next_cursor {
+            output.note(&format!("More versions available: {cursor}"));
+        }
+    }
     Ok(())
 }
 
@@ -1476,49 +1538,119 @@ async fn history(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Resu
 }
 
 async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    let mut grant = NewGrant::new(args.principal.0.clone(), args.access.0.clone());
-    if args.inherit {
-        grant = grant.inheriting();
-    }
-    let created = client.grant(id, &grant).await?;
-    if output.is_json() {
-        output.json(&created);
-    } else {
-        output.note(&format!(
-            "{} may now {} {}{}",
-            created.principal,
-            created
-                .access
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-            args.target,
-            if created.inherit {
-                " and everything inside it"
-            } else {
-                ""
-            }
+    let (kind, value) = args
+        .principal
+        .split_once(':')
+        .ok_or_else(|| CliError::usage("Use carbon:ID, silicon:ID, email:ADDRESS, or tag:TAG"))?;
+    let principal = match kind {
+        "carbon" => briefcase_client::Recipient::Carbon(value.into()),
+        "silicon" => briefcase_client::Recipient::Silicon(value.into()),
+        "email" => briefcase_client::Recipient::Email(value.into()),
+        "tag" => briefcase_client::Recipient::Tag(value.into()),
+        _ => return Err(CliError::usage("Unknown recipient type")),
+    };
+    if args
+        .access
+        .0
+        .contains(&briefcase_client::AccessRight::Delete)
+    {
+        return Err(CliError::usage(
+            "Delete is reserved for creators and organization administrators",
         ));
     }
+    let grant = briefcase_client::Invite {
+        principal,
+        access: args.access.0.clone(),
+        inherit: args.inherit,
+    };
+    let (client, scope, pending, id) =
+        sharing_mutation(global, &args.target, "invite", &grant).await?;
+    let invitation = client
+        .invite(
+            id,
+            &grant,
+            &IdempotencyKey::new(pending.idempotency_key.clone())?,
+        )
+        .await?;
+    finish_durable_mutation(&scope, &pending)?;
+    output.json(&invitation);
     Ok(())
 }
 
 async fn unshare(global: &GlobalArgs, args: &UnshareArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    client.revoke(id, args.grant_id).await?;
-    output.note("grant revoked; access from a tag, Public visibility, ownership or administration is untouched");
+    let (client, scope, pending, id) =
+        sharing_mutation(global, &args.target, "revoke-invitation", &args.grant_id).await?;
+    client
+        .revoke_invitation(
+            id,
+            args.grant_id,
+            &IdempotencyKey::new(pending.idempotency_key.clone())?,
+        )
+        .await?;
+    finish_durable_mutation(&scope, &pending)?;
+    output.note("Invitation revoked. Other inherited access still applies.");
     Ok(())
 }
 
-async fn shares(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<()> {
+async fn link(
+    global: &GlobalArgs,
+    target: &Target,
+    enabled: Option<bool>,
+    output: Output,
+) -> Result<()> {
+    let value = if let Some(enabled) = enabled {
+        let (client, scope, pending, id) =
+            sharing_mutation(global, target, "link-access", &enabled).await?;
+        let value = client
+            .set_link_access(
+                id,
+                enabled,
+                &IdempotencyKey::new(pending.idempotency_key.clone())?,
+            )
+            .await?;
+        finish_durable_mutation(&scope, &pending)?;
+        value
+    } else {
+        let client = connect(global).await?;
+        client.link_access(entry_id(&client, target).await?).await?
+    };
+    output.json(&value);
+    Ok(())
+}
+
+/// Bind a retry to its original entry ID even if the supplied path later moves.
+async fn sharing_mutation<T: Serialize>(
+    global: &GlobalArgs,
+    target: &Target,
+    operation: &str,
+    body: &T,
+) -> Result<(Client, String, PendingMutation, Uuid)> {
+    let (client, resolved) = connect_resolved(global).await?;
+    let fingerprint = request_fingerprint(
+        &serde_json::json!({"operation":operation,"target":target.to_string(),"body":body,"profile":resolved.profile_name,"url":resolved.url,"org":resolved.org,"testing_environment_id":resolved.environment_id}),
+    )?;
+    let scope = format!(
+        "entry:{operation}:{}:{fingerprint}",
+        plane_scope(&resolved.profile_name, resolved.environment_id)
+    );
+    let id = match pending_resource_id(&scope, &fingerprint)? {
+        Some(id) => id,
+        None => entry_id(&client, target).await?,
+    };
+    let pending = prepare_durable_mutation(&scope, &fingerprint, Some(id), None)?;
+    Ok((client, scope, pending, id))
+}
+
+async fn shares(
+    global: &GlobalArgs,
+    target: &Target,
+    cursor: Option<&str>,
+    output: Output,
+) -> Result<()> {
     let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    let grants = client.permissions(id).await?;
-    output.grants(&grants);
+    let id = entry_id(&client, target).await?;
+    let grants = client.invitations(id, cursor).await?;
+    output.json(&grants);
     Ok(())
 }
 
@@ -1770,26 +1902,13 @@ async fn environment(global: &GlobalArgs, command: &EnvCommand, output: Output) 
         EnvCommand::Create {
             name,
             description,
-            iam_environment_id,
-            iam_environment_key,
-            iam_app_id,
-            iam_app_secret,
+            iam_test_key,
         } => {
-            let iam_environment_key = match iam_environment_key {
-                Some(key) => IamEnvironmentKey::new(key.clone())?,
-                None => IamEnvironmentKey::new(prompt_secret("IAM environment root key: ")?)?,
-            };
-            let iam_app_secret = match iam_app_secret {
-                Some(secret) => IamApplicationSecret::new(secret.clone())?,
-                None => IamApplicationSecret::new(prompt_secret("IAM Application secret: ")?)?,
-            };
-            let mut input = TestingEnvironmentCreate::new(
-                name,
-                *iam_environment_id,
-                iam_environment_key,
-                iam_app_id.clone(),
-                iam_app_secret,
-            );
+            let mut input = TestingEnvironmentCreate::new(name);
+            input.iam_test_key = iam_test_key
+                .clone()
+                .map(IamEnvironmentKey::new)
+                .transpose()?;
             input.description.clone_from(description);
             let state = StateDirectory::locate()?;
             let credentials_lock = state.lock_credentials()?;
@@ -1974,40 +2093,6 @@ async fn environment(global: &GlobalArgs, command: &EnvCommand, output: Output) 
                 output.json(&value);
             } else {
                 println!("{}", value.key.expose_secret());
-            }
-        }
-        EnvCommand::RotateKey { environment_id } => {
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:rotate-key:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "rotate-testing-environment-key",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .rotate_testing_environment_key_with_key(*environment_id, &key)
-                .await?;
-            credentials.set_testing_environment_key(&profile, *environment_id, value.key.clone());
-            credentials.set_credential_scope(
-                &profile,
-                Some(*environment_id),
-                management_scope.clone(),
-            );
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            if output.is_json() {
-                output.json(&value);
-            } else {
-                println!("key: {}", value.key.expose_secret());
-                println!("the previous key stopped working");
             }
         }
         EnvCommand::PairIam {
@@ -2340,7 +2425,7 @@ mod tests {
     #[test]
     fn test_login_never_sends_a_stored_root_to_an_overridden_destination() {
         let environment_id = Uuid::from_u128(91);
-        let root = "B2345678901234567890123456789012";
+        let root = "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
         let mut credentials = Credentials::default();
         credentials.set_testing_environment_key(
             "work",
@@ -2377,7 +2462,10 @@ mod tests {
         credentials.set_testing_environment_key(
             "work",
             environment_id,
-            briefcase_client::EnvironmentKey::new("C2345678901234567890123456789012").unwrap(),
+            briefcase_client::EnvironmentKey::new(
+                "ask_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+            )
+            .unwrap(),
         );
         let saved = Profile {
             url: "https://briefcase.example/api/v1/".to_owned(),

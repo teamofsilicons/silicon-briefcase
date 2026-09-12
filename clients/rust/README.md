@@ -91,19 +91,10 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-Release 0.3 removes access-request creation and decisions from the SDK and CLI.
-Use direct permission grants (`grant` / `briefcase share`) to give a member access.
-Historical inbox records remain readable.
-
-The crates version together but publish separately, package first:
-
-```bash
-cargo publish -p briefcase-client
-cargo publish -p briefcase-cli
-```
-
-`briefcase-cli` depends on `briefcase-client` by both path and version, so the
-published CLI resolves the published package.
+Release 1.0.0 is the first official version. The client, CLI and gateway share
+one contract and include app namespaces, immutable versions, streamed folder
+downloads, invitations, public links, 365-day logs and IAM-secret testing.
+See the [official documentation](https://docs.briefcase.teamofsilicons.com/).
 
 ## Licence
 

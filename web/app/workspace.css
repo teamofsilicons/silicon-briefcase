@@ -768,3 +768,53 @@
     gap: 3px;
   }
 }
+
+.public-share {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  min-height: 100dvh;
+}
+.public-share > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 56px;
+}
+.public-share h1 {
+  font-size: clamp(28px, 4vw, 48px);
+  overflow-wrap: anywhere;
+  letter-spacing: -0.04em;
+}
+.public-share .download-link {
+  display: inline-flex;
+  gap: 8px;
+  margin: 16px 0 28px;
+}
+.public-files {
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.public-files > a {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.public-files span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.public-preview {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  margin-top: 20px;
+  border: 0;
+}
+.public-share iframe {
+  height: 70vh;
+  background: white;
+}

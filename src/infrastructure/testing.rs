@@ -45,12 +45,11 @@ type HmacSha256 = Hmac<Sha256>;
 const CREATE_OPERATION: &str = "testing_environment.create";
 const REPLACE_IAM_PAIRING_OPERATION: &str = "testing_environment.replace_iam_pairing";
 const UPDATE_OPERATION: &str = "testing_environment.update";
-const ROTATE_KEY_OPERATION: &str = "testing_environment.rotate_key";
 const DELETE_OPERATION: &str = "testing_environment.delete";
 const RESTORE_OPERATION: &str = "testing_environment.restore";
 // These apply only when evaluating active inactivity or assigning a new
 // retirement deadline. Existing deleted rows retain their recorded purge_after.
-const TESTING_ENVIRONMENT_IDLE_DAYS: i32 = 1;
+const TESTING_ENVIRONMENT_IDLE_DAYS: i32 = 30;
 const TESTING_ENVIRONMENT_RECOVERY_DAYS: i32 = 2;
 const CLEAN_OPERATION: &str = "testing_environment.clean";
 
@@ -533,6 +532,32 @@ impl TestingEnvironmentStore {
         &self.test
     }
 
+    /// Loads the IAM pairing for an authorized environment administrator.
+    /// # Errors
+    /// Returns authorization, missing environment, or encrypted-state errors.
+    pub async fn management_pairing(
+        &self,
+        context: &ExecutionContext,
+        id: Uuid,
+    ) -> Result<TestingEnvironmentIamPairing, AppError> {
+        let mut tx = self.management_transaction(context).await?;
+        ensure_creator_or_admin(&mut tx, context, id).await?;
+        let row:(Uuid,String,Vec<u8>,Vec<u8>,Vec<u8>,Vec<u8>)=sqlx::query_as("SELECT iam_environment_id,iam_app_id,iam_environment_key_ciphertext,iam_environment_key_nonce,iam_app_secret_ciphertext,iam_app_secret_nonce FROM briefcase.testing_environments WHERE org_id=briefcase.current_org_id() AND environment_id=$1 AND status IN ('active','deleted')")
+            .bind(id).fetch_optional(&mut *tx).await?.ok_or(AppError::NotFound)?;
+        let pairing = TestingEnvironmentIamPairing {
+            iam_environment_id: row.0,
+            iam_app_id: row.1,
+            iam_environment_key: self.decrypt(
+                &row.2,
+                &row.3,
+                &secret_aad(id, "iam-environment-key"),
+            )?,
+            iam_app_secret: self.decrypt(&row.4, &row.5, &secret_aad(id, "iam-app-secret"))?,
+        };
+        tx.commit().await?;
+        Ok(pairing)
+    }
+
     /// Resolves a Briefcase root key without recording activity.
     ///
     /// # Errors
@@ -543,7 +568,9 @@ impl TestingEnvironmentStore {
         &self,
         root_key: &SecretString,
     ) -> Result<TestingEnvironmentAccess, AppError> {
-        validate_root_key(root_key.expose_secret())?;
+        if !root_key.expose_secret().starts_with("ask_") || root_key.expose_secret().len() != 47 {
+            return Err(AppError::Unauthenticated);
+        }
         let digest = self.digest(b"briefcase-root", root_key.expose_secret().as_bytes())?;
         let row = sqlx::query_as::<_, RootLookupRow>(
             "SELECT * FROM briefcase.testing_environment_by_root_digest($1)",
@@ -795,8 +822,8 @@ impl TestingEnvironmentStore {
         &self,
         input: &TestingEnvironmentCreate,
     ) -> Result<PreparedEnvironmentCreate, AppError> {
-        let environment_id = Uuid::now_v7();
-        let root_key = Uuid::new_v4().simple().to_string();
+        let environment_id = input.iam_environment_id;
+        let root_key = input.iam_app_secret.expose_secret().to_owned();
         let root_digest = self.digest(b"briefcase-root", root_key.as_bytes())?;
         let iam_digest = self.digest(
             b"iam-environment",
@@ -929,6 +956,14 @@ impl TestingEnvironmentStore {
         validate_iam_pairing(pairing)?;
         require_environment_admin(execution)?;
         let prepared = self.prepare_iam_pairing(environment_id, pairing)?;
+        let root_digest = self.digest(
+            b"briefcase-root",
+            pairing.iam_app_secret.expose_secret().as_bytes(),
+        )?;
+        let (root_ciphertext, root_nonce) = self.encrypt(
+            &pairing.iam_app_secret,
+            &secret_aad(environment_id, "briefcase-root"),
+        )?;
         let mut fence =
             TestingEnvironmentExclusiveFence::acquire(&self.test, environment_id).await?;
         let mut transaction = self.management_transaction(execution).await?;
@@ -988,7 +1023,11 @@ impl TestingEnvironmentStore {
             "iam_environment_id = $2, iam_app_id = $3, ",
             "iam_environment_key_digest = $4, iam_environment_key_ciphertext = $5, ",
             "iam_environment_key_nonce = $6, iam_app_secret_ciphertext = $7, ",
-            "iam_app_secret_nonce = $8, version = version + 1 ",
+            "iam_app_secret_nonce = $8, version = version + 1, ",
+            "root_key_digest=CASE WHEN status='active' THEN $9 ELSE NULL END, ",
+            "root_key_ciphertext=CASE WHEN status='active' THEN $10 ELSE NULL END, ",
+            "root_key_nonce=CASE WHEN status='active' THEN $11 ELSE NULL END, ",
+            "key_generation=key_generation+1,key_rotated_at=clock_timestamp() ",
             "WHERE org_id = briefcase.current_org_id() AND environment_id = $1 ",
             "AND status IN ('active', 'deleted') ",
             "RETURNING ",
@@ -1002,6 +1041,9 @@ impl TestingEnvironmentStore {
         .bind(prepared.iam_nonce.as_slice())
         .bind(prepared.app_ciphertext)
         .bind(prepared.app_nonce.as_slice())
+        .bind(root_digest.as_slice())
+        .bind(root_ciphertext)
+        .bind(root_nonce.as_slice())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(map_environment_sql)?
@@ -1171,82 +1213,6 @@ impl TestingEnvironmentStore {
     ///
     /// Fails for insufficient authority, a missing or deleted environment, or
     /// when secure key generation, encryption, or persistence fails.
-    pub async fn rotate_key(
-        &self,
-        execution: &ExecutionContext,
-        environment_id: Uuid,
-        mutation: &MutationMetadata,
-    ) -> Result<TestingEnvironmentWithKey, AppError> {
-        let key = Uuid::new_v4().simple().to_string();
-        let digest = self.digest(b"briefcase-root", key.as_bytes())?;
-        let (ciphertext, nonce) = self.encrypt(
-            &SecretString::from(key.clone()),
-            &secret_aad(environment_id, "briefcase-root"),
-        )?;
-        let fence = TestingEnvironmentExclusiveFence::acquire(&self.test, environment_id).await?;
-        let mut transaction = self.management_transaction(execution).await?;
-        ensure_creator_or_admin(&mut transaction, execution, environment_id).await?;
-        let auth = execution.authorization();
-        let actor = auth.actor();
-        let authority_type = actor_type(actor.kind());
-        let mutation_identity = EnvironmentMutationIdentity {
-            authority_type,
-            authority_id: actor.id().as_str(),
-            origin_app_id: auth
-                .originating_application()
-                .map(crate::domain::actor::ApplicationId::as_str),
-            operation: ROTATE_KEY_OPERATION,
-            metadata: mutation,
-        };
-        match self
-            .claim_mutation::<TestingEnvironmentWithKey>(
-                &mut transaction,
-                &mutation_identity,
-                environment_id,
-            )
-            .await?
-        {
-            EnvironmentMutationClaim::Replay(response) => {
-                transaction.commit().await?;
-                fence.release().await?;
-                return Ok(response);
-            }
-            EnvironmentMutationClaim::Acquired(claimed_id) if claimed_id != environment_id => {
-                return Err(idempotency_error());
-            }
-            EnvironmentMutationClaim::Acquired(_) => {}
-        }
-        let row = sqlx::query_as::<_, EnvironmentRow>(concat!(
-            "UPDATE briefcase.testing_environments SET root_key_digest = $2, ",
-            "root_key_ciphertext = $3, root_key_nonce = $4, ",
-            "key_generation = key_generation + 1, key_rotated_at = clock_timestamp(), ",
-            "version = version + 1 WHERE org_id = briefcase.current_org_id() ",
-            "AND environment_id = $1 AND status = 'active' RETURNING ",
-            environment_columns!()
-        ))
-        .bind(environment_id)
-        .bind(digest.as_slice())
-        .bind(ciphertext)
-        .bind(nonce.as_slice())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(AppError::NotFound)?;
-        let response = TestingEnvironmentWithKey {
-            environment: environment(row)?,
-            key,
-        };
-        self.complete_mutation(
-            &mut transaction,
-            &mutation_identity,
-            environment_id,
-            &response,
-        )
-        .await?;
-        transaction.commit().await?;
-        fence.release().await?;
-        Ok(response)
-    }
-
     /// Soft-deletes an environment, destroying its Briefcase root key.
     ///
     /// # Errors
@@ -1329,7 +1295,8 @@ impl TestingEnvironmentStore {
         environment_id: Uuid,
         mutation: &MutationMetadata,
     ) -> Result<TestingEnvironmentWithKey, AppError> {
-        let key = Uuid::new_v4().simple().to_string();
+        let pairing = self.management_pairing(execution, environment_id).await?;
+        let key = pairing.iam_app_secret.expose_secret().to_owned();
         let digest = self.digest(b"briefcase-root", key.as_bytes())?;
         let (ciphertext, nonce) = self.encrypt(
             &SecretString::from(key.clone()),

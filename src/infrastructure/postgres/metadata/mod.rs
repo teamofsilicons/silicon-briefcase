@@ -2,7 +2,7 @@
 
 pub(super) mod common;
 pub(super) mod filter;
-pub(super) mod notifications;
+pub(in crate::infrastructure::postgres) mod notifications;
 
 use filter as filter_sql;
 
@@ -546,6 +546,9 @@ impl MetadataRepository for PostgresRepository {
             json!({
                 "renamed": command.name.is_some(),
                 "moved": destination_parent_id.is_some(),
+                "old_parent_id": current.entry.parent_id.map(EntryId::as_uuid),
+                "new_parent_id": destination_parent_id.map(EntryId::as_uuid),
+                "previous_path": current.entry.path.as_str(),
             }),
         )
         .await?;
@@ -838,7 +841,7 @@ impl MetadataRepository for PostgresRepository {
             "permission.granted.v1",
             "entry",
             &command.entry_id.to_string(),
-            json!({"grant_id": grant_id, "access": access_rights(command.access)}),
+            json!({"grant_id": grant_id, "principal":command.principal, "access": access_rights(command.access),"inherit":command.inherits_to_descendants}),
         )
         .await?;
         complete_idempotency(
@@ -1052,7 +1055,7 @@ impl MetadataRepository for PostgresRepository {
         builder.push(
             ")) OR EXISTS ( \
                  SELECT 1 FROM briefcase.entry_closure AS path \
-                   JOIN briefcase.permission_grants AS access_grant \
+                   JOIN briefcase.effective_permission_grants AS access_grant \
                      ON access_grant.org_id = path.org_id \
                     AND access_grant.entry_id = path.ancestor_id \
                   WHERE path.org_id = entry.org_id \
@@ -1106,6 +1109,7 @@ impl MetadataRepository for PostgresRepository {
     ) -> Result<Page<FileVersionView>> {
         #[derive(sqlx::FromRow)]
         struct VersionRow {
+            content_sha256: Option<String>,
             version_id: Uuid,
             version_number: i64,
             source: String,
@@ -1120,7 +1124,7 @@ impl MetadataRepository for PostgresRepository {
         let before = cursor.map_or(i64::MAX, |value| value.number);
         let mut request = begin(self, context).await?;
         let rows = sqlx::query_as::<_, VersionRow>(
-            "SELECT version_id, version_number, source, restored_from_version_id, size_bytes, \
+            "SELECT content_sha256, version_id, version_number, source, restored_from_version_id, size_bytes, \
                     created_by_type, created_by_id, created_at \
                FROM briefcase.entry_versions \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
@@ -1137,7 +1141,8 @@ impl MetadataRepository for PostgresRepository {
         let mut items = Vec::with_capacity(usize::from(query.page.limit));
         for row in rows.into_iter().take(usize::from(query.page.limit)) {
             let source = match row.source.as_str() {
-                "upload" => VersionSource::InitialUpload,
+                "upload" if row.version_number == 1 => VersionSource::InitialUpload,
+                "upload" => VersionSource::Upload,
                 "restore" => VersionSource::Restore {
                     source_version_id: VersionId::from_uuid(
                         row.restored_from_version_id
@@ -1148,6 +1153,7 @@ impl MetadataRepository for PostgresRepository {
                 _ => return Err(internal("invalid persisted version source")),
             };
             items.push(FileVersionView {
+                sha256: row.content_sha256,
                 id: VersionId::from_uuid(row.version_id).map_err(internal_data)?,
                 number: VersionNumber::new(
                     u64::try_from(row.version_number).map_err(internal_data)?,
@@ -1203,7 +1209,7 @@ impl MetadataRepository for PostgresRepository {
                     $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
                     OR EXISTS ( \
                         SELECT 1 FROM briefcase.entry_closure AS path \
-                        JOIN briefcase.permission_grants AS access_grant \
+                        JOIN briefcase.effective_permission_grants AS access_grant \
                           ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
                        WHERE path.org_id = entry.org_id AND path.descendant_id = entry.entry_id \
                          AND access_grant.principal_type = $3 AND access_grant.principal_id = $4 \
@@ -1813,7 +1819,7 @@ async fn lock_and_require_subtree_capability(
                         $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
                         OR EXISTS ( \
                             SELECT 1 FROM briefcase.entry_closure AS grant_path \
-                            JOIN briefcase.permission_grants AS access_grant \
+                            JOIN briefcase.effective_permission_grants AS access_grant \
                               ON access_grant.org_id = grant_path.org_id \
                              AND access_grant.entry_id = grant_path.ancestor_id \
                            WHERE grant_path.org_id = entry.org_id \

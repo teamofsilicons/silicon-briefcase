@@ -577,7 +577,7 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         .await?;
     assert_eq!(
         folder.entry.path.as_str(),
-        format!("private/{ACTOR_ID}/apps/{APPLICATION_ID}")
+        format!("apps/{APPLICATION_ID}/private/{ACTOR_ID}")
     );
     // Materializing it twice returns the same reserved folder.
     let again = repository
@@ -704,7 +704,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 None,
                 Vec::new(),
             )?,
-            &MutationMetadata::new(None, [1; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-1".to_owned())?),
+                [1; 32],
+            ),
         )
         .await?;
     let child = service
@@ -716,7 +719,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 None,
                 Vec::new(),
             )?,
-            &MutationMetadata::new(None, [2; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-2".to_owned())?),
+                [2; 32],
+            ),
         )
         .await?;
     let grant = service
@@ -728,14 +734,20 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 access: GrantedAccess::new([AccessRight::Update]),
                 inherits_to_descendants: true,
             },
-            &MutationMetadata::new(None, [3; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-3".to_owned())?),
+                [3; 32],
+            ),
         )
         .await?;
     service
         .soft_delete_entry(
             &owner,
             folder.entry.id,
-            &MutationMetadata::new(None, [4; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-4".to_owned())?),
+                [4; 32],
+            ),
         )
         .await?;
     let restore = MutationMetadata::new(
@@ -831,9 +843,9 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
             service
                 .restore_bin_entry(&application_member, command, &restore)
                 .await,
-            Err(MetadataServiceError::Conflict)
+            Err(MetadataServiceError::NotFound)
         ),
-        "an originating application has a separate idempotency authority"
+        "an OBO app cannot restore a file outside its namespace"
     );
     let other = service
         .create_folder(
@@ -844,7 +856,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 None,
                 Vec::new(),
             )?,
-            &MutationMetadata::new(None, [7; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-7".to_owned())?),
+                [7; 32],
+            ),
         )
         .await?;
     assert!(
@@ -867,7 +882,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
         .soft_delete_entry(
             &owner,
             folder.entry.id,
-            &MutationMetadata::new(None, [8; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-8".to_owned())?),
+                [8; 32],
+            ),
         )
         .await?;
     assert!(
@@ -897,7 +915,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 entry_id: folder.entry.id,
                 grant_id: grant.id(),
             },
-            &MutationMetadata::new(None, [10; 32]),
+            &MutationMetadata::new(
+                Some(IdempotencyKey::new("metadata-operation-10".to_owned())?),
+                [10; 32],
+            ),
         )
         .await?;
     assert!(

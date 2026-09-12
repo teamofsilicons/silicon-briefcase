@@ -223,7 +223,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
         )?;
         let versions_after_replay = client.versions(file.id).await?;
         ensure(
-            versions_after_replay.len() == 1,
+            versions_after_replay.items.len() == 1,
             "replaying an upload published another version",
         )?;
 
@@ -275,19 +275,21 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
         )?;
         let versions = client.versions(file.id).await?;
         ensure(
-            versions.len() == 2 && versions[0].number == 2 && versions[1].number == 1,
+            versions.items.len() == 2
+                && versions.items[0].number == 2
+                && versions.items[1].number == 1,
             "version history is not newest-first with versions one and two",
         )?;
 
         let restore_key = IdempotencyKey::new(format!("live-restore-{run_id}"))?;
         client
-            .restore_version_with_key(file.id, versions[1].id, &restore_key)
+            .restore_version_with_key(file.id, versions.items[1].id, &restore_key)
             .await?;
         client
-            .restore_version_with_key(file.id, versions[1].id, &restore_key)
+            .restore_version_with_key(file.id, versions.items[1].id, &restore_key)
             .await?;
         ensure(
-            client.versions(file.id).await?.len() == 3,
+            client.versions(file.id).await?.items.len() == 3,
             "restoring once (and replaying it) did not leave exactly three versions",
         )?;
         ensure(

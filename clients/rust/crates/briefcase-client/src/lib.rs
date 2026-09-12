@@ -76,13 +76,17 @@ pub mod models;
 mod requests;
 pub mod update;
 
-pub use api::ContentStream;
 pub use api::delegated;
 pub use api::delegated::{
-    DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedListEntries,
-    DelegatedManifest, DelegatedOperation, DelegatedReadFile, DelegatedReserveUpload,
-    DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadReservation, DelegatedUploadState,
-    DelegatedUploadStatus, OboProof, UploadCapability,
+    DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedInvite,
+    DelegatedLinkAccess, DelegatedListEntries, DelegatedManifest, DelegatedOperation,
+    DelegatedReadFile, DelegatedReserveUpload, DelegatedTrashEntry, DelegatedUploadQuery,
+    DelegatedUploadReservation, DelegatedUploadState, DelegatedUploadStatus, OboProof,
+    UploadCapability,
+};
+pub use api::{
+    ContentStream, Invitation, InvitationPage, Invite, LinkAccess, LogEvent, LogPage, PublicEntry,
+    PublicPage, Recipient,
 };
 pub use client::{Client, IdempotencyKey};
 pub use config::{
@@ -95,13 +99,13 @@ pub use media::{DEFAULT_CONTENT_TYPE, guess_content_type};
 pub use models::{
     AccessRight, ActivityEvent, ActorRef, ActorType, BucketConfiguration, BucketConfigurationState,
     BucketConfigurationStatus, DailyUsageMeasure, EffectiveAccess, EffectivePermission,
-    EncryptionMode, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, IamInfo, LoginActor,
-    LoginStatus, Notification, NotificationDecision, NotificationInbox, NotificationKind,
-    NotificationSubject, OrganizationUsage, PermissionGrant, PermissionInspection, RenderKind,
-    RootType, SearchResult, ServiceStatus, SessionActor, SessionTokens, TestingEnvironment,
-    TestingEnvironmentCleaning, TestingEnvironmentCreator, TestingEnvironmentKey,
-    TestingEnvironmentPage, TestingEnvironmentSelf, TestingEnvironmentStatus,
-    TestingEnvironmentWithKey, UsageMeasure,
+    EncryptionMode, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, FileVersionPage,
+    IamInfo, LoginActor, LoginStatus, Notification, NotificationDecision, NotificationInbox,
+    NotificationKind, NotificationSubject, OrganizationUsage, PermissionGrant,
+    PermissionInspection, RenderKind, RootType, SearchResult, ServiceStatus, SessionActor,
+    SessionTokens, TestingEnvironment, TestingEnvironmentCleaning, TestingEnvironmentCreator,
+    TestingEnvironmentKey, TestingEnvironmentPage, TestingEnvironmentSelf,
+    TestingEnvironmentStatus, TestingEnvironmentWithKey, UsageMeasure,
 };
 pub use requests::{
     ByteRange, Destination, EntryUpdate, ListEntries, NewFolder, NewGrant, OnBehalfOfUpload,

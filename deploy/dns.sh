@@ -38,6 +38,8 @@ usage() {
   sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+[ -f "$CONFIG" ] && { set -a; . "$CONFIG"; set +a; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --value) VALUE="${2:-}"; shift 2 ;;
@@ -49,8 +51,6 @@ while [ $# -gt 0 ]; do
     *) fail "unknown option: $1 (try --help)" ;;
   esac
 done
-
-[ -f "$CONFIG" ] && { set -a; . "$CONFIG"; set +a; }
 
 command -v python3 >/dev/null 2>&1 || fail 'python3 is required to merge the record set'
 [ -n "$VALUE" ] || fail 'pass --value with the load balancer DNS name'

@@ -7,8 +7,8 @@ use thiserror::Error;
 
 use super::ids::VersionId;
 
-/// Maximum number of current and historical versions retained per file.
-pub const MAX_RETAINED_VERSIONS: usize = 50;
+/// Versions remain available until the file is permanently purged from the bin.
+pub const RETAIN_ALL_VERSIONS: bool = true;
 
 /// A monotonically increasing, one-based file-version number.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -84,6 +84,8 @@ pub enum VersionNumberError {
 pub enum VersionSource {
     /// The file's initial small or multipart upload.
     InitialUpload,
+    /// A replacement upload became the next version of the same file.
+    Upload,
     /// A retained version copied into a new current version.
     Restore {
         /// Historical version whose bytes were copied.

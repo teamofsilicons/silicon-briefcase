@@ -48,7 +48,7 @@ digest for real content.
 }
 ```
 
-An empty parent path selects `private/{actor}/apps/{originating_app}`. Otherwise
+An empty parent path selects `apps/{originating_app}/private/{actor}`. Otherwise
 the folder must exist; delegated folder creation can build the hierarchy first.
 The resolved parent, current destination entry (if any), storage target and
 immutable IAM identity are frozen. A later occupant cannot inherit an old
@@ -76,7 +76,7 @@ Content-Type: application/octet-stream
 Content-Length: <exact reserved size>
 ```
 
-Use the same `X-Testing-Environment-Key` throughout a test-plane flow. Do not
+Use the same `X-Briefcase-App-Secret` throughout a test-plane flow. Do not
 send `Authorization`, `X-App-ID`, `X-IAM-OBO-Access-Proof`, content encoding or
 chunked transfer encoding. The SDK handles framing and the configured plane.
 

@@ -507,7 +507,7 @@ Resources:
 
             if ! printf '%s' "$APP_SECRET_JSON" | jq -e '
               [ .BRIEFCASE_IAM_APP_ID, .BRIEFCASE_IAM_APP_SECRET,
-                .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET,
+                .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET, .BRIEFCASE_POSTMARK_SERVER_TOKEN,
                 .BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY,
                 .BRIEFCASE_API_DATABASE_PASSWORD, .BRIEFCASE_WORKER_DATABASE_PASSWORD ]
               | all(type == "string" and length > 0 and . != "REPLACE_IN_AWS_CONSOLE")
@@ -630,7 +630,7 @@ Resources:
             EOF
             printf '%s' "$APP_SECRET_JSON" | jq -r '
               [ "BRIEFCASE_IAM_APP_SECRET=" + .BRIEFCASE_IAM_APP_SECRET,
-                "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET=" + .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET,
+                "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET=" + .BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET, .BRIEFCASE_POSTMARK_SERVER_TOKEN,
                 "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY=" + .BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY ]
               + (if ((.BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON // "") | length) > 0
                  then ["BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON=" + .BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON]
@@ -641,6 +641,7 @@ Resources:
             cat > /etc/silicon-briefcase/worker.env <<EOF
             BRIEFCASE_ENVIRONMENT=production
             BRIEFCASE_WORKER_DATABASE_URL=$WORKER_DB_URL
+            BRIEFCASE_PUBLIC_SITE_BASE_URL=$PUBLIC_SITE_BASE_URL
             BRIEFCASE_TEST_WORKER_DATABASE_URL=$TEST_WORKER_DB_URL
             BRIEFCASE_DATABASE_MAX_CONNECTIONS=8
             BRIEFCASE_DATABASE_MIN_CONNECTIONS=1
@@ -663,6 +664,7 @@ Resources:
             BRIEFCASE_LOG_FILTER=silicon_briefcase=info
             AWS_REGION=$REGION
             EOF
+            printf '%s' "$APP_SECRET_JSON" | jq -r '"BRIEFCASE_POSTMARK_SERVER_TOKEN=" + .BRIEFCASE_POSTMARK_SERVER_TOKEN' >> /etc/silicon-briefcase/worker.env
             chmod 0600 /etc/silicon-briefcase/api.env /etc/silicon-briefcase/worker.env
 
             # Host networking keeps the instance role reachable from inside the

@@ -65,7 +65,7 @@ You need all five of these. Briefcase fails closed on any of them.
    Application** (`oat_…`). A token issued to some other Application is refused.
 3. **`obo.issue` on that subject token.** Without it the exchange answers
    `403 obo_subject_token_forbidden`.
-4. **`roles.read` and `memberships.read` disclosure**, in both the subject token
+4. **`self.membership.read` and `self.identity.read` disclosure**, in both the subject token
    and Briefcase's currently approved scopes. Briefcase requires the delegated
    authorization snapshot and answers `403` when role or membership disclosure
    is missing. Never infer authority from an undisclosed (`null`) field.
@@ -81,7 +81,7 @@ All eight JSON operations use `POST`, `Content-Type: application/json`, and an
 empty IAM metadata object. Bind the complete serialized JSON body, not file
 bytes or a subset of its fields. Send `X-App-ID` and
 `X-IAM-OBO-Access-Proof`, never a bearer. A supplied `X-Org-ID` must agree with
-IAM; a sandbox also needs its separate Briefcase root key.
+IAM; a sandbox also needs its separate IAM testing app secret.
 
 | Operation | JSON inputs | Result |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ An empty creation `parent_path` selects the member's private app folder.
 Otherwise the parent must already exist and be writable. Create a hierarchy
 one folder at a time. Listing and reads retain ordinary permission filtering;
 range, disposition and pagination values are proof-bound JSON, not override
-headers or query parameters. See the [exact JSON API contract](api/README.md#delegated-json-operations).
+headers or query parameters. See the [exact JSON API contract](obo.md#json-controls-and-recoverable-uploads).
 
 For uploads, prepare the complete file manifest before requesting a proof:
 
@@ -196,7 +196,7 @@ Content-Type: application/octet-stream
 | `X-App-ID` | Your canonical `{org_id}>{handle}`. Must equal IAM's `issuer_app_id`. |
 | `X-IAM-OBO-Access-Proof` | The `access_proof` from the exchange; always starts `obo_`. |
 | `X-Org-ID` | Optional. If sent, it must agree with the Team IAM reports. |
-| `X-Testing-Environment-Key` | Sandbox only; see [Sandboxes](#sandboxes). |
+| `X-Briefcase-App-Secret` | Sandbox only; see [Sandboxes](#sandboxes). |
 | `Authorization` | **Never.** A bearer alongside a proof is `400 ambiguous_authentication`. |
 
 Returns `201` with the created entry.
@@ -242,18 +242,34 @@ before re-sending if a duplicate would matter.
 
 ## Where files go
 
-An empty `path` selects the represented member's private Application folder,
-`private/{actor}/apps/{app_id}`. It is created on first use and reserved from
-then on, so each Application keeps its own space inside the member's storage —
-this is the destination to use unless you have a reason not to.
+Every operation stays inside `apps/<calling-app-id>/`. The default empty
+destination is `apps/<app-id>/private/<represented-member-id>`; a public
+upload names `apps/<app-id>/public`. App folders are materialized on first use.
+Normal private visibility, inherited grants and tag membership still apply.
+An owner subject does not bypass the app namespace boundary. An entry's
+originating-app metadata is attribution rather than a separate ownership rule.
 
-Any other `path` must name an existing folder the member may add content to.
-Their own permissions decide, using the current role and tags IAM disclosed for
-this exact request, so a tag-scoped destination works when the member's tags
-reach it. Briefcase does not create intermediate folders for you.
+## Critical sharing operations
 
-Every file records the Application that acted, and appears in the entry's
-history alongside the member who was represented.
+Register `briefcase.invitations.create` at `POST /api/v1/obo/invitations` and
+`briefcase.link_access.update` at `POST /api/v1/obo/link-access` as **critical**
+IAM endpoints. They require user approval. Both use empty endpoint metadata;
+the entire operation is bound into the exact JSON body SHA-256.
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","invitation":{"principal":{"type":"carbon","id":"alex:tos"},"access":["read"],"inherit":true}}
+```
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true}
+```
+
+Use `delegated::DelegatedInvite` and `delegated::DelegatedLinkAccess` in Rust,
+or `briefcase app request invite --body manifest.json --describe` and
+`briefcase app request link-access --body manifest.json --describe` in the CLI.
+Mint a fresh IAM proof from the described binding, then repeat without
+`--describe` and supply `--app-id`. Proofs are one-use, including uncertain
+responses; keep the logical operation UUID and exact bytes for retries.
 
 ## Errors
 
@@ -279,14 +295,14 @@ than 60 seconds elapsed), and `422` (metadata does not satisfy the schema).
 ## Sandboxes
 
 A Briefcase testing environment is a full replica paired with one IAM test
-plane. To use OBO there, send the Briefcase root key for the plane paired with
+plane. To use OBO there, send the IAM testing app secret for the plane paired with
 the proof's IAM environment:
 
 ```http
-X-Testing-Environment-Key: <32-character Briefcase root key>
+X-Briefcase-App-Secret: <ask_ test Application secret>
 ```
 
-The root key does not replace the proof, and a proof from the wrong plane cannot
+The test app secret does not replace the proof, and a proof from the wrong plane cannot
 fall back to production. Register the endpoint in the paired IAM test plane
 before testing. Full setup is in the
 [testing-environment guide](testing-environments.md).
@@ -328,7 +344,7 @@ never `--proof` in a shared shell, where the process list would expose them.
 ## One-shot checklist
 
 - [ ] Same Team as Briefcase; subject token issued to your Application.
-- [ ] `obo.issue`, `roles.read`, `memberships.read` present.
+- [ ] `obo.issue`, `self.membership.read`, `self.identity.read` present.
 - [ ] Digest taken over the exact bytes you will send.
 - [ ] `/api/v1/obo/files` bound as the path, with its `/api/v1` prefix.
 - [ ] Destination bound as metadata, not as a header or query parameter.

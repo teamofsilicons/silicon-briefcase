@@ -19,7 +19,7 @@ process. Disable maintenance explicitly when a caller owns dependency updates.
 
 ```toml
 [dependencies]
-briefcase-client = "0.3"
+briefcase-client = "1.0.0"
 ```
 
 ```rust
@@ -59,7 +59,7 @@ attach the same access token. This switches request context without minting a
 new login. A `Config::new(base_url, org)` login remains available when the
 caller deliberately wants IAM to bind the token to one organization. The IAM
 Application secret stays on the Briefcase backend. Testing environments use a
-typed 32-character `EnvironmentKey` in `Config::with_environment`,
+typed IAM app-secret `EnvironmentKey` in `Config::with_environment`,
 independently of the bearer credential. Production-only management methods
 create, inspect, re-pair, rotate, clean, retire, and restore those planes. Every
 environment mutation has a caller-key `_with_key` variant for safely replaying

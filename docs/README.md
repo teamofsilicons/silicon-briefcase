@@ -1,66 +1,36 @@
-# Silicon Briefcase documentation
+# Silicon Briefcase
 
-Start here to integrate another application, use the Rust package, operate the
-CLI, or work inside an IAM-paired testing environment.
+Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the first official release **1.0.0**.
 
-## Choose your interface
+## Start here
 
-| Guide | Audience and contents |
+| Guide | What you can do |
 | --- | --- |
-| [Browser app](browser.md) | IAM sign-in, file links, browsing, sharing, notifications, previews, and sessions |
-| [OBO for applications](obo.md) | Hand this to another Application: prerequisites, proof exchange, every `/obo/` operation, retries, errors, SDK and CLI |
-| [Delegated uploads](api/delegated-uploads.md) | Exact IAM manifests, private staging, fresh-authorized publication and recovery |
-| [API](api/README.md) | HTTP authentication, request/response conventions, all public operations, permissions, filters, uploads, errors, and retention |
-| [51-operation map](api/operations.md) | Exact HTTP route and revision mapped to the Rust method and CLI command |
-| [Rust client](client/README.md) | Stateless `briefcase-client`, login/refresh, typed requests, streaming, retries, testing, and method inventory |
-| [CLI](cli/README.md) | Installation, SLT login, profiles, file commands, sharing, scripting, environment management, and updates |
-| [Testing environments](testing-environments.md) | IAM preparation, pairing, UUID/key distinctions, API/CLI/client usage, lifecycle, and hands-on checks |
-| [IAM integration](iam-integration.md) | Official IAM SDK, application IDs, current authorization, signed webhooks, approval, and OBO setup |
-| [Deployment runbook](deployment.md) | AWS topology, secrets, deployment, rollback, logs, and operational limits |
+| [Browser app](browser.md) | Sign in, browse, preview, upload, share, and restore |
+| [CLI](cli/README.md) | Manage files and testing environments from a terminal |
+| [Rust client](client/README.md) | Integrate the official typed, streaming client |
+| [HTTP API](api/README.md) and [operation reference](api/reference.md) | Authenticate, use endpoints, and understand errors |
+| [Operation inventory](api/operations.md) | All 58 operation IDs, methods, paths and revisions |
+| [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, mail and audit history |
+| [OBO applications](obo.md) | Act inside an app namespace with current user permissions |
+| [Delegated uploads](api/delegated-uploads.md) | Reserve, transfer, publish and recover staged uploads |
+| [Testing environments](testing-environments.md) | Select a paired test plane using its IAM app secret |
+| [IAM integration](iam-integration.md) | Configure scopes, critical endpoints and signed webhooks |
+| [Version policy](version-policy.md) | Negotiation, compatibility, deprecation and sunset |
+| [Deployment](deployment.md) | Run the backend, gateway, worker, storage and docs |
 
-## Hosted addresses and identifiers
+## Addresses
 
-| Item | Value |
+| Surface | Address |
 | --- | --- |
-| API base for clients | `https://backend.briefcase.teamofsilicons.com/api/v1/` |
-| Anonymous compatibility document | `https://backend.briefcase.teamofsilicons.com/api/version` |
-| Health / readiness | Host-root `/healthz` / `/readyz` |
+| Application and permanent links | `https://briefcase.teamofsilicons.com/org/{org_id}/{path}` |
+| API | `https://backend.briefcase.teamofsilicons.com/api/v1/` |
+| Contract negotiation | `https://backend.briefcase.teamofsilicons.com/api/version` |
 | IAM webhook receiver | `https://backend.briefcase.teamofsilicons.com/webhook/` |
-| Permanent user-facing URLs | `https://briefcase.teamofsilicons.com/org/{org_id}/{path}` |
-| Production IAM Application ID | `tos>briefcase` |
+| Documentation | `https://docs.briefcase.teamofsilicons.com/` |
 
-The application ID is public, not a credential. Its internal UUID is not the
-ID used for app authentication or login. Quote IDs containing `>` in a shell.
-The permanent-URL format is a product contract, not a claim that the frontend
-has been deployed. Example actor paths must be replaced with actual IAM IDs.
+IAM owns login, membership, roles and tags. An organization contains public, private, tag, and app folders. File names and paths stay readable; authorization decides what each actor can discover. Public within an organization and anyone-with-link access are distinct settings.
 
-## Authentication in one minute
+Upload any file type. Reuploading a name publishes the next immutable version on the same file ID. Download folders as streamed tar.zst, restore files from the 45-day bin, and inspect the preceding year of logs. The default limits are 100 GB per UTC day and 1 PB storage per organization; testing planes are limited to 2 GiB and ten active environments.
 
-1. IAM owns identities, organizations, membership, roles, and tags.
-2. A Carbon or Silicon obtains a Briefcase-targeted SLT from IAM. Login is
-   always unscoped; the user selects the organization grants in IAM.
-   Briefcase receives only those active grants and accepts the SLT, not
-   the actor's password or OTP.
-3. The backend exchanges it using the server-held Application secret and
-   returns an access/refresh pair. The CLI stores and rotates it; a Rust caller
-   owns its own storage and refresh policy.
-4. Ordinary requests carry the actor bearer and `X-Org-ID`. A test request also
-   carries the separate Briefcase root key. That key does not replace the actor.
-5. Another application uses a fresh single-use IAM OBO proof on the documented
-   `/obo/` operations, not its own application secret on the member API.
-
-Webhooks reconcile changes but do not grant request authority. First-use login
-and sandbox bootstrap use current online IAM snapshots and need no synthetic
-membership-update webhook. Production webhook approval is a separate IAM
-operation for the owning organization owner/admin or a platform reviewer; see
-the [approval runbook](iam-integration.md).
-
-## Contract and sources
-
-See [Migrating to client and CLI 0.2](migration-0.2.md) for typed-root placement,
-SDK error metadata, and matching client/backend operation revisions.
-
-[UNDERSTANDING.md](../UNDERSTANDING.md) is the requested product behavior.
-[openapi.yaml](../openapi.yaml) describes the wire contract. The guides explain
-how to use the API, package, and CLI. SDK/CLI sources are maintained in this
-repository under [`clients/rust`](../clients/rust).
+The [OpenAPI document](../openapi.yaml) is the wire reference. [UNDERSTANDING.md](../UNDERSTANDING.md) is the human-maintained product specification. Development 0.x contracts are unsupported by this release.

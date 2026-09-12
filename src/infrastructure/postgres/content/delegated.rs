@@ -555,6 +555,7 @@ impl DelegatedUploadRepository for PostgresContentRepository {
             &row.name,
             &row.content_type,
             to_u64(row.size_bytes)?,
+            &hex::encode(row.sha256()?),
             stored.checksum.as_ref().ok_or_else(internal_integrity)?,
             &target,
             &row.key()?,

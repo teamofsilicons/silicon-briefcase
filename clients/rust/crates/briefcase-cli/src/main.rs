@@ -24,6 +24,7 @@ use clap::Parser as _;
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = cli::Cli::parse();
+    let testing = cli.global.test.is_some() || cli.global.app_secret.is_some();
     let run_maintenance = !updater::defers_automatic_update(&cli.command);
     let exit = match run::run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -48,6 +49,9 @@ async fn main() -> std::process::ExitCode {
             Ok(_) => {}
             Err(error) => eprintln!("briefcase: warning: automatic update skipped: {error}"),
         }
+    }
+    if testing {
+        eprintln!("TEST ENVIRONMENT — an isolated Briefcase testing environment is selected.");
     }
     exit
 }

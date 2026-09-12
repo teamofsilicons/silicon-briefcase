@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     client::{Client, IdempotencyKey, Maintenance},
     error::{Error, Result, io, transport},
-    models::{Entry, FileVersion, FileVersionPage},
+    models::{Entry, FileVersionPage},
     requests::{ByteRange, Destination, OnBehalfOfUpload, Upload, UploadSource},
 };
 
@@ -134,8 +134,8 @@ impl Client {
     /// Uploads a file of any supported size.
     ///
     /// Uploading a name an active file already carries publishes that file's
-    /// next version and returns the same entry; the history keeps the previous
-    /// fifty versions.
+    /// next version and returns the same entry; the history keeps the complete
+    /// immutable history.
     ///
     /// # Errors
     ///
@@ -262,13 +262,27 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error when the file is not visible to the caller.
-    pub async fn versions(&self, entry_id: Uuid) -> Result<Vec<FileVersion>> {
+    pub async fn versions(&self, entry_id: Uuid) -> Result<FileVersionPage> {
+        self.versions_page(entry_id, None).await
+    }
+
+    /// Continues through the complete retained version history.
+    ///
+    /// # Errors
+    /// Returns visibility, cursor, or transport errors.
+    pub async fn versions_page(
+        &self,
+        entry_id: Uuid,
+        cursor: Option<&str>,
+    ) -> Result<FileVersionPage> {
         let url = self.api_url(&["entries", &entry_id.to_string(), "versions"])?;
-        let request = self
+        let mut request = self
             .request(Method::GET, url)
             .timeout(self.request_timeout());
-        let page: FileVersionPage = self.receive_json(request).await?;
-        Ok(page.items)
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        self.receive_json(request).await
     }
 
     /// Restores an older version as the file's current content.

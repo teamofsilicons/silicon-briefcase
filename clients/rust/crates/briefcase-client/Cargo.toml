@@ -4,6 +4,7 @@ description = "Official Rust client for the Silicon Briefcase file service."
 categories = ["api-bindings", "filesystem"]
 keywords = ["briefcase", "silicon", "files", "storage", "client"]
 readme = "README.md"
+documentation = "https://docs.briefcase.teamofsilicons.com/client/"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

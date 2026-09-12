@@ -1,11 +1,13 @@
 //! PostgreSQL connection management and tenant-scoped repository primitives.
 
 mod content;
+mod invitations;
 mod metadata;
 mod models;
 mod quota;
 mod repository;
 mod roots;
+pub(crate) mod sharing;
 mod webhook;
 
 use std::str::FromStr as _;
@@ -598,3 +600,6 @@ mod tests {
         assert!(ensure_distinct_database_identities(&production, &rds_testing).is_ok());
     }
 }
+
+#[cfg(test)]
+mod v1_tests;

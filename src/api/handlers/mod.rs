@@ -1,5 +1,6 @@
 //! Contracted HTTP route handlers.
 
+pub(crate) mod archive;
 pub(crate) mod content;
 pub(crate) mod delegated;
 pub(crate) mod delegated_upload;
@@ -11,3 +12,7 @@ pub(crate) mod session;
 pub(crate) mod system;
 pub(crate) mod testing;
 pub(crate) mod usage;
+
+pub(crate) mod sharing;
+
+pub(crate) mod invitations;

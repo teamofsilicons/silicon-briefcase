@@ -38,7 +38,7 @@ mod delivery;
 pub mod dto;
 mod extract;
 mod handlers;
-mod mapping;
+pub(crate) mod mapping;
 mod middleware;
 mod state;
 pub mod upload;
@@ -47,8 +47,8 @@ pub mod versioning;
 mod webhook;
 
 use handlers::{
-    content, delegated, delegated_upload, entries, notifications, obo, permissions, session,
-    system, testing, usage,
+    content, delegated, delegated_upload, entries, invitations, notifications, obo, permissions,
+    session, sharing, system, testing, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -89,7 +89,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         settings.s3.clone(),
     ));
     let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
-    let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content;
+    let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content.clone();
     let lease_seconds = settings
         .server
         .upload_timeout
@@ -105,16 +105,19 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     ));
     let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
         content_repository,
-        object_store,
+        Arc::clone(&object_store),
         settings.s3.temporary_directory.clone(),
     ));
     let state = AppState {
         iam: Arc::new(IamClient::connect(&settings.iam).await?),
         metadata: MetadataService::new(metadata_repository),
         content,
+        content_adapter: concrete_content,
+        objects: object_store,
         delegated_uploads,
         webhook_repository,
         database: database.clone(),
+        contract_database: Some(database.clone()),
         mapper: mapping::ResponseMapper::new(
             &settings.server.public_base_url,
             settings.server.public_site_base_url.clone(),
@@ -245,13 +248,44 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         .layer(SetSensitiveRequestHeadersLayer::new(
             sensitive_request_headers(),
         ))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::contract,
+        ))
         .layer(CatchPanicLayer::custom(middleware::handle_panic))
         .layer(axum_middleware::from_fn(middleware::request_scope))
         .with_state(state)
 }
 
+fn sharing_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            invitations::OBO_INVITE_PATH,
+            post(invitations::delegated_invite),
+        )
+        .route(
+            invitations::OBO_LINK_PATH,
+            post(invitations::delegated_link),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/invitations",
+            get(invitations::list).post(invitations::invite),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/invitations/{grant_id}",
+            delete(invitations::revoke),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/link-access",
+            get(sharing::link_access).put(sharing::set_link_access),
+        )
+        .route("/api/v1/entries/{entry_id}/logs", get(sharing::logs))
+        .route("/api/v1/public/{org_id}/{*path}", get(sharing::public_path))
+}
+
 fn ordinary_routes() -> Router<AppState> {
     Router::new()
+        .merge(sharing_routes())
         .route(
             delegated_upload::RESERVE_PATH,
             post(delegated_upload::reserve),
@@ -357,10 +391,6 @@ fn testing_environment_routes() -> Router<AppState> {
             get(testing::key),
         )
         .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
-            post(testing::rotate_key),
-        )
-        .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
             post(testing::replace_iam_pairing),
         )
@@ -399,7 +429,7 @@ fn sensitive_request_headers() -> [HeaderName; 7] {
         HeaderName::from_static("x-iam-obo-access-proof"),
         HeaderName::from_static("x-silicon-iam-signature"),
         HeaderName::from_static("idempotency-key"),
-        HeaderName::from_static("x-testing-environment-key"),
+        HeaderName::from_static("x-briefcase-app-secret"),
         HeaderName::from_static("x-briefcase-upload-capability"),
     ]
 }
@@ -409,7 +439,7 @@ async fn not_found() -> crate::error::AppError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     use axum::{
@@ -444,7 +474,7 @@ mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 50] = [
+    const CONTRACT: [(&str, &str, &str); 58] = [
         ("/version", "get", "200"),
         ("/iam", "get", "200"),
         ("/auth/status", "get", "200"),
@@ -474,11 +504,6 @@ mod tests {
         (
             "/organizations/{org_id}/testing-environments/{environment_id}/key",
             "get",
-            "200",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
-            "post",
             "200",
         ),
         (
@@ -539,6 +564,19 @@ mod tests {
         ("/bin", "get", "200"),
         ("/bin/{entry_id}/restore", "post", "200"),
         ("/storage/configuration", "put", "200"),
+        ("/entries/{entry_id}/invitations", "get", "200"),
+        ("/entries/{entry_id}/invitations", "post", "201"),
+        (
+            "/entries/{entry_id}/invitations/{grant_id}",
+            "delete",
+            "204",
+        ),
+        ("/entries/{entry_id}/link-access", "get", "200"),
+        ("/entries/{entry_id}/link-access", "put", "200"),
+        ("/entries/{entry_id}/logs", "get", "200"),
+        ("/public/{org_id}/{path}", "get", "200"),
+        ("/obo/invitations", "post", "200"),
+        ("/obo/link-access", "post", "200"),
     ];
 
     #[test]
@@ -777,6 +815,13 @@ mod tests {
         let database = PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(10))
             .connect_lazy("postgresql://briefcase:briefcase@127.0.0.1:9/briefcase")?;
+        let (state, server, webhook) = test_state(database)?;
+        Ok(router(state, &server, &webhook))
+    }
+
+    pub(crate) fn test_state(
+        database: sqlx::PgPool,
+    ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
         let repository = PostgresRepository::new(database.clone());
         let s3 = S3Settings {
             region: "ap-south-1".to_owned(),
@@ -792,7 +837,7 @@ mod tests {
         let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
         let concrete_content = Arc::new(PostgresContentRepository::new(repository, s3.clone()));
         let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
-        let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content;
+        let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content.clone();
         let object_store: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
             aws_config::SdkConfig::builder().build(),
             None,
@@ -806,7 +851,7 @@ mod tests {
         let delegated_uploads: Arc<DelegatedUploadUseCases> =
             Arc::new(DelegatedUploadService::new(
                 delegated_repository,
-                object_store,
+                Arc::clone(&object_store),
                 122,
                 s3.operation_timeout,
             ));
@@ -844,9 +889,12 @@ mod tests {
             iam: Arc::new(iam),
             metadata: MetadataService::new(metadata_repository),
             content,
+            content_adapter: concrete_content,
+            objects: object_store,
             delegated_uploads,
             webhook_repository,
             database,
+            contract_database: None,
             mapper: ResponseMapper::new(
                 &server.public_base_url,
                 server.public_site_base_url.clone(),
@@ -855,7 +903,7 @@ mod tests {
             webhook_settings: webhook.clone(),
             testing: None,
         };
-        Ok(router(state, &server, &webhook))
+        Ok((state, server, webhook))
     }
 
     fn nonzero(value: usize) -> anyhow::Result<NonZeroUsize> {

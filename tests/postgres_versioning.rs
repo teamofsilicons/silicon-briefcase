@@ -494,3 +494,63 @@ async fn usage_tracks_uploads_and_storage_and_refuses_what_exceeds_a_limit() -> 
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn all_versions_and_content_hashes_survive_beyond_fifty_uploads() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let pool = postgres::connect(&database_settings(url), "v1-version-retention").await?;
+    postgres::migrate(&pool).await?;
+    let metadata = PostgresRepository::new(pool.clone());
+    let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
+    let context = execution_context(&format!("v1-{}", Uuid::now_v7().simple()))?;
+    let parent = private_root(&metadata, &context).await?;
+    let first = publish(&files, &context, parent, "version-0", b"original").await?;
+    for n in 1..55 {
+        assert_eq!(
+            publish(
+                &files,
+                &context,
+                parent,
+                &format!("version-{n}"),
+                b"replacement"
+            )
+            .await?,
+            first
+        );
+    }
+    let page = metadata
+        .list_file_versions(
+            &context,
+            &ListVersionsQuery {
+                entry_id: first,
+                page: PageRequest::new(None, 50)?,
+            },
+        )
+        .await?;
+    assert_eq!(page.items.len(), 50);
+    assert_eq!(page.items[0].number.get(), 55);
+    assert_eq!(
+        page.items[0].sha256,
+        Some(hex::encode(Sha256::digest(b"replacement")))
+    );
+    let older = metadata
+        .list_file_versions(
+            &context,
+            &ListVersionsQuery {
+                entry_id: first,
+                page: PageRequest::new(page.next_cursor, 50)?,
+            },
+        )
+        .await?;
+    assert_eq!(older.items.len(), 5);
+    assert!(older.next_cursor.is_none());
+    assert_eq!(older.items[4].number.get(), 1);
+    assert_eq!(
+        older.items[4].sha256,
+        Some(hex::encode(Sha256::digest(b"original")))
+    );
+    pool.close().await;
+    Ok(())
+}

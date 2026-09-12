@@ -87,6 +87,10 @@ pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> 
     .await?
     .rows_affected();
 
+    sqlx::query("DELETE FROM briefcase.audit_events WHERE occurred_at < clock_timestamp() - interval '365 days'")
+        .execute(&mut *transaction).await?;
+    sqlx::query("UPDATE briefcase.api_contracts SET status='sunset',sunset_at=clock_timestamp() WHERE status='deprecated' AND GREATEST(deprecated_at,last_request_at) <= clock_timestamp()-interval '7 days'")
+        .execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(MaintenanceStats {
         indexed_entries,
@@ -94,4 +98,50 @@ pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> 
         expired_idempotency_records,
         pruned_notifications,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn retirement_requires_seven_days_without_consumers() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let pool = sqlx::PgPool::connect_with(
+            url.parse::<sqlx::postgres::PgConnectOptions>()?
+                .options([("search_path", "public")]),
+        )
+        .await?;
+        crate::infrastructure::postgres::migrate(&pool).await?;
+        let version = format!("test-{}", uuid::Uuid::new_v4());
+        sqlx::query("INSERT INTO briefcase.api_contracts(version,status,deprecated_at) VALUES($1,'deprecated',clock_timestamp()-interval '8 days')").bind(&version).execute(&pool).await?;
+        let observed: String = sqlx::query_scalar("SELECT briefcase.observe_api_contract($1)")
+            .bind(&version)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(observed, "deprecated");
+        super::run(&pool).await?;
+        let state: String =
+            sqlx::query_scalar("SELECT status FROM briefcase.api_contracts WHERE version=$1")
+                .bind(&version)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            state, "deprecated",
+            "a recent consumer restarts the inactivity window"
+        );
+        sqlx::query("UPDATE briefcase.api_contracts SET last_request_at=clock_timestamp()-interval '8 days' WHERE version=$1").bind(&version).execute(&pool).await?;
+        super::run(&pool).await?;
+        let retired: String = sqlx::query_scalar("SELECT briefcase.observe_api_contract($1)")
+            .bind(&version)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(retired, "sunset");
+        sqlx::query("DELETE FROM briefcase.api_contracts WHERE version=$1")
+            .bind(version)
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+        Ok(())
+    }
 }

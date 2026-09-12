@@ -61,6 +61,7 @@ Prepare a private JSON file using a secure editor/secret manager. Its schema is:
   "BRIEFCASE_IAM_APP_SECRET": "<existing-IAM-application-secret>",
   "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET": "<configured-webhook-secret>",
   "BRIEFCASE_IAM_WEBHOOK_KEY_VERSION": 1,
+  "BRIEFCASE_POSTMARK_SERVER_TOKEN": "<postmark-server-token>",
   "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY": "<base64-encoded-random-32-bytes>",
   "BRIEFCASE_API_DATABASE_PASSWORD": "<strong-random-runtime-password>",
   "BRIEFCASE_WORKER_DATABASE_PASSWORD": "<different-strong-random-runtime-password>"
@@ -122,8 +123,8 @@ endpoints use their own fixed paths and empty metadata schemas. The
 [capability-only byte-transfer route](api/delegated-uploads.md) is not an IAM
 endpoint registration; its ingress must allow the documented PUT request body.
 
-Verify that the Briefcase Application discloses `profile`, `organizations.read`,
-`memberships.read`, and `roles.read`; without those scopes IAM correctly omits
+Verify that the Briefcase Application discloses `profile`, `self.organizations.read`,
+`self.identity.read`, and `self.membership.read`; without those scopes IAM correctly omits
 fields that Briefcase needs to cross-bind an introspected bearer. The production
 webhook URL accepts both production events and IAM's signed wrapped test
 events. Test deliveries are routed by a constant-time root-key match into the
@@ -257,3 +258,32 @@ outage until it is replaced. Growing past that means more than raising the
 count: uploads stage on instance-local disk, so a second instance needs its own
 staging volume, and the multipart sessions in flight belong to whichever
 instance started them.
+
+## First official release deployment
+
+Build backend, official client, CLI and browser gateway at **1.0.0** together.
+Development 0.x consumers are unsupported. Apply all forward migrations to
+both configured databases before starting the new binaries. Keep the role grants
+for the API and worker separate. The first release introduces app namespace
+roots, immutable version hashes, public links, dynamic tag grants, verified
+contacts, invitation outbox delivery, year-long logs and contract lifecycle state.
+
+Set `BRIEFCASE_POSTMARK_SERVER_TOKEN` on the worker and verify
+`briefcase@teamofsilicons.com` in Postmark. The public site base must be
+`https://briefcase.teamofsilicons.com/` so invitation links point to the browser.
+Monitor invitation outbox retries/dead letters; missing IAM-verified contacts
+are explicit delivery failures. Testing email never leaves the test plane.
+
+Configure IAM 1.7 scopes and the two critical sharing endpoints from the
+[IAM guide](iam-integration.md). Test credentials now select the paired plane
+using `X-Briefcase-App-Secret`. Replace a rotated IAM pairing atomically.
+
+Build the documentation with `npm ci && npm run build && npm run check` in
+`docs-site/`. Upload only `docs-site/dist/` to the static host for
+**docs.briefcase.teamofsilicons.com** and configure TLS, directory indexes and
+`404.html`. No wildcard application proxy or API credentials are required.
+Canonical URLs, navigation, search, sitemap and robots are generated for that
+hostname. See [the site build instructions](../docs-site/README.md).
+
+This change prepares release artifacts and documentation. Publishing packages,
+changing DNS and deploying services/docs are separate operator actions.

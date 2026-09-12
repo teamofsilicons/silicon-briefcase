@@ -1,7 +1,7 @@
 //! Read-only, hands-on example for an already prepared paired test environment.
-//! Put this in examples/sandbox.rs of a project using briefcase-client 0.2 and
+//! Put this in examples/sandbox.rs of a project using briefcase-client 1.0 and
 //! tokio with macros + rt-multi-thread, then run `cargo run --example sandbox`.
-//! Inject BRIEFCASE_TEST_ROOT and BRIEFCASE_TEST_BEARER from private storage.
+//! Inject BRIEFCASE_APP_SECRET and BRIEFCASE_TEST_BEARER from private storage.
 //! This program does not create environments, mutate files, or print secrets.
 
 use briefcase_client::{Client, Config, EnvironmentKey, ListEntries};
@@ -10,7 +10,7 @@ use briefcase_client::{Client, Config, EnvironmentKey, ListEntries};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base = std::env::var("BRIEFCASE_URL")?;
     let org = std::env::var("BRIEFCASE_ORG")?;
-    let root = EnvironmentKey::new(std::env::var("BRIEFCASE_TEST_ROOT")?)?;
+    let root = EnvironmentKey::new(std::env::var("BRIEFCASE_APP_SECRET")?)?;
     let bearer = std::env::var("BRIEFCASE_TEST_BEARER")?;
     let client = Client::connect(
         Config::new(&base, &org)?

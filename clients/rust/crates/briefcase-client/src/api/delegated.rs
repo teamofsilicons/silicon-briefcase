@@ -410,3 +410,78 @@ impl Client {
             .body(manifest.bytes.clone()))
     }
 }
+
+/// Critical invitation manifest; IAM must require user approval for this endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedInvite {
+    /// Stable UUID reused with a fresh proof on retry.
+    pub operation_id: Uuid,
+    /// Entry inside the calling application's namespace.
+    pub entry_id: Uuid,
+    /// Recipient and granted rights.
+    pub invitation: crate::Invite,
+}
+impl sealed::Operation for DelegatedInvite {
+    fn validate(&self) -> Result<()> {
+        non_nil(self.operation_id, "operation_id")?;
+        non_nil(self.entry_id, "entry_id")
+    }
+}
+impl DelegatedOperation for DelegatedInvite {
+    const ENDPOINT_ID: &'static str = "briefcase.invitations.create";
+    const PATH: &'static str = "/api/v1/obo/invitations";
+}
+/// Critical anyone-with-link manifest; requires user approval in IAM.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedLinkAccess {
+    /// Stable logical operation ID.
+    pub operation_id: Uuid,
+    /// Entry inside the calling application's namespace.
+    pub entry_id: Uuid,
+    /// Desired explicit link setting.
+    pub enabled: bool,
+}
+impl sealed::Operation for DelegatedLinkAccess {
+    fn validate(&self) -> Result<()> {
+        non_nil(self.operation_id, "operation_id")?;
+        non_nil(self.entry_id, "entry_id")
+    }
+}
+impl DelegatedOperation for DelegatedLinkAccess {
+    const ENDPOINT_ID: &'static str = "briefcase.link_access.update";
+    const PATH: &'static str = "/api/v1/obo/link-access";
+}
+impl Client {
+    /// Invites a member with a fresh IAM proof for this critical endpoint.
+    /// # Errors
+    /// Returns proof, permission, recipient, or transport errors without retrying.
+    pub async fn invite_on_behalf_of(
+        &self,
+        app: &ApplicationId,
+        proof: OboProof,
+        manifest: &DelegatedManifest<DelegatedInvite>,
+    ) -> Result<crate::Invitation> {
+        self.receive_json_without_maintenance(
+            self.delegated_request(app, proof, manifest)?
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+    /// Sets anonymous read access using a fresh proof for this critical endpoint.
+    /// # Errors
+    /// Returns proof, permission, protected-folder, or transport errors without retrying.
+    pub async fn set_link_access_on_behalf_of(
+        &self,
+        app: &ApplicationId,
+        proof: OboProof,
+        manifest: &DelegatedManifest<DelegatedLinkAccess>,
+    ) -> Result<crate::LinkAccess> {
+        self.receive_json_without_maintenance(
+            self.delegated_request(app, proof, manifest)?
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+}

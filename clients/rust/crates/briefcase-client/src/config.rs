@@ -23,7 +23,7 @@ pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(15);
 /// Default deadline for establishing a connection.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A 32-character root key selecting one isolated Briefcase testing environment.
+/// An IAM testing application secret selecting one isolated Briefcase testing environment.
 ///
 /// This selects a data plane; it does not replace the IAM bearer credential used
 /// inside that plane. Its `Debug` representation is always redacted.
@@ -31,17 +31,21 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct EnvironmentKey(SecretString);
 
 impl EnvironmentKey {
-    /// Validates the fixed 32-character alphanumeric wire form.
+    /// Validates the IAM ask_ application-secret wire form.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Configuration`] when the value is not exactly 32 ASCII
-    /// alphanumeric characters.
+    /// Returns [`Error::Configuration`] when the value is not a valid IAM application secret.
     pub fn new(key: impl Into<String>) -> Result<Self, Error> {
         let key = key.into();
-        if key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        if key.len() != 47
+            || !key.starts_with("ask_")
+            || !key[4..]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
             return Err(Error::Configuration(
-                "a testing environment key is exactly 32 alphanumeric characters".into(),
+                "a testing app secret must be ask_ followed by 43 base64url characters".into(),
             ));
         }
         Ok(Self(SecretString::from(key)))
@@ -51,7 +55,7 @@ impl EnvironmentKey {
         secrecy::ExposeSecret::expose_secret(&self.0)
     }
 
-    /// Exposes the root key when a caller must persist or deliberately print it.
+    /// Exposes the app secret when a caller must persist or deliberately print it.
     ///
     /// Treat the returned value as a credential. Normal request construction
     /// does not need this method; [`Config::with_environment`] sends it safely.
@@ -97,7 +101,7 @@ impl<'de> Deserialize<'de> for EnvironmentKey {
 /// IAM's 32-character root key for the testing plane paired with Briefcase.
 ///
 /// This is intentionally distinct from [`EnvironmentKey`]: confusing the IAM
-/// selector with Briefcase's own root key would cross a security boundary.
+/// root credential with the app-secret selector would cross a security boundary.
 #[derive(Clone)]
 pub struct IamEnvironmentKey(SecretString);
 
@@ -106,8 +110,7 @@ impl IamEnvironmentKey {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Configuration`] unless the key is exactly 32 ASCII
-    /// alphanumeric characters.
+    /// Returns [`Error::Configuration`] unless the key contains exactly 32 ASCII alphanumeric characters.
     pub fn new(key: impl Into<String>) -> Result<Self, Error> {
         let key = key.into();
         if key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
@@ -612,7 +615,7 @@ mod tests {
 
     #[test]
     fn environment_keys_are_fixed_length_and_redacted() {
-        let key = EnvironmentKey::new("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6").unwrap();
+        let key = EnvironmentKey::new("ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         assert_eq!(format!("{key:?}"), "EnvironmentKey(<redacted>)");
         assert!(EnvironmentKey::new("short").is_err());
         assert!(EnvironmentKey::new(format!("{}-", "a".repeat(31))).is_err());
@@ -636,13 +639,8 @@ mod tests {
 
     #[test]
     fn test_secrets_stay_out_of_debug_output() {
-        let input = crate::TestingEnvironmentCreate::new(
-            "test",
-            uuid::Uuid::from_u128(7),
-            IamEnvironmentKey::new("i".repeat(32)).unwrap(),
-            ApplicationId::new("tos>briefcase").unwrap(),
-            IamApplicationSecret::new(format!("ask_{}", "s".repeat(43))).unwrap(),
-        );
+        let mut input = crate::TestingEnvironmentCreate::new("test");
+        input.iam_test_key = Some(IamEnvironmentKey::new("i".repeat(32)).unwrap());
         let rendered = format!("{input:?}");
         assert!(!rendered.contains(&"i".repeat(32)));
         assert!(!rendered.contains(&format!("ask_{}", "s".repeat(43))));

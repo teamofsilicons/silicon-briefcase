@@ -858,7 +858,7 @@ mod tests {
         credentials.set_testing_environment_key(
             "work",
             first,
-            briefcase_client::EnvironmentKey::new("a".repeat(32)).unwrap(),
+            briefcase_client::EnvironmentKey::new(format!("ask_{}", "a".repeat(43))).unwrap(),
         );
 
         assert!(credentials.session("work", None).is_some());

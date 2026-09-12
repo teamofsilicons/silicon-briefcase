@@ -17,7 +17,7 @@ use crate::{
 const ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
 const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
 const APP_ID: HeaderName = HeaderName::from_static("x-app-id");
-const TESTING_ENVIRONMENT_KEY: HeaderName = HeaderName::from_static("x-testing-environment-key");
+const TESTING_ENVIRONMENT_KEY: HeaderName = HeaderName::from_static("x-briefcase-app-secret");
 
 /// Stable IAM action bound to one Briefcase operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,7 +214,12 @@ pub(crate) fn testing_environment_key(
 ) -> Result<Option<SecretString>, AppError> {
     optional_single_header(headers, &TESTING_ENVIRONMENT_KEY)?
         .map(|value| {
-            if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            if value.len() != 47
+                || !value.starts_with("ask_")
+                || !value[4..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
                 return Err(AppError::bad_request("invalid_testing_environment_key"));
             }
             Ok(SecretString::from(value.to_owned()))

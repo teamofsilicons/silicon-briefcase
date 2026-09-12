@@ -3,6 +3,7 @@ mod access;
 mod environments;
 mod files;
 mod organization;
+mod public;
 mod session;
 mod staging;
 
@@ -117,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
                 .delete(session::logout),
         )
         .route("/browser/resolve", get(files::resolve))
+        .route("/browser/public", get(public::read))
         .route("/browser/login/start", post(session::start))
         .route("/browser/notifications", get(access::inbox))
         .route("/browser/notifications/read", post(access::mark_read))
@@ -133,6 +135,20 @@ async fn main() -> anyhow::Result<()> {
             post(files::restore_version),
         )
         .route("/browser/entries/{id}/activity", get(files::activity))
+        .route("/browser/entries/{id}/logs", get(access::logs))
+        .route(
+            "/browser/entries/{id}/link-access",
+            get(access::link).put(access::set_link),
+        )
+        .route(
+            "/browser/entries/{id}/invitations",
+            get(access::invitations).post(access::invite),
+        )
+        .route(
+            "/browser/entries/{id}/invitations/{grant}",
+            axum::routing::delete(access::revoke),
+        )
+        .route("/browser/environments/enter", post(session::enter_secret))
         .route(
             "/browser/entries/{id}/permissions",
             get(files::permissions).post(files::grant),

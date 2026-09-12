@@ -98,6 +98,20 @@ impl MetadataService {
             .load_permission_target(context, command.entry_id)
             .await?;
         require_capability(&entry, context, Capability::ManagePermissions)?;
+        if command
+            .access
+            .contains(crate::domain::permission::AccessRight::Delete)
+            || (entry.entry.kind == crate::domain::entry::EntryKind::File
+                && command
+                    .access
+                    .contains(crate::domain::permission::AccessRight::Write))
+        {
+            return Err(ValidationError {
+                field: "access",
+                message: "delete cannot be invited; create is folder-only",
+            }
+            .into());
+        }
         if !self
             .repository
             .is_current_member(context, &command.principal)

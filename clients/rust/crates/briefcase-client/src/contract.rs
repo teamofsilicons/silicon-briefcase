@@ -43,7 +43,7 @@ const fn operation(
 }
 
 /// Every operation this client calls, with the revision it expects.
-pub const OPERATIONS: [OperationRevision; 50] = [
+pub const OPERATIONS: [OperationRevision; 58] = [
     operation(
         "reserveDelegatedUpload",
         "1.0.0",
@@ -121,12 +121,6 @@ pub const OPERATIONS: [OperationRevision; 50] = [
         "/organizations/{org_id}/testing-environments/{environment_id}/key",
     ),
     operation(
-        "rotateTestingEnvironmentKey",
-        "1.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/key-rotations",
-    ),
-    operation(
         "replaceTestingEnvironmentIamPairing",
         "1.0.0",
         "POST",
@@ -156,30 +150,30 @@ pub const OPERATIONS: [OperationRevision; 50] = [
         "POST",
         "/testing-environment/cleanings",
     ),
-    operation("listEntries", "1.1.0", "GET", "/entries"),
-    operation("createFolder", "2.0.0", "POST", "/entries"),
-    operation("getEntry", "1.1.0", "GET", "/entries/{entry_id}"),
+    operation("listEntries", "1.0.0", "GET", "/entries"),
+    operation("createFolder", "1.0.0", "POST", "/entries"),
+    operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.0.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
     operation(
         "readEntryContent",
-        "1.1.0",
+        "1.0.0",
         "GET",
         "/entries/{entry_id}/content",
     ),
     operation(
         "downloadEntry",
-        "1.1.0",
+        "1.0.0",
         "GET",
         "/entries/{entry_id}/download",
     ),
     operation(
         "resolvePermanentUrl",
-        "1.1.0",
+        "1.0.0",
         "GET",
         "/org/{org_id}/{path}",
     ),
-    operation("uploadFile", "1.1.0", "POST", "/uploads"),
+    operation("uploadFile", "1.0.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "1.0.0", "POST", "/obo/files"),
     operation(
         "createFolderOnBehalfOfMember",
@@ -213,7 +207,7 @@ pub const OPERATIONS: [OperationRevision; 50] = [
     ),
     operation(
         "grantPermission",
-        "1.1.0",
+        "1.0.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
@@ -229,7 +223,7 @@ pub const OPERATIONS: [OperationRevision; 50] = [
         "POST",
         "/permissions/effective",
     ),
-    operation("searchFiles", "1.1.0", "GET", "/search"),
+    operation("searchFiles", "1.0.0", "GET", "/search"),
     operation("listNotifications", "1.0.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
     operation(
@@ -246,7 +240,7 @@ pub const OPERATIONS: [OperationRevision; 50] = [
     ),
     operation(
         "restoreVersion",
-        "1.1.0",
+        "1.0.0",
         "POST",
         "/entries/{entry_id}/versions/{version_id}/restore",
     ),
@@ -258,6 +252,50 @@ pub const OPERATIONS: [OperationRevision; 50] = [
         "1.0.0",
         "PUT",
         "/storage/configuration",
+    ),
+    operation(
+        "listInvitations",
+        "1.0.0",
+        "GET",
+        "/entries/{entry_id}/invitations",
+    ),
+    operation(
+        "createInvitation",
+        "1.0.0",
+        "POST",
+        "/entries/{entry_id}/invitations",
+    ),
+    operation(
+        "revokeInvitation",
+        "1.0.0",
+        "DELETE",
+        "/entries/{entry_id}/invitations/{grant_id}",
+    ),
+    operation(
+        "readLinkAccess",
+        "1.0.0",
+        "GET",
+        "/entries/{entry_id}/link-access",
+    ),
+    operation(
+        "setLinkAccess",
+        "1.0.0",
+        "PUT",
+        "/entries/{entry_id}/link-access",
+    ),
+    operation("listEntryLogs", "1.0.0", "GET", "/entries/{entry_id}/logs"),
+    operation("readPublicEntry", "1.0.0", "GET", "/public/{org_id}/{path}"),
+    operation(
+        "inviteOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/invitations",
+    ),
+    operation(
+        "setLinkAccessOnBehalfOfMember",
+        "1.0.0",
+        "POST",
+        "/obo/link-access",
     ),
 ];
 

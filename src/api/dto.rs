@@ -495,10 +495,14 @@ pub struct ActivityPageDto {
 /// Retained file version.
 #[derive(Clone, Debug, Serialize)]
 pub struct FileVersionDto {
+    /// SHA-256 of the entire file, independent of multipart layout.
+    pub sha256: Option<String>,
+    /// Creation provenance: `initial_upload`, upload, or restore.
+    pub source: crate::domain::version::VersionSource,
     /// Version identifier.
     pub id: Uuid,
     /// Monotonic per-file number.
-    pub number: u32,
+    pub number: u64,
     /// Content size in bytes.
     pub size: u64,
     /// Actor who created this version.
@@ -511,8 +515,10 @@ pub struct FileVersionDto {
 /// File version collection.
 #[derive(Clone, Debug, Serialize)]
 pub struct FileVersionPageDto {
-    /// Newest-first versions, capped at 50.
+    /// Newest-first page of versions.
     pub items: Vec<FileVersionDto>,
+    /// Cursor for the next page of history.
+    pub next_cursor: Option<String>,
 }
 
 /// Server-side encryption mode for an organization bucket.

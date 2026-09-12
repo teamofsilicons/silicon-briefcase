@@ -16,7 +16,7 @@ use wiremock::{
 
 const ACTOR_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f803";
 const TEST_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f800";
-const ROOT_KEY: &str = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
+const ROOT_KEY: &str = "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const ENTRY_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f828";
 const DESTINATION_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f829";
 
@@ -70,14 +70,14 @@ fn entry_document() -> Value {
         "type": "file",
         "visibility": "full",
         "name": "note.txt",
-        "path": "private/cos:tester/apps/tos>notes/note.txt",
+        "path": "apps/tos>notes/private/cos:tester/note.txt",
         "parent_id": null,
         "root_type": "private",
         "tag": null,
         "content_type": "text/plain",
         "size": 4,
         "render": "document",
-        "permanent_url": "https://briefcase.example/org/tos/private/cos:tester/apps/tos%3Enotes/note.txt",
+        "permanent_url": "https://briefcase.example/org/tos/apps/tos%3Enotes/private/cos:tester/note.txt",
         "content_url": null,
         "download_url": null,
         "owner": {"type": "carbon", "id": "cos:tester"},
@@ -238,7 +238,7 @@ async fn a_test_session_uses_its_own_binding_not_the_production_binding() {
             "authorization",
             "Bearer stored-access-must-not-leak",
         ))
-        .and(header("x-testing-environment-key", ROOT_KEY))
+        .and(header("x-briefcase-app-secret", ROOT_KEY))
         .and(header("x-org-id", "tos"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [],
@@ -488,7 +488,7 @@ async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
     let mut second_entry = entry_document();
     second_entry["id"] = json!("01a067ce-7f19-7790-820a-0be6b3d4f829");
     second_entry["name"] = json!("second.txt");
-    second_entry["path"] = json!("private/cos:tester/apps/tos>notes/second.txt");
+    second_entry["path"] = json!("apps/tos>notes/private/cos:tester/second.txt");
     Mock::given(method("GET"))
         .and(path("/api/v1/entries"))
         .and(query_param("cursor", "page-one"))
@@ -1152,4 +1152,26 @@ fn help_is_available_without_state_and_documents_login_inspection() {
     assert!(help.contains("briefcase iam --json"));
     assert!(help.contains("briefcase login status --json"));
     assert!(help.contains("SILICON_HOME"));
+}
+
+#[tokio::test]
+async fn failed_test_commands_keep_json_clean_and_print_the_test_footer() {
+    let home = tempfile::tempdir().unwrap();
+    let output = briefcase(
+        home.path(),
+        &[
+            "--test".into(),
+            TEST_ID.into(),
+            "--json".into(),
+            "ls".into(),
+        ],
+    )
+    .await;
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("TEST ENVIRONMENT"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).ends_with(
+            "TEST ENVIRONMENT — an isolated Briefcase testing environment is selected.\n"
+        )
+    );
 }

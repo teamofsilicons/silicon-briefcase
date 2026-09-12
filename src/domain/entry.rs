@@ -91,6 +91,8 @@ pub enum SystemEntryKind {
     TagRoot,
     /// A canonical private folder for one current member.
     PrivateActorFolder,
+    /// Reserved Apps index or application namespace; navigation only.
+    ApplicationContainer,
 }
 
 impl SystemEntryKind {
@@ -98,7 +100,7 @@ impl SystemEntryKind {
     #[must_use]
     pub const fn root_type(self) -> RootType {
         match self {
-            Self::PublicContainer => RootType::Public,
+            Self::PublicContainer | Self::ApplicationContainer => RootType::Public,
             Self::PrivateContainer | Self::PrivateActorFolder => RootType::Private,
             Self::TagRoot => RootType::Tag,
         }

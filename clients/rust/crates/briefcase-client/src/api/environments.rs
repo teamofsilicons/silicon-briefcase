@@ -218,38 +218,6 @@ impl Client {
         .await
     }
 
-    /// Rotates the root key and invalidates the previous key immediately.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the caller cannot administer the environment.
-    pub async fn rotate_testing_environment_key(
-        &self,
-        id: Uuid,
-    ) -> Result<TestingEnvironmentWithKey> {
-        let idempotency_key = IdempotencyKey::random();
-        self.rotate_testing_environment_key_with_key(id, &idempotency_key)
-            .await
-    }
-
-    /// Rotates the root key using a caller-owned retry identity.
-    ///
-    /// Persist this idempotency key before sending. If the response is lost,
-    /// replaying the same request is how the newly generated root key is
-    /// recovered without rotating it a second time.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the caller cannot administer the environment.
-    pub async fn rotate_testing_environment_key_with_key(
-        &self,
-        id: Uuid,
-        idempotency_key: &IdempotencyKey,
-    ) -> Result<TestingEnvironmentWithKey> {
-        self.environment_post_with_key(id, &["key-rotations"], idempotency_key)
-            .await
-    }
-
     /// Replaces the complete IAM pairing while preserving Briefcase data and
     /// the current Briefcase root key.
     ///

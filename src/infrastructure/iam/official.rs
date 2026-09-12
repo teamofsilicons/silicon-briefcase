@@ -8,6 +8,43 @@ mod directory;
 mod resilience;
 
 impl IamClient {
+    pub(crate) async fn self_email(
+        &self,
+        token: &SecretString,
+        environment: Option<&IamEnvironmentCredential>,
+    ) -> Result<Option<String>, IamClientError> {
+        let client = self
+            .scoped_client(environment)?
+            .with_credential(Credential::Bearer(token.clone()));
+        match client.application_reads().me().await {
+            Ok(profile) => Ok(profile
+                .get("email")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)),
+            Err(silicon_iam_client::Error::Api(error)) if error.status == 403 => Ok(None),
+            Err(error) => Err(sdk_error(error, Operation::Service)),
+        }
+    }
+    pub(crate) async fn provision_testing_environment(
+        &self,
+        name: String,
+        description: Option<String>,
+        iam_test_key: Option<String>,
+        key: &str,
+    ) -> Result<models::ApplicationTestingEnvironmentCreated, IamClientError> {
+        self.scoped_client(None)?
+            .applications()
+            .create_testing_environment(
+                &models::ApplicationTestingEnvironmentCreate {
+                    name,
+                    description,
+                    iam_test_key,
+                },
+                &mutation(key)?,
+            )
+            .await
+            .map_err(|e| sdk_error(e, Operation::Environment))
+    }
     /// Returns the public application ID for production or the selected test plane.
     #[must_use]
     pub fn public_application_id<'a>(
@@ -136,12 +173,13 @@ impl IamClient {
         }
         let client = self.scoped_client(Some(environment))?;
         let current = client
-            .with_credential(Credential::Anonymous)
-            .environments()
-            .current()
+            .applications()
+            .testing_context()
             .await
             .map_err(|error| sdk_error(error, Operation::Environment))?;
-        if current.id != expected_environment_id {
+        if current.environment_id != expected_environment_id
+            || current.application.app_id != self.service_app_id.as_str()
+        {
             return Err(binding_mismatch("testing_environment.id"));
         }
         let application = client
@@ -446,9 +484,9 @@ pub(super) fn session_identity(
     };
     for snapshot in snapshots {
         let snapshot_kind = match snapshot.actor_type {
-            models::ApplicationAuthorizationActorType::Carbon => ActorKind::Carbon,
-            models::ApplicationAuthorizationActorType::Silicon => ActorKind::Silicon,
-            models::ApplicationAuthorizationActorType::Other(_) => {
+            Some(models::ApplicationAuthorizationActorType::Carbon) => ActorKind::Carbon,
+            Some(models::ApplicationAuthorizationActorType::Silicon) => ActorKind::Silicon,
+            Some(models::ApplicationAuthorizationActorType::Other(_)) | None => {
                 return Err(invalid_response("session.actor_type"));
             }
         };
@@ -464,13 +502,13 @@ pub(super) fn session_identity(
             || identity
                 .public_id
                 .as_ref()
-                .is_some_and(|id| id != &snapshot.public_id)
+                .is_some_and(|id| Some(id) != snapshot.public_id.as_ref())
         {
             return Err(binding_mismatch("session.authorization"));
         }
-        ActorId::new(snapshot.public_id.clone())
+        ActorId::new(snapshot.public_id.clone().ok_or(IamClientError::Rejected)?)
             .map_err(|_| invalid_response("session.public_id"))?;
-        identity.public_id = Some(snapshot.public_id);
+        identity.public_id = snapshot.public_id;
         identity.organizations.push(
             OrganizationId::new(snapshot.org_id).map_err(|_| invalid_response("session.org_id"))?,
         );
@@ -503,11 +541,14 @@ fn authorization(
     {
         return Err(binding_mismatch("authorization.scope"));
     }
-    if !snapshot.scopes.iter().any(|scope| scope == "roles.read")
+    if !snapshot
+        .scopes
+        .iter()
+        .any(|scope| scope == "self.membership.read")
         || !snapshot
             .scopes
             .iter()
-            .any(|scope| scope == "memberships.read")
+            .any(|scope| scope == "self.identity.read")
     {
         return Err(IamClientError::Rejected);
     }
@@ -518,9 +559,9 @@ fn authorization(
         _ => return Err(IamClientError::Rejected),
     };
     let actor_kind = match snapshot.actor_type {
-        models::ApplicationAuthorizationActorType::Carbon => ActorKind::Carbon,
-        models::ApplicationAuthorizationActorType::Silicon => ActorKind::Silicon,
-        models::ApplicationAuthorizationActorType::Other(_) => {
+        Some(models::ApplicationAuthorizationActorType::Carbon) => ActorKind::Carbon,
+        Some(models::ApplicationAuthorizationActorType::Silicon) => ActorKind::Silicon,
+        Some(models::ApplicationAuthorizationActorType::Other(_)) | None => {
             return Err(invalid_response("authorization.actor_type"));
         }
     };
@@ -542,7 +583,7 @@ fn authorization(
         organization.clone(),
         ActorRef::new(
             actor_kind,
-            ActorId::new(snapshot.public_id)
+            ActorId::new(snapshot.public_id.ok_or(IamClientError::Rejected)?)
                 .map_err(|_| invalid_response("authorization.public_id"))?,
         ),
         role,
