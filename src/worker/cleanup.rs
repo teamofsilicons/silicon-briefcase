@@ -219,14 +219,7 @@ async fn schedule_multipart_aborts(pool: &PgPool, batch_size: i64) -> Result<u64
 async fn schedule_version_deletions(pool: &PgPool, batch_size: i64) -> Result<u64, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let sources = sqlx::query_as::<_, CleanupSource>(
-        "         SELECT version.org_id, version.entry_id, version.version_id, \
-                    row_number() OVER ( \
-                        PARTITION BY version.org_id, version.entry_id \
-                        ORDER BY version.version_number DESC, version.version_id DESC \
-                    ) AS retention_rank \
-               FROM briefcase.entry_versions AS version \
-         ) \
-         SELECT version.org_id, version.entry_id AS source_entry_id, \
+        "SELECT version.org_id, version.entry_id AS source_entry_id, \
                 version.version_id AS source_version_id, \
                 NULL::uuid AS source_upload_id, entry.deletion_batch_id, \
                 version.storage_backend, version.storage_config_id, version.bucket_name, \
@@ -993,6 +986,21 @@ async fn delete_deletion_batch_metadata(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn version_cleanup_query_executes_in_postgres() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+            eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+            return Ok(());
+        };
+        let pool = sqlx::PgPool::connect(&url).await?;
+        crate::infrastructure::postgres::migrate(&pool).await?;
+        // LIMIT 0 validates the real scheduling query without scheduling any
+        // deletions from fixtures belonging to other integration tests.
+        assert_eq!(super::schedule_version_deletions(&pool, 0).await?, 0);
+        pool.close().await;
+        Ok(())
+    }
 
     use super::{
         ClaimedCleanup, CleanupKind, cleanup_target, duration_millis_rounded_up,
