@@ -188,12 +188,8 @@ pub(crate) async fn optional_testing_access(
         .ok_or(AppError::DependencyUnavailable {
             dependency: "testing_database",
         })?;
-    let access = store.resolve_root_key(&key).await?;
-    let credential = iam_environment_credential(&access)?;
-    state
-        .iam
-        .validate_environment_credential(&credential, access.iam_environment_id)
-        .await?;
+    let current = state.iam.discover_testing_environment(&key).await?;
+    let access = store.discover(&current, &key).await?;
     Ok(Some(access))
 }
 

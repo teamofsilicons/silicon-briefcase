@@ -94,7 +94,8 @@ impl IamEnvironmentCredential {
         app_id: String,
         app_secret: SecretString,
     ) -> Result<Self, IamClientBuildError> {
-        if !valid_environment_key(environment_key.expose_secret())
+        if (!environment_key.expose_secret().is_empty()
+            && !valid_environment_key(environment_key.expose_secret()))
             || !is_canonical_iam_application_id(&app_id)
             || !valid_fixed_iam_secret(app_secret.expose_secret(), "ask_")
         {

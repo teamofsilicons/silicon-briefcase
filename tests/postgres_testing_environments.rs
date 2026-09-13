@@ -2320,3 +2320,133 @@ async fn testing_storage_state(
     transaction.commit().await?;
     Ok(state)
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One stateful first-use/rename/reset integration scenario.
+async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyhow::Result<()> {
+    let (Ok(control_url), Ok(data_url)) = (
+        std::env::var("BRIEFCASE_TEST_CONTROL_DATABASE_URL"),
+        std::env::var("BRIEFCASE_TEST_DATA_DATABASE_URL"),
+    ) else {
+        return Ok(());
+    };
+    let production = postgres::connect(&settings(control_url), "discovery-control-test").await?;
+    let data = postgres::connect(&settings(data_url), "discovery-data-test").await?;
+    postgres::migrate(&production).await?;
+    postgres::migrate(&data).await?;
+    let production = if let Ok(url) = std::env::var("BRIEFCASE_TEST_CONTROL_RUNTIME_DATABASE_URL") {
+        postgres::connect(&settings(url), "discovery-control-runtime").await?
+    } else {
+        production
+    };
+    let data = if let Ok(url) = std::env::var("BRIEFCASE_TEST_DATA_RUNTIME_DATABASE_URL") {
+        postgres::connect(&settings(url), "discovery-data-runtime").await?
+    } else {
+        data
+    };
+    let id = Uuid::now_v7();
+    let org = format!("discovery-{}", Uuid::new_v4().simple());
+    let secret = SecretString::from(format!("ask_{}{}", Uuid::new_v4().simple(), "x".repeat(11)));
+    let mut context: silicon_iam_client::models::ApplicationTestingContext =
+        serde_json::from_value(serde_json::json!({
+            "environment_id":id,"environment":{"environment_id":id,"org_id":org,"name":"IAM sandbox","description":null,"version":1,"key_generation":1,"cleaned_at":null,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"owner"},
+            "application":{"app_id":"tos>briefcase","base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30}
+        }))?;
+    let metadata = context
+        .environment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("metadata"))?;
+    metadata.name = "測".repeat(64);
+    metadata.description = Some("測".repeat(500));
+    let store = TestingEnvironmentStore::new(
+        production.clone(),
+        data.clone(),
+        &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+    )?;
+    // Two first requests must not need a production actor or create duplicates.
+    let (a, b) = tokio::join!(
+        store.discover(&context, &secret),
+        store.discover(&context, &secret)
+    );
+    let a = a?;
+    let b = b?;
+    assert_eq!(a.environment_id, id);
+    assert_eq!(a.control_version, b.control_version);
+    assert!(a.iam_environment_key.expose_secret().is_empty());
+    let repository = PostgresRepository::new(production.clone()).with_test_pool(data.clone());
+    let execution = execution(
+        &org,
+        "test-owner",
+        Some(TestingEnvironmentContext::new(id, a.control_version)),
+    )?;
+    reconcile_roots(&repository, &execution).await?;
+    assert_eq!(organization_count(&data, &execution).await?, 1);
+    assert!(entry_count(&data, &execution).await? > 0);
+    let stale = context.clone();
+    context
+        .environment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("metadata"))?
+        .name = "Renamed in IAM".into();
+    context
+        .environment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("metadata"))?
+        .version = 2;
+    let renamed = store.discover(&context, &secret).await?;
+    assert_eq!(renamed.name, "Renamed in IAM");
+    assert!(store.discover(&stale, &secret).await.is_err());
+    let renamed_execution = execution_with_version(&execution, id, renamed.control_version)?;
+    assert_eq!(organization_count(&data, &renamed_execution).await?, 1);
+    context
+        .environment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("metadata"))?
+        .version = 3;
+    context
+        .environment
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("metadata"))?
+        .cleaned_at = Some(time::OffsetDateTime::now_utc());
+    let reset = store.discover(&context, &secret).await?;
+    let reset_execution = execution_with_version(&execution, id, reset.control_version)?;
+    assert_eq!(
+        entry_count(&data, &reset_execution).await?,
+        0,
+        "IAM reset erases old files and roots"
+    );
+    let mut tx =
+        begin_tenant_transaction(&data, &TenantContext::from_execution(&reset_execution)).await?;
+    let old_members:i64=sqlx::query_scalar("SELECT count(*) FROM briefcase.organization_members WHERE org_id=briefcase.current_org_id()").fetch_one(&mut *tx).await?;
+    assert_eq!(
+        old_members, 0,
+        "IAM reset removes cached identity memberships"
+    );
+    tx.commit().await?;
+    assert!(
+        store.acquire_use_fence(&renamed).await.is_err(),
+        "old request fence is invalidated"
+    );
+    let again = store.discover(&context, &secret).await?;
+    assert_eq!(again.control_version, reset.control_version);
+    let tenant = TenantContext::for_control_service(&org, "discovery-cleanup");
+    let mut tx = begin_tenant_transaction(&production, &tenant).await?;
+    sqlx::query("DELETE FROM briefcase.organizations WHERE org_id=$1")
+        .bind(&org)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+fn execution_with_version(
+    old: &ExecutionContext,
+    id: Uuid,
+    version: i64,
+) -> anyhow::Result<ExecutionContext> {
+    execution(
+        old.authorization().organization_id().as_str(),
+        old.authorization().actor().id().as_str(),
+        Some(TestingEnvironmentContext::new(id, version)),
+    )
+}

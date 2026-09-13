@@ -106,9 +106,42 @@ pub(crate) async fn iam_webhook(
             .ok_or(AppError::DependencyUnavailable {
                 dependency: "testing_database",
             })?;
-        let matched = testing
-            .resolve_iam_webhook(|candidate| verified.testing_key_matches(candidate))
-            .await?;
+        let mut discovered = None;
+        for secret in testing.webhook_candidates().await? {
+            let current = match state.iam.discover_testing_environment(&secret).await {
+                Ok(current) => current,
+                Err(crate::infrastructure::iam::IamClientError::Rejected) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let digest = current
+                .webhook_key_digest
+                .as_deref()
+                .and_then(|value| hex::decode(value).ok())
+                .ok_or(AppError::Unauthenticated)?;
+            if verified.testing_key_digest_matches(&digest) {
+                if current
+                    .environment
+                    .as_ref()
+                    .and_then(|m| m.cleaned_at)
+                    .is_some_and(|cleaned| verified.event.occurred_at <= cleaned)
+                {
+                    return Ok(StatusCode::NO_CONTENT);
+                }
+                let access = testing.discover(&current, &secret).await?;
+                discovered = Some((
+                    TestingEnvironmentContext::new(access.environment_id, access.control_version),
+                    access.owner_org_id,
+                ));
+                break;
+            }
+        }
+        let matched = if discovered.is_some() {
+            discovered
+        } else {
+            testing
+                .resolve_iam_webhook(|candidate| verified.testing_key_matches(candidate))
+                .await?
+        };
         Some(matched.ok_or(AppError::Unauthenticated)?.0)
     } else {
         None

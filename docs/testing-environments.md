@@ -12,7 +12,32 @@ The secret selects the environment; the test actor's current IAM membership, rol
 
 Each environment has a **2 GiB** storage ceiling, including retained versions and reservations. Briefcase permits **10 active environments** across the deployment. Exceeding the test storage ceiling returns `In test enviorment you are limited to a total storage of 2gb per enviorment.`
 
-## Create a paired environment
+## Create and manage in IAM
+
+Create the environment, bootstrap test actors, and import `tos>briefcase` in IAM.
+Give Briefcase the returned test `app_secret`. The first metadata lookup or sign-in
+validates it with IAM and initializes Briefcase storage automatically. No manual
+pairing, Briefcase production login, or IAM environment root key is needed.
+
+Briefcase fixes the application ID to its configured IAM application and asks IAM
+to authenticate the secret. IAM returns the environment UUID and authoritative
+lifecycle metadata. Briefcase validates this on every selected request; a secret
+prefix alone never selects a world or authorizes an actor.
+
+IAM owns environment creation, identities, permissions, names, secret rotation,
+retirement, restoration, and reset. Briefcase owns files, file grants, storage limits,
+and provider cleanup. IAM name changes appear on next use. Rotation accepts the
+new application secret automatically. Retirement blocks new requests; restoration
+allows them again. After IAM resets and the application is reimported, Briefcase
+erases the old files and identity projections before accepting the new world.
+Provider object deletion runs through its durable cleanup queue.
+
+Briefcase keeps its local storage record for recovery and cleanup; IAM retirement
+does not immediately physically delete files. Local Briefcase cleanup and explicit
+retirement are still available, and a locally retired record must be restored
+explicitly. The local idle retirement policy applies only to legacy pairings.
+
+## Optional creation through Briefcase
 
 The API provisions the IAM application testing environment and then creates the empty Briefcase plane. Configure the production Briefcase application and its dependency catalog in IAM first. Production members authorized by IAM can create environments using:
 
@@ -35,7 +60,7 @@ secret manager before running `briefcase env create`. The Rust client exposes
 the same option as `TestingEnvironmentCreate.iam_test_key`, typed as
 `Option<IamEnvironmentKey>`.
 
-IAM currently requires its environment root key together with the test Application secret when a service validates the testing context. Briefcase stores that pairing encrypted, so callers only pass the app secret. A secret from an arbitrary, unregistered IAM environment cannot independently bootstrap Briefcase: create/register the paired environment through this flow first. The backend uses the official IAM SDK for provisioning and verification.
+Existing paired environments are supported and migrate to application-only validation on their next use. The backend uses the official IAM SDK for provisioning and verification.
 
 ## Test sign-in
 
@@ -130,12 +155,12 @@ never its app secret. The drawer clears entered credentials when it closes.
 
 Management uses a production actor session and creator/administrator authorization. Data cleaning is also available to a holder of the test secret at `POST /testing-environment/cleanings`; it requires an idempotency key. This erases isolated Briefcase data and schedules provider cleanup without deleting the IAM dependency environment.
 
-Rotate test credentials **in IAM**, then replace the entire paired credential set using `briefcase env pair-iam`. The new app secret immediately replaces the selector; the old one fails. There is no independent Briefcase key-rotation endpoint. Pairing replacement cannot transfer existing identity-bound data to a different IAM environment. Use a new environment when identities change.
+Rotate test credentials **in IAM**, then use the new app secret directly. Discovery updates the stored credential automatically; the old one fails IAM validation. `briefcase env pair-iam` remains available for legacy management. There is no independent Briefcase key-rotation endpoint. Pairing replacement cannot transfer existing identity-bound data to a different IAM environment. Use a new environment when identities change.
 
-Retirement immediately invalidates local access. Restoration requires an active, valid IAM pairing and reactivates its current app secret. IAM retirement or secret invalidation also prevents further data-plane requests because Briefcase validates the live testing context. Briefcase does not silently restore or erase a shared IAM dependency graph. Idle Briefcase planes retire after 30 days and retain their recorded recovery deadline; metadata responses report the authoritative `purge_after`.
+Retirement immediately invalidates local access. Restoration requires an active, valid IAM pairing and reactivates its current app secret. IAM retirement or secret invalidation also prevents further data-plane requests because Briefcase validates the live testing context. Briefcase does not silently restore or erase a shared IAM dependency graph. Legacy paired Briefcase planes retire after 30 idle days and retain their recorded recovery deadline; metadata responses report the authoritative `purge_after`.
 
 ## Storage and webhook isolation
 
-Use a separate PostgreSQL database for testing, distinct roles, encrypted environment credentials, and environment-specific S3 prefixes. Startup verifies that production and test DSNs resolve to different actual databases. IAM signs test webhook envelopes; Briefcase verifies the raw signature, matches the encrypted IAM root, and routes only to the paired environment. A public UUID is never an authorization credential.
+Use a separate PostgreSQL database for testing, distinct roles, encrypted environment credentials, and environment-specific S3 prefixes. Startup verifies that production and test DSNs resolve to different actual databases. IAM signs test webhook envelopes; Briefcase verifies the raw signature, matches the root digest returned by live IAM application validation, and routes only to that environment. A public UUID is never an authorization credential.
 
 Testing notifications and email outbox records are local to the test plane. The worker does not send test invitations to real email addresses. Cleaning, retirement and in-flight requests use database lifecycle fences so an old request cannot repopulate a cleaned plane.

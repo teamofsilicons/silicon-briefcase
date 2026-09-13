@@ -142,6 +142,12 @@ impl IamClient {
             secret: secret.clone(),
         });
         match environment {
+            Some(environment) if environment.environment_key.expose_secret().is_empty() => client
+                .with_testing_application(
+                    environment.app_id.as_str(),
+                    environment.app_secret.expose_secret(),
+                )
+                .map_err(|_| binding_mismatch("testing_application")),
             Some(environment) => Ok(client.with_environment(
                 EnvironmentKey::new(environment.environment_key.expose_secret().to_owned())
                     .map_err(|_| binding_mismatch("testing_environment.key"))?,
@@ -157,6 +163,41 @@ impl IamClient {
         environment.map_or((&self.service_app_id, &self.service_app_secret), |value| {
             (&value.app_id, &value.app_secret)
         })
+    }
+
+    /// Discovers an IAM-owned test world using only this service's test secret.
+    /// # Errors
+    /// Rejects invalid or inactive test credentials and unavailable IAM metadata.
+    pub async fn discover_testing_environment(
+        &self,
+        secret: &SecretString,
+    ) -> Result<models::ApplicationTestingContext, IamClientError> {
+        if !valid_fixed_iam_secret(secret.expose_secret(), "ask_") {
+            return Err(IamClientError::Rejected);
+        }
+        let client = self
+            .client
+            .with_credential(Credential::Application {
+                app_id: self.service_app_id.as_str().to_owned(),
+                secret: secret.clone(),
+            })
+            .with_testing_application(self.service_app_id.as_str(), secret.expose_secret())
+            .map_err(|_| binding_mismatch("testing_application"))?;
+        let current = client
+            .applications()
+            .testing_context()
+            .await
+            .map_err(|e| sdk_error(e, Operation::Environment))?;
+        if current.application.app_id != self.service_app_id.as_str()
+            || current.environment_id.is_nil()
+            || current
+                .environment
+                .as_ref()
+                .is_none_or(|e| e.environment_id != current.environment_id || e.version < 1)
+        {
+            return Err(binding_mismatch("testing_environment"));
+        }
+        Ok(current)
     }
 
     /// Validates the root and test-only application without production fallback.

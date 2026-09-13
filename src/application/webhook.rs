@@ -202,6 +202,19 @@ impl VerifiedIamWebhook {
         self.testing_key.is_some()
     }
 
+    /// Matches a verified envelope to IAM's non-secret routing digest.
+    #[must_use]
+    pub fn testing_key_digest_matches(&self, expected: &[u8]) -> bool {
+        use sha2::Digest as _;
+        self.testing_key.as_ref().is_some_and(|key| {
+            bool::from(
+                sha2::Sha256::digest(key.expose_secret().as_bytes())
+                    .as_slice()
+                    .ct_eq(expected),
+            )
+        })
+    }
+
     /// Compares the authenticated test key with an expected key without
     /// exposing the received root credential.
     #[must_use]

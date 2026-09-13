@@ -40,6 +40,9 @@ use crate::{
     },
 };
 
+#[path = "testing_discovery.rs"]
+mod discovery;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const CREATE_OPERATION: &str = "testing_environment.create";
@@ -573,7 +576,7 @@ impl TestingEnvironmentStore {
         }
         let digest = self.digest(b"briefcase-root", root_key.expose_secret().as_bytes())?;
         let row = sqlx::query_as::<_, RootLookupRow>(
-            "SELECT * FROM briefcase.testing_environment_by_root_digest($1)",
+            "SELECT c.* FROM briefcase.testing_environment_by_root_digest($1) c WHERE briefcase.testing_environment_version_matches(c.environment_id,c.control_version)",
         )
         .bind(digest.as_slice())
         .fetch_optional(&self.production)
@@ -2264,7 +2267,7 @@ pub async fn maintain_testing_environments(
 ) -> Result<(u64, u64), AppError> {
     let idle = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM briefcase.testing_environments \
-          WHERE status = 'active' \
+          WHERE status = 'active' AND iam_control_version IS NULL \
             AND last_activity_at <= clock_timestamp() - make_interval(days => $1) \
           ORDER BY last_activity_at, environment_id",
     )
@@ -2305,7 +2308,7 @@ async fn retire_idle_environment(
                 deleted_at = clock_timestamp(), purge_after = clock_timestamp() + make_interval(days => $2), \
                 version = version + 1 \
           WHERE environment_id = $1 AND status = 'active' \
-            AND last_activity_at <= clock_timestamp() - make_interval(days => $3)",
+            AND iam_control_version IS NULL AND last_activity_at <= clock_timestamp() - make_interval(days => $3)",
     )
     .bind(environment_id)
     .bind(TESTING_ENVIRONMENT_RECOVERY_DAYS)
