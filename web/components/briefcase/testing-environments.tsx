@@ -421,10 +421,10 @@ export default function TestingEnvironments({
               </Button>
             </div>
             <p className="detail-hint">
-              Each environment has its own paired IAM test world and up to 2 GiB
-              of storage. Inactivity for 30 days retires it; retired
-              environments have a two-day recovery window. Briefcase supports up
-              to 10 active environments across the deployment.
+              IAM-created environments connect automatically with their app
+              secret. Manage the IAM world in IAM; Briefcase manages its files
+              and up to 2 GiB of storage. Briefcase supports up to 10 active
+              environments. Local retirement has a two-day recovery window.
             </p>
             <p className="detail-hint">
               Open an active environment to browse its files as a test Carbon or
@@ -545,9 +545,9 @@ export default function TestingEnvironments({
               <div className="environment-section-heading">
                 <h3 id="environment-entry-heading">Enter with an app secret</h3>
                 <p className="detail-hint">
-                  Already have a paired environment? Sign in with its app secret
+                  Created your environment in IAM? Enter its Briefcase app secret
                   and an IAM-issued test SLT or the Carbon/Silicon ID you want
-                  to use.
+                  to use. No manual pairing is needed.
                 </p>
               </div>
               <fieldset disabled={busy} className="environment-fields">
