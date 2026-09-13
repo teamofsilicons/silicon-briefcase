@@ -91,9 +91,10 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.2 share
+The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.3 share
 one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
+Link-access responses include the shareable file or folder `url`; the browser displays it with a copy action.
 See the [official documentation](https://docs.briefcase.teamofsilicons.com/).
 
 ## Licence

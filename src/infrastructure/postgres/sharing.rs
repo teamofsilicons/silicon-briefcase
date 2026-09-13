@@ -1,6 +1,6 @@
 //! Link authority and audit-log queries, always inside the selected tenant.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -27,8 +27,9 @@ fn error(value: super::metadata::common::Result<()>) -> Result<(), AppError> {
     value.map_err(repo_error)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct LinkAccess {
+    pub path: crate::domain::entry::EntryPath,
     pub can_manage: bool,
     pub enabled: bool,
     pub effective: bool,
@@ -61,7 +62,13 @@ impl PostgresRepository {
                 .authorization(context.authorization())
                 .allows(Capability::ManagePermissions))
             || (safe_root && context.authorization().role().has_administrative_access());
-        let result = read_link(&mut request.transaction, id.as_uuid(), can_manage).await?;
+        let result = read_link(
+            &mut request.transaction,
+            id.as_uuid(),
+            entry.entry.path,
+            can_manage,
+        )
+        .await?;
         request.transaction.commit().await.map_err(db)?;
         Ok(result)
     }
@@ -132,7 +139,13 @@ impl PostgresRepository {
                 .await,
             )?;
         }
-        let result = read_link(&mut request.transaction, id.as_uuid(), true).await?;
+        let result = read_link(
+            &mut request.transaction,
+            id.as_uuid(),
+            entry.entry.path,
+            true,
+        )
+        .await?;
         request.transaction.commit().await.map_err(db)?;
         Ok(result)
     }
@@ -249,6 +262,7 @@ pub(super) async fn public_entry(
 async fn read_link(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
+    path: crate::domain::entry::EntryPath,
     can_manage: bool,
 ) -> Result<LinkAccess, AppError> {
     let enabled = sqlx::query_scalar("SELECT link_public FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND entry_id=$1")
@@ -256,6 +270,7 @@ async fn read_link(
     let inherited_from: Option<Uuid> = sqlx::query_scalar("SELECT a.entry_id FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=briefcase.current_org_id() AND c.descendant_id=$1 AND c.depth>0 AND a.link_public AND a.deleted_at IS NULL ORDER BY c.depth LIMIT 1")
         .bind(id).fetch_optional(&mut **tx).await.map_err(db)?;
     Ok(LinkAccess {
+        path,
         can_manage,
         enabled,
         effective: enabled || inherited_from.is_some(),

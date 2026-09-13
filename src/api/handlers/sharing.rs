@@ -1,6 +1,12 @@
 //! Read-only public-link access and authenticated sharing/log controls.
 
-use super::super::{auth::IamAction, delivery, dto::PageQuery, extract, state::AppState};
+use super::super::{
+    auth::IamAction,
+    delivery,
+    dto::{LinkAccessDto, PageQuery},
+    extract,
+    state::AppState,
+};
 use crate::{
     application::{
         content::{ContentDelivery, ContentIntent, map_object_error, resolve_range},
@@ -9,10 +15,7 @@ use crate::{
     },
     domain::{actor::is_canonical_iam_organization_id, entry::EntryPath},
     error::AppError,
-    infrastructure::postgres::{
-        TenantContext,
-        sharing::{LinkAccess, LogPage},
-    },
+    infrastructure::postgres::{TenantContext, sharing::LogPage},
 };
 use axum::{
     Json,
@@ -33,16 +36,18 @@ pub(crate) async fn link_access(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<LinkAccess>, AppError> {
+) -> Result<Json<LinkAccessDto>, AppError> {
     let context =
         extract::authenticate(&state, &headers, IamAction::ReadEntry, &id.to_string()).await?;
-    Ok(Json(
-        state
-            .content_adapter
-            .metadata_repository()
-            .link_access(&context, extract::entry_id(id)?)
-            .await?,
-    ))
+    let access = state
+        .content_adapter
+        .metadata_repository()
+        .link_access(&context, extract::entry_id(id)?)
+        .await?;
+    Ok(Json(state.mapper.link_access(
+        context.authorization().organization_id().as_str(),
+        &access,
+    )?))
 }
 
 pub(crate) async fn set_link_access(
@@ -50,7 +55,7 @@ pub(crate) async fn set_link_access(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<LinkUpdate>,
-) -> Result<Json<LinkAccess>, AppError> {
+) -> Result<Json<LinkAccessDto>, AppError> {
     let context = extract::authenticate(
         &state,
         &headers,
@@ -59,13 +64,15 @@ pub(crate) async fn set_link_access(
     )
     .await?;
     let metadata = extract::mutation(&headers, "set_link_access", &id.to_string(), &body, true)?;
-    Ok(Json(
-        state
-            .content_adapter
-            .metadata_repository()
-            .set_link_access(&context, extract::entry_id(id)?, body.enabled, &metadata)
-            .await?,
-    ))
+    let access = state
+        .content_adapter
+        .metadata_repository()
+        .set_link_access(&context, extract::entry_id(id)?, body.enabled, &metadata)
+        .await?;
+    Ok(Json(state.mapper.link_access(
+        context.authorization().organization_id().as_str(),
+        &access,
+    )?))
 }
 
 pub(crate) async fn logs(

@@ -72,6 +72,55 @@ mod url_tests {
     use super::*;
 
     #[test]
+    fn share_links_cover_files_folders_inheritance_and_disabled_access() -> anyhow::Result<()> {
+        let mapper = ResponseMapper::new(
+            &Url::parse("https://api.example/api/v1/")?,
+            Url::parse("https://site.example/")?,
+        );
+        for (path, encoded) in [
+            (
+                "private/me:tos/Shared reports",
+                "private/me:tos/Shared%20reports",
+            ),
+            (
+                "private/me:tos/Shared reports/draft #1.txt",
+                "private/me:tos/Shared%20reports/draft%20%231.txt",
+            ),
+        ] {
+            for (enabled, inherited_from) in [
+                (true, None),
+                (false, Some(uuid::Uuid::new_v4())),
+                (false, None),
+            ] {
+                let effective = enabled || inherited_from.is_some();
+                let result = mapper.link_access(
+                    "tos",
+                    &crate::infrastructure::postgres::sharing::LinkAccess {
+                        path: EntryPath::new(path)?,
+                        can_manage: true,
+                        enabled,
+                        effective,
+                        inherited_from,
+                    },
+                )?;
+                let document = serde_json::to_value(result)?;
+                assert_eq!(document["enabled"], enabled);
+                assert_eq!(document["effective"], effective);
+                if effective {
+                    assert_eq!(
+                        document["url"],
+                        format!("https://site.example/org/tos/{encoded}")
+                    );
+                } else {
+                    assert!(document["url"].is_null());
+                }
+                assert!(document.get("path").is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reserved_characters_remain_in_their_entry_segment() -> anyhow::Result<()> {
         let base = Url::parse("https://briefcase.example/api/v1/")?;
         let mapper = ResponseMapper::new(&base, Url::parse("https://site.example/")?);
@@ -203,6 +252,24 @@ impl ResponseMapper {
             created_at: None,
             updated_at: None,
             deleted_at: None,
+        })
+    }
+
+    pub(crate) fn link_access(
+        &self,
+        organization_id: &str,
+        access: &crate::infrastructure::postgres::sharing::LinkAccess,
+    ) -> Result<super::dto::LinkAccessDto, AppError> {
+        let url = access
+            .effective
+            .then(|| self.permanent_url(organization_id, &access.path))
+            .transpose()?;
+        Ok(super::dto::LinkAccessDto {
+            can_manage: access.can_manage,
+            enabled: access.enabled,
+            effective: access.effective,
+            inherited_from: access.inherited_from,
+            url,
         })
     }
 

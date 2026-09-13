@@ -3338,7 +3338,14 @@ components:
       - effective
       - inherited_from
       - can_manage
+      - url
       properties:
+        url:
+          type:
+          - string
+          - 'null'
+          format: uri
+          description: Shareable file or folder website URL when effective is true; otherwise null. Testing URLs require the recipient to select the same testing environment.
         enabled:
           type: boolean
         effective:

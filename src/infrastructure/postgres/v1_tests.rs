@@ -135,8 +135,10 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         repo.public_entry(&tenant, child.entry.path.as_str()).await,
         Err(AppError::NotFound)
     ));
-    repo.set_link_access(&owner, folder.entry.id, true, &mutation()?)
+    let shared = repo
+        .set_link_access(&owner, folder.entry.id, true, &mutation()?)
         .await?;
+    assert_eq!(shared.path, folder.entry.path);
     assert_eq!(
         repo.public_entry(&tenant, child.entry.path.as_str())
             .await?
@@ -144,6 +146,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         child.entry.id.as_uuid()
     );
     let access = repo.link_access(&owner, child.entry.id).await?;
+    assert_eq!(access.path, child.entry.path);
     assert!(
         !access.enabled
             && access.effective

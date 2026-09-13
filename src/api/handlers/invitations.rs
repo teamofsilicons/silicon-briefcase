@@ -264,7 +264,7 @@ pub(crate) async fn delegated_link(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<crate::infrastructure::postgres::sharing::LinkAccess>, AppError> {
+) -> Result<Json<crate::api::dto::LinkAccessDto>, AppError> {
     let (context, body): (_, DelegatedLink) = super::delegated::authorize_json(
         &state,
         &headers,
@@ -279,16 +279,18 @@ pub(crate) async fn delegated_link(
         body.operation_id,
         &body,
     )?;
-    Ok(Json(
-        state
-            .content_adapter
-            .metadata_repository()
-            .set_link_access(
-                &context,
-                extract::entry_id(body.entry_id)?,
-                body.enabled,
-                &metadata,
-            )
-            .await?,
-    ))
+    let access = state
+        .content_adapter
+        .metadata_repository()
+        .set_link_access(
+            &context,
+            extract::entry_id(body.entry_id)?,
+            body.enabled,
+            &metadata,
+        )
+        .await?;
+    Ok(Json(state.mapper.link_access(
+        context.authorization().organization_id().as_str(),
+        &access,
+    )?))
 }

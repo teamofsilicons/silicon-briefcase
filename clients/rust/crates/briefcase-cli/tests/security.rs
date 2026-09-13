@@ -1243,3 +1243,59 @@ async fn failed_test_commands_keep_json_clean_and_print_the_test_footer() {
         )
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enabling_link_access_returns_file_and_folder_urls() {
+    for (entry_path, json_output) in [
+        ("public/Shared%20folder", false),
+        ("public/Shared%20folder/file%23.txt", true),
+    ] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        write_state(
+            home.path(),
+            &server,
+            &json!({
+                "sessions": {"work": session("2099-01-01T00:00:00Z")},
+                "production_credential_scopes": {"work": scope(&server, "tos")},
+            }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/version"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("briefcase-api-version", "v1")
+                    .set_body_json(version_document()),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("https://briefcase.example/org/tos/{entry_path}");
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/entries/{ENTRY_ID}/link-access")))
+            .and(body_json(json!({"enabled":true})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "can_manage":true,"enabled":true,"effective":true,"inherited_from":null,"url":url
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut args = vec![
+            "link".into(),
+            ENTRY_ID.into(),
+            "--enabled".into(),
+            "true".into(),
+        ];
+        if json_output {
+            args.push("--json".into());
+        }
+        let result = briefcase(home.path(), &args).await;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["url"], url);
+        assert_eq!(value["enabled"], true);
+    }
+}

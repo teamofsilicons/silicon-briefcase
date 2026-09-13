@@ -648,3 +648,18 @@ mod tests {
         ));
     }
 }
+
+/// Dynamic anyone-with-link visibility and its shareable address.
+#[derive(Clone, Debug, Serialize)]
+pub struct LinkAccessDto {
+    /// Whether the caller may change the explicit setting.
+    pub can_manage: bool,
+    /// This entry's own setting.
+    pub enabled: bool,
+    /// Public through this entry or an ancestor.
+    pub effective: bool,
+    /// Nearest shared ancestor, if any.
+    pub inherited_from: Option<Uuid>,
+    /// File or folder website URL when effective access is public; otherwise null.
+    pub url: Option<Url>,
+}

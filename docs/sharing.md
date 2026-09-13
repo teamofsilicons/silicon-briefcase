@@ -30,7 +30,9 @@ The HTTP equivalents are `GET/POST /entries/{entry_id}/invitations` and `DELETE 
 
 ## Anyone with the link
 
-Use the browser's Access tab, `briefcase link <path> --enabled true`, or `PUT /entries/{entry_id}/link-access` with `{"enabled":true}` and an idempotency key. The response reports the entry's explicit `enabled` value, effective access, and nearest `inherited_from` folder ID.
+Use the browser's Access tab, `briefcase link <path> --enabled true`, or `PUT /entries/{entry_id}/link-access` with `{"enabled":true}` and an idempotency key. The response includes `url`, the shareable website address for the file or folder whenever effective link access is enabled (including inherited access), or `null` when it is private. The CLI returns this URL in its JSON result, and the browser Access tab displays it with a **Copy share link** button. Testing-environment links require the recipient to select the same testing environment; secrets are never embedded in URLs.
+
+The response reports the entry's explicit `enabled` value, effective access, and nearest `inherited_from` folder ID.
 
 Anyone can view and download a shared entry without signing in. Folder sharing applies dynamically to every descendant, including new children. Turning off a child's explicit setting does not override a shared parent. Disable the parent setting to remove inherited public access; descendants with their own setting remain public.
 

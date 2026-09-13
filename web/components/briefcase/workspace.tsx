@@ -186,6 +186,7 @@ export default function Workspace({
     enabled: boolean;
     effective: boolean;
     inherited_from: string | null;
+    url: string | null;
   } | null>(null);
   const linkIntent = useRef<{
     id: string;
@@ -611,6 +612,7 @@ export default function Workspace({
             enabled: boolean;
             effective: boolean;
             inherited_from: string | null;
+            url: string | null;
           }>('/entries/' + selected.id + '/link-access');
           if (current) setLinkAccess(link);
           if (selected.effective_access.includes('manage_permissions')) {
@@ -1645,6 +1647,33 @@ export default function Workspace({
                             ? 'Can view and download'
                             : 'Requires an authorized account'}
                         </p>
+                        {linkAccess.effective && linkAccess.url && (
+                          <div className="mt-3 flex min-w-0 flex-col items-start gap-2">
+                            <a
+                              className="break-all text-sm underline"
+                              href={linkAccess.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {linkAccess.url}
+                            </a>
+                            <Button
+                              variant="outline"
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(
+                                    linkAccess.url!,
+                                  );
+                                  setNotice('Share link copied.');
+                                } catch (e) {
+                                  fail(e);
+                                }
+                              }}
+                            >
+                              <LinkIcon size={15} /> Copy share link
+                            </Button>
+                          </div>
+                        )}
                         {linkAccess.inherited_from && (
                           <p>
                             Access is inherited from a shared parent folder.

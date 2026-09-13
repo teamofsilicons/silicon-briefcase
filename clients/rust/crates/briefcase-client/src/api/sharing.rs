@@ -60,6 +60,10 @@ pub struct LinkAccess {
     pub effective: bool,
     /// Nearest shared ancestor, when inherited.
     pub inherited_from: Option<Uuid>,
+    /// Shareable file or folder website URL when access is effective.
+    /// Absent on older servers or when link access is disabled.
+    #[serde(default)]
+    pub url: Option<url::Url>,
 }
 
 /// A retained, attributable audit event.
