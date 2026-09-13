@@ -123,10 +123,12 @@ paths:
       operationId: exchangeShortLivedToken
       summary: Exchange an IAM short-lived token for a Briefcase Application session
       security: []
-      description: Accepts only the single-use SLT obtained from IAM's hosted Application login. Briefcase supplies
-        its own Application credential. When X-Briefcase-App-Secret is present, Briefcase uses only the mapped IAM
-        testing-environment key and test-only Application credential. Preserve the same Idempotency-Key when recovering
-        an uncertain result.
+      description: In production, slt is the single-use code obtained from IAM's hosted Application login.
+        With X-Briefcase-App-Secret selecting a paired test environment, slt is an existing test Carbon ID
+        (alice) or Silicon ID (worker:tos). Briefcase exchanges it through IAM using only the mapped testing
+        key and test Application credential, and verifies the returned actor. IAM determines the actor's
+        current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key
+        and input when recovering an uncertain result.
       parameters:
       - $ref: '#/components/parameters/AuthIdempotencyKey'
       - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
@@ -151,7 +153,7 @@ paths:
         '400':
           description: Missing or invalid idempotency key or request body
         '401':
-          description: The SLT is invalid, expired, consumed, or belongs to another plane
+          description: The production SLT or selected test actor is invalid, inactive, or belongs to another plane
         '503':
           description: IAM or the configured testing plane is unavailable
         default:
@@ -2202,7 +2204,11 @@ components:
       properties:
         slt:
           type: string
-          pattern: ^oac_[A-Za-z0-9_-]{43}$
+          description: Production IAM login code, or the existing Carbon/Silicon public ID when a test app secret is supplied.
+          oneOf:
+          - pattern: ^oac_[A-Za-z0-9_-]{43}$
+          - pattern: ^[a-z1-9_-]{3,30}$
+          - pattern: ^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$
     ApplicationSessionRefresh:
       type: object
       additionalProperties: false

@@ -91,7 +91,7 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.1 share
+The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.2 share
 one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
 See the [official documentation](https://docs.briefcase.teamofsilicons.com/).
@@ -107,3 +107,9 @@ The API this speaks to lives in
 `UNDERSTANDING.md` there is the product contract, `openapi.yaml` the wire
 contract, and its `docs/` directory the canonical API/client/CLI integration
 guides. The local pages above retain compatibility links to those guides.
+
+In a paired test environment, the SLT is an existing Carbon ID (e.g. `alice`)
+or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
+IAM issues the test session and determines its current access. Production
+continues to require a one-time IAM login code.

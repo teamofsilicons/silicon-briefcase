@@ -276,3 +276,9 @@ without grants remains authenticated; its public identifier may be absent.
 Network, IAM, and test-plane failures remain errors. The caller owns token
 refresh and storage; the Rust package does not read `SILICON_HOME` or persist
 credentials. The stateful CLI handles these responsibilities.
+
+In a paired test environment, the SLT is an existing Carbon ID (e.g. `alice`)
+or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
+IAM issues the test session and determines its current access. Production
+continues to require a one-time IAM login code.

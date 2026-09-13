@@ -45,15 +45,20 @@ impl Client {
         self.receive_json(request).await
     }
 
-    /// Exchanges a two-minute, single-use IAM SLT for a Briefcase session.
+    /// Exchanges an IAM SLT for a Briefcase session.
     ///
-    /// The Briefcase Application secret remains on the backend. This client
-    /// never accepts, stores, or transmits it.
+    /// Production uses a two-minute, single-use IAM login code. With a test
+    /// Application secret configured through [`crate::Config::with_environment`],
+    /// pass the existing test Carbon ID (e.g. `alice`) or Silicon ID (e.g.
+    /// `worker:tos`) as `slt`. IAM issues a session for that actor in the paired
+    /// test world. Production never accepts an actor ID as a login credential.
+    /// The production Briefcase Application secret remains on the backend.
     ///
     /// # Errors
     ///
     /// Returns an unauthenticated error when the SLT is unknown, expired,
-    /// already spent, or was minted for another canonical Application ID.
+    /// already spent, or was minted for another canonical Application ID,
+    /// or when IAM rejects the actor in the selected test world.
     /// Returns [`Error::Protocol`] if Briefcase returns a session that is not
     /// bound to the organization configured on this client.
     pub async fn login_with_slt(&self, slt: &str) -> Result<SessionTokens> {
@@ -61,7 +66,7 @@ impl Client {
             .await
     }
 
-    /// Exchanges an SLT using a caller-owned retry identity.
+    /// Exchanges an SLT (a test actor ID in testing) using a caller-owned retry identity.
     ///
     /// Reuse the same key with the same SLT after an uncertain transport
     /// outcome. Supplying a new key can turn a successful-but-lost response
