@@ -23,9 +23,14 @@ pub(crate) async fn read(
     headers: HeaderMap,
     Query(q): Query<PublicQuery>,
 ) -> Result<Response> {
-    let client = briefcase_client::Client::new_unchecked(
-        briefcase_client::Config::for_sign_in(&app.upstream)?.with_auto_update(false),
-    )?;
+    let mut config = briefcase_client::Config::for_sign_in(&app.upstream)?
+        .with_auto_update(false)
+        .with_telemetry(crate::telemetry::enabled(&headers))
+        .with_telemetry_source(briefcase_client::telemetry::Source::Web);
+    if let Some(environment) = crate::session::selected_environment(&headers)? {
+        config = config.with_public_testing_environment(environment);
+    }
+    let client = briefcase_client::Client::new_unchecked(config)?;
     let mut response = match q.view.as_deref().unwrap_or("metadata") {
         "metadata" => Json(client.public_entry(&q.org, &q.path).await?).into_response(),
         "contents" => Json(

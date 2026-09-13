@@ -13,6 +13,40 @@ use wiremock::{
     matchers::{body_json, body_string_contains, header, method, path, query_param},
 };
 
+#[tokio::test]
+async fn anonymous_sandbox_links_send_only_the_public_routing_id() {
+    let server = MockServer::start().await;
+    let environment = uuid::Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/public/tos/public/shared.txt"))
+        .and(query_param("test_environment", environment.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":uuid::Uuid::new_v4(),"name":"shared.txt","path":"public/shared.txt",
+            "entry_type":"file","content_type":"text/plain","size":4
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::new_unchecked(
+        Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
+            .unwrap()
+            .with_public_testing_environment(environment)
+            .with_auto_update(false),
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .public_entry("tos", "public/shared.txt")
+            .await
+            .unwrap()
+            .name,
+        "shared.txt"
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests[0].headers.contains_key("authorization"));
+    assert!(!requests[0].headers.contains_key("x-briefcase-app-secret"));
+}
+
 fn version_document(list_entries_revision: &str) -> serde_json::Value {
     let operations: Vec<serde_json::Value> = briefcase_client::OPERATIONS
         .iter()
@@ -1244,4 +1278,55 @@ async fn anonymous_links_need_no_selected_organization_or_session() {
         client.list_entries(&ListEntries::default()).await.is_err(),
         "unscoped public access must not permit ordinary workspace reads"
     );
+}
+
+#[tokio::test]
+async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
+    use briefcase_client::telemetry::{Event, Source, Stage};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/telemetry"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let event = Event::new(Source::Sdk, "upload", Stage::Completed);
+    briefcase_client::telemetry::submit(&format!("{}/api/v1/", server.uri()), &event)
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/iam"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"app_id":"tos>briefcase","testing":false,"test_environment_id":null}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    for enabled in [true, false] {
+        Client::new_unchecked(
+            Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
+                .unwrap()
+                .with_auto_update(false)
+                .with_telemetry(enabled),
+        )
+        .unwrap()
+        .iam_info()
+        .await
+        .unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].body_json::<serde_json::Value>().unwrap()["id"],
+        event.id.to_string()
+    );
+    assert_eq!(requests[0].headers["x-briefcase-telemetry"], "off");
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.headers.contains_key("authorization")
+                && !r.headers.contains_key("x-briefcase-app-secret"))
+    );
+    assert_eq!(requests[1].headers["x-briefcase-telemetry"], "on");
+    assert_eq!(requests[2].headers["x-briefcase-telemetry"], "off");
+    assert_eq!(requests[2].headers["x-briefcase-source"], "sdk");
 }

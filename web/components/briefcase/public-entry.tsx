@@ -40,6 +40,16 @@ export default function PublicEntryView({
     truncated: boolean;
   } | null>(null);
   const target = () => readFileLocation();
+  // Preserve the selector from this share URL, including malformed/duplicate
+  // values so the gateway rejects them instead of falling back to production.
+  const testQuery = () => {
+    if (typeof window === 'undefined') return '';
+    const query = new URLSearchParams();
+    new URLSearchParams(window.location.search)
+      .getAll('test_environment')
+      .forEach((id) => query.append('test_environment', id));
+    return query.toString();
+  };
   function endpoint(path: string, view = 'metadata', cursor?: string) {
     const current = target();
     return (
@@ -49,7 +59,8 @@ export default function PublicEntryView({
         path,
         view,
         ...(cursor ? { cursor } : {}),
-      })
+      }) +
+      (testQuery() ? '&' + testQuery() : '')
     );
   }
   const read = useCallback(
@@ -125,6 +136,11 @@ export default function PublicEntryView({
   const source = entry ? endpoint(entry.path, 'inline') : '';
   return (
     <main className="public-share">
+      {testQuery() && (
+        <aside className="testing-view-banner">
+          Testing environment · Shared sandbox link
+        </aside>
+      )}
       <header>
         <Link href="/">Silicon Briefcase</Link>
         <Button variant="outline" onClick={onSignIn}>
@@ -161,7 +177,13 @@ export default function PublicEntryView({
             {entry.entry_type === 'folder' ? (
               <div className="public-files">
                 {children.map((child) => (
-                  <a key={child.id} href={fileLocation(org, child.path)}>
+                  <a
+                    key={child.id}
+                    href={
+                      fileLocation(org, child.path) +
+                      (testQuery() ? '?' + testQuery() : '')
+                    }
+                  >
                     {child.entry_type === 'folder' ? (
                       <Folder size={20} />
                     ) : (

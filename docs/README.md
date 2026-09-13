@@ -1,6 +1,24 @@
 # Silicon Briefcase
 
-Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the first official release **1.0.0**.
+Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **1.1.0** source release.
+
+## Install and use
+
+```sh
+curl -fsSL https://docs.briefcase.teamofsilicons.com/install.sh | sh
+briefcase iam --json
+briefcase login <IAM-short-lived-token>
+briefcase --org <organization> ls
+```
+
+The installer sets up the CLI and persistent hourly updater on macOS/Linux.
+Obtain the short-lived token from IAM; Briefcase never needs your password.
+Run `briefcase docs cli` for offline instructions, or traverse
+`briefcase <command> --help` to discover each operation.
+
+For development from this checkout, install the reviewed source with
+`BRIEFCASE_INSTALL_SOURCE=clients/rust/crates/briefcase-cli sh docs/install.sh`.
+The hosted installer becomes available when this documentation build is deployed.
 
 ## Start here
 
@@ -10,7 +28,7 @@ Organization-scoped files for Carbons, Silicons, and IAM-authorized applications
 | [CLI](cli/README.md) | Manage files and testing environments from a terminal |
 | [Rust client](client/README.md) | Integrate the official typed, streaming client |
 | [HTTP API](api/README.md) and [operation reference](api/reference.md) | Authenticate, use endpoints, and understand errors |
-| [Operation inventory](api/operations.md) | All 58 operation IDs, methods, paths and revisions |
+| [Operation inventory](api/operations.md) | All 59 operation IDs, methods, paths and revisions |
 | [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, mail and audit history |
 | [OBO applications](obo.md) | Act inside an app namespace with current user permissions |
 | [Delegated uploads](api/delegated-uploads.md) | Reserve, transfer, publish and recover staged uploads |

@@ -2395,8 +2395,29 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
         .version = 2;
     let renamed = store.discover(&context, &secret).await?;
     assert_eq!(renamed.name, "Renamed in IAM");
+    let (public_context, fence) = store.public_link_context(id, &org).await?;
+    assert_eq!(public_context.id(), id);
+    assert_eq!(public_context.control_version(), renamed.control_version);
+    fence.release().await?;
+    assert!(store.public_link_context(id, "another-org").await.is_err());
+    assert!(
+        store
+            .public_link_context(Uuid::new_v4(), &org)
+            .await
+            .is_err()
+    );
     assert!(store.discover(&stale, &secret).await.is_err());
     let renamed_execution = execution_with_version(&execution, id, renamed.control_version)?;
+    repository
+        .submit_report(
+            &renamed_execution,
+            "Sandbox report",
+            None,
+            None,
+            &MutationMetadata::new(None, [61; 32]),
+        )
+        .await?;
+
     assert_eq!(organization_count(&data, &renamed_execution).await?, 1);
     context
         .environment
@@ -2417,6 +2438,12 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
     );
     let mut tx =
         begin_tenant_transaction(&data, &TenantContext::from_execution(&reset_execution)).await?;
+    let old_reports: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM briefcase.bug_reports WHERE org_id=briefcase.current_org_id()",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    assert_eq!(old_reports, 0, "IAM reset removes test bug reports");
     let old_members:i64=sqlx::query_scalar("SELECT count(*) FROM briefcase.organization_members WHERE org_id=briefcase.current_org_id()").fetch_one(&mut *tx).await?;
     assert_eq!(
         old_members, 0,

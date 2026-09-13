@@ -2,10 +2,9 @@
 
 use time::{Duration, OffsetDateTime};
 
-use briefcase_client::update::{Release, Version, check, install_binary};
+use briefcase_client::update::{Release, Version, check, install_binary, install_binary_at};
 
 use crate::{
-    cli::{Command, ConfigCommand, SystemCommand},
     run::CliError,
     state::{StateDirectory, UpdateState},
 };
@@ -29,25 +28,21 @@ pub enum Outcome {
     Updated { from: Version, to: Version },
 }
 
-/// Runs one due check after an eligible command has finished.
-///
-/// # Errors
-///
-/// Returns non-fatally to `main` when config, crates.io, or Cargo is unavailable.
-pub async fn automatic() -> Result<Outcome, CliError> {
-    let state = StateDirectory::locate()?;
+/// Runs maintenance for a registered Silicon home without changing process environment.
+pub async fn automatic_for_state(state: &StateDirectory) -> Result<Outcome, CliError> {
     let configuration = state.configuration()?;
     if !environment_switch().unwrap_or(configuration.auto_update) {
         return Ok(Outcome::Skipped);
     }
-    let Some(_lock) = state.try_lock_update()? else {
+    let installation = StateDirectory::at(crate::daemon::root()?.join("installation"));
+    let Some(_lock) = installation.try_lock_update()? else {
         return Ok(Outcome::Skipped);
     };
-    let update_state = state.update_state()?;
+    let update_state = installation.update_state()?;
     if !check_is_due(&update_state, OffsetDateTime::now_utc()) {
         return Ok(Outcome::Skipped);
     }
-    update_locked(&state, &update_state).await
+    update_locked(&installation, &update_state).await
 }
 
 /// Checks immediately, irrespective of policy or throttle state.
@@ -56,7 +51,7 @@ pub async fn automatic() -> Result<Outcome, CliError> {
 ///
 /// Returns an error when crates.io, Cargo, or local state cannot be used.
 pub async fn update_now() -> Result<Outcome, CliError> {
-    let state = StateDirectory::locate()?;
+    let state = StateDirectory::at(crate::daemon::root()?.join("installation"));
     let _lock = state.try_lock_update()?.ok_or_else(|| {
         CliError::Usage(
             "another Briefcase updater is already running; retry after it finishes".to_owned(),
@@ -79,7 +74,9 @@ async fn update_locked(
         checked_at: Some(OffsetDateTime::now_utc()),
     })?;
     let release = check(CLI_CRATE, &known_version).await?;
-    let outcome = apply_release(&release)?;
+    let outcome = tokio::task::spawn_blocking(move || apply_release(&release))
+        .await
+        .map_err(|error| CliError::Usage(format!("updater task failed: {error}")))??;
     let checked_version = match &outcome {
         Outcome::Updated { to, .. } | Outcome::Current(to) => to.to_string(),
         Outcome::Skipped => CLI_VERSION.to_owned(),
@@ -95,24 +92,23 @@ fn apply_release(release: &Release) -> Result<Outcome, CliError> {
     if !release.update_available() {
         return Ok(Outcome::Current(release.current.clone()));
     }
-    install_binary(CLI_CRATE, CLI_BINARY, &release.latest)?;
+    let executable = std::env::current_exe().map_err(|source| CliError::Io {
+        path: "CLI executable".into(),
+        source,
+    })?;
+    if let Some(bin) = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "bin"))
+        && let Some(root) = bin.parent()
+    {
+        install_binary_at(CLI_CRATE, CLI_BINARY, &release.latest, root)?;
+    } else {
+        install_binary(CLI_CRATE, CLI_BINARY, &release.latest)?;
+    }
     Ok(Outcome::Updated {
         from: release.current.clone(),
         to: release.latest.clone(),
     })
-}
-
-pub fn defers_automatic_update(command: &Command) -> bool {
-    // Login SLTs and application OBO proofs are short-lived, one-use
-    // credentials. Never spend their lifetime on registry or Cargo work; the
-    // next ordinary invocation performs the due check after its work instead.
-    matches!(command, Command::Login(_) | Command::App(_))
-        || matches!(command, Command::System(SystemCommand::Update))
-        || matches!(
-            command,
-            Command::Config(ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key })
-                if key == "auto-update"
-        )
 }
 
 fn check_is_due(state: &UpdateState, now: OffsetDateTime) -> bool {
@@ -151,13 +147,10 @@ fn environment_switch() -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
     use time::OffsetDateTime;
 
-    use super::{
-        CHECK_INTERVAL, CLI_VERSION, check_is_due, defers_automatic_update, known_installed_version,
-    };
-    use crate::{cli::Cli, state::UpdateState};
+    use super::{CHECK_INTERVAL, CLI_VERSION, check_is_due, known_installed_version};
+    use crate::state::UpdateState;
 
     #[test]
     fn checks_at_most_hourly_after_an_attempt() {
@@ -205,33 +198,5 @@ mod tests {
             checked_at: Some(OffsetDateTime::now_utc()),
         };
         assert!(!check_is_due(&state, OffsetDateTime::now_utc()));
-    }
-
-    #[test]
-    fn short_lived_credentials_and_updater_controls_skip_automatic_maintenance() {
-        let login = Cli::try_parse_from(["briefcase", "login", "--slt", "slt-once"]).unwrap();
-        assert!(defers_automatic_update(&login.command));
-
-        let app = Cli::try_parse_from([
-            "briefcase",
-            "app",
-            "upload",
-            "--app-id",
-            "tos>notes",
-            "--proof",
-            "obo-once",
-            "note.txt",
-        ])
-        .unwrap();
-        assert!(defers_automatic_update(&app.command));
-
-        let explicit = Cli::try_parse_from(["briefcase", "system", "update"]).unwrap();
-        assert!(defers_automatic_update(&explicit.command));
-        let policy =
-            Cli::try_parse_from(["briefcase", "config", "set", "auto-update", "off"]).unwrap();
-        assert!(defers_automatic_update(&policy.command));
-
-        let ordinary = Cli::try_parse_from(["briefcase", "ls"]).unwrap();
-        assert!(!defers_automatic_update(&ordinary.command));
     }
 }

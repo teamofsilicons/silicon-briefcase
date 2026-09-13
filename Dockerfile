@@ -22,6 +22,9 @@ COPY --from=builder /opt/silicon-briefcase/briefcase-api /usr/local/bin/briefcas
 COPY --from=builder /opt/silicon-briefcase/briefcase-worker /usr/local/bin/briefcase-worker
 COPY --from=builder /opt/silicon-briefcase/briefcase-migrate /usr/local/bin/briefcase-migrate
 
+RUN install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/telemetry
+ENV BRIEFCASE_TELEMETRY_HOME=/var/lib/silicon-briefcase/telemetry
+
 USER 10001:10001
 
 ENV RUST_BACKTRACE=0

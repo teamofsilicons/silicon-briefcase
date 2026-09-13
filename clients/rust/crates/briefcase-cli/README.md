@@ -5,6 +5,7 @@ download, and share organization files.
 
 ```bash
 cargo install briefcase-cli
+briefcase daemon install
 # Ask IAM for an unscoped SLT; choose the organization grants in IAM:
 iam login --app-id 'tos>briefcase'
 briefcase login <slt>
@@ -64,10 +65,8 @@ appear in normal output; retain the logical operation UUID for status recovery.
 Every ordinary command also works in an isolated plane as
 `briefcase --test <environment-uuid> <command>`. `briefcase env` manages those
 planes and remembers UUID-to-secret mappings without putting app secrets on the
-command line. The CLI checks crates.io at most hourly by default; use
-`briefcase config set auto-update off` to opt out. Login and application
-commands defer that check to the next ordinary invocation so a short-lived,
-single-use IAM credential is sent immediately.
+command line. The persistent daemon checks crates.io hourly by default; use
+`briefcase config set auto-update off` to opt out. The check runs independently of commands, including while the CLI is idle.
 
 [service]: https://briefcase.teamofsilicons.com
 [package]: https://crates.io/crates/briefcase-client
@@ -78,3 +77,5 @@ or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production
 continues to require a one-time IAM login code.
+
+Run `briefcase docs cli` for the bundled offline manual. `briefcase report <message> --pr <optional-PR-link>` submits a bug report; `briefcase daemon status` inspects the persistent hourly updater. See the [CLI guide](https://docs.briefcase.teamofsilicons.com/cli/) for service installation and configuration.

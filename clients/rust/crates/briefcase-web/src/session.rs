@@ -20,13 +20,18 @@ pub(crate) struct LoginFlow {
     return_to: String,
     deadline: Instant,
     operation_id: Uuid,
+    telemetry: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Start {
     return_to: Option<String>,
 }
-pub(crate) async fn start(State(app): State<App>, Json(input): Json<Start>) -> Result<Response> {
+pub(crate) async fn start(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<Start>,
+) -> Result<Response> {
     let return_to = input.return_to.unwrap_or_else(|| "/".into());
     let target = url::Url::parse(&format!("{}{return_to}", app.origin))
         .map_err(|_| bad("Invalid return path"))?;
@@ -63,6 +68,7 @@ pub(crate) async fn start(State(app): State<App>, Json(input): Json<Start>) -> R
             return_to,
             deadline: Instant::now() + Duration::from_secs(600),
             operation_id: Uuid::new_v4(),
+            telemetry: crate::telemetry::enabled(&headers),
         },
     );
     let cookie = HeaderValue::from_str(&format!(
@@ -136,8 +142,12 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
         operation_id: flow.operation_id,
     };
     let return_to = flow.return_to.clone();
+    let mut headers = headers.clone();
+    if !flow.telemetry {
+        headers.insert("x-briefcase-telemetry", HeaderValue::from_static("off"));
+    }
     drop(flows);
-    let mut response = login(State(app.clone()), Json(input)).await?;
+    let mut response = login(State(app.clone()), headers.clone(), Json(input)).await?;
     response.headers_mut().insert(
         header::LOCATION,
         HeaderValue::from_str(&return_to).map_err(|_| bad("Invalid return path"))?,
@@ -197,11 +207,14 @@ fn cookie(app: &App, id: &str, age: u32) -> Result<HeaderValue> {
     .map_err(|_| bad("Invalid session"))
 }
 fn identifier(app: &App, headers: &HeaderMap) -> Option<String> {
+    identifier_named(app.cookie, headers)
+}
+fn identifier_named(cookie_name: &str, headers: &HeaderMap) -> Option<String> {
     let mut found = None;
     for line in headers.get_all(header::COOKIE) {
         for item in line.to_str().ok()?.split(';') {
             if let Some((name, value)) = item.trim().split_once('=')
-                && name == app.cookie
+                && name == cookie_name
             {
                 if found.is_some()
                     || value.len() != 64
@@ -231,7 +244,7 @@ async fn production_session(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<
     drop(parent);
     Ok(session)
 }
-fn selected_environment(headers: &HeaderMap) -> Result<Option<Uuid>> {
+pub(crate) fn selected_environment(headers: &HeaderMap) -> Result<Option<Uuid>> {
     let values: Vec<_> = headers.get_all("x-briefcase-environment").iter().collect();
     match values.as_slice() {
         [] => Ok(None),
@@ -246,57 +259,103 @@ fn selected_environment(headers: &HeaderMap) -> Result<Option<Uuid>> {
         _ => Err(bad("Ambiguous testing environment.")),
     }
 }
-async fn lookup(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
-    let parent = production_session(app, headers).await?;
-    let Some(environment) = selected_environment(headers)? else {
-        return Ok(parent);
-    };
-    let child = parent
-        .lock()
-        .await
-        .test_sessions
-        .get(&environment)
-        .cloned()
+async fn standalone_test(
+    app: &App,
+    headers: &HeaderMap,
+    environment: Uuid,
+) -> Result<Arc<Mutex<Session>>> {
+    let id = identifier_named(&format!("{}-testing", app.cookie), headers)
         .ok_or_else(unauthenticated)?;
     let session = app
         .sessions
         .lock()
         .await
-        .get(&child)
+        .get(&id)
         .cloned()
         .ok_or_else(unauthenticated)?;
-    let matches = session
-        .lock()
-        .await
-        .test_environment
-        .as_ref()
-        .is_some_and(|e| e.id == environment);
-    if !matches {
+    let value = session.lock().await;
+    if !value.testing
+        || value.rejected
+        || value.deadline <= Instant::now()
+        || !value
+            .test_environment
+            .as_ref()
+            .is_some_and(|e| e.id == environment)
+    {
         return Err(unauthenticated());
     }
+    drop(value);
     Ok(session)
 }
+
+async fn lookup(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
+    let Some(environment) = selected_environment(headers)? else {
+        return production_session(app, headers).await;
+    };
+    if let Ok(parent) = production_session(app, headers).await {
+        let child = parent.lock().await.test_sessions.get(&environment).cloned();
+        if let Some(child) = child {
+            let session = app
+                .sessions
+                .lock()
+                .await
+                .get(&child)
+                .cloned()
+                .ok_or_else(unauthenticated)?;
+            let matches = session
+                .lock()
+                .await
+                .test_environment
+                .as_ref()
+                .is_some_and(|e| e.id == environment);
+            if !matches {
+                return Err(unauthenticated());
+            }
+            return Ok(session);
+        }
+    }
+    // A test-only browser session has its own cookie and can never satisfy a
+    // production lookup, including after Exit testing clears the selector.
+    standalone_test(app, headers, environment).await
+}
+
 fn unauthenticated() -> Failure {
     Failure(
         StatusCode::UNAUTHORIZED,
         "Sign in to Briefcase to continue.".into(),
     )
 }
-pub(crate) async fn login(State(app): State<App>, Json(input): Json<Login>) -> Result<Response> {
-    let (id, value) = establish(&app, input).await?;
+pub(crate) async fn login(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<Login>,
+) -> Result<Response> {
+    if let Some(app_secret) = input.test_key {
+        return enter_secret(
+            State(app),
+            headers,
+            Json(EnterSecret {
+                app_secret,
+                slt: input.slt,
+                org: input.org,
+                operation_id: input.operation_id,
+            }),
+        )
+        .await;
+    }
+    let (id, value) = establish(&app, input, crate::telemetry::enabled(&headers)).await?;
     Ok((
         [(header::SET_COOKIE, cookie(&app, &id, 28800)?)],
         Json(value),
     )
         .into_response())
 }
-async fn establish(app: &App, input: Login) -> Result<(String, Value)> {
+async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, Value)> {
     if input.operation_id.is_nil()
         || input
             .org
             .as_ref()
             .is_some_and(|org| org.is_empty() || org.len() > 128 || org.trim() != org)
-        || (input.org.is_none() && input.test_key.is_some())
         || input.slt.len() > 256
     {
         return Err(bad("Invalid IAM sign-in request."));
@@ -329,17 +388,16 @@ async fn establish(app: &App, input: Login) -> Result<(String, Value)> {
         let previous = previous.lock().await;
         return Ok((id, view(&previous)));
     }
-    let mut config = Config::for_sign_in(&app.upstream)?.with_auto_update(false);
+    let mut config = Config::for_sign_in(&app.upstream)?
+        .with_auto_update(false)
+        .with_telemetry(telemetry)
+        .with_telemetry_source(briefcase_client::telemetry::Source::Web);
     let testing = input.test_key.is_some();
     if let Some(key) = input.test_key {
-        config = config
-            .with_environment(EnvironmentKey::new(key)?)
-            .with_organization(
-                input
-                    .org
-                    .clone()
-                    .ok_or_else(|| bad("Choose a testing organization."))?,
-            )?;
+        config = config.with_environment(EnvironmentKey::new(key)?);
+        if let Some(org) = &input.org {
+            config = config.with_organization(org.clone())?;
+        }
     }
     let client = match Client::connect(config.clone()).await {
         Ok(client) => client,
@@ -407,7 +465,7 @@ pub(crate) async fn select(
     if session.deadline <= Instant::now() || session.rejected {
         return Err(unauthenticated());
     }
-    refresh_if_needed(&mut session).await?;
+    refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
     if !session.organizations.iter().any(|org| org == &input.org) {
         return Err(Failure(
             StatusCode::FORBIDDEN,
@@ -438,9 +496,15 @@ pub(crate) async fn client(app: &App, headers: &HeaderMap) -> Result<Client> {
     }
     Ok(client)
 }
-async fn refresh_if_needed(session: &mut Session) -> Result<()> {
+async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()> {
     if session.expires <= Instant::now() + Duration::from_secs(30) {
-        let client = Client::new_unchecked(session.auth_config.clone())?;
+        let client = Client::new_unchecked(
+            session
+                .auth_config
+                .clone()
+                .with_telemetry(telemetry)
+                .with_telemetry_source(briefcase_client::telemetry::Source::Web),
+        )?;
         let result = client
             .refresh_session_with_key(&session.tokens.refresh_token, &session.refresh_key)
             .await;
@@ -478,16 +542,20 @@ async fn authenticated_client(app: &App, headers: &HeaderMap) -> Result<Client> 
     if session.deadline <= Instant::now() || session.rejected {
         return Err(unauthenticated());
     }
-    refresh_if_needed(&mut session).await?;
+    refresh_if_needed(&mut session, crate::telemetry::enabled(headers)).await?;
     Ok(Client::new_unchecked(
         session
             .config
             .clone()
-            .with_token(session.tokens.access_token.clone()),
+            .with_token(session.tokens.access_token.clone())
+            .with_telemetry(crate::telemetry::enabled(headers))
+            .with_telemetry_source(briefcase_client::telemetry::Source::Web),
     )?)
 }
 pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
-    if identifier(&app, &headers).is_none() {
+    if identifier(&app, &headers).is_none()
+        && identifier_named(&format!("{}-testing", app.cookie), &headers).is_none()
+    {
         return Ok(Json(json!({"authenticated":false})));
     }
     let session = lookup(&app, &headers).await?;
@@ -495,16 +563,27 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result
     if session.deadline <= Instant::now() || session.rejected {
         return Err(unauthenticated());
     }
-    refresh_if_needed(&mut session).await?;
+    refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
     Ok(Json(view(&session)))
 }
 pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
     if let Some(environment) = selected_environment(&headers)? {
-        let parent = production_session(&app, &headers).await?;
-        if let Some(id) = parent.lock().await.test_sessions.remove(&environment) {
+        if let Ok(parent) = production_session(&app, &headers).await
+            && let Some(id) = parent.lock().await.test_sessions.remove(&environment)
+        {
+            app.sessions.lock().await.remove(&id);
+            return Ok(Json(json!({"authenticated":false})).into_response());
+        }
+        let test = standalone_test(&app, &headers, environment).await?;
+        test.lock().await.rejected = true;
+        if let Some(id) = identifier_named(&format!("{}-testing", app.cookie), &headers) {
             app.sessions.lock().await.remove(&id);
         }
-        return Ok(Json(json!({"authenticated":false})).into_response());
+        return Ok((
+            [(header::SET_COOKIE, testing_cookie(&app, "", 0)?)],
+            Json(json!({"authenticated":false})),
+        )
+            .into_response());
     }
     if let Some(id) = identifier(&app, &headers) {
         app.sessions.lock().await.remove(&id);
@@ -561,12 +640,14 @@ pub(crate) async fn enter_test(
         {
             return Err(unauthenticated());
         }
-        refresh_if_needed(&mut saved).await?;
+        refresh_if_needed(&mut saved, crate::telemetry::enabled(&headers)).await?;
         if !Client::new_unchecked(
             saved
                 .config
                 .clone()
-                .with_token(saved.tokens.access_token.clone()),
+                .with_token(saved.tokens.access_token.clone())
+                .with_telemetry(crate::telemetry::enabled(&headers))
+                .with_telemetry_source(briefcase_client::telemetry::Source::Web),
         )?
         .login_status()
         .await?
@@ -584,6 +665,7 @@ pub(crate) async fn enter_test(
             test_key: Some(key.key.expose_secret().to_owned()),
             operation_id: input.operation_id,
         },
+        crate::telemetry::enabled(&headers),
     )
     .await?;
     let child = app
@@ -654,6 +736,124 @@ mod tests {
             testing:test.is_some(),rejected:false,test_environment:environment,test_sessions:Default::default(),
         }
     }
+    #[tokio::test]
+    async fn standalone_test_cookie_never_authenticates_production_or_another_environment() {
+        let app = app();
+        let environment = Uuid::new_v4();
+        let token = "c".repeat(64);
+        let test = Arc::new(Mutex::new(session(Some(environment))));
+        app.sessions
+            .lock()
+            .await
+            .insert(token.clone(), test.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("briefcase_dev-testing={token}")).unwrap(),
+        );
+        assert!(lookup(&app, &headers).await.is_err());
+        headers.insert(
+            "x-briefcase-environment",
+            HeaderValue::from_str(&environment.to_string()).unwrap(),
+        );
+        assert!(Arc::ptr_eq(
+            &lookup(&app, &headers).await.ok().unwrap(),
+            &test
+        ));
+        headers.insert(
+            "x-briefcase-environment",
+            HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),
+        );
+        assert!(lookup(&app, &headers).await.is_err());
+        headers.insert(
+            "x-briefcase-environment",
+            HeaderValue::from_str(&environment.to_string()).unwrap(),
+        );
+        assert!(logout(State(app.clone()), headers.clone()).await.is_ok());
+        assert!(lookup(&app, &headers).await.is_err());
+        assert!(!app.sessions.lock().await.contains_key(&token));
+    }
+
+    #[tokio::test]
+    async fn secret_and_test_identity_can_sign_in_without_a_production_cookie_or_org() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header as matches_header, method, path},
+        };
+        let server = MockServer::start().await;
+        let mut app = app();
+        app.upstream = format!("{}/api/v1/", server.uri());
+        let environment = Uuid::new_v4();
+        let secret = format!("ask_{}", "a".repeat(43));
+        Mock::given(method("GET")).and(path("/api/v1/testing-environment"))
+            .and(matches_header("x-briefcase-app-secret", secret.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":environment,"name":"Sandbox","description":null,"key_generation":1,"created_at":"2026-09-13T00:00:00Z"})))
+            .mount(&server).await;
+        let operations: Vec<_> = briefcase_client::OPERATIONS
+            .iter()
+            .map(|op| json!({"id":op.id,"version":op.version,"method":op.method,"path":op.path}))
+            .collect();
+        Mock::given(method("GET")).and(path("/api/version"))
+            .respond_with(ResponseTemplate::new(200).insert_header("briefcase-api-version", "v1").set_body_json(json!({"service":"silicon-briefcase","selected_api_version":"v1","supported_api_versions":["v1"],"contract_version":"1.0.0","build":"test","operations":operations})))
+            .mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/v1/auth/slt"))
+            .and(matches_header("x-briefcase-app-secret", secret.as_str()))
+            .and(body_json(json!({"slt":"worker:tos"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"test-access","refresh_token":"test-refresh","token_type":"Bearer","expires_in":3600,"scope":"profile","actor":{"principal_id":Uuid::new_v4(),"type":"silicon","public_id":"worker:tos"},"org_id":"tos","organizations":["tos"]})))
+            .expect(1).mount(&server).await;
+        let mut privacy = HeaderMap::new();
+        privacy.insert(
+            header::COOKIE,
+            HeaderValue::from_static("briefcase_telemetry=off"),
+        );
+        let response = enter_secret(
+            State(app.clone()),
+            privacy,
+            Json(EnterSecret {
+                app_secret: secret,
+                slt: "worker:tos".into(),
+                org: None,
+                operation_id: Uuid::new_v4(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("{}: {}", failure.0, failure.1));
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.starts_with("briefcase_dev-testing="));
+        assert!(cookie.contains("HttpOnly"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(cookie.split(';').next().unwrap()).unwrap(),
+        );
+        assert!(
+            lookup(&app, &headers).await.is_err(),
+            "test cookie cannot become production"
+        );
+        headers.insert(
+            "x-briefcase-environment",
+            HeaderValue::from_str(&environment.to_string()).unwrap(),
+        );
+        let child = lookup(&app, &headers).await.ok().unwrap();
+        let child = child.lock().await;
+        assert_eq!(child.tokens.actor.public_id, "worker:tos");
+        assert_eq!(child.org.as_deref(), Some("tos"));
+        assert!(child.config.environment().is_some());
+        drop(child);
+        let status = status(State(app), headers).await.ok().unwrap();
+        assert_eq!(status.0["authenticated"], true);
+        assert_eq!(status.0["test_environment"]["id"], environment.to_string());
+        for request in server.received_requests().await.unwrap() {
+            assert_eq!(request.headers["x-briefcase-telemetry"], "off");
+            assert_eq!(request.headers["x-briefcase-source"], "web");
+        }
+    }
+
     fn headers(cookie: &str, environment: Option<Uuid>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -783,35 +983,38 @@ struct TestSelection {
 pub(crate) struct EnterSecret {
     app_secret: String,
     slt: String,
-    org: String,
+    org: Option<String>,
     operation_id: Uuid,
 }
-/// Attaches a secret-selected testing session to the production browser session.
+/// Signs into a sandbox independently, preserving any existing production session.
 pub(crate) async fn enter_secret(
     State(app): State<App>,
     headers: HeaderMap,
     Json(input): Json<EnterSecret>,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     if selected_environment(&headers)?.is_some() {
         return Err(bad(
             "Return to production before selecting another environment.",
         ));
     }
-    let parent = production_session(&app, &headers).await?;
+    let parent = production_session(&app, &headers).await.ok();
     let config = Config::for_sign_in(&app.upstream)?
         .with_environment(EnvironmentKey::new(input.app_secret.clone())?)
-        .with_auto_update(false);
+        .with_auto_update(false)
+        .with_telemetry(crate::telemetry::enabled(&headers))
+        .with_telemetry_source(briefcase_client::telemetry::Source::Web);
     let current = Client::new_unchecked(config)?
         .current_testing_environment()
         .await?;
     let (child_id, _) = establish(
         &app,
         Login {
-            org: Some(input.org),
+            org: input.org,
             slt: input.slt,
             test_key: Some(input.app_secret),
             operation_id: input.operation_id,
         },
+        crate::telemetry::enabled(&headers),
     )
     .await?;
     let child = app
@@ -821,18 +1024,35 @@ pub(crate) async fn enter_secret(
         .get(&child_id)
         .cloned()
         .ok_or_else(unauthenticated)?;
-    let mut parent = parent.lock().await;
-    if parent.rejected || parent.deadline <= Instant::now() {
-        return Err(unauthenticated());
-    }
     let mut child = child.lock().await;
-    child.deadline = child.deadline.min(parent.deadline);
     child.test_environment = Some(TestSelection {
         id: current.id,
         name: current.name,
         version: 0,
         key_generation: current.key_generation,
     });
-    parent.test_sessions.insert(current.id, child_id);
-    Ok(Json(view(&child)))
+    let value = view(&child);
+    drop(child);
+    if let Some(parent) = parent {
+        let mut parent = parent.lock().await;
+        if !parent.rejected && parent.deadline > Instant::now() {
+            parent.test_sessions.insert(current.id, child_id.clone());
+        }
+    }
+    // Its own cookie lets this test session continue even if production later
+    // expires or signs out; the test world's credentials still govern access.
+    Ok((
+        [(header::SET_COOKIE, testing_cookie(&app, &child_id, 28800)?)],
+        Json(value),
+    )
+        .into_response())
+}
+
+fn testing_cookie(app: &App, id: &str, age: u32) -> Result<HeaderValue> {
+    HeaderValue::from_str(&format!(
+        "{}-testing={id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={age}{}",
+        app.cookie,
+        if app.secure { "; Secure" } else { "" }
+    ))
+    .map_err(|_| bad("Invalid testing session"))
 }

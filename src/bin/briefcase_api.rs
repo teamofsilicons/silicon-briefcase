@@ -6,5 +6,7 @@ use silicon_briefcase::{api, config::Settings, telemetry};
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
     telemetry::init(&settings)?;
-    api::serve(settings).await
+    let result = api::serve(settings).await;
+    telemetry::flush();
+    result
 }

@@ -1,10 +1,10 @@
 # Briefcase HTTP API
 
-Official contract **1.0.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 58 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
+Official contract **1.1.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 59 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
 
 ## Authentication and negotiation
 
-A normal request presents `Authorization: Bearer <IAM access token>` and `X-Org-ID: <organization>`. IAM owns identities, organizations, roles, tags and active membership. Briefcase uses the official `silicon-iam-client` 1.7.0 and verifies live IAM authorization. Missing or conflicting identity, organization, audience, role, tag, or testing-plane facts fail closed. Signed webhooks update local projections but do not replace request authentication.
+A normal request presents `Authorization: Bearer <IAM access token>` and `X-Org-ID: <organization>`. IAM owns identities, organizations, roles, tags and active membership. Briefcase uses the official `silicon-iam-client` 1.8.0 and verifies live IAM authorization. Missing or conflicting identity, organization, audience, role, tag, or testing-plane facts fail closed. Signed webhooks update local projections but do not replace request authentication.
 
 `GET /iam` discovers the public application ID. `POST /auth/slt` exchanges a Briefcase-targeted short-lived IAM token from the selected plane, and also accepts an existing Carbon/Silicon public ID as `slt` when a paired test app secret is supplied; `POST /auth/refresh` rotates a refresh token. Both require a durable `Idempotency-Key`. `GET /auth/status` reports current identity and authorized organizations. IAM chooses the user's organization grants during login; a client-supplied organization cannot manufacture consent.
 

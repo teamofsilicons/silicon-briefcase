@@ -160,7 +160,7 @@ fn require_session_organization(actual: Option<&str>, expected: &str) -> Result<
         // Login and refresh are unscoped. The configured organization selects
         // subsequent file operations; it does not narrow IAM consent.
         None => Ok(()),
-        Some(actual) if !expected.is_empty() && actual == expected => Ok(()),
+        Some(actual) if expected.is_empty() || actual == expected => Ok(()),
         Some(actual) => Err(Error::Protocol(format!(
             "Briefcase returned a session for organization {actual}, but this client is configured for {expected}"
         ))),
@@ -176,6 +176,7 @@ mod tests {
         assert!(require_session_organization(Some("tos"), "tos").is_ok());
 
         assert!(require_session_organization(None, "tos").is_ok());
+        assert!(require_session_organization(Some("tos"), "").is_ok());
 
         let mismatched = require_session_organization(Some("other"), "tos").unwrap_err();
         assert!(mismatched.to_string().contains("organization other"));

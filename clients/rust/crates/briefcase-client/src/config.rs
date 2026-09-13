@@ -342,11 +342,14 @@ pub struct Config {
     pub(crate) organization: String,
     pub(crate) credential: Credential,
     pub(crate) environment: Option<EnvironmentKey>,
+    pub(crate) public_environment: Option<uuid::Uuid>,
     pub(crate) request_timeout: Duration,
     pub(crate) transfer_timeout: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) user_agent: String,
     pub(crate) auto_update: bool,
+    pub(crate) telemetry: bool,
+    pub(crate) telemetry_source: crate::telemetry::Source,
     pub(crate) update_manifest: Option<PathBuf>,
 }
 
@@ -452,11 +455,14 @@ impl Config {
             organization,
             credential: Credential::None,
             environment: None,
+            public_environment: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             user_agent: concat!("briefcase-client/", env!("CARGO_PKG_VERSION")).to_owned(),
             auto_update: true,
+            telemetry: true,
+            telemetry_source: crate::telemetry::Source::Sdk,
             update_manifest: None,
         })
     }
@@ -485,10 +491,33 @@ impl Config {
         self
     }
 
+    /// Selects a sandbox for anonymous public-link reads only. This public ID
+    /// conveys no actor authority and does not select authenticated operations.
+    #[must_use]
+    pub const fn with_public_testing_environment(mut self, environment: uuid::Uuid) -> Self {
+        self.public_environment = Some(environment);
+        self
+    }
+
     /// Returns this configuration to the production data plane.
     #[must_use]
     pub fn without_environment(mut self) -> Self {
         self.environment = None;
+        self.public_environment = None;
+        self
+    }
+
+    /// Enables or disables operational telemetry for requests from this client.
+    #[must_use]
+    pub const fn with_telemetry(mut self, enabled: bool) -> Self {
+        self.telemetry = enabled;
+        self
+    }
+
+    /// Identifies the embedding application without sending arguments or user data.
+    #[must_use]
+    pub const fn with_telemetry_source(mut self, source: crate::telemetry::Source) -> Self {
+        self.telemetry_source = source;
         self
     }
 

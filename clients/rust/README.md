@@ -52,15 +52,13 @@ consent. Review access in IAM to authorise another organization.
 Both crates also support disposable IAM-coupled test planes; see the guides for
 the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
 
-Both crates maintain themselves from crates.io by default. The package advances
-the consuming Cargo project's lockfile through best-effort background
-maintenance after ordinary operations, at most hourly per project in the
-process; streams defer it until they end. The CLI checks at most hourly after
-an ordinary command finishes and installs a newer `briefcase-cli` for the next
-invocation without changing the command's result. Contract negotiation and
-short-lived IAM credential commands defer maintenance so those credentials
-are sent immediately. Both behaviors have documented config and environment
-opt-outs; loaded code changes only on the next build or invocation.
+The package advances the consuming Cargo project's lockfile through best-effort
+background maintenance after ordinary operations, at most hourly per project
+in the process; streams defer it until they end. The CLI's persistent daemon
+checks hourly even while the CLI is idle and installs a newer `briefcase-cli`
+for the next invocation. Run `briefcase daemon install` to enable the login
+service. Both behaviors have documented configuration and environment opt-outs;
+loaded code changes only on the next build or invocation.
 
 ## The contract check
 
@@ -91,8 +89,8 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-The first official API contract is 1.0.0. Client, CLI and gateway patch 1.0.3 share
-one contract and include app namespaces, immutable versions, streamed folder
+Client, CLI and gateway 1.1.0 target API v1 and contract 1.1.0. Publish the
+client before the CLI after deploying the backend contract. They share one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
 Link-access responses include the shareable file or folder `url`; the browser displays it with a copy action.
 See the [official documentation](https://docs.briefcase.teamofsilicons.com/).

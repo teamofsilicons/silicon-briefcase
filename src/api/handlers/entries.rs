@@ -205,6 +205,7 @@ pub(crate) async fn resolve_path(
                     DispositionDto::Attachment => "attachment".to_owned(),
                 }),
                 cursor: None,
+                test_environment: query.test_environment,
             },
         )
         .await;
@@ -217,6 +218,13 @@ pub(crate) async fn resolve_path(
         ContentIntent::Download => IamAction::DownloadFile,
     });
     let context = extract::authenticate(&state, &headers, action, &resource).await?;
+    if query.test_environment.is_some_and(|id| {
+        context
+            .testing_environment()
+            .is_none_or(|environment| environment.id() != id)
+    }) {
+        return Err(AppError::NotFound);
+    }
     let entry = extract::scoped(
         &context,
         state.metadata.get_entry_by_path(&context, &entry_path),

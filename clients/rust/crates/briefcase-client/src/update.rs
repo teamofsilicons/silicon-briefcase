@@ -173,8 +173,35 @@ pub fn update_dependency(
 ///
 /// Returns an error when Cargo cannot start or refuses the installation.
 pub fn install_binary(package: &str, binary: &str, version: &Version) -> Result<(), UpdateError> {
-    let status = Command::new(cargo_program())
-        .arg("install")
+    install_binary_in(package, binary, version, None)
+}
+
+/// Installs into an explicit Cargo installation root, preserving a custom CLI location.
+///
+/// # Errors
+/// Returns an error when Cargo cannot install the selected release.
+pub fn install_binary_at(
+    package: &str,
+    binary: &str,
+    version: &Version,
+    root: &Path,
+) -> Result<(), UpdateError> {
+    install_binary_in(package, binary, version, Some(root))
+}
+
+fn install_binary_in(
+    package: &str,
+    binary: &str,
+    version: &Version,
+    root: Option<&Path>,
+) -> Result<(), UpdateError> {
+    let mut command = Command::new(cargo_program());
+    if let Some(root) = root {
+        command.arg("install").arg("--root").arg(root);
+    } else {
+        command.arg("install");
+    }
+    let status = command
         .arg(package)
         .arg("--bin")
         .arg(binary)

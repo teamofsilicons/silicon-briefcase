@@ -1,4 +1,5 @@
 'use client';
+import { TelemetryPreference } from './telemetry';
 import { useRef, useState, type SubmitEvent } from 'react';
 import { Settings, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -180,8 +181,12 @@ export default function OrganizationSettings({
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList>
               <TabsTrigger value="usage">Usage</TabsTrigger>
+              <TabsTrigger value="telemetry">Telemetry</TabsTrigger>
               <TabsTrigger value="storage">Storage configuration</TabsTrigger>
             </TabsList>
+            <TabsContent value="telemetry">
+              <TelemetryPreference />
+            </TabsContent>
             <TabsContent value="usage">
               <div className="settings-section-heading">
                 <h3>Storage and uploads</h3>

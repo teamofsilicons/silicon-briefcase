@@ -264,13 +264,18 @@ fn execution_context(
     )
 }
 
-pub(crate) async fn scoped<T>(context: &ExecutionContext, future: impl Future<Output = T>) -> T {
-    request_context::scope_authenticated(
-        context.request_id().to_owned(),
-        context.authorization().clone(),
-        future,
+pub(crate) fn scoped<T>(
+    context: &ExecutionContext,
+    future: impl Future<Output = T>,
+) -> impl Future<Output = T> {
+    crate::telemetry::authenticated(
+        context,
+        request_context::scope_authenticated(
+            context.request_id().to_owned(),
+            context.authorization().clone(),
+            Box::pin(future),
+        ),
     )
-    .await
 }
 
 pub(crate) fn organization_resource(headers: &HeaderMap) -> Result<String, AppError> {

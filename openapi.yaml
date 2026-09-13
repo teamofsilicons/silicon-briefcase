@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 1.0.0
+  version: 1.1.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
     access.
 servers:
@@ -893,6 +893,86 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
+  /telemetry:
+    post:
+      tags: [Telemetry]
+      operationId: submitTelemetry
+      x-operation-version: 1.0.0
+      summary: Submit a bounded operational event
+      security: []
+      description: Best-effort anonymous relay to Space Station. No table key or IAM credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id, source, operation, stage]
+              properties:
+                id: {type: string, format: uuid, description: Non-nil event ID retained across retries.}
+                source: {type: string, enum: [sdk, cli, daemon, web]}
+                operation: {type: string, minLength: 1, maxLength: 96, pattern: '^[A-Za-z0-9_.-]+$', description: Fixed operational name; never credentials or user content. Known credential prefixes are rejected.}
+                stage: {type: string, enum: [started, progress, completed, failed, cancelled]}
+                testing: {type: boolean, default: false}
+                environment_id: {type: [string, 'null'], format: uuid, description: Non-nil public ID; only valid when testing is true.}
+                request_id: {type: [string, 'null'], format: uuid}
+                duration_ms: {type: [integer, 'null'], minimum: 0}
+                status: {type: [integer, 'null'], minimum: 100, maximum: 599}
+                attempt: {type: [integer, 'null'], minimum: 0, maximum: 4294967295}
+                count: {type: [integer, 'null'], minimum: 0}
+                progress: {type: [integer, 'null'], minimum: 0, maximum: 100}
+      responses:
+        '204': {description: Event accepted for best-effort delivery or collection disabled}
+        '429': {description: Process-wide telemetry intake limit reached}
+        default:
+          $ref: '#/components/responses/Error'
+  /reports:
+    post:
+      tags: [Reports]
+      operationId: submitReport
+      x-operation-version: 1.0.0
+      summary: Submit a bug report with an optional proposed fix
+      description: Stores the user-authored report in the selected organization and environment. No telemetry, credentials, or files are collected automatically. Test reports stay in the test database. Reuse the same idempotency key and body after an uncertain response.
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 16384
+                  description: Nonblank reproduction steps; maximum 16384 UTF-8 bytes.
+                pr:
+                  type: string
+                  format: uri
+                  description: Optional HTTPS pull request URL in teamofsilicons/silicon-briefcase.
+                isi:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+                  description: Optional internal Silicon attribution; maximum 256 UTF-8 bytes, no control characters.
+      responses:
+        '200':
+          description: Durable report receipt, including on an idempotent replay
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, accepted]
+                properties:
+                  id: {type: string, format: uuid}
+                  accepted: {type: boolean, const: true}
+        default:
+          $ref: '#/components/responses/Error'
   /notifications:
     get:
       tags:
@@ -1535,6 +1615,12 @@ paths:
         The organization segment must match `X-Org-ID`. Without `disposition` the entry and its effective access
         are returned; with `disposition` the file bytes are streamed. Anything the caller cannot read answers `404`.
       parameters:
+      - in: query
+        name: test_environment
+        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
+        schema:
+          type: string
+          format: uuid
       - $ref: '#/components/parameters/OrgId'
       - name: org_id
         in: path
@@ -1572,7 +1658,7 @@ paths:
           $ref: '#/components/responses/PartialFileContent'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/invitations:
     get:
       operationId: listInvitations
@@ -1663,7 +1749,7 @@ paths:
                 $ref: '#/components/schemas/LinkAccess'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
     put:
       operationId: setLinkAccess
       summary: Set anyone-with-link read/download access
@@ -1688,7 +1774,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/LinkAccessUpdate'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/logs:
     get:
       operationId: listEntryLogs
@@ -1717,6 +1803,12 @@ paths:
       tags:
       - Permissions
       parameters:
+      - in: query
+        name: test_environment
+        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
+        schema:
+          type: string
+          format: uuid
       - $ref: '#/components/parameters/OrgIdPath'
       - in: path
         name: path
@@ -1755,7 +1847,7 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       security: []
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /obo/invitations:
     post:
       operationId: inviteOnBehalfOfMember
@@ -1823,7 +1915,7 @@ paths:
       x-iam-critical: true
       description: IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and
         calling application. Require critical user approval in the IAM endpoint catalog.
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
 components:
   securitySchemes:
     uploadCapability:

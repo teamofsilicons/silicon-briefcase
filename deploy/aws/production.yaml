@@ -487,7 +487,7 @@ Resources:
             install -d -m 0700 /etc/silicon-briefcase /opt/silicon-briefcase
             # Uploads are staged whole on local disk before they reach S3, so
             # this is a real directory on the data volume rather than a tmpfs.
-            install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/staging
+            install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/staging /var/lib/silicon-briefcase/telemetry-api /var/lib/silicon-briefcase/telemetry-worker
 
             curl --fail --silent --show-error --location \
               https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
@@ -665,6 +665,15 @@ Resources:
             AWS_REGION=$REGION
             EOF
             printf '%s' "$APP_SECRET_JSON" | jq -r '"BRIEFCASE_POSTMARK_SERVER_TOKEN=" + .BRIEFCASE_POSTMARK_SERVER_TOKEN' >> /etc/silicon-briefcase/worker.env
+            # Telemetry credentials stay on the two server processes. Each has
+            # a private durable spool even with a read-only container root.
+            for target in api worker; do
+              printf '%s' "$APP_SECRET_JSON" | jq -r '
+                [ "BRIEFCASE_TELEMETRY=" + (.BRIEFCASE_TELEMETRY // "on"),
+                  "BRIEFCASE_TELEMETRY_TABLE_KEY=" + (.BRIEFCASE_TELEMETRY_TABLE_KEY // ""),
+                  "BRIEFCASE_TELEMETRY_URL=" + (.BRIEFCASE_TELEMETRY_URL // "https://backend.spacestation.teamofsilicons.com") ] | .[]
+              ' >> /etc/silicon-briefcase/$target.env
+            done
             chmod 0600 /etc/silicon-briefcase/api.env /etc/silicon-briefcase/worker.env
 
             # Host networking keeps the instance role reachable from inside the
@@ -680,7 +689,7 @@ Resources:
             RestartSec=5
             TimeoutStopSec=45
             ExecStartPre=-/usr/bin/docker rm -f silicon-briefcase-api
-            ExecStart=/usr/bin/docker run --name silicon-briefcase-api --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --env-file /etc/silicon-briefcase/api.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/api --log-opt tag=api "$BACKEND_IMAGE" briefcase-api
+            ExecStart=/usr/bin/docker run --name silicon-briefcase-api --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --volume /var/lib/silicon-briefcase/telemetry-api:/var/lib/silicon-briefcase/telemetry --env-file /etc/silicon-briefcase/api.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/api --log-opt tag=api "$BACKEND_IMAGE" briefcase-api
             ExecStop=/usr/bin/docker stop --time 35 silicon-briefcase-api
 
             [Install]
@@ -698,7 +707,7 @@ Resources:
             RestartSec=5
             TimeoutStopSec=315
             ExecStartPre=-/usr/bin/docker rm -f silicon-briefcase-worker
-            ExecStart=/usr/bin/docker run --name silicon-briefcase-worker --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --env-file /etc/silicon-briefcase/worker.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/worker --log-opt tag=worker "$BACKEND_IMAGE" briefcase-worker
+            ExecStart=/usr/bin/docker run --name silicon-briefcase-worker --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=16m,mode=1777 --volume /opt/silicon-briefcase/aws-rds-global-bundle.pem:/opt/silicon-briefcase/aws-rds-global-bundle.pem:ro --volume /var/lib/silicon-briefcase/staging:/var/lib/silicon-briefcase/staging --volume /var/lib/silicon-briefcase/telemetry-worker:/var/lib/silicon-briefcase/telemetry --env-file /etc/silicon-briefcase/worker.env --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=/silicon-briefcase/production/worker --log-opt tag=worker "$BACKEND_IMAGE" briefcase-worker
             ExecStop=/usr/bin/docker stop --time 310 silicon-briefcase-worker
 
             [Install]

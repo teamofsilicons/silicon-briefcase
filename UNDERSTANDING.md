@@ -273,7 +273,7 @@ For each content return the latest 100 entries, it's paginated so should be poss
 
 I should be able to invite other silicons or carbons or specific email to view my file/folder, i can invite them to a folder or i can invite them to a specific file. During invitation i can invite any carbon/silicon of my org using their id or invite tags so anyone with the tag should be able to view the file, during inviting i can also set the permissions by default they just have the Read permission but i should be able to individually configure if i wanna give them any other permission like Create or Update. Create would only be valid for folder invites. Delete is still reserved to the creator and org admin and org owner. 
 
-For each invited carbon or silicon also send them a mail that you have been invited to this file/folder. We use postmark to send the emails. You would send the email via `briefcase@teamofsilicons.com`. 
+For each invited carbon or silicon also send them a mail that you have been invited to this file/folder. We use postmark to send the emails. You would send the email via `briefcase@teamofsilicons.com`. For the emails you send ensure to send it to the email they are registered in the org with and not the main personal email until both match. 
 
 
 # Filter
@@ -360,25 +360,68 @@ For all the app specific data and even the scope of the said application is just
 `For every file and folders created, accessed, deleted, updated or downloade maintain a version history that would store who performed the said action and the timestamp, maintain the history upto the last 100 entries.`
 
 
-# Testing Enviorment
+# Testing Environment
 
-We will have an test enviorment for briefcase itself, this would be an exact replica of the main application, so when the test enviorment is created it would be initiated empty, for the said test enviorment actions can be performed, as this is an exact same replica of the main prod.
+We will have a test environment for Briefcase itself. This would work exactly like the main application, with the same functions, APIs, permission checks, and workflows, but with completely isolated data.
 
-Refer to this on how iam manages testing enviorments.
-https://docs.iam.teamofsilicons.com/api/testing-environments/
+When a test environment is created, it would start empty.
 
-A test enviorment is basically the exact same briefcase with all the functions and everything else, so this is the briefcase where i can test uploading files, deleting stuff, seeing if the correct person has the correct set of permissions, etc. 
+Refer to [how IAM manages testing environments](https://docs.iam.teamofsilicons.com/api/testing-environments/) for environment creation, test identities, application imports, authentication, webhooks, and lifecycle.
+
+A test environment is basically the same Briefcase where I can test uploading files, deleting stuff, sharing folders, and checking whether the correct person has the correct set of permissions. It uses test IAM and test Briefcase together, so the entire flow can be tested inside one sandbox.
+
+### Using a Test Environment
+
+In the client app, website, CLI, or API, passing the test environment’s `app_secret` would select that application’s test environment. No manual pairing or separately entering the IAM environment root key should be needed. Briefcase should validate the secret with IAM and identify the correct environment automatically.
+
+For logging in, it would ask for an SLT. In a test environment, this can either be an IAM-issued test SLT or the public ID of an existing Carbon/Silicon in the test sandbox. Entering the ID would sign me in as that test user. Unknown or inactive identities should be rejected. This shortcut must never work in production.
+
+The IAM environment root key gives administrative control over the test world. The application’s `app_secret` selects its sandbox. Once signed in as a particular user, actions must follow that user’s actual permissions. Possessing the secret must not make every signed-in user bypass permission checks.
+
+If an administrative or god view is provided, it should be separate and clearly labelled so it cannot be confused with testing what a normal user is allowed to do.
+
+### Website and CLI
+
+On the website, I should be able to enter the `app_secret` from settings or the sign-in screen. Without a selected test environment, the application would use production.
+
+When in a test environment, always show a banner at the top saying that I am currently in a test environment, along with its name, the signed-in test identity, and a button to exit testing mode.
+
+Production and testing sessions should remain separate. Exiting testing mode should return me to the production session or ask me to sign in.
+
+In the CLI, always display the selected test environment at the end, including when a command fails. This message should go to stderr so it does not interfere with JSON output, downloaded files, or commands used in scripts.
+
+### Isolation
+
+Everything belonging to a test environment must stay inside that environment, including files, permissions, versions, deleted items, search results, caches, notifications, background jobs, and audit logs.
+
+Production credentials must not work in testing, and credentials from one test environment must not work in another.
+
+If a supplied test secret is invalid, revoked, or belongs to an unavailable environment, return an error. Never silently continue in production.
+
+### Storage and Environment Limits
+
+Each Briefcase test environment would have a maximum total storage of **2 GiB**. This includes retained file versions, deleted files that have not been permanently removed, and storage reserved for uploads.
+
+Concurrent uploads must also respect this limit. If an upload would exceed it, return:
+
+`In test enviorment you are limited to a total storage of 2gb per enviorment.`
+
+There would be a maximum of **10 simultaneous active test environments across the Silicon Briefcase deployment**. Retired environments would not count as active, and restoring one would require an available slot.
 
 
-### Using a Test Enviorment
+### Webhooks and External Actions
 
-For using a test enviorment anyone with the key would have the god view for that test enviorment, they should be able to access briefcase as the signed in user from IAm, and now as the signed in user it should be able to perform the set of allowed actions, so this is an exact replica of how Briefcase would have worked with the actual iam, instead it has the test iam and the test briefcase, so an sandboxed enviorment to test it all out. 
+Test webhooks should follow IAM’s documented format. Verify the signature over the complete raw body, identify the correct test environment, and apply the event only there. Duplicate or out-of-order events must not corrupt the current state.
 
-In the briefcase test enviorment there's only a total storage of maximum 2gb for an test enviorment. For files that exceed that just return `In test enviorment you are limited to a total storage of 2gb per enviorment.` and also a maximum of 10 possible simultaneous enviorments at silicon-briefcase level.
+Test actions should not send real emails, SMS messages, payments, or other production effects. These should use test destinations or simulated delivery.
 
-Read [https://docs.iam.teamofsilicons.com/api/testing-environments/] to understand how exactly are webhooks gonna work for this, etc. 
+Secrets must not appear in URLs, logs, audit records, or stored webhook payloads.
 
-In briefcase itself for the client app, website, cli or api just passing in the app_secret for the test enviorment would let me use the entire application as if it's in the test enviorment. For logging in the test enviorment it will ask for slt which in test enviorment would just be the carbon/silicon id just entering that would let me in the application as that user or even entering the stk from iam would let me in, either way works, just the normal carbon/silicon id is a workaround for testing enviorments. For website in settings i should be able to put in this app_secret in settings if no app_secret is provided it would be in prod, otherwise the specific test enviorment. When in test enviorment in website always show in top you are currently in test enviorment with a button to exit test enviorment. in cli at end always display you are in test envioment.
+### Sharing Links
+
+Sharing should behave like production, including returning the file or folder link when “Anyone with the link can view” is enabled.
+
+A test link must resolve only within its intended test environment.
 
 ---
 ---
@@ -425,8 +468,6 @@ For logging in via the cli or the package for any carbon/silicon you don't ask f
 For CLI login there should be this exact command: `briefcase login <slt>`.
 And there should be an command to configure the home directory where the information is stored: `{home_dir}/.{appname}/dir`. This can be confitgure via `briefcase config home {location}`. If it's not a directory give an error not a directory.
 
-For both cli and client we would also package in an auto updater, the task of this auto updater is to compare the current version to the latest version in crates for them, and if there's a new verion auto update it to the said new version. By default auto update is on, users can specifically come and opt in to stop auto update. Which would stop auto updating the package. Auto updater check runs every single hour. Updates should be checked when the command is run and should happen every hour, so check for the last update check time and if it's past 1 hour old check for update and update after the command finishes running.
-
 
 It should also expose these specific commands:
 1) `--help` which would give all the help documentation on how to use waveform. So the user should be able to run `briefcase --help` and get the help docs.
@@ -434,27 +475,91 @@ It should also expose these specific commands:
 3) `login status --json` the user should be able to run `briefcase login status --json`, reports successful authentication reports `authenticated: true`, alongside which carbon or silicon is it authenticated as.
 
 
-### Cli experience
+# Cli experience
 
-Cli is an interface on it's own, it's an interface used by our fellow dear agents, and sometimes humans. What we would want this interface to serve as is it should give the correct information at correct time, and can write texts to explain what exactly is happening. 
+CLI is the primary way to interact with IAM Apps. It should be built for both Carbons & Silicons. Any other interface (like website) will be a subset of the CLI.
 
-A few things that would be needed to ensure good cli experience: the cli alone should have enough information to use Briefcase correctly! Surfacing the right set of things when needed, giving suggestions at the correct times. Like for eg: when someone runs a command then show them the exact help for it if the information is not enough, and when the app has been created, show them the other related commands that they might need to run after it. For each command a good description, the entire docs, etc. 
+The cli should never ask for credentials from either silicon or carbon. it should just ask for short lived tokens that the user can generate from the official iam cli, or from the web where the the user is sent to auth concent screen.
 
-So the overall cli experience needs to be super good. It needs to give the relevant informations, help should be detailed, and suggested commands, etc should also happen. 
+CLIs get SILICON_HOME env variable where it should store all the details. Its home, so you should use that as base, and make their own hidden folders to keep their information.
+
+Specific apps that could benefit from using ISI env variable should do that. eg: dm.
+
+ISI are internal silicons. If silicon is a brain, then isi are parts of the brain. store this inside metadata, or main data if its super useful. ISI may or may not be present. make sure to not rely on it in such a way that things break. consider ISI as useful additional information.
+
+every app cli must support the following commands:
+
+`app iam --json` gives {app_id: "...", ...}
+
+`app login "..."` takes in a short lived auth token generated by silicon interpretter.
+
+`app login status --json` tells if its {authenticated: true, ...}
+
+
+App Internals:
+All apps are suggested to make a rust library which is stateless. then 2 things that uses the rust library: always running daemon, and a cli interface that talks to the daemon.
+
+At the end, on the docs page, there should be one curl + sh command to run to install and get everything setup to start using it. not auth, just technical setup on the system like installing the right set of things.
+
+CLI design should be focused on giving details and helping finding the right command to use. CLI will often have lots of commands and it should be like a tree that can be traversed using --help.
+
+CLI documentation should be bundled inside the cli itself. On each print of the cli documentation using --help or otherwise, it should show what this command is for, how its often used (perhaps in conjunction with other commands if applicable) and then a list of flags etc it takes in.
+
+Follow the CLI grammar. These CLIs can be used by humans, but more often than not, it'll be used by an agent who prefers to know why something broke and so it can figure out ways to fix it. Don't just say something went wrong... tell it exactly what & why.
+
+A good rule of thumb is: these CLIs are being made for someone who understands ins-and-outs of technology. Make like a programming language that gives very specific and helpful errors and outputs compared to a web interface where all errors are hidden until absolutely critical.
+
+All CLIs must have a report bug feature that also optionally takes in a PR ref if the agent did not just find a bug but also patched it. 
+
+briefcase report `<report-message>` --pr `<pr-link>` and if someone just reports the bug, without the pr, show them a message, you can also put a pr in the repo (`repo-link`). 
+
+Everytime a bug is reported use postmark to mail [saketdev12@gmail.com, shubhastro2@gmails.com, bugs@teamofsilicons.com]
+
+Since all TOS applications are open sourced, any bug can be discovered, replicated, patched and a pr can be raised. Allow all such edge cases be figured out by the agent instead of fixing it ourselves based on a bug report.
+
+Only a bug report submitting is possible, but its encouraged to give a lot more details and also attach a PR if possible.
+
+Give the information of the github repo, online docs, rust package, etc inside the cli itself.
+
+The CLI as i told before is a tree of documentation. Show possible paths, and then let someone go deeper along with documentation.
+
 
 # Docs
 
-The API, Rust-client, CLI, IAM integration, and testing-environment guides are
-maintained in [docs/].
+There are two kinds of documentations: informative & instructive.
 
-For the docs keep it as detailed and mention all the details, this is the only thing the other apps can use as their source of knowledge and how they can use briefcase exactly. 
+Always keep instructive documentation up front, easy to use, direct with clear instructions & link to informative documents to know why its done this way. Instructive documents should be the landing point of the product for both carbons & silicons.
 
-Write detailed guides.
+It can give carbon the instructions on how to install & use it, or how to ask their silicon to use it.
 
-Write very good detailed instructions on how test enviorment for silicon-briefcase works. Write docs on all 3 cli, api, client. Keep it segregated and clear. Write all the documentations in docs/ folder in the main directory of silicon-briefcase.  
+For silicons, it can be that, but also how to do a lot more with it. Esp. things like building on top of it. Make it very clear what is expected, what is mandatory and how does the system work.
 
-In the docs also mention everything like how we handle file uploads the 100mb thing we have, the test limitations, etc.
+Then the silicon can dig deeper into the informative documentation to know all the possible ways to do it, & why its done the way its done.
 
-# Later to do
+While both carbons and silicons can read the documentation, it'll likely be more silicon. So design it for silicons. The more reasons you give, the better a silicon would be at making a judgement call of how to do something.
 
-briefcase report `<report-message>`, this should send an report message to the user. 
+Since all IAM apps can both be used as is, and also built on top of... its imp to write documentation for both. Usage docs & Development docs.
+
+# Telemetry
+
+All IAM apps use Space Station [https://spacestation.teamofsilicons.com/docs] for telemetry. Telemetry is opted-in by default but can be opted out from settings if the user wants.
+
+Space Station is also a rust package which can be used from within the backend, or daemon, or cli to send telemetry.
+
+Record as many things as you think might be useful to diagnose or follow traces later.
+
+Since space station is just an event store, make sure to include all the source, step, progress, etc information inside each event. some of the system information is automatically added to the metadata so you need not add that.
+
+push context-rich, self-contained events.
+
+Space Station also support web, for web it has 2 possible pathways: analytics & events. Most of the Analytics is self captured and you can define a seperate event store from the web. Its possible that both web analytics and web events go to separate tables.
+
+
+# Configurability
+
+We ship highly configurable apps with sensible defaults. Very much like VS Code. flags to toggle / customize behaviors.
+
+
+# Updates
+
+All CLIs when installed, within their daemon run a update checker hourly. Update the CLI to the newest one if a update is found. Don't rely on user usage to check for updates.

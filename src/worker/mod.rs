@@ -65,7 +65,7 @@ pub async fn run(settings: WorkerProcessSettings) -> anyhow::Result<()> {
 
     let objects = S3ObjectStore::from_settings(&settings.s3).await;
     let runtime = WorkerRuntime::new(settings.worker, settings.s3.operation_timeout)?;
-    let result = runtime.run(&pool, test_pool.as_ref(), &objects).await;
+    let result = Box::pin(runtime.run(&pool, test_pool.as_ref(), &objects)).await;
     if let Some(test_pool) = test_pool {
         test_pool.close().await;
     }
@@ -147,13 +147,13 @@ impl WorkerRuntime {
                         );
                     }
                     if let Some(test_pool) = test_pool
-                        && let Err(error) = outbox::process_batch(
+                        && let Err(error) = crate::telemetry::testing(outbox::process_batch(
                             test_pool,
                             &email, true,
                             &self.settings,
                             self.batch_size,
                             self.lease_duration_millis,
-                        ).await
+                        )).await
                     {
                         error!(
                             event = "test_outbox_batch_failed",
@@ -165,7 +165,7 @@ impl WorkerRuntime {
                 _ = maintenance.tick() => {
                     self.run_maintenance(pool, objects).await;
                     if let Some(test_pool) = test_pool {
-                        self.run_maintenance(test_pool, objects).await;
+                        crate::telemetry::testing(self.run_maintenance(test_pool, objects)).await;
                         match crate::infrastructure::testing::maintain_testing_environments(
                             pool,
                             test_pool,

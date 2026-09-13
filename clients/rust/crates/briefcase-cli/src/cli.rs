@@ -22,6 +22,7 @@ use uuid::Uuid;
                   Run `briefcase <command> --help` for full command usage and options.\n\
                   State defaults to $SILICON_HOME/.briefcase when SILICON_HOME is set,\n\
                   otherwise $HOME/.briefcase. Use `briefcase config home <directory>` to configure it.",
+    after_help = "Offline guides: briefcase docs cli | client | testing\nRepository: https://github.com/teamofsilicons/silicon-briefcase\nDocs: https://docs.briefcase.teamofsilicons.com/\nRust package: https://crates.io/crates/briefcase-client",
     propagate_version = true,
     disable_help_subcommand = true
 )]
@@ -195,6 +196,25 @@ pub enum Command {
     /// Maintenance of the installed CLI.
     #[command(subcommand)]
     System(SystemCommand),
+    /// Submit a bug report, optionally linking a proposed fix.
+    #[command(
+        long_about = "Submit reproduction steps, expected behavior, and actual behavior. Nothing is attached automatically.\n\nExample: briefcase report \"Upload fails when the filename contains a tab\" --pr https://github.com/teamofsilicons/silicon-briefcase/pull/42\n\nReports go to the selected deployment and test reports remain inside testing. A PR is optional."
+    )]
+    Report {
+        /// Description and reproduction steps (1–16384 bytes).
+        message: String,
+        /// Optional Briefcase GitHub pull request URL.
+        #[arg(long)]
+        pr: Option<String>,
+    },
+    /// Manage the shared background service for hourly updates.
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
+    /// Read bundled usage or development documentation without network access.
+    Docs {
+        /// Guide name; omit to list the available guides.
+        topic: Option<String>,
+    },
     /// Show the client and deployment contract versions.
     Version,
 }
@@ -681,16 +701,33 @@ pub enum ConfigCommand {
     },
     /// Set a supported setting.
     Set {
-        /// Currently `auto-update`.
+        /// `auto-update` or `telemetry`.
         key: String,
         /// `on` or `off`.
         value: String,
     },
     /// Restore a supported setting to its default.
     Unset {
-        /// Currently `auto-update`.
+        /// `auto-update` or `telemetry`.
         key: String,
     },
+}
+
+/// Shared background service lifecycle.
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Run in the foreground under a supervisor; registers this Silicon home.
+    Run,
+    /// Start a background process and register this Silicon home.
+    Start,
+    /// Show whether the daemon is responding and its registered homes.
+    Status,
+    /// Stop the shared daemon (a service supervisor may restart it).
+    Stop,
+    /// Install and start the current user's login service (macOS/Linux).
+    Install,
+    /// Uninstall the login service and stop its daemon.
+    Uninstall,
 }
 
 /// Installed-CLI maintenance.

@@ -1,3 +1,4 @@
+import { telemetryEnabled, trackRequest } from './telemetry';
 export type BrowserSession = {
   authenticated: boolean;
   org: string;
@@ -72,6 +73,7 @@ export async function api<T>(
     headers: {
       'Content-Type': 'application/json',
       'X-Briefcase-Browser': '1',
+      'X-Briefcase-Telemetry': telemetryEnabled() ? 'on' : 'off',
       ...(workspaceOrganization && path !== '/session'
         ? { 'X-Briefcase-Organization': workspaceOrganization }
         : {}),
@@ -83,7 +85,9 @@ export async function api<T>(
       throw new Error('A read request cannot have a body.');
     options.body = JSON.stringify(body);
   }
+  const started = performance.now();
   const response = await fetch(browserUrl('/browser' + path), options);
+  trackRequest(method, response.status, performance.now() - started);
   const value = (await response.json().catch(() => null)) as {
     error?: { message?: string };
   } | null;

@@ -243,7 +243,7 @@ impl Client {
         if self.config.organization.is_empty()
             && !matches!(
                 segments,
-                ["iam" | "testing-environment"]
+                ["iam" | "testing-environment" | "telemetry"]
                     | ["auth", "slt" | "refresh" | "status"]
                     | ["public", _, ..]
                     | ["testing-environment", "cleanings"]
@@ -303,6 +303,20 @@ impl Client {
 
     /// Adds the testing-plane selector to a manually constructed request.
     pub(crate) fn apply_environment(&self, mut request: RequestBuilder) -> RequestBuilder {
+        request = request
+            .header(
+                "x-briefcase-telemetry",
+                if self.config.telemetry { "on" } else { "off" },
+            )
+            .header(
+                "x-briefcase-source",
+                match self.config.telemetry_source {
+                    crate::telemetry::Source::Cli => "cli",
+                    crate::telemetry::Source::Daemon => "daemon",
+                    crate::telemetry::Source::Web => "web",
+                    _ => "sdk",
+                },
+            );
         if let Some(environment) = self.config.environment() {
             request = request.header("x-briefcase-app-secret", environment.expose());
         }

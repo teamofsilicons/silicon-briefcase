@@ -124,6 +124,7 @@ async fn briefcase(home: &Path, arguments: &[String]) -> std::process::Output {
     let arguments = arguments.to_owned();
     tokio::task::spawn_blocking(move || {
         Command::new(executable)
+            .env("BRIEFCASE_TELEMETRY", "off")
             .args(arguments)
             .env("BRIEFCASE_HOME", home)
             .env("BRIEFCASE_AUTO_UPDATE", "off")
@@ -145,6 +146,7 @@ async fn briefcase_with_stdin(
     let input = input.to_owned();
     tokio::task::spawn_blocking(move || {
         let mut child = Command::new(executable)
+            .env("BRIEFCASE_TELEMETRY", "off")
             .args(arguments)
             .env("BRIEFCASE_HOME", home)
             .env("BRIEFCASE_AUTO_UPDATE", "off")
@@ -1103,6 +1105,7 @@ async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organizati
 
 fn clean_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_briefcase"));
+    command.env("BRIEFCASE_TELEMETRY", "off");
     for key in [
         "BRIEFCASE_HOME",
         "SILICON_HOME",
@@ -1238,9 +1241,8 @@ async fn failed_test_commands_keep_json_clean_and_print_the_test_footer() {
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("TEST ENVIRONMENT"));
     assert!(
-        String::from_utf8_lossy(&output.stderr).ends_with(
-            "TEST ENVIRONMENT — an isolated Briefcase testing environment is selected.\n"
-        )
+        String::from_utf8_lossy(&output.stderr)
+            .ends_with(&format!("TEST ENVIRONMENT — {TEST_ID}\n"))
     );
 }
 
@@ -1298,4 +1300,114 @@ async fn enabling_link_access_returns_file_and_folder_urls() {
         assert_eq!(value["url"], url);
         assert_eq!(value["enabled"], true);
     }
+}
+
+#[tokio::test]
+async fn bug_report_sends_only_explicit_content_and_replays_its_operation_identity() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(
+        home.path(),
+        &server,
+        &json!({"sessions":{"work":session("2099-01-01T00:00:00Z")}}),
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("briefcase-api-version", "v1")
+                .set_body_json(version_document()),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/reports"))
+        .and(header(
+            "authorization",
+            "Bearer stored-access-must-not-leak",
+        ))
+        .and(body_json(json!({"message":"Reproduction steps"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":ENTRY_ID,"accepted":true})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    for _ in 0..2 {
+        let result = briefcase(
+            home.path(),
+            &[
+                "report".into(),
+                "Reproduction steps".into(),
+                "--json".into(),
+            ],
+        )
+        .await;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["accepted"], true);
+        assert!(String::from_utf8_lossy(&result.stderr).contains("--pr"));
+    }
+    let requests = server.received_requests().await.unwrap();
+    let reports: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/api/v1/reports")
+        .collect();
+    assert_eq!(
+        reports[0].headers["idempotency-key"],
+        reports[1].headers["idempotency-key"]
+    );
+}
+
+#[tokio::test]
+async fn telemetry_preference_persists_and_never_attaches_command_arguments() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(home.path(), &server, &json!({}));
+    Mock::given(method("POST"))
+        .and(path("/api/v1/telemetry"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let state = home.path().to_owned();
+    tokio::task::spawn_blocking(move || {
+        for args in [
+            ["config", "show"].as_slice(),
+            ["config", "set", "telemetry", "off"].as_slice(),
+            ["config", "show"].as_slice(),
+        ] {
+            let output = clean_cli()
+                .env("BRIEFCASE_HOME", &state)
+                .env("BRIEFCASE_TELEMETRY", "on")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    })
+    .await
+    .unwrap();
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(saved["telemetry"], false);
+    let requests = server.received_requests().await.unwrap();
+    let telemetry = requests
+        .iter()
+        .find(|r| r.url.path() == "/api/v1/telemetry")
+        .unwrap();
+    let event: Value = serde_json::from_slice(&telemetry.body).unwrap();
+    assert_eq!(event["operation"], "config");
+    assert_eq!(event["source"], "cli");
+    assert!(event["duration_ms"].is_number());
+    assert!(!String::from_utf8_lossy(&telemetry.body).contains("profiles"));
+    assert!(!telemetry.headers.contains_key("authorization"));
 }

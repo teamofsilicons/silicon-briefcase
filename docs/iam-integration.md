@@ -10,7 +10,7 @@ The [delegated-upload protocol](api/delegated-uploads.md) documents endpoint
 registration, exact manifests, narrow staging capabilities and fresh commit
 proofs. It never turns an IAM authorization snapshot into a reusable grant.
 
-The backend imports registry `silicon-iam-client = "=1.7.0"`. Its typed methods
+The backend imports registry `silicon-iam-client = "=1.8.0"`. Its typed methods
 own all IAM network calls, API-version negotiation, redirects, and transport.
 Runtime dependency auto-updates are disabled for the backend: upgrading the
 dependency requires a deliberate build and deployment. This is distinct from
@@ -206,7 +206,7 @@ not create permission for later requests.
 
 ## First official release requirements
 
-Use IAM client 1.7.0 and the corresponding deployed IAM contract. Subject
+Use IAM client 1.8.0 and the corresponding deployed IAM contract. Subject
 snapshots require `self.identity.read`, `self.membership.read`, and
 `self.tags.read`. Use `self.organizations.read` for organization selection.
 Recipient/tag discovery uses `directory.carbons.read`, `directory.silicons.read`,

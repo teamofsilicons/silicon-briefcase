@@ -15,3 +15,6 @@ pub use content::ContentStream;
 
 mod sharing;
 pub use sharing::*;
+
+mod reports;
+pub use reports::{BugReport, ReportReceipt};

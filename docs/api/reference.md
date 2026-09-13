@@ -2,7 +2,7 @@
 
 This reference is generated from the v1 [OpenAPI contract](../../openapi.yaml). Paths starting `/api/v1/` are absolute; normal requests require `Authorization: Bearer` and `X-Org-ID` unless the operation specifies another authority. Start with [API conventions](README.md), [sharing](../sharing.md), and [IAM OBO](../obo.md).
 
-All operations below have revision **1.0.0**. Public links expose read/download only. Test selection always uses `X-Briefcase-App-Secret` in addition to the stated actor authority.
+Operation revisions are listed in the [inventory](operations.md). Public links expose read/download only. Test selection always uses `X-Briefcase-App-Secret` in addition to the stated actor authority.
 
 ## Read the public IAM application ID before login
 
@@ -1216,6 +1216,7 @@ Authority: anonymous.
 | `path` | path | yes | string |
 | `view` | query | no | string: metadata, contents, inline, attachment |
 | `cursor` | query | no | string |
+| `test_environment` | query | no | Public sandbox UUID; requires effective public-link access and never falls back to production |
 | `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
 
 | Response | Meaning | Body |
@@ -1272,3 +1273,23 @@ Request: `application/json` (required).
 | --- | --- | --- |
 | 200 | Success | `application/json` LinkAccess |
 | default | Error | `application/json` Error |
+
+
+## Submit an explicit bug report
+
+`POST /reports` requires a member bearer, `X-Org-ID`, and an `Idempotency-Key`.
+Send `{ "message": "Steps, expected behavior, actual behavior", "pr": "https://github.com/teamofsilicons/silicon-briefcase/pull/42", "isi": "optional-component" }`.
+Only `message` is required (nonblank, at most 16384 UTF-8 bytes). `pr`, when
+present, must identify a Briefcase pull request. `isi` is optional, at most 256
+UTF-8 bytes, with no control characters. The response is `{ "id": "UUID",
+"accepted": true }`. Reuse the key and identical body after a lost response.
+An optional `X-Briefcase-App-Secret` keeps the report in its test environment.
+
+## Submit operational telemetry
+
+`POST /api/v1/telemetry` is an anonymous, bounded relay for fixed diagnostic
+fields. Its OpenAPI operation is `submitTelemetry`; 204 means intake and 429
+means the process limit was reached. Client events are untrusted observations.
+Use the SDK event model, preserve the UUID on retries, and never attach content
+or credentials. Collection settings and delivery guarantees are in
+[deployment](../deployment.md#telemetry).

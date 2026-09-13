@@ -48,7 +48,7 @@ mod webhook;
 
 use handlers::{
     content, delegated, delegated_upload, entries, invitations, notifications, obo, permissions,
-    session, sharing, system, testing, usage,
+    reports, session, sharing, system, telemetry, testing, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -341,6 +341,8 @@ fn ordinary_routes() -> Router<AppState> {
             post(permissions::inspect_permissions),
         )
         .route("/api/v1/search", get(entries::search))
+        .route("/api/v1/reports", post(reports::submit))
+        .route("/api/v1/telemetry", post(telemetry::submit))
         .route(
             "/api/v1/notifications",
             get(notifications::list_notifications),
@@ -474,7 +476,7 @@ pub(crate) mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 58] = [
+    const CONTRACT: [(&str, &str, &str); 60] = [
         ("/version", "get", "200"),
         ("/iam", "get", "200"),
         ("/auth/status", "get", "200"),
@@ -552,6 +554,8 @@ pub(crate) mod tests {
         ("/permissions/effective", "post", "200"),
         ("/search", "get", "200"),
         ("/usage", "get", "200"),
+        ("/reports", "post", "200"),
+        ("/telemetry", "post", "204"),
         ("/notifications", "get", "200"),
         ("/notifications/read", "post", "200"),
         ("/entries/{entry_id}/activity", "get", "200"),
@@ -808,6 +812,77 @@ pub(crate) mod tests {
                 assert!(body["actor"].is_null());
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telemetry_relay_is_anonymous_and_rejects_arbitrary_payloads() -> anyhow::Result<()> {
+        use briefcase_client::telemetry::{Event, Source, Stage};
+        let router = test_router()?;
+        let mut event = serde_json::to_value(Event::new(Source::Cli, "upload", Stage::Completed))?;
+        for (mutation, expected) in [(None, 204), (Some("token"), 422), (Some("source"), 422)] {
+            if let Some(field) = mutation {
+                event[field] = serde_json::json!(if field == "source" {
+                    "backend"
+                } else {
+                    "slt_private"
+                });
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/telemetry")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&event)?))?,
+                )
+                .await?;
+            assert_eq!(response.status().as_u16(), expected);
+            event
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("object"))?
+                .remove("token");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit live Space Station check; requires the private collector configuration"]
+    async fn telemetry_live_delivery() -> anyhow::Result<()> {
+        use briefcase_client::telemetry::{Event, Source, Stage};
+        crate::telemetry::init_process(
+            crate::config::RuntimeEnvironment::Test,
+            "silicon_briefcase=info",
+        )?;
+        anyhow::ensure!(
+            crate::telemetry::configured(),
+            "collector is not configured"
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}/api/v1/", listener.local_addr()?);
+        let router = test_router()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        for source in [Source::Sdk, Source::Cli, Source::Daemon, Source::Web] {
+            let mut event = Event::new(source, "telemetry_integration_check", Stage::Completed);
+            event.testing = true;
+            event.count = Some(1);
+            briefcase_client::telemetry::submit(&base, &event).await?;
+            println!("live telemetry event {} source {source:?}", event.id);
+        }
+        let mut acked = false;
+        for _ in 0..40 {
+            if crate::telemetry::flush() {
+                acked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        server.abort();
+        anyhow::ensure!(
+            acked,
+            "Space Station did not acknowledge within the live-check window"
+        );
         Ok(())
     }
 

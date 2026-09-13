@@ -235,6 +235,8 @@ pub enum DispositionDto {
 pub struct PathContentQuery {
     /// Omission returns entry metadata instead of content.
     pub disposition: Option<DispositionDto>,
+    /// Public sandbox routing ID. Authenticated requests must select the same sandbox.
+    pub test_environment: Option<Uuid>,
 }
 
 /// One right conveyed by an invitation or requested through the workflow.

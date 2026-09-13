@@ -50,6 +50,8 @@ pub enum IamAction {
     Search,
     /// Read the notification inbox.
     ListNotifications,
+    /// Submit an explicit bug report.
+    SubmitReport,
     /// Mark the notification inbox read.
     ReadNotifications,
     /// Read an entry's action history.
@@ -89,6 +91,7 @@ impl IamAction {
             Self::RevokePermission => "briefcase.permissions.revoke",
             Self::Search => "briefcase.search",
             Self::ListNotifications => "briefcase.notifications.list",
+            Self::SubmitReport => "briefcase.reports.submit",
             Self::ReadNotifications => "briefcase.notifications.read",
             Self::ListActivity => "briefcase.activity.list",
             Self::ListVersions => "briefcase.versions.list",

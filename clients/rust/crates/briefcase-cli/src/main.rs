@@ -14,20 +14,42 @@
 //! - `4` the credential was refused, or the action is not allowed.
 
 mod cli;
+mod daemon;
+mod manual;
 mod render;
 mod run;
 mod state;
+mod telemetry;
 mod updater;
-
-use clap::Parser as _;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let cli = cli::Cli::parse();
-    let testing = cli.global.test.is_some() || cli.global.app_secret.is_some();
-    let run_maintenance = !updater::defers_automatic_update(&cli.command);
-    let exit = match run::run(cli).await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+    let mut testing = testing_selection();
+    let cli = match manual::parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = error.exit_code();
+            let message = redact_parse_error(&error.to_string());
+            if code == 0 {
+                print!("{message}");
+            } else {
+                eprint!("{message}");
+            }
+            footer(testing.as_deref());
+            return std::process::ExitCode::from(u8::try_from(code).unwrap_or(2));
+        }
+    };
+    let register = !matches!(
+        cli.command,
+        cli::Command::Daemon(_) | cli::Command::Docs { .. }
+    );
+    let observation = telemetry::CommandObservation::new(&cli);
+    let mut succeeded = false;
+    let exit = match run::run(cli, &mut testing).await {
+        Ok(()) => {
+            succeeded = true;
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("briefcase: {error}");
             if let run::CliError::Client(briefcase_client::Error::Incompatible(_)) = &error {
@@ -35,23 +57,68 @@ async fn main() -> std::process::ExitCode {
                     "briefcase: use matching CLI and server versions; check `briefcase --version` and the deployment's `/api/version` before retrying"
                 );
             }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            std::process::ExitCode::from(error.exit_code() as u8)
+            std::process::ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
         }
     };
-    // Print the command's result before maintenance, and never let registry,
-    // Cargo, or updater-state failures replace its result or exit status.
-    if run_maintenance {
-        match updater::automatic().await {
-            Ok(updater::Outcome::Updated { from, to }) => eprintln!(
-                "briefcase: updated from {from} to {to}; the next invocation uses the new version"
-            ),
-            Ok(_) => {}
-            Err(error) => eprintln!("briefcase: warning: automatic update skipped: {error}"),
-        }
+    // Never delay exchange of one-use credentials for local maintenance.
+    if register {
+        let _ = daemon::register().await;
     }
-    if testing {
-        eprintln!("TEST ENVIRONMENT — an isolated Briefcase testing environment is selected.");
-    }
+    observation.finish(succeeded).await;
+    footer(testing.as_deref());
     exit
+}
+
+fn footer(selection: Option<&str>) {
+    if let Some(selection) = selection {
+        eprintln!("TEST ENVIRONMENT — {}", render::terminal_text(selection));
+    }
+}
+
+fn testing_selection() -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let selected = args.iter().any(|arg| {
+        arg == "--test"
+            || arg.starts_with("--test=")
+            || arg == "--app-secret"
+            || arg.starts_with("--app-secret=")
+    }) || std::env::var_os("BRIEFCASE_TEST").is_some()
+        || std::env::var_os("BRIEFCASE_APP_SECRET").is_some();
+    // Never echo unparsed arguments: they may be secrets, even in a malformed
+    // command. A successfully parsed selector replaces this with its UUID.
+    selected.then(|| "test selection requested; environment has not been resolved".into())
+}
+
+fn redact_parse_error(message: &str) -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut result = message.to_owned();
+    let mut secret_next = false;
+    for argument in &args {
+        let (flag, inline) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(flag, value)| {
+                (flag, Some(value))
+            });
+        let sensitive = matches!(
+            flag,
+            "--app-secret"
+                | "--token"
+                | "--slt"
+                | "--iam-app-secret"
+                | "--iam-test-key"
+                | "--iam-environment-key"
+        );
+        let value = inline.unwrap_or(argument);
+        if (secret_next
+            || sensitive && inline.is_some()
+            || ["ask_", "oat_", "ort_", "slt_"]
+                .iter()
+                .any(|prefix| value.starts_with(prefix)))
+            && !value.is_empty()
+        {
+            result = result.replace(value, "<redacted>");
+        }
+        secret_next = sensitive && inline.is_none();
+    }
+    result
 }

@@ -949,3 +949,67 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn bug_reports_are_retry_safe_and_tenant_isolated() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let pool = postgres::connect(&settings(url), "briefcase-report-tests").await?;
+    postgres::migrate(&pool).await?;
+    let repository = PostgresRepository::new(pool.clone());
+    let org = format!("report-{}", Uuid::now_v7().simple());
+    let context = ExecutionContext::new(
+        authorization(&org, AuthenticationMode::Bearer),
+        "report-test",
+    );
+    let metadata = MutationMetadata::new(
+        Some(IdempotencyKey::new("report-retry".to_owned())?),
+        [42; 32],
+    );
+    let (first, replay) = tokio::join!(
+        repository.submit_report(
+            &context,
+            "Reproduction steps",
+            None,
+            Some("planner"),
+            &metadata
+        ),
+        repository.submit_report(
+            &context,
+            "Reproduction steps",
+            None,
+            Some("planner"),
+            &metadata
+        )
+    );
+    let first = first?;
+    assert_eq!(first.id, replay?.id);
+    assert!(first.accepted);
+    let conflict = MutationMetadata::new(metadata.idempotency_key.clone(), [43; 32]);
+    assert!(matches!(
+        repository
+            .submit_report(&context, "Different report", None, None, &conflict)
+            .await,
+        Err(MetadataRepositoryError::Conflict)
+    ));
+    let tenant = postgres::TenantContext::from_execution(&context);
+    let mut transaction = repository.begin(&tenant).await?;
+    sqlx::query("SET LOCAL ROLE briefcase_api")
+        .execute(&mut *transaction)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM briefcase.bug_reports")
+        .fetch_one(&mut *transaction)
+        .await?;
+    assert_eq!(count, 1);
+    sqlx::query("SELECT set_config('briefcase.org_id', 'other-report-org', true)")
+        .execute(&mut *transaction)
+        .await?;
+    let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM briefcase.bug_reports")
+        .fetch_one(&mut *transaction)
+        .await?;
+    assert_eq!(hidden, 0);
+    transaction.rollback().await?;
+    Ok(())
+}

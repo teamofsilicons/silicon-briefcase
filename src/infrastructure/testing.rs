@@ -585,6 +585,27 @@ impl TestingEnvironmentStore {
         self.access_from_row(row)
     }
 
+    /// Resolves anonymous link routing while holding the sandbox lifecycle fence.
+    /// This grants no actor authority; callers must enforce public entry policy.
+    /// # Errors
+    /// Returns not-found for another organization or an unavailable sandbox.
+    pub async fn public_link_context(
+        &self,
+        id: Uuid,
+        organization: &str,
+    ) -> Result<(TestingEnvironmentContext, TestingEnvironmentUseFence), AppError> {
+        let fence = TestingEnvironmentUseFence::acquire(&self.test, id).await?;
+        let version = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT briefcase.public_testing_environment_version($1, $2)",
+        )
+        .bind(id)
+        .bind(organization)
+        .fetch_one(&self.production)
+        .await?
+        .ok_or(AppError::NotFound)?;
+        Ok((TestingEnvironmentContext::new(id, version), fence))
+    }
+
     /// Records successful use of an already-authenticated environment key.
     ///
     /// Root lookup itself is intentionally read-only: callers invoke this only

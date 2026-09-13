@@ -62,6 +62,7 @@ Prepare a private JSON file using a secure editor/secret manager. Its schema is:
   "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET": "<configured-webhook-secret>",
   "BRIEFCASE_IAM_WEBHOOK_KEY_VERSION": 1,
   "BRIEFCASE_POSTMARK_SERVER_TOKEN": "<postmark-server-token>",
+  "BRIEFCASE_TELEMETRY_TABLE_KEY": "<siliconbriefcase-table-key>",
   "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY": "<base64-encoded-random-32-bytes>",
   "BRIEFCASE_API_DATABASE_PASSWORD": "<strong-random-runtime-password>",
   "BRIEFCASE_WORKER_DATABASE_PASSWORD": "<different-strong-random-runtime-password>"
@@ -133,7 +134,7 @@ is persisted.
 
 Deploy IAM's current authorization contract (backend migration 0067 and test
 migration 9003) before this Briefcase version. Briefcase uses the official
-`silicon-iam-client` 1.4.0, with dependency auto-updates disabled. Complete
+`silicon-iam-client` 1.8.0, with dependency auto-updates disabled. Complete
 online snapshots populate immutable membership bindings on first use; webhook
 delivery is no longer a prerequisite for first login or post-clean bootstrap.
 Keep webhooks enabled for other members, resource lifecycle and directory
@@ -261,7 +262,7 @@ instance started them.
 
 ## First official release deployment
 
-Deploy backend **1.0.0** with official client, CLI and browser gateway **1.0.1**.
+Deploy backend **1.1.0** with official client, CLI and browser gateway **1.1.0**.
 Development 0.x consumers are unsupported. Apply all forward migrations to
 both configured databases before starting the new binaries. Keep the role grants
 for the API and worker separate. The first release introduces app namespace
@@ -287,3 +288,51 @@ hostname. See [the site build instructions](../docs-site/README.md).
 
 This change prepares release artifacts and documentation. Publishing packages,
 changing DNS and deploying services/docs are separate operator actions.
+
+## Telemetry
+
+Backend and worker use the official Space Station Rust client, pinned in
+`Cargo.toml`. Browser analytics and explicit UI events use
+`@teamofsilicons/space-station-web`. Everything lands in the private
+[`tos/siliconbriefcase` table](https://spacestation.teamofsilicons.com/o/tos/tables/siliconbriefcase).
+Bug report content stays in Briefcase PostgreSQL.
+
+Provision `BRIEFCASE_TELEMETRY_TABLE_KEY` in the backend and worker secret
+environments. Keep it out of client builds and source control. Local processes
+also read `$HOME/.config/briefcase/telemetry.env`; use directory mode 0700 and file
+mode 0600. `BRIEFCASE_TELEMETRY_URL` defaults to
+`https://backend.spacestation.teamofsilicons.com`. `BRIEFCASE_TELEMETRY_HOME` selects a
+persistent private spool directory (default `$HOME/.briefcase-telemetry`).
+Each replica should have its own durable volume for this directory. The container
+image uses `/var/lib/silicon-briefcase/telemetry`; the AWS template mounts separate
+private API and worker spool directories and reads the telemetry key, URL and
+optional on/off override from the existing application secret in Secrets Manager. Missing or
+invalid configuration disables delivery; `telemetry::configured()` exposes only
+whether a collector was initialized. Set `BRIEFCASE_TELEMETRY=off` to disable a
+backend, worker, or gateway process. Restart after changing server settings.
+
+HTTP middleware records operation, outcome, duration, and a UUID correlation ID.
+Request-scoped tracing inherits opt-out and authenticated sandbox context.
+Workers record named job stages and numeric progress. Browser analytics are
+sanitized before leaving the browser; the gateway relays batches to
+`POST /api/v1/telemetry`, and only the backend holds the table key. Both browser
+analytics and custom request events use the same table. Browser preference is
+available on sign-in and in Organisation settings → Telemetry, applies to that
+browser, and is on by default. CLI and SDK settings are documented in their guides.
+
+Each stored record includes event ID, source, operation, stage, sandbox context,
+optional correlation/timing/status/count/progress, schema version, service,
+backend build, receipt time, and `client_reported`. Space Station adds its own
+host metadata for the collecting backend/worker, not the remote browser or CLI.
+Remote source and sandbox labels are claims, never authorization facts. Raw
+request paths, headers, error messages, typed text, filenames and file contents
+are excluded. Test telemetry shares this operational table with `testing: true`;
+it contains no sandbox application data and is independent of sandbox cleanup.
+
+Collection is best effort: the official Rust client's bounded queue and durable
+spool retry remote delivery, while client relays have short deadlines. Browser
+batches retry within bounded queues; duplicate event IDs are suppressed for 60
+seconds by each backend process. A 204 means intake, not Space Station persistence.
+When the sink is unavailable, Briefcase operations continue normally. An already
+accepted event can still drain after a client opts out; new opted-out requests
+are suppressed. In-flight network traffic cannot be recalled.

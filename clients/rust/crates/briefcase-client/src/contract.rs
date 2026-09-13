@@ -43,7 +43,7 @@ const fn operation(
 }
 
 /// Every operation this client calls, with the revision it expects.
-pub const OPERATIONS: [OperationRevision; 58] = [
+pub const OPERATIONS: [OperationRevision; 60] = [
     operation(
         "reserveDelegatedUpload",
         "1.0.0",
@@ -169,7 +169,7 @@ pub const OPERATIONS: [OperationRevision; 58] = [
     ),
     operation(
         "resolvePermanentUrl",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/org/{org_id}/{path}",
     ),
@@ -224,6 +224,8 @@ pub const OPERATIONS: [OperationRevision; 58] = [
         "/permissions/effective",
     ),
     operation("searchFiles", "1.0.0", "GET", "/search"),
+    operation("submitTelemetry", "1.0.0", "POST", "/telemetry"),
+    operation("submitReport", "1.0.0", "POST", "/reports"),
     operation("listNotifications", "1.0.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
     operation(
@@ -273,18 +275,18 @@ pub const OPERATIONS: [OperationRevision; 58] = [
     ),
     operation(
         "readLinkAccess",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/entries/{entry_id}/link-access",
     ),
     operation(
         "setLinkAccess",
-        "1.0.0",
+        "1.1.0",
         "PUT",
         "/entries/{entry_id}/link-access",
     ),
     operation("listEntryLogs", "1.0.0", "GET", "/entries/{entry_id}/logs"),
-    operation("readPublicEntry", "1.0.0", "GET", "/public/{org_id}/{path}"),
+    operation("readPublicEntry", "1.1.0", "GET", "/public/{org_id}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
         "1.0.0",
@@ -293,7 +295,7 @@ pub const OPERATIONS: [OperationRevision; 58] = [
     ),
     operation(
         "setLinkAccessOnBehalfOfMember",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/obo/link-access",
     ),

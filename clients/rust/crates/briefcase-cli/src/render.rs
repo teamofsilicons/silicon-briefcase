@@ -454,7 +454,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 // Names, paths and excerpts are user-controlled. Never interpret their terminal
 // control sequences or bidi overrides as display instructions. Raw file output
 // (`cat`/download) and structured JSON deliberately preserve the original data.
-fn terminal_text(value: &str) -> String {
+pub(crate) fn terminal_text(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
         if character.is_control()

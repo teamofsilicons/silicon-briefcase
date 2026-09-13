@@ -1,7 +1,7 @@
-# Silicon Briefcase — first official release 1.0.0
+# Silicon Briefcase — source release 1.1.0
 
 Documentation: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
-API/client/CLI/gateway target contract 1.0.0 (`v1`); development releases are unsupported.
+API/client/CLI/gateway target contract 1.1.0 (`v1`); development releases are unsupported.
 
 
 Silicon Briefcase is the organization-scoped file service used by Carbons,

@@ -90,7 +90,10 @@ type Result<T> = std::result::Result<T, CliError>;
 /// # Errors
 ///
 /// Returns whatever stopped the command, carrying the exit code it deserves.
-pub async fn run(mut cli: Cli) -> Result<()> {
+pub async fn run(mut cli: Cli, testing: &mut Option<String>) -> Result<()> {
+    if let Some(id) = cli.global.test {
+        *testing = Some(id.to_string());
+    }
     if let Some(secret) = cli.global.app_secret.take() {
         let state = StateDirectory::locate()?;
         let saved = state.configuration()?;
@@ -105,9 +108,12 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         let probe = Client::new_unchecked(
             Config::for_sign_in(&url)?
                 .with_environment(environment_key.clone())
-                .with_auto_update(false),
+                .with_auto_update(false)
+                .with_telemetry(crate::telemetry::enabled())
+                .with_telemetry_source(briefcase_client::telemetry::Source::Cli),
         )?;
         let environment = probe.current_testing_environment().await?;
+        *testing = Some(format!("{} ({})", environment.name, environment.id));
         let _lock = state.lock_credentials()?;
         let mut credentials = state.credentials()?;
         credentials.set_testing_environment_key(&profile_name, environment.id, environment_key);
@@ -172,6 +178,9 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         Command::Env(command) => environment(&cli.global, &command, output).await,
         Command::Config(command) => configure(&cli.global, &command, output),
         Command::System(command) => system(&command, output).await,
+        Command::Report { message, pr } => report(&cli.global, message, pr, output).await,
+        Command::Daemon(command) => crate::daemon::command(command, output).await,
+        Command::Docs { topic } => crate::manual::show(topic.as_deref(), output),
         Command::Version => version(&cli.global, output).await,
     }
 }
@@ -408,7 +417,9 @@ fn config(session: &ResolvedSession) -> Result<Config> {
     } else {
         Config::new(&session.url, &session.org)?
     }
-    .with_auto_update(false);
+    .with_auto_update(false)
+    .with_telemetry(crate::telemetry::enabled())
+    .with_telemetry_source(briefcase_client::telemetry::Source::Cli);
     if let Some(environment) = &session.environment_key {
         config = config.with_environment(environment.clone());
     }
@@ -417,9 +428,15 @@ fn config(session: &ResolvedSession) -> Result<Config> {
 
 fn refresh_config(session: &ResolvedSession, stored: &StoredSession) -> Result<Config> {
     let mut config = if let Some(org) = &stored.org_id {
-        Config::new(&session.url, org)?.with_auto_update(false)
+        Config::new(&session.url, org)?
+            .with_auto_update(false)
+            .with_telemetry(crate::telemetry::enabled())
+            .with_telemetry_source(briefcase_client::telemetry::Source::Cli)
     } else {
-        Config::for_sign_in(&session.url)?.with_auto_update(false)
+        Config::for_sign_in(&session.url)?
+            .with_auto_update(false)
+            .with_telemetry(crate::telemetry::enabled())
+            .with_telemetry_source(briefcase_client::telemetry::Source::Cli)
     };
     if let Some(environment) = &session.environment_key {
         config = config.with_environment(environment.clone());
@@ -599,7 +616,10 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
             )))?;
         login_scope = Some(scope_for(&url, &bound.organization)?);
     }
-    let mut login_config = Config::for_sign_in(&url)?.with_auto_update(false);
+    let mut login_config = Config::for_sign_in(&url)?
+        .with_auto_update(false)
+        .with_telemetry(crate::telemetry::enabled())
+        .with_telemetry_source(briefcase_client::telemetry::Source::Cli);
     if let Some(environment_id) = global.test {
         let environment = testing_environment_for_login(
             &credentials,
@@ -2241,6 +2261,7 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
                 output.json(&serde_json::json!({
                     "profile": global.profile.as_deref().unwrap_or(&configuration.current_profile),
                     "auto_update": configuration.auto_update,
+                    "telemetry": configuration.telemetry,
                 }));
             } else {
                 println!(
@@ -2251,6 +2272,10 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
                         .unwrap_or(&configuration.current_profile)
                 );
                 println!(
+                    "telemetry   {}",
+                    if configuration.telemetry { "on" } else { "off" }
+                );
+                println!(
                     "auto-update {}",
                     if configuration.auto_update {
                         "on"
@@ -2259,6 +2284,20 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
                     }
                 );
             }
+        }
+        ConfigCommand::Set { key, value } if key == "telemetry" => {
+            configuration.telemetry = parse_switch(value)?;
+            state.save_configuration(&configuration)?;
+            output.note(if configuration.telemetry {
+                "telemetry enabled"
+            } else {
+                "telemetry disabled"
+            });
+        }
+        ConfigCommand::Unset { key } if key == "telemetry" => {
+            configuration.telemetry = true;
+            state.save_configuration(&configuration)?;
+            output.note("telemetry restored to the default: on");
         }
         ConfigCommand::Set { key, value } if key == "auto-update" => {
             configuration.auto_update = parse_switch(value)?;
@@ -2276,7 +2315,7 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
         }
         ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => {
             return Err(CliError::usage(format!(
-                "unknown setting `{key}`; supported setting: auto-update"
+                "unknown setting `{key}`; supported settings: auto-update, telemetry"
             )));
         }
         ConfigCommand::Home { .. } => unreachable!("home was handled before reading configuration"),
@@ -2288,7 +2327,7 @@ fn parse_switch(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Ok(true),
         "off" | "false" | "no" | "0" => Ok(false),
-        _ => Err(CliError::usage("auto-update must be on or off")),
+        _ => Err(CliError::usage("setting must be on or off")),
     }
 }
 
@@ -2362,6 +2401,39 @@ async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
             version.supported_api_versions.join(", ")
         ),
         None => println!("server    not reachable"),
+    }
+    Ok(())
+}
+
+async fn report(
+    global: &GlobalArgs,
+    message: String,
+    pr: Option<String>,
+    output: Output,
+) -> Result<()> {
+    if message.trim().is_empty() || message.len() > 16_384 {
+        return Err(CliError::Usage("report message must contain 1–16384 bytes; include steps to reproduce, expected behavior, and actual behavior".into()));
+    }
+    let body = briefcase_client::BugReport {
+        message,
+        pr,
+        isi: std::env::var("ISI")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    };
+    let (client, session) = connect_resolved(global).await?;
+    let intent = serde_json::json!({"operation": "submit-report", "url": session.url, "org": session.org, "environment": session.environment_id, "report": body});
+    let encoded =
+        serde_json::to_vec(&intent).map_err(|error| CliError::Usage(error.to_string()))?;
+    // Stable across process retries, scoped to the current actor as well as the
+    // deployment, organization and environment by the server's idempotency key.
+    let key = IdempotencyKey::new(format!("report-{:x}", Sha256::digest(&encoded)))?;
+    let receipt = client.submit_report_with_key(&body, &key).await?;
+    output.json(&receipt);
+    if body.pr.is_none() {
+        eprintln!(
+            "You can also propose a fix at https://github.com/teamofsilicons/silicon-briefcase and attach it with `briefcase report <message> --pr <pr-link>`."
+        );
     }
     Ok(())
 }

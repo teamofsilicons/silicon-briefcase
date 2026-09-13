@@ -44,10 +44,15 @@ pub(crate) async fn link_access(
         .metadata_repository()
         .link_access(&context, extract::entry_id(id)?)
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    Ok(Json(
+        state.mapper.link_access(
+            context.authorization().organization_id().as_str(),
+            &access,
+            context
+                .testing_environment()
+                .map(TestingEnvironmentContext::id),
+        )?,
+    ))
 }
 
 pub(crate) async fn set_link_access(
@@ -69,10 +74,15 @@ pub(crate) async fn set_link_access(
         .metadata_repository()
         .set_link_access(&context, extract::entry_id(id)?, body.enabled, &metadata)
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    Ok(Json(
+        state.mapper.link_access(
+            context.authorization().organization_id().as_str(),
+            &access,
+            context
+                .testing_environment()
+                .map(TestingEnvironmentContext::id),
+        )?,
+    ))
 }
 
 pub(crate) async fn logs(
@@ -109,6 +119,8 @@ pub(crate) struct PublicQuery {
     /// metadata, contents, inline, or attachment.
     pub view: Option<String>,
     pub cursor: Option<Uuid>,
+    /// Public sandbox routing ID; never an application secret.
+    pub test_environment: Option<Uuid>,
 }
 
 pub(crate) async fn public_path(
@@ -138,9 +150,34 @@ pub(crate) async fn read_public(
     {
         return Err(AppError::NotFound);
     }
-    let fence = extract::testing_use_fence(state, access.as_ref()).await?;
+    if query.test_environment.is_some_and(|id| {
+        id.is_nil()
+            || access
+                .as_ref()
+                .is_some_and(|access| access.environment_id != id)
+    }) {
+        return Err(AppError::NotFound);
+    }
+    let (public_context, public_fence) = if let Some(id) = query.test_environment {
+        let (context, fence) = state
+            .testing
+            .as_ref()
+            .ok_or(AppError::NotFound)?
+            .public_link_context(id, org)
+            .await?;
+        (Some(context), Some(fence))
+    } else {
+        (None, None)
+    };
+    let fence = if public_fence.is_some() {
+        public_fence
+    } else {
+        extract::testing_use_fence(state, access.as_ref()).await?
+    };
     extract::touch_testing_access(state, access.as_ref()).await?;
-    let tenant = if let Some(access) = access {
+    let tenant = if let Some(context) = public_context {
+        TenantContext::for_testing_environment_service(org, context, "public-link")
+    } else if let Some(access) = access {
         TenantContext::for_testing_environment_service(
             org,
             TestingEnvironmentContext::new(access.environment_id, access.control_version),

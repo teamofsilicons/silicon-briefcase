@@ -70,6 +70,7 @@ mod api;
 mod client;
 mod config;
 mod contract;
+pub mod daemon;
 mod error;
 mod media;
 pub mod models;
@@ -85,8 +86,8 @@ pub use api::delegated::{
     UploadCapability,
 };
 pub use api::{
-    ContentStream, Invitation, InvitationPage, Invite, LinkAccess, LogEvent, LogPage, PublicEntry,
-    PublicPage, Recipient,
+    BugReport, ContentStream, Invitation, InvitationPage, Invite, LinkAccess, LogEvent, LogPage,
+    PublicEntry, PublicPage, Recipient, ReportReceipt,
 };
 pub use client::{Client, IdempotencyKey};
 pub use config::{
@@ -113,3 +114,6 @@ pub use requests::{
     TestingEnvironmentUpdate, Upload, UploadSource,
 };
 pub use update::UpdateStatus;
+
+/// Operational telemetry and explicit opt-out controls.
+pub mod telemetry;

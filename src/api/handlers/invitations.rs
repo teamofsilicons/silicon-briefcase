@@ -289,8 +289,13 @@ pub(crate) async fn delegated_link(
             &metadata,
         )
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    Ok(Json(
+        state.mapper.link_access(
+            context.authorization().organization_id().as_str(),
+            &access,
+            context
+                .testing_environment()
+                .map(crate::application::context::TestingEnvironmentContext::id),
+        )?,
+    ))
 }

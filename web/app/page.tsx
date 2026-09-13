@@ -1,4 +1,5 @@
 'use client';
+import { TelemetryPreference } from '@/components/briefcase/telemetry';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import {
   ArrowRight,
@@ -8,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
+import TestSignIn from '@/components/briefcase/test-sign-in';
 import PublicEntryView from '@/components/briefcase/public-entry';
 import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link';
 import {
@@ -42,6 +44,24 @@ export default function Home() {
     setWorkspaceOrganization(null);
   }, []);
   useEffect(() => {
+    const selectors = new URLSearchParams(location.search).getAll(
+      'test_environment',
+    );
+    if (selectors.length) {
+      if (
+        selectors.length !== 1 ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          selectors[0],
+        ) ||
+        selectors[0] === '00000000-0000-0000-0000-000000000000'
+      ) {
+        // eslint-disable-next-line react/react-compiler -- Validate the actual browser URL after static hydration before any session request.
+        setError('Invalid testing environment in this link.');
+        setChecking(false);
+        return;
+      }
+      sessionStorage.setItem('briefcase-test-environment', selectors[0]);
+    }
     try {
       const target = readFileLocation();
       if (target) {
@@ -303,6 +323,8 @@ export default function Home() {
               </form>
             </>
           )}
+          {!testingEnvironment() && <TestSignIn />}
+          <TelemetryPreference />
           <p className="session-note">
             Your session stays on the server. Tokens aren’t saved in browser
             storage.

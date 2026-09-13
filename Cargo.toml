@@ -1,6 +1,6 @@
 [package]
 name = "silicon-briefcase"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Proprietary"
@@ -24,6 +24,9 @@ name = "briefcase-migrate"
 path = "src/bin/briefcase_migrate.rs"
 
 [dependencies]
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
+briefcase-client = { path = "clients/rust/crates/briefcase-client" }
+space-station = { git = "https://github.com/teamofsilicons/space-station", rev = "13060076eaaee8adc82e42e2a4c82515751810de", package = "space-station" }
 anyhow = "1.0.100"
 aes-gcm = "0.10.3"
 async-trait = "0.1.89"
@@ -65,7 +68,6 @@ url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
-briefcase-client = { path = "clients/rust/crates/briefcase-client" }
 pretty_assertions = "1.4.1"
 proptest = "1.8.0"
 serde_yaml = "0.9.34"

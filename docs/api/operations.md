@@ -1,6 +1,6 @@
 # Operation inventory
 
-Contract **1.0.0**, API major **v1**. All 58 operations initially carry revision **1.0.0**. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
+Contract **1.1.0**, API major **v1**. The 60 operations carry the revisions listed below. Sandbox sharing and permanent-link operations use revision **1.1.0**; other initial operations retain **1.0.0**. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
 
 | Operation | Method and path | Revision |
 | --- | --- | --- |
@@ -33,6 +33,7 @@ Contract **1.0.0**, API major **v1**. All 58 operations initially carry revision
 | `revokePermission` | `DELETE /entries/{entry_id}/permissions/{grant_id}` | 1.0.0 |
 | `inspectEffectivePermissions` | `POST /permissions/effective` | 1.0.0 |
 | `searchFiles` | `GET /search` | 1.0.0 |
+| `submitReport` | `POST /reports` | 1.0.0 |
 | `listNotifications` | `GET /notifications` | 1.0.0 |
 | `readNotifications` | `POST /notifications/read` | 1.0.0 |
 | `listEntryActivity` | `GET /entries/{entry_id}/activity` | 1.0.0 |
@@ -52,13 +53,14 @@ Contract **1.0.0**, API major **v1**. All 58 operations initially carry revision
 | `listBin` | `GET /bin` | 1.0.0 |
 | `restoreEntry` | `POST /bin/{entry_id}/restore` | 1.0.0 |
 | `configureOrganizationBucket` | `PUT /storage/configuration` | 1.0.0 |
-| `resolvePermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 |
+| `resolvePermanentUrl` | `GET /org/{org_id}/{path}` | 1.1.0 |
 | `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 |
 | `createInvitation` | `POST /entries/{entry_id}/invitations` | 1.0.0 |
 | `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 |
-| `readLinkAccess` | `GET /entries/{entry_id}/link-access` | 1.0.0 |
-| `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.0.0 |
+| `readLinkAccess` | `GET /entries/{entry_id}/link-access` | 1.1.0 |
+| `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.1.0 |
 | `listEntryLogs` | `GET /entries/{entry_id}/logs` | 1.0.0 |
-| `readPublicEntry` | `GET /public/{org_id}/{path}` | 1.0.0 |
+| `readPublicEntry` | `GET /public/{org_id}/{path}` | 1.1.0 |
 | `inviteOnBehalfOfMember` | `POST /obo/invitations` | 1.0.0 |
-| `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 1.0.0 |
+| `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 1.1.0 |
+| `submitTelemetry` | `POST /telemetry` | 1.0.0 |

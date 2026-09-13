@@ -69,3 +69,23 @@ issue a dedicated Certbot certificate, then install `docs.nginx.conf` as
 `/etc/nginx/conf.d/briefcase-docs.conf`. Run `nginx -t` before reloading.
 The docs use directory indexes and their own 404 page. Rollback changes only
 the `current` symlink to the preceding release.
+
+## Telemetry
+
+Store `BRIEFCASE_TELEMETRY_TABLE_KEY` for `tos/siliconbriefcase` in the existing
+application secret in Secrets Manager. Preserve all other secret fields.
+Copy only the telemetry settings into the API and worker's mode-0600 runtime
+env files. The browser receives no table key. Use
+`BRIEFCASE_TELEMETRY_URL=https://backend.spacestation.teamofsilicons.com` and
+`BRIEFCASE_TELEMETRY_HOME=/var/lib/silicon-briefcase/telemetry`.
+
+Create separate host directories `/var/lib/silicon-briefcase/telemetry-api` and
+`/var/lib/silicon-briefcase/telemetry-worker`, owned by `10001:10001`, mode 0700.
+Mount the appropriate directory at `/var/lib/silicon-briefcase/telemetry` in each
+service's Docker ExecStart. Keep existing staging and CA mounts. Back up the
+units and env files, run `systemctl daemon-reload`, and restart with the new
+image. `BRIEFCASE_TELEMETRY=off` is the operator override.
+
+After release, verify `/api/version` exposes `submitTelemetry`, submit a labelled
+content-free test event, and confirm its UUID in the Space Station table. Also
+verify the browser telemetry setting and the public CLI installer/docs.

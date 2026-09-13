@@ -357,3 +357,11 @@ summary {
     flex-direction: column;
   }
 }
+
+.test-sign-in { margin-top: 1.5rem; }
+.test-sign-in-form { display: grid; gap: .65rem; margin-top: 1rem; }
+.test-sign-in-form label { margin: .5rem 0 0; font-size: .85rem; font-weight: 500; }
+
+.telemetry-preference { display: grid; grid-template-columns: auto 1fr; gap: .5rem .65rem; padding: 1rem 0; font-size: .85rem; align-items: start; cursor: pointer; }
+.telemetry-preference input { margin-top: .2rem; accent-color: var(--primary); }
+.telemetry-preference span { grid-column: 2; color: var(--muted-foreground); font-size: .75rem; line-height: 1.5; }

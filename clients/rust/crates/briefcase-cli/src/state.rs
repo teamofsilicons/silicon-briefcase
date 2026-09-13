@@ -83,6 +83,9 @@ pub struct Configuration {
     /// Whether the installed CLI checks crates.io at most once per hour.
     #[serde(default = "enabled")]
     pub auto_update: bool,
+    /// Default-on operational diagnostics; separate from explicit bug reports.
+    #[serde(default = "enabled")]
+    pub telemetry: bool,
     /// Profile used when `--profile` is not given.
     #[serde(default = "default_profile_name")]
     pub current_profile: String,
@@ -95,6 +98,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             auto_update: true,
+            telemetry: true,
             current_profile: default_profile_name(),
             profiles: BTreeMap::new(),
         }
@@ -568,8 +572,7 @@ impl StateDirectory {
         Ok(())
     }
 
-    /// Uses an explicit directory, which is what the tests do.
-    #[cfg(test)]
+    /// Uses an explicit state directory without changing process environment.
     #[must_use]
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -845,6 +848,7 @@ mod tests {
         let configuration: Configuration =
             serde_json::from_str(r#"{"current_profile":"default","profiles":{}}"#).unwrap();
         assert!(configuration.auto_update);
+        assert!(configuration.telemetry);
     }
 
     #[test]

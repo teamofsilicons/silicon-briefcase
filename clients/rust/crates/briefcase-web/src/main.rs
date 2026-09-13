@@ -6,6 +6,7 @@ mod organization;
 mod public;
 mod session;
 mod staging;
+mod telemetry;
 
 use axum::{
     Router,
@@ -119,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/browser/resolve", get(files::resolve))
         .route("/browser/public", get(public::read))
+        .route("/browser/telemetry", post(telemetry::submit))
         .route("/browser/login/start", post(session::start))
         .route("/browser/notifications", get(access::inbox))
         .route("/browser/notifications/read", post(access::mark_read))

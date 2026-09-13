@@ -237,7 +237,12 @@ impl Client {
     fn public_url(&self, org: &str, path: &str) -> Result<url::Url> {
         let mut parts = vec!["public", org];
         parts.extend(path.trim_start_matches('/').split('/'));
-        self.api_url(&parts)
+        let mut url = self.api_url(&parts)?;
+        if let Some(environment) = self.config().public_environment {
+            url.query_pairs_mut()
+                .append_pair("test_environment", &environment.to_string());
+        }
+        Ok(url)
     }
 
     /// Resolves a shared file or folder without sending the configured bearer.
