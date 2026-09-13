@@ -102,7 +102,7 @@ pub enum Command {
         for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
         Use `briefcase login status --json` to check authentication and identity.\n\n\
         Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane.\n\n\
-        In a test environment selected by --test or --app-secret, SLT is the existing test Carbon or Silicon ID, for example `alice` or `worker:tos`. IAM signs you in as that test actor."
+        In a test environment selected by --test or --app-secret, SLT can be an IAM-issued test login code or the existing test Carbon or Silicon ID, for example `alice` or `worker:tos`. IAM signs you in as that test actor."
     )]
     Login(LoginArgs),
     /// Show the deployment's public IAM app ID before signing in.

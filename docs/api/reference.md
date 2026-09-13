@@ -66,7 +66,7 @@ Authority: anonymous.
 
 `POST /auth/slt` · `exchangeShortLivedToken`
 
-In production, `slt` is the single-use code obtained from IAM's hosted Application login. With `X-Briefcase-App-Secret` selecting a paired test environment, `slt` is an existing test Carbon ID (`alice`) or Silicon ID (`worker:tos`). Briefcase exchanges it through IAM using only the mapped testing key and test Application credential, and verifies the returned actor. IAM determines the actor's current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key and input when recovering an uncertain result.
+In production, `slt` is the single-use code obtained from IAM's hosted Application login. With `X-Briefcase-App-Secret` selecting a paired test environment, `slt` can be an IAM-issued test login code or an existing test Carbon ID (`alice`) or Silicon ID (`worker:tos`). Briefcase exchanges it through IAM using only the mapped testing key and test Application credential, and verifies the returned actor. IAM determines the actor's current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key and input when recovering an uncertain result.
 
 Authority: anonymous.
 
@@ -79,7 +79,7 @@ Request: `application/json` (required).
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `slt` | string | yes | Production IAM login code, or an existing Carbon/Silicon public ID when a test app secret is supplied. |
+| `slt` | string | yes | IAM-issued login code for the selected plane, or an existing Carbon/Silicon public ID when a test app secret is supplied. |
 
 | Response | Meaning | Body |
 | --- | --- | --- |

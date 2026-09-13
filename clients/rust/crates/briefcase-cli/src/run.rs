@@ -553,7 +553,7 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
         match args.slt_positional.as_ref().or(args.slt.as_ref()) {
             Some(slt) => slt.clone(),
             None => prompt_secret(if global.test.is_some() {
-                "Test Carbon or Silicon ID (SLT): "
+                "IAM test SLT or Carbon/Silicon ID: "
             } else {
                 "IAM short-lived token: "
             })?,
@@ -945,7 +945,7 @@ async fn iam(global: &GlobalArgs, output: Output) -> Result<()> {
         if let Some(id) = info.iam_environment_id {
             println!("IAM test    {id}");
             println!(
-                "In this test environment, SLT is the Carbon or Silicon ID. Run `briefcase login <actor-id>` with the same test selection."
+                "In this test environment, SLT can be an IAM-issued test login code or a Carbon/Silicon ID. Run `briefcase login <actor-id>` with the same test selection."
             );
         } else {
             println!(

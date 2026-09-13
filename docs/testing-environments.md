@@ -39,9 +39,9 @@ IAM currently requires its environment root key together with the test Applicati
 
 ## Test sign-in
 
-In testing, **SLT is the existing Carbon or Silicon public ID**: for example,
-`alice` or `worker:tos`. Select the paired environment with its app secret and
-send the ID in the existing `slt` field:
+In testing, **SLT accepts either an IAM-issued test login code or an existing
+Carbon/Silicon public ID**, such as `alice` or `worker:tos`. Select the paired
+environment with its app secret and send either value in the existing `slt` field:
 
 ```http
 POST /api/v1/auth/slt
@@ -52,8 +52,10 @@ Content-Type: application/json
 {"slt":"worker:tos"}
 ```
 
-IAM resolves that actor in the paired test world and issues the access/refresh
-session. Its current memberships, roles and tags determine file permissions.
+The ID shortcut signs in as that actor in the paired IAM world, selecting its
+current active organizations and Briefcase’s approved scopes. An IAM-issued
+SLT retains the organization grants selected during that IAM login. Both paths
+issue the same access/refresh session. Its current memberships, roles and tags determine file permissions.
 The actor must already exist in that IAM world. Production login still requires
 a one-time IAM login code; a public actor ID never authenticates production.
 Reuse the exact input, app secret and idempotency key after an uncertain exchange.
@@ -105,8 +107,8 @@ and optional description, and optionally enter an existing root key in
 is masked, validates the root-key format, and is cleared when its dialog closes.
 An uncertain create request keeps its exact input and operation ID for retry.
 
-Under **Enter with an app secret**, enter the test app secret and the existing
-**Test Carbon or Silicon ID (SLT)**. The same ID field appears when opening an
+Under **Enter with an app secret**, enter the test app secret and either value in
+**IAM test SLT or Carbon/Silicon ID**. The same masked field appears when opening an
 environment with **View as testing environment**. The gateway keeps credentials server-side and attaches the
 test session to the existing browser session. A persistent testing banner
 identifies the environment. Exit returns the tab to production without signing

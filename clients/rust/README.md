@@ -108,7 +108,7 @@ The API this speaks to lives in
 contract, and its `docs/` directory the canonical API/client/CLI integration
 guides. The local pages above retain compatibility links to those guides.
 
-In a paired test environment, the SLT is an existing Carbon ID (e.g. `alice`)
+In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
 or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production

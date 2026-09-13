@@ -1388,6 +1388,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_iam_issued_slt_uses_only_the_paired_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("idempotency-key", "login-operation-0001"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "app_id=tos%3Ebriefcase&slt={SHORT_LIVED_TOKEN}"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(application_token_response()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let tokens = client
+            .exchange_short_lived_token(
+                &SecretString::from(SHORT_LIVED_TOKEN.to_owned()),
+                "login-operation-0001",
+                Some(&environment_credential()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("published SLT exchange should succeed: {error}"));
+
+        assert_eq!(tokens.expires_in_seconds(), 1_800);
+        assert_eq!(tokens.principal_id().to_string(), PRINCIPAL_ID);
+        assert_eq!(tokens.actor().id().as_str(), "carbon-a");
+        assert_eq!(
+            tokens.organization_id().map(OrganizationId::as_str),
+            Some("tos")
+        );
+        let rendered = format!("{tokens:?}");
+        assert!(!rendered.contains(tokens.access_token().expose_secret()));
+        assert!(!rendered.contains(tokens.refresh_token().expose_secret()));
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn test_actor_login_uses_only_the_paired_iam_credentials() -> anyhow::Result<()> {
         for (actor_id, actor_type) in [("alice", "carbon"), ("worker:tos", "silicon")] {
             let server = MockServer::start().await;
@@ -1447,7 +1494,6 @@ mod tests {
             "worker:tos:extra",
             "tos>worker",
             "ALICE",
-            SHORT_LIVED_TOKEN,
             BEARER_TOKEN,
             TEST_APP_SECRET,
         ] {

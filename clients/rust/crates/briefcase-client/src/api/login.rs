@@ -49,7 +49,7 @@ impl Client {
     ///
     /// Production uses a two-minute, single-use IAM login code. With a test
     /// Application secret configured through [`crate::Config::with_environment`],
-    /// pass the existing test Carbon ID (e.g. `alice`) or Silicon ID (e.g.
+    /// pass either an IAM-issued test login code or the existing test Carbon ID (e.g. `alice`) or Silicon ID (e.g.
     /// `worker:tos`) as `slt`. IAM issues a session for that actor in the paired
     /// test world. Production never accepts an actor ID as a login credential.
     /// The production Briefcase Application secret remains on the backend.

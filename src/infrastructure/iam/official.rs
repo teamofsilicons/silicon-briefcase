@@ -203,12 +203,12 @@ impl IamClient {
         idempotency_key: &str,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<IamApplicationTokens, IamClientError> {
-        let expected_actor = if environment.is_some() {
-            Some(testing_login_actor(slt.expose_secret()).ok_or(IamClientError::Rejected)?)
-        } else if !valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
-            return Err(IamClientError::Rejected);
-        } else {
+        let expected_actor = if valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
             None
+        } else if environment.is_some() {
+            Some(testing_login_actor(slt.expose_secret()).ok_or(IamClientError::Rejected)?)
+        } else {
+            return Err(IamClientError::Rejected);
         };
         let client = self.scoped_client(environment)?;
         let mutation = mutation(idempotency_key)?;
