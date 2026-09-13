@@ -993,7 +993,11 @@ mod tests {
             eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
             return Ok(());
         };
-        let pool = sqlx::PgPool::connect(&url).await?;
+        let pool = sqlx::PgPool::connect_with(
+            url.parse::<sqlx::postgres::PgConnectOptions>()?
+                .options([("search_path", "public")]),
+        )
+        .await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         // LIMIT 0 validates the real scheduling query without scheduling any
         // deletions from fixtures belonging to other integration tests.
