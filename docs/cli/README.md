@@ -140,7 +140,7 @@ without a home directory, saved profile, network connection, or login.
 `iam --json` reads the selected deployment's public IAM configuration without
 sending a member access token. It returns `app_id`, `test_environment_id`, and
 `iam_environment_id`. Use the `app_id` when requesting the single-use SLT from
-IAM. Production returns null for both environment IDs. No app secret or
+IAM in production. In testing, supply either an IAM-issued test SLT or a Carbon/Silicon ID. Production returns null for both environment IDs. No app secret or
 app secret is printed. URL/profile overrides apply as usual.
 
 `login status --json` checks the session with IAM and returns one JSON object:
@@ -192,8 +192,10 @@ and its IAM testing app secret are both required for test-plane requests.
 
 Create IAM and Briefcase together: `briefcase env create integration`.
 The result is stored as a UUID-to-IAM-test-app-secret mapping. Use
-`briefcase --test <environment-id> login <test-slt>` and then the same file
-commands with `--test`. Alternatively, set `BRIEFCASE_APP_SECRET` or pass
+`briefcase --test <environment-id> login <test-actor-id>` and then the same file
+commands with `--test`. In testing the SLT can be an IAM-issued test login code or the existing Carbon or Silicon ID
+(e.g. `alice` or `worker:tos`); omit the argument to enter that ID at the prompt.
+Alternatively, set `BRIEFCASE_APP_SECRET` or pass
 `--app-secret`; the CLI resolves the environment and keeps its login separate.
 The testing footer is always printed to stderr, including on errors.
 

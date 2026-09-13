@@ -378,7 +378,7 @@ In the briefcase test enviorment there's only a total storage of maximum 2gb for
 
 Read [https://docs.iam.teamofsilicons.com/api/testing-environments/] to understand how exactly are webhooks gonna work for this, etc. 
 
-In briefcase itself for the client app, website, cli or api just passing in the app_secret for the test enviorment would let me use the entire application as if it's in the test enviorment. For website in settings i should be able to put in this app_secret in settings if no app_secret is provided it would be in prod, otherwise the specific test enviorment. When in test enviorment in website always show in top you are currently in test enviorment with a button to exit test enviorment. in cli at end always display you are in test envioment.
+In briefcase itself for the client app, website, cli or api just passing in the app_secret for the test enviorment would let me use the entire application as if it's in the test enviorment. For logging in the test enviorment it will ask for slt which in test enviorment would just be the carbon/silicon id just entering that would let me in the application as that user or even entering the stk from iam would let me in, either way works, just the normal carbon/silicon id is a workaround for testing enviorments. For website in settings i should be able to put in this app_secret in settings if no app_secret is provided it would be in prod, otherwise the specific test enviorment. When in test enviorment in website always show in top you are currently in test enviorment with a button to exit test enviorment. in cli at end always display you are in test envioment.
 
 ---
 ---

@@ -154,7 +154,9 @@ storage. If a request has an uncertain outcome, retry the same operation with
 its fields unchanged.
 
 To use an existing paired environment, enter its IAM test Application secret
-and a fresh test sign-in token in **Enter with an app secret**.
+and either value in **IAM test SLT or Carbon/Silicon ID** under **Enter with an app secret**.
+In testing, either an IAM-issued test SLT or the ID itself works: for example `alice` or `worker:tos`.
+The environment’s **View as testing environment** dialog accepts both formats too. IAM signs you in as that actor in the paired test world.
 A persistent banner identifies the active test plane, and Exit returns to
 production. The server stores the secret; the tab remembers only the public
 UUID. Limits are 2 GiB per environment and 10 active environments. Rotate

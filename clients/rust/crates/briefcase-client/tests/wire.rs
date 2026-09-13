@@ -707,7 +707,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
         .and(path("/api/v1/auth/slt"))
         .and(header("x-briefcase-app-secret", root_key))
         .and(header("idempotency-key", "login-attempt-0001"))
-        .and(body_json(json!({"slt": "slt-once"})))
+        .and(body_json(json!({"slt": "worker:tos"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
         .mount(&server)
         .await;
@@ -733,7 +733,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
     let too_short = IdempotencyKey::new("short-00").unwrap();
     assert!(
         client
-            .login_with_slt_with_key("slt-once", &too_short)
+            .login_with_slt_with_key("worker:tos", &too_short)
             .await
             .is_err()
     );
@@ -749,7 +749,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
 
     let login_key = IdempotencyKey::new("login-attempt-0001").unwrap();
     let login = client
-        .login_with_slt_with_key("slt-once", &login_key)
+        .login_with_slt_with_key("worker:tos", &login_key)
         .await
         .unwrap();
     let refresh_key = IdempotencyKey::new("refresh-attempt-0001").unwrap();

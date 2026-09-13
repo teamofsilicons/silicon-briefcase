@@ -167,7 +167,7 @@ export default function TestingEnvironments({
     } catch (e) {
       setViewError(
         e instanceof ApiError && e.status === 401
-          ? 'Sign in with a fresh token from the paired IAM testing environment.'
+          ? 'Enter an IAM-issued test SLT or a Carbon/Silicon ID from the paired environment.'
           : e instanceof Error
             ? e.message
             : 'The environment could not be opened.',
@@ -546,7 +546,8 @@ export default function TestingEnvironments({
                 <h3 id="environment-entry-heading">Enter with an app secret</h3>
                 <p className="detail-hint">
                   Already have a paired environment? Sign in with its app secret
-                  and a fresh IAM test sign-in token.
+                  and an IAM-issued test SLT or the Carbon/Silicon ID you want
+                  to use.
                 </p>
               </div>
               <fieldset disabled={busy} className="environment-fields">
@@ -570,7 +571,7 @@ export default function TestingEnvironments({
                   />
                 </label>
                 <label htmlFor="direct-test-slt">
-                  IAM test sign-in token
+                  IAM test SLT or Carbon/Silicon ID
                   <Input
                     id="direct-test-slt"
                     type="password"
@@ -579,6 +580,8 @@ export default function TestingEnvironments({
                     spellCheck={false}
                     required
                     value={directSlt}
+                    maxLength={101}
+                    placeholder="oac_…, alice, or worker:tos"
                     onChange={(e) => {
                       setDirectSlt(e.target.value);
                       directOperation.current = '';
@@ -635,12 +638,16 @@ export default function TestingEnvironments({
               </p>
             )}
             <label className="block" htmlFor="test-signin-token">
-              IAM test sign-in token
+              IAM test SLT or Carbon/Silicon ID
               <Input
                 id="test-signin-token"
-                aria-label="IAM test sign-in token"
+                aria-label="IAM test SLT or Carbon/Silicon ID"
                 type="password"
                 autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                maxLength={101}
+                placeholder="oac_…, alice, or worker:tos"
                 value={viewToken}
                 onChange={(e) => {
                   setViewToken(e.target.value);
@@ -651,10 +658,10 @@ export default function TestingEnvironments({
               />
             </label>
             <p className="detail-hint">
-              Use a fresh token for{' '}
-              <strong>{viewEnvironment?.iam_app_id}</strong> from IAM test
-              environment <code>{viewEnvironment?.iam_environment_id}</code>.
-              Production tokens cannot be used here.
+              Enter an IAM-issued test SLT or an existing Carbon/Silicon ID from
+              IAM test environment{' '}
+              <code>{viewEnvironment?.iam_environment_id}</code> to sign in to{' '}
+              <strong>{viewEnvironment?.iam_app_id}</strong> as that actor.
             </p>
             <Button type="submit" disabled={viewBusy}>
               {viewBusy ? 'Opening…' : 'Enter testing environment'}

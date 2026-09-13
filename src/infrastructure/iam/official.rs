@@ -193,7 +193,7 @@ impl IamClient {
         Ok(())
     }
 
-    /// Exchanges one SLT using the caller's durable retry key.
+    /// Exchanges a production SLT or test actor ID using a durable retry key.
     ///
     /// # Errors
     /// Rejects invalid credentials or reports redacted upstream failures.
@@ -203,9 +203,13 @@ impl IamClient {
         idempotency_key: &str,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<IamApplicationTokens, IamClientError> {
-        if !valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
+        let expected_actor = if valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
+            None
+        } else if environment.is_some() {
+            Some(testing_login_actor(slt.expose_secret()).ok_or(IamClientError::Rejected)?)
+        } else {
             return Err(IamClientError::Rejected);
-        }
+        };
         let client = self.scoped_client(environment)?;
         let mutation = mutation(idempotency_key)?;
         let tokens = client
@@ -217,7 +221,14 @@ impl IamClient {
             )
             .await
             .map_err(|error| sdk_error(error, Operation::Token))?;
-        validate_application_tokens(self.convert(tokens)?, None)
+        let tokens = validate_application_tokens(self.convert(tokens)?, None)?;
+        if expected_actor
+            .as_ref()
+            .is_some_and(|actor| actor != tokens.actor())
+        {
+            return Err(binding_mismatch("login.actor"));
+        }
+        Ok(tokens)
     }
 
     /// Lists only active memberships explicitly selected by the user in IAM

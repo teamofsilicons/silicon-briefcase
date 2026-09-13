@@ -552,11 +552,15 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
     } else {
         match args.slt_positional.as_ref().or(args.slt.as_ref()) {
             Some(slt) => slt.clone(),
-            None => prompt_secret("IAM short-lived token: ")?,
+            None => prompt_secret(if global.test.is_some() {
+                "IAM test SLT or Carbon/Silicon ID: "
+            } else {
+                "IAM short-lived token: "
+            })?,
         }
     };
     if slt.is_empty() {
-        return Err(CliError::usage("the short-lived token was empty"));
+        return Err(CliError::usage("the SLT or test actor ID was empty"));
     }
 
     // A login can replace a rotating session. Serialize the complete
@@ -940,10 +944,14 @@ async fn iam(global: &GlobalArgs, output: Output) -> Result<()> {
         println!("deployment  {}", resolved.url);
         if let Some(id) = info.iam_environment_id {
             println!("IAM test    {id}");
+            println!(
+                "In this test environment, SLT can be an IAM-issued test login code or a Carbon/Silicon ID. Run `briefcase login <actor-id>` with the same test selection."
+            );
+        } else {
+            println!(
+                "Get a short-lived token for this app from IAM, then run `briefcase login <slt>`."
+            );
         }
-        println!(
-            "Get a short-lived token for this app from IAM, then run `briefcase login <slt>`."
-        );
     }
     Ok(())
 }

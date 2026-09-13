@@ -680,6 +680,30 @@ fn valid_scope(scope: &str) -> bool {
         })
 }
 
+// IAM public IDs: Carbon handles or globally qualified Silicon handles.
+// This checks syntax only. IAM must resolve the actor in the selected world
+// and issue the session; no local identity lookup grants authentication.
+fn testing_login_actor(value: &str) -> Option<ActorRef> {
+    let kind = if let Some((local, organization)) = value.split_once(':') {
+        if !is_canonical_iam_organization_id(local)
+            || !is_canonical_iam_organization_id(organization)
+        {
+            return None;
+        }
+        ActorKind::Silicon
+    } else {
+        if !(3..=30).contains(&value.len())
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'1'..=b'9' | b'_' | b'-'))
+        {
+            return None;
+        }
+        ActorKind::Carbon
+    };
+    Some(ActorRef::new(kind, ActorId::new(value).ok()?))
+}
+
 fn valid_fixed_iam_secret(value: &str, prefix: &str) -> bool {
     value.len() == prefix.len() + 43
         && value.starts_with(prefix)
@@ -1361,6 +1385,184 @@ mod tests {
         assert!(!rendered.contains(tokens.access_token().expose_secret()));
         assert!(!rendered.contains(tokens.refresh_token().expose_secret()));
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn test_iam_issued_slt_uses_only_the_paired_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", test_basic_authorization()))
+            .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+            .and(header("silicon-iam-supported-api-versions", "v1"))
+            .and(header("idempotency-key", "login-operation-0001"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string(format!(
+                "app_id=tos%3Ebriefcase&slt={SHORT_LIVED_TOKEN}"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("cache-control", "no-store")
+                    .insert_header("pragma", "no-cache")
+                    .set_body_json(application_token_response()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))
+            .unwrap_or_else(|error| panic!("test fixture: {error}"));
+
+        let tokens = client
+            .exchange_short_lived_token(
+                &SecretString::from(SHORT_LIVED_TOKEN.to_owned()),
+                "login-operation-0001",
+                Some(&environment_credential()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("published SLT exchange should succeed: {error}"));
+
+        assert_eq!(tokens.expires_in_seconds(), 1_800);
+        assert_eq!(tokens.principal_id().to_string(), PRINCIPAL_ID);
+        assert_eq!(tokens.actor().id().as_str(), "carbon-a");
+        assert_eq!(
+            tokens.organization_id().map(OrganizationId::as_str),
+            Some("tos")
+        );
+        let rendered = format!("{tokens:?}");
+        assert!(!rendered.contains(tokens.access_token().expose_secret()));
+        assert!(!rendered.contains(tokens.refresh_token().expose_secret()));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn test_actor_login_uses_only_the_paired_iam_credentials() -> anyhow::Result<()> {
+        for (actor_id, actor_type) in [("alice", "carbon"), ("worker:tos", "silicon")] {
+            let server = MockServer::start().await;
+            let mut response = application_token_response();
+            response["actor"]["public_id"] = json!(actor_id);
+            response["actor"]["type"] = json!(actor_type);
+            Mock::given(method("POST"))
+                .and(path("/api/v1/app-auth/tokens"))
+                .and(header("authorization", test_basic_authorization()))
+                .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+                .and(header("idempotency-key", "test-actor-login-0001"))
+                .and(body_string(format!(
+                    "app_id=tos%3Ebriefcase&slt={}",
+                    actor_id.replace(':', "%3A")
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = IamClient::new_without_handshake(&client_settings(&server))?;
+            let tokens = client
+                .exchange_short_lived_token(
+                    &SecretString::from(actor_id.to_owned()),
+                    "test-actor-login-0001",
+                    Some(&environment_credential()),
+                )
+                .await?;
+            assert_eq!(tokens.actor().id().as_str(), actor_id);
+            server.verify().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn actor_ids_cannot_authenticate_production_or_invalid_test_inputs() -> anyhow::Result<()>
+    {
+        let server = MockServer::start().await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        for value in ["alice", "worker:tos"] {
+            assert!(matches!(
+                client
+                    .exchange_short_lived_token(
+                        &SecretString::from(value.to_owned()),
+                        "test-actor-login-0001",
+                        None,
+                    )
+                    .await,
+                Err(IamClientError::Rejected)
+            ));
+        }
+        for value in [
+            "",
+            " alice",
+            "alice\n",
+            "a",
+            "alice0",
+            "worker:tos:extra",
+            "tos>worker",
+            "ALICE",
+            BEARER_TOKEN,
+            TEST_APP_SECRET,
+        ] {
+            assert!(
+                matches!(
+                    client
+                        .exchange_short_lived_token(
+                            &SecretString::from(value.to_owned()),
+                            "test-actor-login-0001",
+                            Some(&environment_credential()),
+                        )
+                        .await,
+                    Err(IamClientError::Rejected)
+                ),
+                "accepted {value:?}"
+            );
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_actor_login_rejects_other_identities_and_never_retries_production()
+    -> anyhow::Result<()> {
+        for (status, actor_id, actor_type) in [
+            (200, "someone-else", "carbon"),
+            (200, "alice", "silicon"),
+            (400, "alice", "carbon"),
+        ] {
+            let server = MockServer::start().await;
+            let mut response = application_token_response();
+            response["actor"]["public_id"] = json!(actor_id);
+            response["actor"]["type"] = json!(actor_type);
+            if status == 400 {
+                response =
+                    json!({"error": "invalid_grant", "error_description": "Unknown test actor"});
+            }
+            Mock::given(method("POST"))
+                .and(path("/api/v1/app-auth/tokens"))
+                .and(header("authorization", test_basic_authorization()))
+                .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
+                .respond_with(ResponseTemplate::new(status).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = IamClient::new_without_handshake(&client_settings(&server))?;
+            assert!(
+                client
+                    .exchange_short_lived_token(
+                        &SecretString::from("alice".to_owned()),
+                        "test-actor-login-0001",
+                        Some(&environment_credential()),
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap_or_default().len(),
+                1
+            );
+            server.verify().await;
+        }
+        Ok(())
     }
 
     #[tokio::test]

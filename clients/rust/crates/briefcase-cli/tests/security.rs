@@ -322,6 +322,74 @@ async fn test_login_never_sends_a_stored_root_to_an_overridden_url() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_actor_login_sends_the_id_and_preserves_the_production_session() {
+    for (actor_id, actor_type) in [("alice", "carbon"), ("worker:tos", "silicon")] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        let mut production = session("2099-01-01T00:00:00Z");
+        production["organizations"] = json!(["tos"]);
+        write_state(
+            home.path(),
+            &server,
+            &json!({
+                "sessions": {"work": production},
+                "testing_environment_keys": {"work": {(TEST_ID): ROOT_KEY}},
+                "testing_environment_scopes": {"work": {(TEST_ID): scope(&server, "tos")}},
+            }),
+        );
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/slt"))
+            .and(header("x-briefcase-app-secret", ROOT_KEY))
+            .and(body_json(json!({"slt": actor_id})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "token_type": "Bearer",
+                "expires_in": 1800,
+                "scope": "briefcase",
+                "actor": {"principal_id": ACTOR_ID, "type": actor_type, "public_id": actor_id},
+                "organizations": ["tos"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = briefcase(
+            home.path(),
+            &[
+                "--test".into(),
+                TEST_ID.into(),
+                "--no-verify".into(),
+                "--json".into(),
+                "login".into(),
+                actor_id.into(),
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["actor"]["public_id"], actor_id);
+        assert_eq!(result["test_environment_id"], TEST_ID);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("TEST ENVIRONMENT"));
+        let credentials: Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(credentials["sessions"]["work"], production);
+        assert_eq!(
+            credentials["test_sessions"]["work"][TEST_ID]["access_token"],
+            "test-access"
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert!(requests[0].headers.contains_key("idempotency-key"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
     let server = MockServer::start().await;
     let home = tempfile::tempdir().unwrap();

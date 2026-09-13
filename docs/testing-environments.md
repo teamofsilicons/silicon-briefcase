@@ -37,10 +37,33 @@ the same option as `TestingEnvironmentCreate.iam_test_key`, typed as
 
 IAM currently requires its environment root key together with the test Application secret when a service validates the testing context. Briefcase stores that pairing encrypted, so callers only pass the app secret. A secret from an arbitrary, unregistered IAM environment cannot independently bootstrap Briefcase: create/register the paired environment through this flow first. The backend uses the official IAM SDK for provisioning and verification.
 
+## Test sign-in
+
+In testing, **SLT accepts either an IAM-issued test login code or an existing
+Carbon/Silicon public ID**, such as `alice` or `worker:tos`. Select the paired
+environment with its app secret and send either value in the existing `slt` field:
+
+```http
+POST /api/v1/auth/slt
+X-Briefcase-App-Secret: ask_<43 base64url characters>
+Idempotency-Key: test-login-operation-0001
+Content-Type: application/json
+
+{"slt":"worker:tos"}
+```
+
+The ID shortcut signs in as that actor in the paired IAM world, selecting its
+current active organizations and Briefcase’s approved scopes. An IAM-issued
+SLT retains the organization grants selected during that IAM login. Both paths
+issue the same access/refresh session. Its current memberships, roles and tags determine file permissions.
+The actor must already exist in that IAM world. Production login still requires
+a one-time IAM login code; a public actor ID never authenticates production.
+Reuse the exact input, app secret and idempotency key after an uncertain exchange.
+
 ## CLI
 
 ```bash
-briefcase --test <environment-id> login <test-slt>
+briefcase --test <environment-id> login <test-actor-id>
 briefcase --test <environment-id> ls
 briefcase --test <environment-id> put ./fixture.txt private/me:tos
 briefcase --test <environment-id> usage --json
@@ -50,7 +73,7 @@ Pass the app secret directly when the UUID is not saved locally:
 
 ```bash
 export BRIEFCASE_APP_SECRET='ask_…'
-briefcase --org tos login <test-slt>
+briefcase --org tos login <test-actor-id>
 briefcase --org tos ls
 unset BRIEFCASE_APP_SECRET
 ```
@@ -60,13 +83,15 @@ unset BRIEFCASE_APP_SECRET
 ## Rust client
 
 ```rust,no_run
-use briefcase_client::{Client, Config, EnvironmentKey, ListEntries};
+use briefcase_client::{Client, Config, EnvironmentKey, IdempotencyKey, ListEntries};
 # async fn example() -> briefcase_client::Result<()> {
-let client = Client::connect(
-    Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
-        .with_environment(EnvironmentKey::new(std::env::var("BRIEFCASE_APP_SECRET").unwrap())?)
-        .with_token(std::env::var("BRIEFCASE_TEST_TOKEN").unwrap()),
-).await?;
+let config = Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
+    .with_environment(EnvironmentKey::new(std::env::var("BRIEFCASE_APP_SECRET").unwrap())?);
+let client = Client::connect(config.clone()).await?;
+// Persist this key before exchange and reuse it after an uncertain result.
+let login_key = IdempotencyKey::random();
+let session = client.login_with_slt_with_key("worker:tos", &login_key).await?;
+let client = Client::connect(config.with_token(session.access_token)).await?;
 let page = client.list_entries(&ListEntries::default()).await?;
 # Ok(())
 # }
@@ -82,8 +107,9 @@ and optional description, and optionally enter an existing root key in
 is masked, validates the root-key format, and is cleared when its dialog closes.
 An uncertain create request keeps its exact input and operation ID for retry.
 
-Under **Enter with an app secret**, enter the test app secret and a fresh IAM
-test sign-in token. The gateway keeps credentials server-side and attaches the
+Under **Enter with an app secret**, enter the test app secret and either value in
+**IAM test SLT or Carbon/Silicon ID**. The same masked field appears when opening an
+environment with **View as testing environment**. The gateway keeps credentials server-side and attaches the
 test session to the existing browser session. A persistent testing banner
 identifies the environment. Exit returns the tab to production without signing
 out the production session. A tab stores only the public environment UUID,

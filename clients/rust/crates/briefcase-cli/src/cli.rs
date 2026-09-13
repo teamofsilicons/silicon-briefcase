@@ -101,7 +101,8 @@ pub enum Command {
         The hosted backend is selected automatically; --url is only needed to override it \
         for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
         Use `briefcase login status --json` to check authentication and identity.\n\n\
-        Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane."
+        Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane.\n\n\
+        In a test environment selected by --test or --app-secret, SLT can be an IAM-issued test login code or the existing test Carbon or Silicon ID, for example `alice` or `worker:tos`. IAM signs you in as that test actor."
     )]
     Login(LoginArgs),
     /// Show the deployment's public IAM app ID before signing in.
@@ -209,15 +210,15 @@ pub struct LoginArgs {
     #[command(subcommand)]
     pub command: Option<LoginCommand>,
 
-    /// IAM short-lived token as the direct login argument.
+    /// IAM short-lived token; in testing, the Carbon or Silicon ID.
     #[arg(index = 1, value_name = "SLT", conflicts_with_all = ["slt", "slt_stdin"])]
     pub slt_positional: Option<String>,
 
-    /// IAM short-lived token. Prompted for when omitted.
+    /// IAM SLT or test actor ID. Prompted for when omitted.
     #[arg(long, value_name = "SLT", conflicts_with = "slt_stdin")]
     pub slt: Option<String>,
 
-    /// Read the IAM short-lived token from standard input.
+    /// Read the IAM SLT or test actor ID from standard input.
     #[arg(long, conflicts_with = "slt")]
     pub slt_stdin: bool,
 
