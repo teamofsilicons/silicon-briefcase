@@ -598,6 +598,15 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
 #[tokio::test]
 async fn imported_world_raw_recording_upload_keeps_verified_data_org_and_bytes()
 -> anyhow::Result<()> {
+    raw_recording_upload(true).await
+}
+
+#[tokio::test]
+async fn imported_world_raw_recording_upload_accepts_undisclosed_tags() -> anyhow::Result<()> {
+    raw_recording_upload(false).await
+}
+
+async fn raw_recording_upload(tags_disclosed: bool) -> anyhow::Result<()> {
     use crate::application::{content::ContentService, ports::ObjectStore};
     use crate::infrastructure::s3::S3ObjectStore;
     let Some(mut f) = Fixture::new().await? else {
@@ -638,6 +647,14 @@ async fn imported_world_raw_recording_upload_keeps_verified_data_org_and_bytes()
     proof["endpoint"] =
         json!({"endpoint_id":"briefcase.files.create","path":handlers::obo::CREATE_FILE_PATH});
     proof["authorization"]["scopes"][0] = json!("obo:tos>briefcase:briefcase.files.create");
+    if !tags_disclosed {
+        proof["authorization"]["scopes"] = json!([
+            "obo:tos>briefcase:briefcase.files.create",
+            "self.identity.read",
+            "self.membership.read"
+        ]);
+        proof["authorization"]["tags"] = Value::Null;
+    }
     proof["metadata"] =
         json!({"path":"","name":"recording.bin","content_type":"application/octet-stream"});
     Mock::given(method("POST")).and(path("/api/v1/obo-access/verify"))
@@ -666,6 +683,92 @@ async fn imported_world_raw_recording_upload_keeps_verified_data_org_and_bytes()
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body, bytes);
     storage.verify().await;
+    f.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_tag_access()
+-> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let tag_id = Uuid::new_v4();
+    let mut disclosed = f.introspection();
+    disclosed["authorization"]["org_role"] = json!("member");
+    disclosed["authorization"]["tags"] = json!([{"id":tag_id,"name":"finance"}]);
+    f.introspect(disclosed.clone()).await;
+    let current = f.authenticate(false).await?;
+    let tag_path = EntryPath::new("finance")?;
+    f.state
+        .metadata
+        .get_entry_by_path(&current, &tag_path)
+        .await?;
+
+    f.iam.reset().await;
+    f.discovery(1, None).await;
+    let mut unknown = disclosed.clone();
+    unknown["scope"] = json!("self.identity.read self.membership.read");
+    unknown["authorization"]["scopes"] = json!(["self.identity.read", "self.membership.read"]);
+    unknown["authorization"]["tags"] = Value::Null;
+    f.introspect(unknown).await;
+    let current = f.authenticate(false).await?;
+    assert!(current.authorization().tags().is_none());
+    assert!(
+        current
+            .authorization()
+            .iam_binding()
+            .is_some_and(|binding| binding.tags.is_none())
+    );
+    // The exact actor owns this private tree independently of tag disclosure.
+    f.state
+        .metadata
+        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .await?;
+    assert!(
+        f.state
+            .metadata
+            .get_entry_by_path(&current, &tag_path)
+            .await
+            .is_err()
+    );
+    let assignments: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon' AND tag_id=$2",
+    ).bind(format!("{}:{}", f.environment, f.org)).bind(tag_id.to_string()).fetch_one(&f.data).await?;
+    assert_eq!(
+        assignments, 1,
+        "unknown disclosure must not erase cached assignments"
+    );
+
+    f.iam.reset().await;
+    f.discovery(1, None).await;
+    disclosed["authorization"]["tags"] = json!([]);
+    f.introspect(disclosed).await;
+    let current = f.authenticate(false).await?;
+    assert!(
+        current
+            .authorization()
+            .tags()
+            .is_some_and(std::collections::BTreeSet::is_empty)
+    );
+    f.state
+        .metadata
+        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .await?;
+    assert!(
+        f.state
+            .metadata
+            .get_entry_by_path(&current, &tag_path)
+            .await
+            .is_err()
+    );
+    let assignments: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon'",
+    ).bind(format!("{}:{}", f.environment, f.org)).fetch_one(&f.data).await?;
+    assert_eq!(
+        assignments, 0,
+        "an explicit empty snapshot replaces assignments"
+    );
     f.cleanup().await?;
     Ok(())
 }

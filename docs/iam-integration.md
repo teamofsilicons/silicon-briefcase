@@ -197,13 +197,16 @@ endpoint. Its narrow capability permits private staging only; a fresh commit
 proof separately authorizes publication. See [delegated uploads](api/delegated-uploads.md).
 
 Webhook approval and OBO catalog registration are separate operations.
-Confirm the Briefcase Application's required scope disclosure (`profile`,
-`self.organizations.read`, `self.identity.read`, `self.membership.read`, `self.tags.read`) and catalog registration
-before making OBO calls. The issuing member's Application token needs
-`obo.issue`. Delegated `self.identity.read`, `self.membership.read` and
+Confirm the Briefcase Application's `self.identity.read` and
+`self.membership.read` disclosure and catalog registration before making OBO calls.
+The issuing member's Application token needs the exact
+`obo:tos>briefcase:<endpoint_id>` grant. Delegated `self.identity.read`, `self.membership.read` and
 `self.tags.read` disclosures require their intersection across the parent token,
 current exact consent, issuer approval and recipient approval. Briefcase requires
-all three disclosures; missing role or tags never become implicit authority.
+identity and role disclosure. Tags may be undisclosed: they remain unknown,
+never authorize tag-based access and never overwrite directory assignments.
+Explicit owner, actor, role and permission-grant authority remains available.
+Disclosed empty tags still replace assignments; scope/disclosure inconsistencies fail closed.
 The snapshot must include exactly the verified endpoint's canonical delegated
 scope, for example `obo:tos>briefcase:briefcase.files.create`. Briefcase validates
 the audience and endpoint components, rejects missing or foreign OBO scopes,
@@ -215,8 +218,9 @@ not create permission for later requests.
 ## First official release requirements
 
 Use IAM client 1.8.0 and the corresponding deployed IAM contract. Subject
-snapshots require `self.identity.read`, `self.membership.read`, and
-`self.tags.read`. Use `self.organizations.read` for organization selection.
+snapshots require `self.identity.read` and `self.membership.read`.
+`self.tags.read` adds tag-based access; its absence does not block the member's
+own private files. Use `self.organizations.read` for organization selection.
 Recipient/tag discovery uses `directory.carbons.read`, `directory.silicons.read`,
 `directory.memberships.read`, and `directory.tags.read`. Scope-projected
 responses must not be parsed as complete admin-directory models.

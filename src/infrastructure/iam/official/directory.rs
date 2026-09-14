@@ -158,6 +158,6 @@ fn directory_member(
         membership_id: member.id,
         membership_version: member.version,
         authorization_epoch: member.authorization_epoch,
-        tags,
+        tags: Some(tags),
     }))
 }

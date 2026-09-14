@@ -64,13 +64,16 @@ You need all five of these. Briefcase fails closed on any of them.
    Briefcase must receive the exact organization authorized by the proof.
 2. **A subject token: the member's IAM access token, issued to *your*
    Application** (`oat_…`). A token issued to some other Application is refused.
-3. **`obo.issue` on that subject token.** Without it the exchange answers
-   `403 obo_subject_token_forbidden`.
-4. **`self.membership.read`, `self.identity.read` and `self.tags.read` disclosure**,
+3. **The exact `obo:tos>briefcase:<endpoint_id>` grant on that subject token.**
+   IAM also checks current consent and application approval for the endpoint.
+4. **`self.membership.read` and `self.identity.read` disclosure**,
    present in the subject token, its current exact consent, the issuer's approved
    scopes and Briefcase's approved scopes. Briefcase requires the delegated
-   authorization snapshot and fails closed when identity, role or tags are
-   undisclosed. Never infer authority from a `null` field. Its scope set must
+   authorization snapshot and fails closed when identity or role is undisclosed.
+   `self.tags.read` is optional: missing disclosure remains unknown, does not
+   replace directory tags, and cannot confer tag-based access. Explicit actor,
+   owner, role and permission-grant authority still applies. A disclosed empty
+   list is distinct from unknown. Its scope set must
    contain the exact `obo:tos>briefcase:<endpoint_id>` verified by IAM; canonical
    `org>app` audience syntax is distinct from native IAM scope syntax.
 5. **Your Application's own secret**, used only for HTTP Basic and the HMAC on
@@ -292,8 +295,8 @@ Every error is `{"error": {"code": …, "message": …, "request_id": …}}`.
 | `429` / `507` | — | Rate limited, or the Team's storage allowance is exhausted. |
 | `503` | — | IAM or a dependency is unavailable. This is *not* a refused proof; that is `401`. |
 
-At the IAM exchange, expect `403` (Team mismatch, inactive membership, missing
-`obo.issue`), `404` (unknown `endpoint_id` or audience), `409` (proof consumed,
+At the IAM exchange, expect `403` (unauthorized organization, inactive membership,
+or missing endpoint authority), `404` (unknown `endpoint_id` or audience), `409` (proof consumed,
 or an idempotency key reused with different input), `410 proof_expired` (more
 than 60 seconds elapsed), and `422` (metadata does not satisfy the schema).
 
@@ -348,8 +351,9 @@ never `--proof` in a shared shell, where the process list would expose them.
 
 ## One-shot checklist
 
-- [ ] Same Team as Briefcase; subject token issued to your Application.
-- [ ] `obo.issue`, `self.membership.read`, `self.identity.read` present.
+- [ ] Authorized data organization; subject token issued to your Application.
+- [ ] Exact `obo:tos>briefcase:<endpoint_id>`, `self.membership.read`, and `self.identity.read` grants present.
+- [ ] `self.tags.read` disclosed when relying on tag-based access.
 - [ ] Digest taken over the exact bytes you will send.
 - [ ] `/api/v1/obo/files` bound as the path, with its `/api/v1` prefix.
 - [ ] Destination bound as metadata, not as a header or query parameter.

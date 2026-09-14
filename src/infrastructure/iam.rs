@@ -9,15 +9,15 @@
 //!   HTTP Basic credentials and scoped with `X-Org-ID`;
 //! - the mandatory unversioned compatibility handshake completes before any
 //!   versioned request and every later request carries the negotiated major;
-//! - introspection returns current identity, role, tags and membership version;
+//! - introspection returns current identity, role, disclosed tags and membership version;
 //!   the online snapshot is authoritative without waiting for webhooks;
 //! - OBO verification submits the exact method, registered path, and body
 //!   digest of the request Briefcase actually received, authenticated with
 //!   application HTTP Basic credentials alone. It accepts no organization
 //!   header and no idempotency key, and it is never retried: IAM consumes the
 //!   proof exactly once, so a retry is indistinguishable from a replay;
-//! - OBO returns scope-limited authority; role and membership disclosure scopes
-//!   are required before accepting a complete snapshot;
+//! - OBO returns scope-limited authority; identity and membership disclosures
+//!   are required. Unknown tags never become tag authority or directory updates;
 //! - unknown response fields are ignored for forward compatibility, while any
 //!   missing security-relevant field on a successful response fails closed.
 

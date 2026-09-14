@@ -242,14 +242,14 @@ impl AuthenticationMode {
 ///
 /// Constructing this value does not perform IAM verification. Only an IAM
 /// adapter that has already validated active membership, organization, role,
-/// tags, and any OBO proof should construct it.
+/// disclosed tags, and any OBO proof should construct it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuthContext {
     iam_binding: Option<IamMembershipBinding>,
     organization_id: OrganizationId,
     actor: ActorRef,
     role: OrganizationRole,
-    tags: BTreeSet<TagName>,
+    tags: Option<BTreeSet<TagName>>,
     authentication: AuthenticationMode,
 }
 
@@ -268,15 +268,19 @@ impl RequestAuthContext {
             organization_id,
             actor,
             role,
-            tags: tags.into_iter().collect(),
+            tags: Some(tags.into_iter().collect()),
             authentication,
         }
     }
 
-    /// Attaches an online, scope-complete IAM snapshot already cross-validated
+    /// Attaches an online IAM snapshot already cross-validated
     /// by the adapter. It is never reconstructed from cached authority.
     #[must_use]
     pub fn with_iam_binding(mut self, binding: IamMembershipBinding) -> Self {
+        self.tags = binding
+            .tags
+            .as_ref()
+            .map(|tags| tags.iter().map(|(_, name)| name.clone()).collect());
         self.iam_binding = Some(binding);
         self
     }
@@ -305,16 +309,17 @@ impl RequestAuthContext {
         self.role
     }
 
-    /// Returns the actor's current IAM tags.
+    /// Returns disclosed IAM tags. `None` is unknown; `Some(empty)` is a
+    /// verified empty assignment. Cached tags never fill an undisclosed value.
     #[must_use]
-    pub const fn tags(&self) -> &BTreeSet<TagName> {
-        &self.tags
+    pub const fn tags(&self) -> Option<&BTreeSet<TagName>> {
+        self.tags.as_ref()
     }
 
     /// Returns whether IAM currently assigns the exact tag to the actor.
     #[must_use]
     pub fn has_tag(&self, tag: &TagName) -> bool {
-        self.tags.contains(tag)
+        self.tags.as_ref().is_some_and(|tags| tags.contains(tag))
     }
 
     /// Returns the verified authentication mode.
@@ -330,7 +335,7 @@ impl RequestAuthContext {
     }
 }
 
-/// Scope-complete membership facts from an online IAM authorization snapshot.
+/// Membership facts from an online IAM authorization snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IamMembershipBinding {
     /// Immutable IAM organization.
@@ -343,8 +348,8 @@ pub struct IamMembershipBinding {
     pub membership_version: i64,
     /// Current authorization epoch.
     pub authorization_epoch: i64,
-    /// Canonical tag identities and display names.
-    pub tags: Vec<(uuid::Uuid, TagName)>,
+    /// Disclosed canonical tags. `None` must not replace directory assignments.
+    pub tags: Option<Vec<(uuid::Uuid, TagName)>>,
 }
 
 #[cfg(test)]
