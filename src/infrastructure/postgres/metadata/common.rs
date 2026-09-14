@@ -134,7 +134,7 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     })
 }
 
-/// Only complete online snapshots enter here. Serialize with signed webhooks
+/// Only verified online snapshots enter here. Serialize with signed webhooks
 /// and reject older membership versions/epochs instead of rolling back access.
 pub(crate) async fn synchronize_iam_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
@@ -174,10 +174,15 @@ pub(crate) async fn synchronize_iam_snapshot(
     if member.is_none() {
         return Err(MetadataRepositoryError::NotFound);
     }
+    // Scope omission is not an empty directory assignment. Preserve every
+    // cached tag; authorization still uses only this request's disclosed tags.
+    let Some(tags) = &binding.tags else {
+        return Ok(());
+    };
     // Online authority contains tag IDs but not tag aggregate versions. Seed
     // missing tags at zero; never rename/reactivate an existing tag from an
     // unversioned name. Even two online snapshots can arrive out of order.
-    for (id, name) in &binding.tags {
+    for (id, name) in tags {
         let tag = sqlx::query_scalar::<_, String>(
             "INSERT INTO briefcase.organization_tags (org_id, tag_id, name, lifecycle_status, iam_version) \
              VALUES (briefcase.current_org_id(), $1, $2, 'active', 0) \
@@ -191,7 +196,7 @@ pub(crate) async fn synchronize_iam_snapshot(
     }
     sqlx::query("DELETE FROM briefcase.organization_member_tags WHERE org_id = briefcase.current_org_id() AND actor_type = $1 AND actor_id = $2")
         .bind(actor_kind(actor.kind())).bind(actor.id().as_str()).execute(&mut **transaction).await.map_err(map_sql)?;
-    for (id, _) in &binding.tags {
+    for (id, _) in tags {
         sqlx::query("INSERT INTO briefcase.organization_member_tags (org_id, actor_type, actor_id, tag_id, iam_version) VALUES (briefcase.current_org_id(), $1, $2, $3, $4)")
             .bind(actor_kind(actor.kind())).bind(actor.id().as_str()).bind(id.to_string()).bind(binding.membership_version)
             .execute(&mut **transaction).await.map_err(map_sql)?;
@@ -249,7 +254,7 @@ async fn caller_projection_is_current(
 fn caller_projection_matches(
     projected: &ProjectedCaller,
     current_role: OrganizationRole,
-    current_tags: &BTreeSet<TagName>,
+    current_tags: Option<&BTreeSet<TagName>>,
 ) -> bool {
     if projected.membership_status != "active"
         || projected.org_role != organization_role(current_role)
@@ -257,6 +262,9 @@ fn caller_projection_matches(
         return false;
     }
 
+    let Some(current_tags) = current_tags else {
+        return true;
+    };
     let projected_tags = projected
         .tag_names
         .iter()
@@ -308,7 +316,7 @@ async fn refresh_caller_projection(
 
     // Insert a baseline only for a previously unseen represented actor. In
     // particular, preserve a webhook arriving between the read and insert.
-    if is_obo {
+    if is_obo || authorization.tags().is_none() {
         return Ok(());
     }
     let Some(member_version) = member_version else {
@@ -316,7 +324,7 @@ async fn refresh_caller_projection(
     };
 
     let mut tag_ids = BTreeSet::new();
-    for tag in authorization.tags() {
+    for tag in authorization.tags().into_iter().flatten() {
         tag_ids.insert(ensure_online_tag(transaction, tag.as_str()).await?);
     }
     sqlx::query(
@@ -606,7 +614,8 @@ async fn has_visible_descendant(
     let tags: Vec<&str> = execution
         .authorization()
         .tags()
-        .iter()
+        .into_iter()
+        .flatten()
         .map(TagName::as_str)
         .collect();
     sqlx::query_scalar::<_, bool>(
@@ -1088,7 +1097,7 @@ mod tests {
         assert!(caller_projection_matches(
             &projected,
             OrganizationRole::Admin,
-            &current
+            Some(&current)
         ));
     }
 
@@ -1106,7 +1115,7 @@ mod tests {
         assert!(!caller_projection_matches(
             &projected,
             OrganizationRole::Member,
-            &duplicate_input
+            Some(&duplicate_input)
         ));
 
         let active = ProjectedCaller {
@@ -1116,12 +1125,12 @@ mod tests {
         assert!(!caller_projection_matches(
             &active,
             OrganizationRole::Owner,
-            &duplicate_input
+            Some(&duplicate_input)
         ));
         assert!(!caller_projection_matches(
             &active,
             OrganizationRole::Member,
-            &[tag("finance"), tag("research")].into_iter().collect()
+            Some(&[tag("finance"), tag("research")].into_iter().collect())
         ));
     }
 

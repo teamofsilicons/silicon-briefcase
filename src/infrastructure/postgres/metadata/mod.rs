@@ -990,7 +990,8 @@ impl MetadataRepository for PostgresRepository {
         let actor = authorization.actor();
         let tags: Vec<String> = authorization
             .tags()
-            .iter()
+            .into_iter()
+            .flatten()
             .map(|tag| tag.as_str().to_owned())
             .collect();
         // Both sides are normalized by the same function, so a term inside a

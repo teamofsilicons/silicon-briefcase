@@ -6,6 +6,8 @@ use super::*;
 
 mod directory;
 mod resilience;
+#[cfg(test)]
+mod tag_tests;
 
 impl IamClient {
     pub(crate) async fn self_email(
@@ -630,8 +632,15 @@ fn authorization(
             return Err(invalid_response("authorization.actor_type"));
         }
     };
+    let tags_disclosed = snapshot
+        .scopes
+        .iter()
+        .any(|scope| scope == "self.tags.read");
+    if tags_disclosed != snapshot.tags.is_some() {
+        return Err(binding_mismatch("authorization.tags"));
+    }
     let mut tags = Vec::new();
-    for tag in snapshot.tags.ok_or(IamClientError::Rejected)? {
+    for tag in snapshot.tags.into_iter().flatten() {
         if tag.id.is_nil()
             || tags
                 .iter()
@@ -661,6 +670,6 @@ fn authorization(
         membership_id: snapshot.membership_id,
         membership_version: snapshot.membership_version,
         authorization_epoch: snapshot.authorization_epoch,
-        tags,
+        tags: tags_disclosed.then_some(tags),
     }))
 }
