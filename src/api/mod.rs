@@ -897,7 +897,18 @@ pub(crate) mod tests {
     pub(crate) fn test_state(
         database: sqlx::PgPool,
     ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
+        test_state_with_test_database(database, None)
+    }
+
+    pub(crate) fn test_state_with_test_database(
+        database: sqlx::PgPool,
+        test_database: Option<sqlx::PgPool>,
+    ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
         let repository = PostgresRepository::new(database.clone());
+        let repository = match test_database {
+            Some(test) => repository.with_test_pool(test),
+            None => repository,
+        };
         let s3 = S3Settings {
             region: "ap-south-1".to_owned(),
             bucket: "briefcase-test".to_owned(),
@@ -985,3 +996,6 @@ pub(crate) mod tests {
         NonZeroUsize::new(value).ok_or_else(|| anyhow::anyhow!("test fixture must be non-zero"))
     }
 }
+
+#[cfg(test)]
+mod testing_auth_tests;

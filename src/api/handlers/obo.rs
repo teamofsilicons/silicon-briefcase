@@ -95,12 +95,7 @@ pub(crate) async fn create_file(
     if verified.endpoint_id != CREATE_FILE_ENDPOINT_ID {
         return Err(AppError::Forbidden);
     }
-    accept_testing_access(
-        &state,
-        testing_access.as_ref(),
-        verified.organization_id.as_str(),
-    )
-    .await?;
+    extract::touch_testing_access(&state, testing_access.as_ref()).await?;
     if let Some(fence) = fence {
         fence.release().await?;
     }
@@ -158,17 +153,6 @@ pub(crate) async fn create_file(
         .await
         .map_err(metadata_error)?;
     Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
-}
-
-async fn accept_testing_access(
-    state: &AppState,
-    access: Option<&TestingEnvironmentAccess>,
-    verified_org_id: &str,
-) -> Result<(), AppError> {
-    if access.is_some_and(|access| access.owner_org_id != verified_org_id) {
-        return Err(AppError::NotFound);
-    }
-    extract::touch_testing_access(state, access).await
 }
 
 fn represented_context(

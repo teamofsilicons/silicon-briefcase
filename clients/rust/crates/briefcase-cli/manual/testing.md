@@ -5,10 +5,23 @@ An IAM testing Application secret selects an isolated Briefcase environment:
 ```http
 X-Briefcase-App-Secret: ask_<43 base64url characters>
 Authorization: Bearer <IAM test access token>
-X-Org-ID: tos
+X-Org-ID: interface-test-org
 ```
 
 The secret selects the environment; the test actor's current IAM membership, role, tags and permissions determine what it can do. Production credentials do not authenticate a test actor. Unknown, invalid, deleted, or mismatched secrets never fall back to production.
+
+The environment's production owner (for example, `tos`) manages its lifecycle.
+`X-Org-ID` selects the **data organization inside that world** (for example,
+`interface-test-org`); these IDs do not need to match. Each bearer or OBO request
+must receive current IAM authority for that exact data organization, application
+and world. Briefcase never substitutes the control owner for the selected org.
+Files and upload capabilities remain partitioned by both world UUID and data org;
+reset/version fences still invalidate earlier requests and reservations.
+
+Public testing URLs carry the world UUID and data org, never a credential.
+Resolving this routing context grants no access: only entries with public-link
+policy are visible under that world's tenant RLS. A private path, wrong world,
+missing world selector, pending reset, or inactive world remains unavailable.
 
 Each environment has a **2 GiB** storage ceiling, including retained versions and reservations. Briefcase permits **10 active environments** across the deployment. Exceeding the test storage ceiling returns `In test enviorment you are limited to a total storage of 2gb per enviorment.`
 
@@ -185,3 +198,15 @@ SDK consumers can use `Config::with_public_testing_environment(id)` with the
 `public_entry`, `public_children`, `public_content` and `public_download` methods.
 This setting applies only to anonymous reads and grants no signed-in actor authority.
 The HTTP public endpoint accepts the same `test_environment` query parameter.
+
+## Backend regression coverage
+
+`cargo test --locked --lib imported_world -- --test-threads=1` exercises real
+PostgreSQL control/data databases under the restricted `briefcase_api` role,
+with IAM and object storage served by local HTTP fixtures. Set
+`BRIEFCASE_TEST_CONTROL_DATABASE_URL` and `BRIEFCASE_TEST_DATA_DATABASE_URL`
+to disposable migrated-admin databases; without both, these checks skip.
+The cases cover separate control/data organizations, bearer and delegated
+folder/raw recording paths, wrong world/org/audience/actor, missing disclosure
+or endpoint scope, rejected proofs, exact body binding, public/private links,
+and generation/reset invalidation. They do not attest deployed provider access.

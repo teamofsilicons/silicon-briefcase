@@ -183,8 +183,10 @@ Every operation uses `POST`; endpoint IDs must not be repointed to other paths.
 
 The one-shot file endpoint keeps its raw-byte body and metadata contract.
 The other operations put all inputs in exact JSON body bytes, including range,
-disposition, pagination and logical mutation UUIDs. The issuer and audience
-must meet IAM's same-organization and authorization rules. Proofs bind exact
+disposition, pagination and logical mutation UUIDs. IAM's issuer/audience
+registration and current consent checks remain authoritative. The represented
+member's selected data organization may differ from the applications' owning
+organization. Proofs bind exact
 body bytes by SHA-256, method, endpoint, audience, actor, and environment; they
 are single-use and must not be blindly retried. Keep the same logical mutation
 UUID when recovering an uncertain JSON mutation, but obtain a fresh proof.
@@ -196,10 +198,16 @@ proof separately authorizes publication. See [delegated uploads](api/delegated-u
 
 Webhook approval and OBO catalog registration are separate operations.
 Confirm the Briefcase Application's required scope disclosure (`profile`,
-`self.organizations.read`, `self.identity.read`, `self.membership.read`) and catalog registration
+`self.organizations.read`, `self.identity.read`, `self.membership.read`, `self.tags.read`) and catalog registration
 before making OBO calls. The issuing member's Application token needs
-`obo.issue`; `self.identity.read` and `self.membership.read` must also be present in both
-that token and the recipient's approved scopes. The [API](obo.md#choose-an-operation)
+`obo.issue`. Delegated `self.identity.read`, `self.membership.read` and
+`self.tags.read` disclosures require their intersection across the parent token,
+current exact consent, issuer approval and recipient approval. Briefcase requires
+all three disclosures; missing role or tags never become implicit authority.
+The snapshot must include exactly the verified endpoint's canonical delegated
+scope, for example `obo:tos>briefcase:briefcase.files.create`. Briefcase validates
+the audience and endpoint components, rejects missing or foreign OBO scopes,
+and preserves IAM's sorted, unique scope-set contract. The [API](obo.md#choose-an-operation)
 documents the exact request bodies and recovery behavior. Proofs remain
 dependent on current initiator authorization; storing a verified snapshot does
 not create permission for later requests.

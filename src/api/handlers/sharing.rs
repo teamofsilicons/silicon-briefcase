@@ -144,12 +144,6 @@ pub(crate) async fn read_public(
     }
     let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
     let access = extract::optional_testing_access(state, headers).await?;
-    if access
-        .as_ref()
-        .is_some_and(|access| access.owner_org_id != org)
-    {
-        return Err(AppError::NotFound);
-    }
     if query.test_environment.is_some_and(|id| {
         id.is_nil()
             || access

@@ -229,12 +229,6 @@ pub(crate) async fn transfer(
     let organization_id = auth::optional_organization(&headers)?
         .ok_or_else(|| AppError::bad_request("missing_org_id"))?;
     let testing_access = extract::optional_testing_access(&state, &headers).await?;
-    if testing_access
-        .as_ref()
-        .is_some_and(|access| access.owner_org_id != organization_id.as_str())
-    {
-        return Err(AppError::NotFound);
-    }
     let scope = DelegatedUploadScope {
         organization_id,
         testing_environment: testing_access.as_ref().map(|access| {

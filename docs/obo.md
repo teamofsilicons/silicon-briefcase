@@ -58,22 +58,27 @@ before sending either production or sandbox operations.
 
 You need all five of these. Briefcase fails closed on any of them.
 
-1. **Your Application is registered in IAM, in the same Team as Briefcase.**
-   OBO never crosses a Team. IAM derives the Team from the two Applications and
-   refuses to accept one from you.
+1. **Your Application is registered in IAM and approved for the Briefcase endpoint.**
+   IAM validates the applications and the represented member's selected organization.
+   The member's data organization can differ from an application's owning Team;
+   Briefcase must receive the exact organization authorized by the proof.
 2. **A subject token: the member's IAM access token, issued to *your*
    Application** (`oat_…`). A token issued to some other Application is refused.
 3. **`obo.issue` on that subject token.** Without it the exchange answers
    `403 obo_subject_token_forbidden`.
-4. **`self.membership.read` and `self.identity.read` disclosure**, in both the subject token
-   and Briefcase's currently approved scopes. Briefcase requires the delegated
-   authorization snapshot and answers `403` when role or membership disclosure
-   is missing. Never infer authority from an undisclosed (`null`) field.
+4. **`self.membership.read`, `self.identity.read` and `self.tags.read` disclosure**,
+   present in the subject token, its current exact consent, the issuer's approved
+   scopes and Briefcase's approved scopes. Briefcase requires the delegated
+   authorization snapshot and fails closed when identity, role or tags are
+   undisclosed. Never infer authority from a `null` field. Its scope set must
+   contain the exact `obo:tos>briefcase:<endpoint_id>` verified by IAM; canonical
+   `org>app` audience syntax is distinct from native IAM scope syntax.
 5. **Your Application's own secret**, used only for HTTP Basic and the HMAC on
    the IAM exchange. It is never sent to Briefcase.
 
-The member must be an active member of your Application's Team at verification
-time. Ending a session does not by itself extend or revoke IAM authority.
+The member must retain active membership and current consent for the selected
+data organization at verification time. IAM rechecks the parent session,
+membership epoch, endpoint approval and selected testing world for every proof.
 
 ## JSON controls and recoverable uploads
 
