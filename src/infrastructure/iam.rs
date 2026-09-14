@@ -2074,4 +2074,127 @@ mod tests {
             Err(IamClientError::InvalidResponse { .. })
         ));
     }
+
+    fn directory_fixture(removed: bool) -> serde_json::Value {
+        json!({
+            "id": MEMBERSHIP_ID, "org_id": "tos",
+            "principal": {"principal_id": PRINCIPAL_ID, "type": "carbon", "public_id": "carbon-a"},
+            "status": if removed { "removed" } else { "active" }, "org_role": "member",
+            "tags": [], "removed_at": if removed { Some("2026-09-14T12:34:56.123456Z") } else { None },
+            "version": 7, "authorization_epoch": 7
+        })
+    }
+
+    async fn resolve_directory_fixture(
+        items: Vec<serde_json::Value>,
+        all: bool,
+    ) -> anyhow::Result<Result<Option<Vec<crate::domain::actor::RequestAuthContext>>, IamClientError>>
+    {
+        use crate::domain::actor::{
+            ActorId, ActorKind, ActorRef, AuthenticationMode, IamMembershipBinding,
+            OrganizationRole, RequestAuthContext,
+        };
+        use uuid::Uuid;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/organizations/tos/members"))
+            .and(header("authorization", format!("Bearer {BEARER_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": items, "page": {"has_more": false, "next_cursor": null}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        let caller = RequestAuthContext::new(
+            organization(),
+            ActorRef::new(ActorKind::Carbon, ActorId::new("carbon-a")?),
+            OrganizationRole::Member,
+            [],
+            AuthenticationMode::Bearer,
+        )
+        .with_iam_binding(IamMembershipBinding {
+            organization_id: Uuid::parse_str("01990a9d-86f1-7000-8000-000000000099")?,
+            principal_id: Uuid::parse_str(PRINCIPAL_ID)?,
+            membership_id: Uuid::parse_str(MEMBERSHIP_ID)?,
+            membership_version: 7,
+            authorization_epoch: 7,
+            tags: Some(vec![]),
+        });
+        let recipients = if all {
+            vec![]
+        } else {
+            vec![caller.actor().clone()]
+        };
+        Ok(client
+            .resolve_directory_recipients(
+                &SecretString::from(BEARER_TOKEN.to_owned()),
+                &caller,
+                &recipients,
+                None,
+            )
+            .await)
+    }
+
+    #[tokio::test]
+    async fn directory_removed_history_does_not_block_active_recipient_or_tag_discovery()
+    -> anyhow::Result<()> {
+        // IAM returns RFC3339 removal dates and may retain an older membership
+        // for the same public actor. Only the active membership is a recipient.
+        let mut removed = directory_fixture(true);
+        removed["id"] = json!("01990a9d-86f1-7000-8000-000000000055");
+        for all in [false, true] {
+            let contexts =
+                resolve_directory_fixture(vec![removed.clone(), directory_fixture(false)], all)
+                    .await??
+                    .ok_or_else(|| anyhow::anyhow!("active recipient missing"))?;
+            assert_eq!(contexts.len(), 1);
+            assert_eq!(
+                contexts[0]
+                    .iam_binding()
+                    .map(|binding| binding.membership_id.to_string()),
+                Some(MEMBERSHIP_ID.to_owned())
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn directory_removed_recipient_is_not_granted_access() -> anyhow::Result<()> {
+        assert!(
+            resolve_directory_fixture(vec![directory_fixture(true)], false)
+                .await??
+                .is_none()
+        );
+        assert!(
+            resolve_directory_fixture(vec![directory_fixture(true)], true)
+                .await??
+                .is_some_and(|members| members.is_empty())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn directory_invalid_authority_and_malformed_dates_remain_rejected() -> anyhow::Result<()>
+    {
+        for (field, value) in [
+            ("org_id", json!("other-org")),
+            ("status", json!("unrecognized")),
+            ("authorization_epoch", json!(0)),
+            ("version", json!(0)),
+            ("org_role", json!(null)),
+            ("removed_at", json!("not-a-date")),
+            ("removed_at", json!("2026-09-14T12:34:56Z")),
+        ] {
+            let mut member = directory_fixture(false);
+            member[field] = value;
+            assert!(
+                resolve_directory_fixture(vec![member], false)
+                    .await?
+                    .is_err(),
+                "accepted invalid {field}"
+            );
+        }
+        Ok(())
+    }
 }
