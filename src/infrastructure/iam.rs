@@ -1,4 +1,4 @@
-//! Fail-closed domain adapter around official `silicon-iam-client` 1.3.
+//! Fail-closed domain adapter around official `silicon-iam-client` 1.8.
 //!
 //! IAM publishes token-introspection and OBO verification contracts.
 //! This adapter keeps those wire types isolated from Briefcase domain types and
@@ -618,7 +618,7 @@ fn validate_obo(
     }
     validate_wire_text("endpoint.endpoint_id", &endpoint.endpoint_id, 128)?;
 
-    // IAM derives the tenant from the two applications and never accepts one
+    // IAM derives the tenant from the represented membership and never accepts one
     // from the caller, so the response is authoritative. A request that still
     // declared an organization must agree with it.
     let organization_value = required_wire(wire.org_id, "org_id")?;
@@ -673,6 +673,22 @@ fn valid_scope_set(value: &str) -> bool {
 }
 
 fn valid_scope(scope: &str) -> bool {
+    if let Some(delegation) = scope.strip_prefix("obo:") {
+        // IAM encodes an audience application and registered endpoint, not a
+        // native scope containing an arbitrary '>' character. Split once: an
+        // endpoint may itself contain ':'. Component limits bound the result.
+        return delegation
+            .split_once(':')
+            .is_some_and(|(audience, endpoint)| {
+                is_canonical_iam_application_id(audience)
+                    && endpoint.len() >= 3
+                    && valid_native_scope(endpoint)
+            });
+    }
+    valid_native_scope(scope)
+}
+
+fn valid_native_scope(scope: &str) -> bool {
     (2..=128).contains(&scope.len())
         && scope.bytes().enumerate().all(|(index, byte)| {
             byte.is_ascii_lowercase()
@@ -989,6 +1005,59 @@ mod tests {
             "org_role": "member",
             "tags": []
         })
+    }
+
+    fn delegated_snapshot(audience: &str, testing: bool) -> serde_json::Value {
+        let mut snapshot = authorization_snapshot(audience, testing);
+        snapshot["scopes"] = json!([
+            format!("obo:{audience}:briefcase.files.create"),
+            "self.identity.read",
+            "self.membership.read",
+            "self.tags.read"
+        ]);
+        snapshot
+    }
+
+    #[test]
+    fn canonical_delegation_scopes_preserve_component_and_set_boundaries() {
+        for scope in [
+            "obo:tos>briefcase:briefcase.files.create",
+            "obo:123-org>app-name:files.create:v2",
+            "self.identity.read",
+        ] {
+            assert!(super::valid_scope_set(scope), "{scope}");
+        }
+        let maximum = format!(
+            "obo:{}>{}:{}",
+            "o".repeat(50),
+            "a".repeat(80),
+            "e".repeat(128)
+        );
+        assert!(super::valid_scope_set(&maximum));
+        for scope in [
+            "obo:tos:briefcase.files.create",
+            "obo:tos>>briefcase:files.create",
+            "obo:tos>briefcase:",
+            "obo:tos>briefcase:ab",
+            "obo:tos>briefcase:1bad",
+            "obo:tos>briefcase:files>create",
+            "obo:Tos>briefcase:files.create",
+            "obo:tos>ab:files.create",
+            "obo:tos>briefcase:files/create",
+            "self>identity.read",
+            "self.identity.read self.identity.read",
+            "self.tags.read obo:tos>briefcase:files.create",
+            " self.identity.read",
+        ] {
+            assert!(!super::valid_scope_set(scope), "{scope}");
+        }
+        assert!(!super::valid_scope_set(&format!(
+            "obo:tos>briefcase:{}",
+            "e".repeat(129)
+        )));
+        assert!(super::valid_scope_set(
+            "obo:tos>briefcase:files.create self.identity.read self.membership.read self.tags.read"
+        ));
     }
 
     fn application_token_response() -> serde_json::Value {
@@ -1631,7 +1700,7 @@ mod tests {
                         "proof_id": "01990a9d-86f1-7000-8000-000000000004",
                         "issuer_app_id": "tos>silicon-dm",
                         "audience": IAM_APP_ID,
-                        "authorization": authorization_snapshot(IAM_APP_ID, false),
+                        "authorization": delegated_snapshot(IAM_APP_ID, false),
                         "actor": {
                             "principal_id": PRINCIPAL_ID,
                             "type": "carbon",
@@ -1742,7 +1811,7 @@ mod tests {
                         "proof_id": "01990a9d-86f1-7000-8000-000000000004",
                         "issuer_app_id": "tos>silicon-dm",
                         "audience": TEST_APP_ID,
-                        "authorization": authorization_snapshot(TEST_APP_ID, true),
+                        "authorization": delegated_snapshot(TEST_APP_ID, true),
                         "actor": {
                             "principal_id": PRINCIPAL_ID,
                             "type": "carbon",

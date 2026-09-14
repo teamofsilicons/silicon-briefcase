@@ -145,12 +145,6 @@ pub(super) async fn authorize_json<T: DeserializeOwned>(
     {
         return Err(AppError::validation("invalid_obo_metadata"));
     }
-    if testing_access
-        .as_ref()
-        .is_some_and(|access| access.owner_org_id != verified.organization_id.as_str())
-    {
-        return Err(AppError::NotFound);
-    }
     extract::touch_testing_access(state, testing_access.as_ref()).await?;
     if let Some(fence) = fence {
         fence.release().await?;

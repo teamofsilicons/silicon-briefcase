@@ -2399,7 +2399,11 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
     assert_eq!(public_context.id(), id);
     assert_eq!(public_context.control_version(), renamed.control_version);
     fence.release().await?;
-    assert!(store.public_link_context(id, "another-org").await.is_err());
+    // Routing metadata does not grant entry access or constrain data orgs to
+    // the production control owner; public entry policy runs under tenant RLS.
+    let (_, other_fence) = store.public_link_context(id, "another-org").await?;
+    other_fence.release().await?;
+    assert!(store.public_link_context(id, "invalid/org").await.is_err());
     assert!(
         store
             .public_link_context(Uuid::new_v4(), &org)

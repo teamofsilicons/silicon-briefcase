@@ -430,6 +430,19 @@ impl IamClient {
             expected_organization,
             binding,
         )?;
+        let expected_scope = format!(
+            "obo:{}:{}",
+            self.application_identity(environment).0.as_str(),
+            verified.endpoint_id
+        );
+        if !snapshot.scopes.iter().any(|scope| scope == &expected_scope)
+            || snapshot
+                .scopes
+                .iter()
+                .any(|scope| scope.starts_with("obo:") && scope != &expected_scope)
+        {
+            return Err(binding_mismatch("authorization.obo_scope"));
+        }
         let authority = authorization(
             snapshot,
             self.application_identity(environment).0,

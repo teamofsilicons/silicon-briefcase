@@ -84,11 +84,8 @@ pub(crate) async fn authenticate(
     resource: &str,
 ) -> Result<ExecutionContext, AppError> {
     let access = optional_testing_access(state, headers).await?;
-    if access.as_ref().is_some_and(|access| {
-        auth::organization_resource(headers).ok().as_deref() != Some(&access.owner_org_id)
-    }) {
-        return Err(AppError::NotFound);
-    }
+    // The production owner manages the sandbox. Only the selected world's
+    // live IAM snapshot authorizes the requested data organization.
     let credential = access
         .as_ref()
         .map(iam_environment_credential)
@@ -116,11 +113,8 @@ pub(crate) async fn authenticate_bearer(
     action: IamAction,
 ) -> Result<ExecutionContext, AppError> {
     let access = optional_testing_access(state, headers).await?;
-    if access.as_ref().is_some_and(|access| {
-        auth::organization_resource(headers).ok().as_deref() != Some(&access.owner_org_id)
-    }) {
-        return Err(AppError::NotFound);
-    }
+    // The production owner manages the sandbox. Only the selected world's
+    // live IAM snapshot authorizes the requested data organization.
     let credential = access
         .as_ref()
         .map(iam_environment_credential)

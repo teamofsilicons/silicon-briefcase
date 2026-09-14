@@ -588,7 +588,9 @@ impl TestingEnvironmentStore {
     /// Resolves anonymous link routing while holding the sandbox lifecycle fence.
     /// This grants no actor authority; callers must enforce public entry policy.
     /// # Errors
-    /// Returns not-found for another organization or an unavailable sandbox.
+    /// Returns not-found for an invalid data organization or unavailable sandbox.
+    /// The organization need not be the production control owner; entry-level
+    /// public policy, selected-world routing and tenant RLS remain authoritative.
     pub async fn public_link_context(
         &self,
         id: Uuid,
