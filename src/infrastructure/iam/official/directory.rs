@@ -16,6 +16,7 @@ struct DirectoryMember {
     status: models::MembershipStatus,
     org_role: models::MembershipOrgRole,
     tags: Vec<models::TagSummary>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     removed_at: Option<time::OffsetDateTime>,
     version: i64,
     authorization_epoch: i64,
@@ -57,6 +58,15 @@ impl IamClient {
             for member in page.items {
                 if member.org_id != caller.organization_id().as_str() {
                     return Err(binding_mismatch("directory.organization"));
+                }
+                // IAM lists historical memberships as well as active recipients.
+                // Removed members cannot receive grants or join tag invitations.
+                match member.status {
+                    models::MembershipStatus::Active => {}
+                    models::MembershipStatus::Removed => continue,
+                    models::MembershipStatus::Other(_) => {
+                        return Err(invalid_response("directory.membership_status"));
+                    }
                 }
                 let kind = match member.principal.type_field {
                     models::ActorRefType::Carbon => ActorKind::Carbon,
