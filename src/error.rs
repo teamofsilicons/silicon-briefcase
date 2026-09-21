@@ -232,7 +232,11 @@ impl AppError {
 }
 
 fn conflict_message(code: &str) -> &'static str {
-    if code == "testing_environment_iam_rebind_requires_new_environment" {
+    if code == "testing_environment_managed_by_honeycomb" {
+        "Honeycomb manages shared testing environments. Use honeycomb environments or briefcase env manage; enter Briefcase with the environment's IAM app secret."
+    } else if code == "stale_honeycomb_discovery" {
+        "The testing environment changed while IAM was being checked. Retry with the current test application secret."
+    } else if code == "testing_environment_iam_rebind_requires_new_environment" {
         "This sandbox already uses identities from its paired IAM environment. Create a new Briefcase sandbox to use a different IAM environment."
     } else {
         "The request conflicts with the current resource state."

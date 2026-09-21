@@ -66,6 +66,8 @@
 //!
 //! [Silicon Briefcase]: https://briefcase.teamofsilicons.com
 
+pub mod honeycomb;
+
 mod api;
 mod client;
 mod config;

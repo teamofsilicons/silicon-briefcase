@@ -182,8 +182,18 @@ pub(crate) async fn optional_testing_access(
         .ok_or(AppError::DependencyUnavailable {
             dependency: "testing_database",
         })?;
-    let current = state.iam.discover_testing_environment(&key).await?;
-    let access = store.discover(&current, &key).await?;
+    let mut current = state.iam.discover_testing_environment(&key).await?;
+    let id = current.environment_id;
+    let revision = store.honeycomb_discovery_revision(id).await?;
+    if revision.is_some() {
+        // Bind a fresh IAM response to the participant revision. An older request
+        // cannot repopulate a later clean, even across several unobserved cleans.
+        current = state.iam.discover_testing_environment(&key).await?;
+        if current.environment_id != id {
+            return Err(AppError::Unauthenticated);
+        }
+    }
+    let access = store.discover_at_revision(&current, &key, revision).await?;
     Ok(Some(access))
 }
 

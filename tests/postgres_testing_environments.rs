@@ -1193,7 +1193,12 @@ async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Res
     let repository = PostgresRepository::new(production.clone()).with_test_pool(data.clone());
     reconcile_roots(&repository, &control_context).await?;
     let master_key = SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=");
-    let store = TestingEnvironmentStore::new(production.clone(), data.clone(), &master_key)?;
+    let store = TestingEnvironmentStore::new(
+        production.clone(),
+        data.clone(),
+        &master_key,
+        "tos>briefcase",
+    )?;
     let environment = store
         .create(
             &control_context,
@@ -1354,7 +1359,12 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         cleanup_returns_not_found: true,
     });
     let master_key = SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=");
-    let store = TestingEnvironmentStore::new(production.clone(), data.clone(), &master_key)?;
+    let store = TestingEnvironmentStore::new(
+        production.clone(),
+        data.clone(),
+        &master_key,
+        "tos>briefcase",
+    )?;
 
     let mut created_environment_ids = Vec::new();
     let result = AssertUnwindSafe(async {
@@ -2362,6 +2372,7 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
         production.clone(),
         data.clone(),
         &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+        "tos>briefcase",
     )?;
     // Two first requests must not need a production actor or create duplicates.
     let (a, b) = tokio::join!(

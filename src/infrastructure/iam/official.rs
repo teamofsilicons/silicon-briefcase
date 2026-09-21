@@ -27,26 +27,6 @@ impl IamClient {
             Err(error) => Err(sdk_error(error, Operation::Service)),
         }
     }
-    pub(crate) async fn provision_testing_environment(
-        &self,
-        name: String,
-        description: Option<String>,
-        iam_test_key: Option<String>,
-        key: &str,
-    ) -> Result<models::ApplicationTestingEnvironmentCreated, IamClientError> {
-        self.scoped_client(None)?
-            .applications()
-            .create_testing_environment(
-                &models::ApplicationTestingEnvironmentCreate {
-                    name,
-                    description,
-                    iam_test_key,
-                },
-                &mutation(key)?,
-            )
-            .await
-            .map_err(|e| sdk_error(e, Operation::Environment))
-    }
     /// Returns the public application ID for production or the selected test plane.
     #[must_use]
     pub fn public_application_id<'a>(

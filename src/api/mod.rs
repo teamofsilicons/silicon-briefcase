@@ -73,8 +73,26 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
             database.clone(),
             test_database.clone(),
             &testing.encryption_key,
-        )?;
-        (Some(test_database), Some(Arc::new(store)))
+            &settings.iam.app_id,
+        )?
+        .with_honeycomb_token(testing.honeycomb_service_token.clone());
+        let store = Arc::new(store);
+        if testing.honeycomb_service_token.is_some() {
+            let reporter = store.clone();
+            let origin = testing.honeycomb_base_url.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    if reporter.report_honeycomb_activity(&origin).await.is_err() {
+                        tracing::warn!(
+                            "Honeycomb activity report failed; durable reports will retry"
+                        );
+                    }
+                }
+            });
+        }
+        (Some(test_database), Some(store))
     } else {
         (None, None)
     };
@@ -240,6 +258,10 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         .merge(restore)
         .merge(uploads)
         .merge(webhook)
+        .merge(with_deadline(
+            Router::new().route("/internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}",
+                put(handlers::honeycomb::apply).get(handlers::honeycomb::receipt))
+                .layer(DefaultBodyLimit::max(server.max_json_body_bytes.get())), server.request_timeout))
         .fallback(not_found)
         .layer(ConcurrencyLimitLayer::new(
             server.max_concurrent_requests.get(),
@@ -380,34 +402,34 @@ fn testing_environment_routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/organizations/{org_id}/testing-environments",
-            get(testing::list).post(testing::create),
+            get(testing::list).post(testing::manage),
         )
         .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}",
             get(testing::get)
-                .patch(testing::update)
-                .delete(testing::delete),
+                .patch(testing::manage)
+                .delete(testing::manage),
         )
         .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/key",
-            get(testing::key),
+            get(testing::manage),
         )
         .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
-            post(testing::replace_iam_pairing),
+            post(testing::manage),
         )
         .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
-            post(testing::clean),
+            post(testing::manage),
         )
         .route(
             "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/restorations",
-            post(testing::restore),
+            post(testing::manage),
         )
         .route("/api/v1/testing-environment", get(testing::current))
         .route(
             "/api/v1/testing-environment/cleanings",
-            post(testing::clean_current),
+            post(testing::manage),
         )
 }
 
@@ -486,7 +508,7 @@ pub(crate) mod tests {
         (
             "/organizations/{org_id}/testing-environments",
             "post",
-            "201",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}",
@@ -496,35 +518,35 @@ pub(crate) mod tests {
         (
             "/organizations/{org_id}/testing-environments/{environment_id}",
             "patch",
-            "200",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}",
             "delete",
-            "200",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}/key",
             "get",
-            "200",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
             "post",
-            "200",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
             "post",
-            "200",
+            "409",
         ),
         (
             "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
             "post",
-            "200",
+            "409",
         ),
         ("/testing-environment", "get", "200"),
-        ("/testing-environment/cleanings", "post", "200"),
+        ("/testing-environment/cleanings", "post", "409"),
         ("/entries", "get", "200"),
         ("/entries", "post", "201"),
         ("/entries/{entry_id}", "get", "200"),
@@ -584,7 +606,7 @@ pub(crate) mod tests {
     ];
 
     #[test]
-    fn every_openapi_operation_has_the_expected_success_status() -> anyhow::Result<()> {
+    fn every_openapi_operation_has_the_expected_response_status() -> anyhow::Result<()> {
         let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
         let mut documented_operations = 0_usize;
         for path_item in document["paths"]
@@ -882,6 +904,71 @@ pub(crate) mod tests {
         anyhow::ensure!(
             acked,
             "Space Station did not acknowledge within the live-check window"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn honeycomb_control_requires_only_the_dedicated_service_token() -> anyhow::Result<()> {
+        let database = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(10))
+            .connect_lazy("postgresql://briefcase:briefcase@127.0.0.1:9/briefcase")?;
+        let (mut state, server, webhook) = test_state(database.clone())?;
+        let token = "dedicated-honeycomb-service-token-12345";
+        state.testing = Some(Arc::new(
+            crate::infrastructure::testing::TestingEnvironmentStore::new(
+                database.clone(),
+                database,
+                &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+                "tos>briefcase",
+            )?
+            .with_honeycomb_token(Some(SecretString::from(token))),
+        ));
+        let app = router(state, &server, &webhook);
+        let id = uuid::Uuid::new_v4();
+        let operation = uuid::Uuid::new_v4();
+        let path = format!(
+            "/internal/honeycomb/organizations/tos/testing-environments/{id}/operations/{operation}"
+        );
+        let body=serde_json::json!({"operation_id":operation,"environment_id":id,"org_id":"other-org","app_id":"tos>briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}).to_string();
+        for supplied in [
+            None,
+            Some("Bearer member-session"),
+            Some("Bearer 0123456789abcdefghijklmnopqrstuv"),
+        ] {
+            let mut request = Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header("content-type", "application/json");
+            if let Some(value) = supplied {
+                request = request.header("authorization", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body.clone()))?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let authorized = Request::builder()
+            .method("PUT")
+            .uri(&path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.clone()))?;
+        assert_eq!(
+            app.clone().oneshot(authorized).await?.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let duplicate = Request::builder()
+            .method("PUT")
+            .uri(&path)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .header("authorization", "Bearer second")
+            .body(Body::from(body))?;
+        assert_eq!(
+            app.oneshot(duplicate).await?.status(),
+            StatusCode::UNAUTHORIZED
         );
         Ok(())
     }

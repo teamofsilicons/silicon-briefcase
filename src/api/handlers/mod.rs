@@ -20,3 +20,5 @@ pub(crate) mod invitations;
 pub(crate) mod reports;
 
 pub(crate) mod telemetry;
+
+pub(crate) mod honeycomb;

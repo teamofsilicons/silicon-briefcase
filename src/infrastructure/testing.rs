@@ -42,6 +42,8 @@ use crate::{
 
 #[path = "testing_discovery.rs"]
 mod discovery;
+#[path = "testing_honeycomb.rs"]
+pub mod honeycomb;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -125,6 +127,8 @@ pub struct TestingEnvironmentStore {
     production: PgPool,
     test: PgPool,
     master: Arc<MasterKey>,
+    honeycomb_token: Option<SecretString>,
+    app_id: String,
 }
 
 impl fmt::Debug for TestingEnvironmentStore {
@@ -134,7 +138,8 @@ impl fmt::Debug for TestingEnvironmentStore {
             .field("production", &self.production)
             .field("test", &self.test)
             .field("master", &self.master)
-            .finish()
+            .field("honeycomb_configured", &self.honeycomb_token.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -499,12 +504,17 @@ impl TestingEnvironmentStore {
     ///
     /// # Errors
     ///
-    /// Returns a redacted error if the master key is not exactly 32 bytes.
+    /// Returns a redacted error if the master key is not exactly 32 bytes or
+    /// the configured IAM application identity is invalid.
     pub fn new(
         production: PgPool,
         test: PgPool,
         encoded_master_key: &SecretString,
+        app_id: &str,
     ) -> Result<Self, AppError> {
+        if !is_canonical_iam_application_id(app_id) {
+            return Err(AppError::validation("invalid_iam_application_id"));
+        }
         let bytes = general_purpose::STANDARD
             .decode(encoded_master_key.expose_secret())
             .or_else(|_| {
@@ -520,6 +530,8 @@ impl TestingEnvironmentStore {
             production,
             test,
             master: Arc::new(MasterKey(master)),
+            honeycomb_token: None,
+            app_id: app_id.to_owned(),
         })
     }
 
@@ -582,6 +594,7 @@ impl TestingEnvironmentStore {
         .fetch_optional(&self.production)
         .await?
         .ok_or(AppError::Unauthenticated)?;
+        self.ensure_honeycomb_access(row.environment_id).await?;
         self.access_from_row(row)
     }
 
@@ -597,6 +610,7 @@ impl TestingEnvironmentStore {
         organization: &str,
     ) -> Result<(TestingEnvironmentContext, TestingEnvironmentUseFence), AppError> {
         let fence = TestingEnvironmentUseFence::acquire(&self.test, id).await?;
+        self.ensure_honeycomb_access(id).await?;
         let version = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT briefcase.public_testing_environment_version($1, $2)",
         )
@@ -628,6 +642,11 @@ impl TestingEnvironmentStore {
         if !touched {
             return Err(AppError::Unauthenticated);
         }
+        let tenant = TenantContext::for_control_service(&access.owner_org_id, "honeycomb-activity");
+        let mut tx = begin_tenant_transaction(&self.production, &tenant).await?;
+        sqlx::query("UPDATE briefcase.honeycomb_environments SET last_activity_at=clock_timestamp() WHERE environment_id=$1 AND state='active'")
+            .bind(access.environment_id).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2290,7 +2309,7 @@ pub async fn maintain_testing_environments(
 ) -> Result<(u64, u64), AppError> {
     let idle = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM briefcase.testing_environments \
-          WHERE status = 'active' AND iam_control_version IS NULL \
+          WHERE status = 'active' AND iam_control_version IS NULL AND NOT briefcase.honeycomb_owned_environment(environment_id) \
             AND last_activity_at <= clock_timestamp() - make_interval(days => $1) \
           ORDER BY last_activity_at, environment_id",
     )
@@ -2306,8 +2325,7 @@ pub async fn maintain_testing_environments(
     // assigned by an earlier policy; never recalculate it from deleted_at.
     let expired = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM briefcase.testing_environments \
-          WHERE (status = 'deleted' AND purge_after <= clock_timestamp()) \
-             OR status = 'purging' \
+          WHERE ((status = 'deleted' AND purge_after <= clock_timestamp()) OR status = 'purging') AND NOT briefcase.honeycomb_owned_environment(environment_id) \
           ORDER BY purge_after, environment_id",
     )
     .fetch_all(production)
@@ -2331,7 +2349,7 @@ async fn retire_idle_environment(
                 deleted_at = clock_timestamp(), purge_after = clock_timestamp() + make_interval(days => $2), \
                 version = version + 1 \
           WHERE environment_id = $1 AND status = 'active' \
-            AND iam_control_version IS NULL AND last_activity_at <= clock_timestamp() - make_interval(days => $3)",
+            AND iam_control_version IS NULL AND NOT briefcase.honeycomb_owned_environment(environment_id) AND last_activity_at <= clock_timestamp() - make_interval(days => $3)",
     )
     .bind(environment_id)
     .bind(TESTING_ENVIRONMENT_RECOVERY_DAYS)
@@ -2354,7 +2372,7 @@ async fn purge_testing_environment(
         "UPDATE briefcase.testing_environments \
             SET status = 'purging', \
                 version = CASE WHEN status = 'deleted' THEN version + 1 ELSE version END \
-          WHERE environment_id = $1 \
+          WHERE environment_id = $1 AND NOT briefcase.honeycomb_owned_environment(environment_id) \
             AND ((status = 'deleted' AND purge_after <= clock_timestamp()) \
                  OR status = 'purging') \
           RETURNING org_id, version",
@@ -2403,7 +2421,7 @@ mod tests {
             .connect_lazy("postgres://localhost/briefcase")
             .unwrap_or_else(|error| panic!("lazy pool must build: {error}"));
         let key = SecretString::from(general_purpose::STANDARD.encode([7_u8; 32]));
-        TestingEnvironmentStore::new(pool.clone(), pool, &key)
+        TestingEnvironmentStore::new(pool.clone(), pool, &key, "tos>briefcase")
             .unwrap_or_else(|error| panic!("store must build: {error}"))
     }
 

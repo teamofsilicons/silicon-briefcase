@@ -122,6 +122,10 @@ pub struct DatabaseSettings {
 /// Shared sandbox database and encryption-at-rest configuration.
 #[derive(Clone, Debug)]
 pub struct TestingSettings {
+    /// Dedicated Honeycomb service token; never a testing key or user token.
+    pub honeycomb_service_token: Option<SecretString>,
+    /// HTTPS Honeycomb origin for durable activity reporting.
+    pub honeycomb_base_url: Url,
     /// Database used only for sandbox filesystem state.
     pub database: DatabaseSettings,
     /// Base64-encoded 256-bit key encrypting retrievable environment secrets.
@@ -234,6 +238,11 @@ impl Settings {
         let server = server_settings()?;
         let database = database_settings("BRIEFCASE_DATABASE_URL", false)?;
         let testing = testing_settings(&database)?;
+        if environment == RuntimeEnvironment::Production
+            && let Some(testing) = &testing
+        {
+            require_https("BRIEFCASE_HONEYCOMB_BASE_URL", &testing.honeycomb_base_url)?;
+        }
         let iam = iam_settings()?;
         let s3 = s3_settings()?;
         let webhook = webhook_settings()?;
@@ -481,7 +490,25 @@ fn testing_settings(
             "must be base64 for exactly 32 bytes",
         ));
     }
+    let honeycomb_service_token = optional("BRIEFCASE_HONEYCOMB_SERVICE_TOKEN");
+    if honeycomb_service_token
+        .as_ref()
+        .is_some_and(|v| v.len() < 32)
+    {
+        return Err(invalid(
+            "BRIEFCASE_HONEYCOMB_SERVICE_TOKEN",
+            "must contain at least 32 characters",
+        ));
+    }
     Ok(Some(TestingSettings {
+        honeycomb_service_token: honeycomb_service_token.map(SecretString::from),
+        honeycomb_base_url: normalized_origin_url(
+            "BRIEFCASE_HONEYCOMB_BASE_URL",
+            parse_or(
+                "BRIEFCASE_HONEYCOMB_BASE_URL",
+                "https://backend.honeycomb.teamofsilicons.com/",
+            )?,
+        )?,
         database,
         encryption_key,
     }))

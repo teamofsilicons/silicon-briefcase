@@ -234,35 +234,16 @@ paths:
       tags:
       - Testing environments
       operationId: createTestingEnvironment
-      summary: Create an empty Briefcase testing environment
-      description: Provisions an IAM application testing environment through the official SDK and creates its empty
-        Briefcase data plane. The IAM root credential and application secret are encrypted at rest. The returned
-        key is the IAM test application secret (ask_ followed by 43 URL-safe characters), which selects this plane
-        in X-Briefcase-App-Secret. At most ten environments may be active and each has a 2 GiB storage ceiling.
-        Completed retries recover the original encrypted response.
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TestingEnvironmentCreate'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '201':
-          description: Empty environment and its IAM test application secret (no-store)
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
-            Cache-Control:
-              schema:
-                const: no-store
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentWithKey'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -295,33 +276,16 @@ paths:
       tags:
       - Testing environments
       operationId: updateTestingEnvironment
-      summary: Rename or re-describe an active testing environment
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
-      - $ref: '#/components/parameters/IfMatch'
-      requestBody:
-        required: true
-        content:
-          application/merge-patch+json:
-            schema:
-              $ref: '#/components/schemas/TestingEnvironmentPatch'
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TestingEnvironmentPatch'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Updated environment metadata
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironment'
-        '409':
-          description: If-Match does not name the current resource version
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -329,21 +293,16 @@ paths:
       tags:
       - Testing environments
       operationId: deleteTestingEnvironment
-      summary: Retire an environment with a two-day recovery window
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Soft-deleted environment, including its purge deadline
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironment'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -356,19 +315,16 @@ paths:
       tags:
       - Testing environments
       operationId: getTestingEnvironmentKey
-      summary: Retrieve the selected IAM test application secret
-      description: Restricted to the creator or a current organization admin/owner.
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Current key and generation
-          headers:
-            Cache-Control:
-              schema:
-                const: no-store
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentKey'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -381,34 +337,16 @@ paths:
       tags:
       - Testing environments
       operationId: replaceTestingEnvironmentIamPairing
-      summary: Replace every credential in the paired IAM testing plane
-      description: Restricted to the creator or an organization administrator. Verify the complete replacement IAM
-        pairing live. Replacing the app secret immediately replaces the Briefcase selector and advances the control/key
-        generation. Existing initialized data cannot be rebound to a different IAM environment identity; create
-        a new environment for that. Lifecycle changes wait for accepted work through the environment fence.
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TestingEnvironmentIamPairing'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Environment metadata with the replacement public pairing
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
-            Cache-Control:
-              schema:
-                const: no-store
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironment'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -421,21 +359,16 @@ paths:
       tags:
       - Testing environments
       operationId: cleanTestingEnvironment
-      summary: Erase an environment's isolated data while retaining its key
-      description: Atomically erases Briefcase content, versions, permissions, logs, notifications, idempotency
-        state, storage settings, and consumption. Exact provider deletion and multipart-abort descriptors are durably
-        queued before source metadata is removed, then retried by the worker. The paired IAM directory projection
-        is retained so existing test identities can use the empty environment immediately; deterministic roots are
-        rebuilt on their next request.
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Cleaning result
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentCleaning'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -448,26 +381,16 @@ paths:
       tags:
       - Testing environments
       operationId: restoreTestingEnvironment
-      summary: Restore a retired environment before its purge deadline
-      description: Restore before the two-day purge deadline, provided the paired IAM environment and application
-        credential remain valid. Returns the current IAM app secret and advances the control generation.
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Restored environment and its current IAM app secret (no-store)
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
-            Cache-Control:
-              schema:
-                const: no-store
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentWithKey'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -498,21 +421,16 @@ paths:
       tags:
       - Testing environments
       operationId: cleanCurrentTestingEnvironment
-      summary: Erase isolated Briefcase data using its test app secret
-      description: Uses only the selected environment root as authority and performs the same atomic Briefcase-state
-        erasure as the production control-plane cleaning route while retaining the paired IAM identity projection.
-        Provider deletion is durably queued and retried after logical erasure.
-      security:
-      - testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/IdempotencyKey'
+      deprecated: true
+      summary: Manage the shared environment through Honeycomb
+      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
       responses:
-        '200':
-          description: Cleaning result
+        '409':
+          description: Shared testing lifecycle is managed by Honeycomb
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentCleaning'
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0

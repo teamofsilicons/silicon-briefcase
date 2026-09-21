@@ -86,6 +86,7 @@ impl Fixture {
             runtime_control,
             runtime_data,
             &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+            "tos>briefcase",
         )?));
         let fixture = Self {
             state,
