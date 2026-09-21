@@ -73,7 +73,7 @@ class LinuxAbiTests(unittest.TestCase):
 
     def test_packager_rejects_bad_linux_abi_before_packing(self):
         spec = importlib.util.spec_from_file_location(
-            "package_release", Path(__file__).with_name("package-release.py")
+            "package_release", Path(__file__).with_name("package-native-session-release.py")
         )
         package = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(package)
