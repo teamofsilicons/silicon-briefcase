@@ -44,11 +44,13 @@ struct SavedSession {
 }
 
 impl Session {
-    fn save(&self) -> Result<()> {
+    fn save(&mut self) -> Result<()> {
+        self.durable_dirty = true;
         let Some((storage, id)) = &self.durable else {
+            self.durable_dirty = false;
             return Ok(());
         };
-        storage
+        let result = storage
             .write(
                 id,
                 &SavedSession {
@@ -68,7 +70,11 @@ impl Session {
                     test_sessions: self.test_sessions.clone(),
                 },
             )
-            .map_err(|_| storage_failure())
+            .map_err(|_| storage_failure());
+        if result.is_ok() {
+            self.durable_dirty = false;
+        }
+        result
     }
 }
 
@@ -105,6 +111,7 @@ pub(crate) fn restore(
                 refresh_key: IdempotencyKey::new(saved.refresh_key)?,
                 refresh_started_at: saved.refresh_started_at,
                 durable: Some((storage.clone(), id)),
+                durable_dirty: false,
                 org: saved.org,
                 organizations: saved.organizations,
                 testing: saved.testing,
@@ -282,6 +289,7 @@ pub(crate) struct Session {
     refresh_key: IdempotencyKey,
     refresh_started_at: Option<SystemTime>,
     durable: Option<(Arc<crate::session_store::Storage>, String)>,
+    durable_dirty: bool,
     org: Option<String>,
     organizations: Vec<String>,
     testing: bool,
@@ -494,8 +502,21 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
         sessions.get(&id).cloned()
     };
     if let Some(previous) = previous {
-        let previous = previous.lock().await;
+        let mut previous = previous.lock().await;
+        if previous.durable_dirty {
+            previous.save()?;
+        }
         return Ok((id, view(&previous)));
+    }
+    // A callback retry belongs to the original login operation. It must not
+    // resurrect that login after an explicit logout or its family deadline.
+    if let Some(storage) = &app.session_storage
+        && let Some(saved) = storage
+            .read::<SavedSession>(&id)
+            .map_err(|_| storage_failure())?
+        && (saved.rejected || saved.deadline <= SystemTime::now())
+    {
+        return Err(unauthenticated());
     }
     let mut config = Config::for_sign_in(&app.upstream)?
         .with_auto_update(false)
@@ -538,7 +559,7 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
         .map(|org| config.clone().with_organization(org))
         .transpose()?
         .unwrap_or_else(|| config.clone());
-    let session = Session {
+    let mut session = Session {
         auth_config,
         expires: SystemTime::now() + Duration::from_secs(tokens.expires_in.min(86400)),
         deadline: SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS)),
@@ -550,6 +571,7 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
             .session_storage
             .clone()
             .map(|storage| (storage, id.clone())),
+        durable_dirty: false,
         org: session_org,
         organizations,
         testing,
@@ -613,6 +635,11 @@ pub(crate) async fn client(app: &App, headers: &HeaderMap) -> Result<Client> {
     Ok(client)
 }
 async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()> {
+    // Never serve an advanced in-memory token until its successor and retry
+    // metadata survive a restart. A failed rename/fsync leaves this flag set.
+    if session.durable_dirty {
+        session.save()?;
+    }
     for _ in 0..2 {
         if session.expires > SystemTime::now() + Duration::from_secs(30)
             && session.refresh_started_at.is_none()
@@ -881,7 +908,7 @@ mod tests {
                 "scope":"profile","actor":{"principal_id":Uuid::new_v4(),"type":"carbon","public_id":"saket"},
                 "org_id":"tos","organizations":["tos"]
             })).unwrap(), expires: SystemTime::now()+Duration::from_secs(3600),deadline:SystemTime::now()+Duration::from_secs(3600),
-            refresh_key:IdempotencyKey::random(), refresh_started_at:None, durable:None, org:Some("tos".into()),organizations:vec!["tos".into()],
+            refresh_key:IdempotencyKey::random(), refresh_started_at:None, durable:None, durable_dirty:false, org:Some("tos".into()),organizations:vec!["tos".into()],
             testing:test.is_some(),rejected:false,test_environment:environment,test_sessions:Default::default(),
         }
     }
@@ -1003,6 +1030,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_old_login_retry_cannot_replace_a_durable_logout() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let mut app = app();
+        app.session_storage = Some(storage.clone());
+        let input = Login {
+            org: None,
+            slt: "already-exchanged".into(),
+            test_key: None,
+            operation_id: Uuid::new_v4(),
+        };
+        let mut hash = Sha256::new();
+        hash.update(app.login_salt.as_bytes());
+        hash.update(serde_json::to_vec(&input).unwrap());
+        let id = format!("{:x}", hash.finalize());
+        let mut saved = session(None);
+        saved.rejected = true;
+        saved.durable = Some((storage, id));
+        saved.save().ok().unwrap();
+        let failure = establish(&app, input, false).await.err().unwrap();
+        assert_eq!(failure.0, StatusCode::UNAUTHORIZED);
+        assert!(app.sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn uncertain_refresh_survives_restart_and_delayed_replay_is_renewed() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
@@ -1066,6 +1118,58 @@ mod tests {
         assert!(recovered.refresh_started_at.is_none());
         let reloaded = restore(&storage).unwrap();
         assert_eq!(reloaded[&id].lock().await.tokens.refresh_token, "fresh");
+    }
+
+    #[tokio::test]
+    async fn failed_rotation_write_must_be_repaired_before_a_session_can_be_used() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let id = "a".repeat(64);
+        let state_file = root.path().join(format!("{id}.json"));
+        let previous_file = root.path().join("before-refresh.json");
+        let mut saved = session(None);
+        saved.auth_config = Config::for_sign_in(&format!("{}/api/v1/", server.uri())).unwrap();
+        saved.config = saved.auth_config.clone().with_organization("tos").unwrap();
+        saved.expires = SystemTime::UNIX_EPOCH;
+        saved.durable = Some((storage.clone(), id.clone()));
+        saved.save().ok().unwrap();
+        let mut tokens = saved.tokens.clone();
+        tokens.access_token = "access-new".into();
+        tokens.refresh_token = "refresh-new".into();
+        let blocked = state_file.clone();
+        let backup = previous_file.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(move |_: &wiremock::Request| {
+                // The old credential and attempt are safely on disk when IAM
+                // rotates, then the final durable replacement fails.
+                std::fs::rename(&blocked, &backup).unwrap();
+                std::fs::create_dir(&blocked).unwrap();
+                ResponseTemplate::new(200).set_body_json(&tokens)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(refresh_if_needed(&mut saved, false).await.is_err());
+        assert_eq!(saved.tokens.refresh_token, "refresh-new");
+        assert!(saved.durable_dirty);
+        // A still-valid access token must not make the next request bypass saving.
+        assert!(refresh_if_needed(&mut saved, false).await.is_err());
+        std::fs::remove_dir(&state_file).unwrap();
+        std::fs::rename(&previous_file, &state_file).unwrap();
+        refresh_if_needed(&mut saved, false).await.ok().unwrap();
+        assert!(!saved.durable_dirty);
+        let reloaded = restore(&storage).unwrap();
+        assert_eq!(
+            reloaded[&id].lock().await.tokens.refresh_token,
+            "refresh-new"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
     #[tokio::test]
     async fn standalone_test_cookie_never_authenticates_production_or_another_environment() {
