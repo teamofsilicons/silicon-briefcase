@@ -1103,6 +1103,64 @@ async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organizati
     );
 }
 
+#[tokio::test]
+async fn delayed_or_legacy_pending_refresh_does_not_extend_replayed_access_lifetime() {
+    for started in [Value::Null, json!("2000-01-01T00:00:00Z")] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        let mut stored = session("2020-01-01T00:00:00Z");
+        stored["refresh_idempotency_key"] = json!("original-refresh-attempt");
+        stored["refresh_started_at"] = started;
+        write_state(
+            home.path(),
+            &server,
+            &json!({"sessions":{"work":stored},
+            "production_credential_scopes":{"work":scope(&server,"tos")}}),
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/version"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("briefcase-api-version", "v1")
+                    .set_body_json(version_document()),
+            )
+            .mount(&server)
+            .await;
+        for (old, new) in [
+            ("stored-refresh-must-not-leak", "replayed"),
+            ("replayed", "fresh"),
+        ] {
+            Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
+                .and(body_json(json!({"refresh_token":old})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token":format!("access-{new}"),"refresh_token":new,"token_type":"Bearer",
+                    "expires_in":1800,"scope":"profile","org_id":"tos","organizations":["tos"],
+                    "actor":{"principal_id":ACTOR_ID,"type":"carbon","public_id":"cos:tester"}})))
+                .expect(1).mount(&server).await;
+        }
+        Mock::given(method("GET")).and(path("/api/v1/auth/status"))
+            .and(header("authorization", "Bearer access-fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,
+                "actor":{"principal_id":ACTOR_ID,"type":"carbon","public_id":"cos:tester"},"organizations":["tos"],"expires_at":4_102_444_800_i64})))
+            .expect(1).mount(&server).await;
+        let output = briefcase(
+            home.path(),
+            &["login".into(), "status".into(), "--json".into()],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let credentials: Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(credentials["sessions"]["work"]["refresh_token"], "fresh");
+        assert!(credentials["sessions"]["work"]["refresh_started_at"].is_null());
+    }
+}
+
 fn clean_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_briefcase"));
     command.env("BRIEFCASE_TELEMETRY", "off");

@@ -411,6 +411,12 @@ pub struct StoredSession {
     /// Retry identity persisted before an in-flight refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_idempotency_key: Option<String>,
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub refresh_started_at: Option<OffsetDateTime>,
 }
 
 impl StoredSession {
@@ -426,13 +432,15 @@ impl StoredSession {
             org_id: tokens.org_id.clone(),
             organizations: tokens.organizations.clone(),
             refresh_idempotency_key: None,
+            refresh_started_at: None,
         }
     }
 
     /// Whether renewal should happen before the next request starts.
     #[must_use]
     pub fn needs_refresh(&self) -> bool {
-        self.expires_at <= OffsetDateTime::now_utc() + time::Duration::minutes(1)
+        self.refresh_idempotency_key.is_some()
+            || self.expires_at <= OffsetDateTime::now_utc() + time::Duration::minutes(1)
     }
 }
 
@@ -443,6 +451,7 @@ impl std::fmt::Debug for StoredSession {
             .field("access_token", &"<redacted>")
             .field("refresh_token", &"<redacted>")
             .field("expires_at", &self.expires_at)
+            .field("refresh_started_at", &self.refresh_started_at)
             .field("actor", &self.actor)
             .field("org_id", &self.org_id)
             .field("organizations", &self.organizations)
@@ -830,6 +839,7 @@ mod tests {
             org_id: Some("tos".to_owned()),
             organizations: vec!["tos".to_owned()],
             refresh_idempotency_key: None,
+            refresh_started_at: None,
         }
     }
 

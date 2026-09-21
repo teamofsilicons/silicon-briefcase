@@ -470,16 +470,29 @@ async fn connect_with_scope(
             .credential_scope(&resolved.profile_name, resolved.environment_id)
             .cloned()
             .unwrap_or_else(|| resolved.credential_scope.clone());
-        if let Some(stored) = resolved.stored_session.clone()
-            && stored.needs_refresh()
-        {
+        for _ in 0..2 {
+            let Some(stored) = resolved
+                .stored_session
+                .clone()
+                .filter(StoredSession::needs_refresh)
+            else {
+                break;
+            };
             let mut pending = stored.clone();
+            let started_at = pending.refresh_started_at.unwrap_or_else(|| {
+                if pending.refresh_idempotency_key.is_some() {
+                    time::OffsetDateTime::UNIX_EPOCH
+                } else {
+                    time::OffsetDateTime::now_utc()
+                }
+            });
             let refresh_key = pending
                 .refresh_idempotency_key
                 .clone()
                 .unwrap_or_else(|| IdempotencyKey::random().as_str().to_owned());
-            if pending.refresh_idempotency_key.is_none() {
+            if pending.refresh_idempotency_key.is_none() || pending.refresh_started_at.is_none() {
                 pending.refresh_idempotency_key = Some(refresh_key.clone());
+                pending.refresh_started_at = Some(started_at);
                 credentials.set_session(
                     &resolved.profile_name,
                     resolved.environment_id,
@@ -504,7 +517,10 @@ async fn connect_with_scope(
             let refreshed = refresh_client
                 .refresh_session_with_key(&stored.refresh_token, &refresh_key)
                 .await?;
-            let refreshed = StoredSession::from_tokens(&refreshed);
+            let mut saved = StoredSession::from_tokens(&refreshed);
+            saved.expires_at = started_at
+                + time::Duration::seconds(i64::try_from(refreshed.expires_in).unwrap_or(i64::MAX));
+            let refreshed = saved;
             credentials.set_session(
                 &resolved.profile_name,
                 resolved.environment_id,
@@ -513,11 +529,20 @@ async fn connect_with_scope(
             credentials.set_credential_scope(
                 &resolved.profile_name,
                 resolved.environment_id,
-                stored_scope,
+                stored_scope.clone(),
             );
             state.save_credentials(&credentials)?;
             resolved.token = Some(refreshed.access_token.clone());
             resolved.stored_session = Some(refreshed);
+        }
+        if resolved
+            .stored_session
+            .as_ref()
+            .is_some_and(StoredSession::needs_refresh)
+        {
+            return Err(CliError::usage(
+                "refreshed access token has no usable lifetime; retry the command",
+            ));
         }
         drop(credentials_lock);
     }
