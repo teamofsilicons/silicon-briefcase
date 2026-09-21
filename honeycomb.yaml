@@ -2,7 +2,7 @@
 format_version: 1
 
 app_id: "tos>briefcase"
-version: "1.1.1"
+version: "1.1.2"
 
 bin:
   briefcase: "app"

@@ -14,6 +14,21 @@ use wiremock::{
     matchers::{body_json, body_string_contains, header, method, path, query_param},
 };
 
+// Most command fixtures start with an active saved login. Individual tests
+// install higher-priority status responses when exercising invalidation.
+async fn authenticated_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authenticated": true, "actor": null, "organizations": ["tos"], "expires_at": null
+        })))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    server
+}
+
 const ACTOR_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f803";
 const TEST_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f800";
 const ROOT_KEY: &str = "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -169,8 +184,8 @@ async fn briefcase_with_stdin(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stored_bearers_never_follow_url_or_organization_overrides() {
-    let saved = MockServer::start().await;
-    let attacker = MockServer::start().await;
+    let saved = authenticated_server().await;
+    let attacker = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -214,8 +229,8 @@ async fn stored_bearers_never_follow_url_or_organization_overrides() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_test_session_uses_its_own_binding_not_the_production_binding() {
-    let test_deployment = MockServer::start().await;
-    let production_deployment = MockServer::start().await;
+    let test_deployment = authenticated_server().await;
+    let production_deployment = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -271,7 +286,7 @@ async fn a_test_session_uses_its_own_binding_not_the_production_binding() {
             .await
             .unwrap_or_default()
             .len(),
-        1
+        2
     );
     assert!(
         production_deployment
@@ -284,8 +299,8 @@ async fn a_test_session_uses_its_own_binding_not_the_production_binding() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_login_never_sends_a_stored_root_to_an_overridden_url() {
-    let saved = MockServer::start().await;
-    let attacker = MockServer::start().await;
+    let saved = authenticated_server().await;
+    let attacker = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -326,7 +341,7 @@ async fn test_login_never_sends_a_stored_root_to_an_overridden_url() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_actor_login_sends_the_id_and_preserves_the_production_session() {
     for (actor_id, actor_type) in [("alice", "carbon"), ("worker:tos", "silicon")] {
-        let server = MockServer::start().await;
+        let server = authenticated_server().await;
         let home = tempfile::tempdir().unwrap();
         let mut production = session("2099-01-01T00:00:00Z");
         production["organizations"] = json!(["tos"]);
@@ -393,7 +408,7 @@ async fn test_actor_login_sends_the_id_and_preserves_the_production_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/slt"))
@@ -456,7 +471,7 @@ async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn entry_pages_are_resumable_and_retain_the_next_cursor() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -545,7 +560,7 @@ async fn entry_pages_are_resumable_and_retain_the_next_cursor() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -605,7 +620,7 @@ async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
     assert!(page["next_cursor"].is_null());
 
-    let looping_server = MockServer::start().await;
+    let looping_server = authenticated_server().await;
     let looping_home = tempfile::tempdir().unwrap();
     write_state(
         looping_home.path(),
@@ -642,7 +657,7 @@ async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_verifies_the_contract_before_presenting_the_rotating_token() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -681,7 +696,7 @@ async fn refresh_verifies_the_contract_before_presenting_the_rotating_token() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     let file = home.path().join("note.txt");
     std::fs::write(&file, b"note").unwrap();
@@ -756,7 +771,7 @@ async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session
     reason = "one crash-recovery scenario covers all three path-addressed mutation shapes"
 )]
 async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     let upload_file = home.path().join("upload.txt");
     std::fs::write(&upload_file, b"stable upload").unwrap();
@@ -903,7 +918,13 @@ async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() 
         );
     }
 
-    let requests = server.received_requests().await.unwrap_or_default();
+    let requests: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.url.path() != "/api/v1/auth/status")
+        .collect();
     assert_eq!(requests.len(), 3);
     assert!(
         requests
@@ -918,7 +939,7 @@ async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() 
 
 #[tokio::test]
 async fn iam_discovery_does_not_read_or_send_member_credentials() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(home.path(), &server, &json!({}));
     std::fs::write(home.path().join("credentials.json"), "not valid JSON").unwrap();
@@ -954,7 +975,7 @@ async fn iam_discovery_does_not_read_or_send_member_credentials() {
 
 #[tokio::test]
 async fn login_status_without_credentials_is_json_and_needs_no_network() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(home.path(), &server, &json!({}));
     let output = briefcase(
@@ -975,7 +996,7 @@ async fn login_status_without_credentials_is_json_and_needs_no_network() {
 
 #[tokio::test]
 async fn login_status_checks_override_identity_instead_of_the_saved_actor() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -1038,7 +1059,7 @@ async fn login_status_checks_override_identity_instead_of_the_saved_actor() {
 
 #[tokio::test]
 async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organization() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     let mut stored = session("2020-01-01T00:00:00Z");
     stored["org_id"] = Value::Null;
@@ -1106,7 +1127,7 @@ async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organizati
 #[tokio::test]
 async fn delayed_or_legacy_pending_refresh_does_not_extend_replayed_access_lifetime() {
     for started in [Value::Null, json!("2000-01-01T00:00:00Z")] {
-        let server = MockServer::start().await;
+        let server = authenticated_server().await;
         let home = tempfile::tempdir().unwrap();
         let mut stored = session("2020-01-01T00:00:00Z");
         stored["refresh_idempotency_key"] = json!("original-refresh-attempt");
@@ -1310,7 +1331,7 @@ async fn enabling_link_access_returns_file_and_folder_urls() {
         ("public/Shared%20folder", false),
         ("public/Shared%20folder/file%23.txt", true),
     ] {
-        let server = MockServer::start().await;
+        let server = authenticated_server().await;
         let home = tempfile::tempdir().unwrap();
         write_state(
             home.path(),
@@ -1362,7 +1383,7 @@ async fn enabling_link_access_returns_file_and_folder_urls() {
 
 #[tokio::test]
 async fn bug_report_sends_only_explicit_content_and_replays_its_operation_identity() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(
         home.path(),
@@ -1423,7 +1444,7 @@ async fn bug_report_sends_only_explicit_content_and_replays_its_operation_identi
 
 #[tokio::test]
 async fn telemetry_preference_persists_and_never_attaches_command_arguments() {
-    let server = MockServer::start().await;
+    let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     write_state(home.path(), &server, &json!({}));
     Mock::given(method("POST"))
@@ -1468,4 +1489,131 @@ async fn telemetry_preference_persists_and_never_attaches_command_arguments() {
     assert!(event["duration_ms"].is_number());
     assert!(!String::from_utf8_lossy(&telemetry.body).contains("profiles"));
     assert!(!telemetry.headers.contains_key("authorization"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn early_access_invalidation_refreshes_before_the_command_starts() {
+    for unauthorized in [false, true] {
+        let server = authenticated_server().await;
+        let home = tempfile::tempdir().unwrap();
+        write_state(
+            home.path(),
+            &server,
+            &json!({
+                "sessions": {"work": session("2099-01-01T00:00:00Z")},
+                "production_credential_scopes": {"work": scope(&server, "tos")}
+            }),
+        );
+        Mock::given(method("GET")).and(path("/api/v1/auth/status"))
+            .and(header("authorization", "Bearer stored-access-must-not-leak"))
+            .respond_with(if unauthorized {
+                ResponseTemplate::new(401).set_body_json(json!({"error":{"code":"unauthenticated","message":"inactive"}}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"authenticated":false,"actor":null,"organizations":[],"expires_at":null}))
+            }).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
+            .and(body_json(json!({"refresh_token":"stored-refresh-must-not-leak"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token":"recovered-access","refresh_token":"recovered-refresh","token_type":"Bearer",
+                "expires_in":1800,"scope":"profile","org_id":"tos","organizations":["tos"],
+                "actor":{"principal_id":ACTOR_ID,"type":"carbon","public_id":"cos:tester"}
+            }))).expect(1).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/entries"))
+            .and(header("authorization", "Bearer recovered-access"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = briefcase(
+            home.path(),
+            &[
+                "--no-verify".into(),
+                "--json".into(),
+                "mkdir".into(),
+                "test-folder".into(),
+                "--type".into(),
+                "public".into(),
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+            [
+                "/api/v1/auth/status",
+                "/api/v1/auth/refresh",
+                "/api/v1/entries"
+            ]
+        );
+        let credentials: Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            credentials["sessions"]["work"]["refresh_token"],
+            "recovered-refresh"
+        );
+        assert_eq!(
+            credentials["production_credential_scopes"]["work"],
+            scope(&server, "tos")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn early_invalidation_refresh_outage_keeps_the_original_family_and_receipt() {
+    let server = authenticated_server().await;
+    let home = tempfile::tempdir().unwrap();
+    write_state(
+        home.path(),
+        &server,
+        &json!({
+            "sessions":{"work":session("2099-01-01T00:00:00Z")},
+            "production_credential_scopes":{"work":scope(&server,"tos")}
+        }),
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"authenticated":false,"actor":null,"organizations":[],"expires_at":null}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(json!({"error":{"code":"unavailable","message":"retry later"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = briefcase(
+        home.path(),
+        &["--no-verify".into(), "--json".into(), "ls".into()],
+    )
+    .await;
+    assert!(!output.status.success());
+    let credentials: Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
+            .unwrap();
+    let saved = &credentials["sessions"]["work"];
+    assert_eq!(saved["refresh_token"], "stored-refresh-must-not-leak");
+    assert_eq!(saved["access_token"], "stored-access-must-not-leak");
+    assert!(saved["refresh_idempotency_key"].is_string());
+    assert!(saved["refresh_started_at"].is_string());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() != "/api/v1/entries")
+    );
 }

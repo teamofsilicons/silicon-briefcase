@@ -202,6 +202,7 @@ fn deployment_url(global: &GlobalArgs, saved: Option<&Profile>) -> String {
 
 /// Resolved deployment, plane, and authentication for one invocation.
 struct ResolvedSession {
+    verified_login: Option<briefcase_client::LoginStatus>,
     profile_name: String,
     url: String,
     org: String,
@@ -327,6 +328,7 @@ fn resolve_session(
     });
 
     Ok(ResolvedSession {
+        verified_login: None,
         profile_name,
         url,
         org,
@@ -452,6 +454,39 @@ async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSessio
     connect_with_scope(global, true).await
 }
 
+// Advertised expiry is only an upper bound: IAM can invalidate access while
+// its refresh family stays active. Check before any command side effect, so
+// uploads and multi-step mutations are not replayed to recover a saved login.
+async fn probe_stored_access(global: &GlobalArgs, resolved: &mut ResolvedSession) -> Result<bool> {
+    if resolved
+        .stored_session
+        .as_ref()
+        .is_none_or(StoredSession::needs_refresh)
+    {
+        return Ok(false);
+    }
+    let mut probe_config = config(resolved)?;
+    if let Some(token) = resolved.token.clone() {
+        probe_config = probe_config.with_token(token);
+    }
+    let probe = if global.no_verify {
+        Client::new_unchecked(probe_config)?
+    } else {
+        Client::connect(probe_config).await?
+    };
+    match probe.login_status().await {
+        Ok(status) => {
+            let inactive = !status.authenticated;
+            if status.authenticated {
+                resolved.verified_login = Some(status);
+            }
+            Ok(inactive)
+        }
+        Err(error) if error.is_unauthenticated() => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn connect_with_scope(
     global: &GlobalArgs,
     require_org: bool,
@@ -470,14 +505,16 @@ async fn connect_with_scope(
             .credential_scope(&resolved.profile_name, resolved.environment_id)
             .cloned()
             .unwrap_or_else(|| resolved.credential_scope.clone());
+        let mut force_refresh = probe_stored_access(global, &mut resolved).await?;
         for _ in 0..2 {
             let Some(stored) = resolved
                 .stored_session
                 .clone()
-                .filter(StoredSession::needs_refresh)
+                .filter(|stored| force_refresh || stored.needs_refresh())
             else {
                 break;
             };
+            force_refresh = false;
             let mut pending = stored.clone();
             let started_at = pending.refresh_started_at.unwrap_or_else(|| {
                 if pending.refresh_idempotency_key.is_some() {
@@ -1007,7 +1044,10 @@ async fn login_status(global: &GlobalArgs, output: Output) -> Result<()> {
         briefcase_client::LoginStatus::default()
     } else {
         match connect_with_scope(global, false).await {
-            Ok((client, _)) => client.login_status().await?,
+            Ok((client, connected)) => match connected.verified_login {
+                Some(status) => status,
+                None => client.login_status().await?,
+            },
             Err(CliError::Client(error)) if error.is_unauthenticated() => {
                 briefcase_client::LoginStatus::default()
             }
