@@ -38,7 +38,6 @@ struct Fixture {
     owner: String,
     environment: Uuid,
     principal: Uuid,
-    membership: Uuid,
     organization: Uuid,
     secret: SecretString,
 }
@@ -97,7 +96,6 @@ impl Fixture {
             owner: format!("owner-{}", Uuid::new_v4().simple()),
             environment: Uuid::new_v4(),
             principal: Uuid::new_v4(),
-            membership: Uuid::new_v4(),
             organization: Uuid::new_v4(),
             secret: SecretString::from(format!("ask_{}xxxxxxxxxxx", Uuid::new_v4().simple())),
         };
@@ -144,7 +142,7 @@ impl Fixture {
     fn snapshot(&self) -> Value {
         json!({"principal_id":self.principal,"actor_type":"carbon","public_id":"test-carbon",
             "organization_id":self.organization,"org_id":self.org,
-            "membership_id":self.membership,"membership_version":7,"authorization_epoch":7,
+            "membership_id":format!("test-carbon[{}]", self.org),"membership_version":7,"authorization_epoch":7,
             "audience":APP,"testing_environment_id":self.environment,
             "scopes":["self.identity.read","self.membership.read","self.tags.read"],
             "org_role":"owner","tags":[]})
@@ -152,7 +150,7 @@ impl Fixture {
 
     fn introspection(&self) -> Value {
         json!({"active":true,"principal_id":self.principal,"actor_type":"carbon","client_id":APP,
-            "org_id":self.org,"membership_id":self.membership,
+            "org_id":self.org,"membership_id":format!("test-carbon[{}]", self.org),
             "session_id":"01990a9d-86f1-7000-8000-000000000003",
             "scope":"self.identity.read self.membership.read self.tags.read","audience":APP,
             "authorization":self.snapshot(),"authorization_epoch":7,
