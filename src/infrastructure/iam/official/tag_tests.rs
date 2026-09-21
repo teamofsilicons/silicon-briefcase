@@ -1,7 +1,7 @@
 //! Optional disclosure never substitutes cached tags or weakens independent ACLs.
 use serde_json::{Value, json};
 
-use super::{authorization, models};
+use super::authorization;
 use crate::domain::{
     actor::{
         ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, OrganizationId, TagName,
@@ -14,7 +14,10 @@ use crate::domain::{
     },
 };
 
-fn snapshot(tags: &Value, disclosed: bool) -> anyhow::Result<models::ApplicationAuthorization> {
+fn snapshot(
+    tags: &Value,
+    disclosed: bool,
+) -> anyhow::Result<super::super::canonical::LocalAuthorization> {
     let mut scopes = vec!["self.identity.read", "self.membership.read"];
     if disclosed {
         scopes.push("self.tags.read");

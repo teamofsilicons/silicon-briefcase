@@ -27,7 +27,7 @@ pub struct IamWebhookEvent {
     /// Monotonic IAM aggregate version.
     pub aggregate_version: u64,
     /// IAM aggregate identifier from the signed envelope.
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
     /// IAM aggregate type from the signed envelope.
     pub aggregate_type: String,
     /// Stable IAM event type.
@@ -60,7 +60,7 @@ struct WireIamWebhookEvent {
 
 #[derive(Deserialize)]
 struct WireIamAggregate {
-    id: Uuid,
+    id: String,
     #[serde(rename = "type")]
     aggregate_type: String,
     version: u64,
@@ -72,6 +72,14 @@ impl<'de> Deserialize<'de> for IamWebhookEvent {
         D: Deserializer<'de>,
     {
         let wire = WireIamWebhookEvent::deserialize(deserializer)?;
+        if wire.aggregate.id.is_empty()
+            || wire.aggregate.id.len() > 255
+            || wire.aggregate.id.trim() != wire.aggregate.id
+        {
+            return Err(serde::de::Error::custom(
+                "IAM webhook aggregate key is malformed",
+            ));
+        }
         if wire.aggregate.version == 0 {
             return Err(serde::de::Error::custom(
                 "IAM webhook aggregate version must be positive",
@@ -283,6 +291,19 @@ mod tests {
         assert!(!valid_event_type("future.v1"));
         assert!(!valid_event_type("future.Resource.changed.v1"));
         assert!(!valid_event_type("future.resource.changed.v01"));
+    }
+
+    #[test]
+    fn canonical_identity_aggregate_retains_its_public_key() -> anyhow::Result<()> {
+        let mut body = serde_json::json!({
+            "spec_version":"1.0","event_id":uuid::Uuid::now_v7(),"event_type":"carbon.updated.v1",
+            "occurred_at":"2026-09-21T00:00:00Z","aggregate":{"type":"carbon","id":"person","version":1},"data":{}
+        });
+        let event: IamWebhookEvent = serde_json::from_value(body.clone())?;
+        assert_eq!(event.aggregate_id, "person");
+        body["aggregate"]["id"] = serde_json::json!("");
+        assert!(serde_json::from_value::<IamWebhookEvent>(body).is_err());
+        Ok(())
     }
 
     #[test]

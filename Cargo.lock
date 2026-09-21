@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-briefcase"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3019,7 +3019,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "silicon-iam-client",
- "space-station",
+ "space-station 0.1.1 (git+https://github.com/teamofsilicons/space-station?rev=13060076eaaee8adc82e42e2a4c82515751810de)",
  "sqlx",
  "subtle",
  "tar",
@@ -3040,20 +3040,23 @@ dependencies = [
 
 [[package]]
 name = "silicon-iam-client"
-version = "1.8.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f430f493c26ff76c2a385a1d0d9813c79a74a87ac67ffc838366cb2886af1f"
+checksum = "66ae8c19bfc293cc4c5c1da432efd38bf5509e9772fda5bbf7fc0795a4f288e5"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "hmac 0.12.1",
  "http 1.5.0",
  "reqwest",
+ "rustls",
  "secrecy",
  "semver",
  "serde",
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
+ "space-station 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "subtle",
  "thiserror",
  "time",
@@ -3106,15 +3109,43 @@ dependencies = [
 [[package]]
 name = "space-station"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d23c6025cd1697bc9a6c04425ec7f0b5084df564aa0dbac3a22644768ef45ef1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "space-station-shared 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sysinfo",
+ "tungstenite",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "space-station"
+version = "0.1.1"
 source = "git+https://github.com/teamofsilicons/space-station?rev=13060076eaaee8adc82e42e2a4c82515751810de#13060076eaaee8adc82e42e2a4c82515751810de"
 dependencies = [
  "libc",
  "serde",
  "serde_json",
- "space-station-shared",
+ "space-station-shared 0.1.1 (git+https://github.com/teamofsilicons/space-station?rev=13060076eaaee8adc82e42e2a4c82515751810de)",
  "sysinfo",
  "tungstenite",
  "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "space-station-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f76ad739efabec005409d87404e9db24fed4a0cdc0f6225dec1e72ce92281afd"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "uuid",
 ]
 
@@ -3438,7 +3469,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

@@ -193,7 +193,7 @@ async fn claim_receipt(
     .bind(org_id)
     .bind(&event.event_type)
     .bind(&event.aggregate_type)
-    .bind(event.aggregate_id.to_string())
+    .bind(&event.aggregate_id)
     .bind(i64::try_from(event.aggregate_version).map_err(decode_error)?)
     .bind(webhook.signature_timestamp)
     .bind(webhook.payload_sha256.as_slice())
@@ -319,8 +319,7 @@ async fn apply_member(
     member: &Value,
 ) -> Result<WebhookApplyOutcome, AppError> {
     let resource = member.get("resource").unwrap_or(member);
-    let principal_id = required_uuid(resource, "principal_id", "invalid_iam_membership_payload")?;
-    let membership_id = required_uuid(resource, "id", "invalid_iam_membership_payload")?;
+    let resource_id = required_uuid(resource, "id", "invalid_iam_membership_payload")?;
     let version = required_positive_version(resource, "invalid_iam_membership_payload")?;
     let actor_type = required_string(
         resource,
@@ -346,42 +345,11 @@ async fn apply_member(
         return Err(AppError::validation("invalid_iam_membership_payload"));
     }
 
-    let actor_id = member
-        .pointer("/principal/public_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty());
-    let existing_actor = if actor_id.is_none() {
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT actor_type, actor_id FROM briefcase.organization_members \
-              WHERE org_id = briefcase.current_org_id() \
-                AND principal_id = $1 AND membership_id = $2",
-        )
-        .bind(principal_id)
-        .bind(membership_id)
-        .fetch_optional(&mut **transaction)
-        .await?
-    } else {
-        None
-    };
-    let actor_id = actor_id.or_else(|| {
-        existing_actor
-            .as_ref()
-            .map(|(_, actor_id)| actor_id.as_str())
-    });
-    // A before-only authorization tombstone can legitimately omit the public
-    // profile. If Briefcase never held that member, there is no local authority
-    // to revoke and the tombstone is already satisfied.
-    if status == "removed" && actor_id.is_none() {
+    let Some((actor_id, principal_id, membership_id)) =
+        member_identity_keys(transaction, member, actor_type, status, resource_id).await?
+    else {
         return Ok(WebhookApplyOutcome::Applied);
-    }
-    let actor_id =
-        actor_id.ok_or_else(|| AppError::validation("invalid_iam_membership_payload"))?;
-    if existing_actor
-        .as_ref()
-        .is_some_and(|(existing_type, _)| existing_type != actor_type)
-    {
-        return Err(AppError::validation("invalid_iam_membership_payload"));
-    }
+    };
 
     let role = member.pointer("/roles/org_role").and_then(Value::as_str);
     if let Some(role) = role {
@@ -389,7 +357,7 @@ async fn apply_member(
     }
     let projection = MemberProjection {
         actor_type,
-        actor_id,
+        actor_id: &actor_id,
         principal_id,
         membership_id,
         authorization_epoch,
@@ -403,11 +371,95 @@ async fn apply_member(
     }
 
     if status == "removed" {
-        delete_member_tags(transaction, actor_type, actor_id).await?;
+        delete_member_tags(transaction, actor_type, &actor_id).await?;
     } else if let Some(tags) = tags {
-        replace_member_tags(transaction, actor_type, actor_id, tags, version).await?;
+        replace_member_tags(transaction, actor_type, &actor_id, tags, version).await?;
     }
     Ok(WebhookApplyOutcome::Applied)
+}
+
+async fn member_identity_keys(
+    transaction: &mut Transaction<'_, Postgres>,
+    member: &Value,
+    actor_type: &str,
+    status: &str,
+    resource_id: uuid::Uuid,
+) -> Result<Option<(String, uuid::Uuid, uuid::Uuid)>, AppError> {
+    let resource = member.get("resource").unwrap_or(member);
+    let (stored_org,environment): (String,Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT briefcase.current_org_id(),NULLIF(current_setting('briefcase.testing_environment_id',true),'')::uuid",
+    ).fetch_one(&mut **transaction).await?;
+    let public_org = if let Some(environment) = environment {
+        stored_org
+            .strip_prefix(&format!("{environment}:"))
+            .ok_or_else(|| AppError::validation("invalid_iam_membership_environment"))?
+    } else {
+        stored_org.as_str()
+    };
+    let canonical_member = resource.get("membership_id").and_then(Value::as_str);
+    let member_actor =
+        canonical_member.and_then(|member| member.strip_suffix(&format!("[{public_org}]")));
+    if canonical_member.is_some() && member_actor.is_none() {
+        return Err(AppError::validation("invalid_iam_membership_payload"));
+    }
+    let disclosed_actor = member
+        .pointer("/principal/public_id")
+        .and_then(Value::as_str);
+    if disclosed_actor
+        .zip(member_actor)
+        .is_some_and(|(first, second)| first != second)
+    {
+        return Err(AppError::validation("invalid_iam_membership_payload"));
+    }
+    // A retained minimal notification can omit the public profile. Its
+    // resource UUID can only identify a previously stored, same-tenant member.
+    let existing_actor = if disclosed_actor.or(member_actor).is_none() {
+        sqlx::query_as::<_,(String,String)>(
+            "SELECT actor_type,actor_id FROM briefcase.organization_members WHERE org_id=briefcase.current_org_id() AND membership_id=$1",
+        ).bind(resource_id).fetch_optional(&mut **transaction).await?
+    } else {
+        None
+    };
+    let actor_id = disclosed_actor
+        .or(member_actor)
+        .or_else(|| existing_actor.as_ref().map(|(_, id)| id.as_str()));
+    if status == "removed" && actor_id.is_none() {
+        return Ok(None);
+    }
+    let actor_id =
+        actor_id.ok_or_else(|| AppError::validation("invalid_iam_membership_payload"))?;
+    if !crate::infrastructure::iam::valid_public_identity(actor_type, actor_id)
+        || existing_actor
+            .as_ref()
+            .is_some_and(|(kind, _)| kind != actor_type)
+    {
+        return Err(AppError::validation("invalid_iam_membership_payload"));
+    }
+    let canonical_member = format!("{actor_id}[{public_org}]");
+    let principal_id =
+        resolve_projection_identity(transaction, environment, actor_type, actor_id).await?;
+    let membership_id =
+        resolve_projection_identity(transaction, environment, "membership", &canonical_member)
+            .await?;
+
+    Ok(Some((actor_id.to_owned(), principal_id, membership_id)))
+}
+
+async fn resolve_projection_identity(
+    transaction: &mut Transaction<'_, Postgres>,
+    environment: Option<uuid::Uuid>,
+    kind: &str,
+    public_id: &str,
+) -> Result<uuid::Uuid, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT briefcase.resolve_iam_identity_key($1,$2,$3,$4)")
+            .bind(environment.unwrap_or(uuid::Uuid::nil()))
+            .bind(kind)
+            .bind(public_id)
+            .bind(uuid::Uuid::now_v7())
+            .fetch_one(&mut **transaction)
+            .await?,
+    )
 }
 
 async fn upsert_member(
@@ -656,6 +708,44 @@ mod tests {
         storage_organization_id,
     };
 
+    #[tokio::test]
+    async fn canonical_webhook_projection_preserves_owner_keys() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("BRIEFCASE_CANONICAL_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let pool = sqlx::PgPool::connect(&url).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql("SET LOCAL ROLE briefcase_api; SET LOCAL briefcase.org_id='alpha'; SET LOCAL briefcase.testing_environment_id=''").execute(&mut *tx).await?;
+        let before:(Uuid,Uuid)=sqlx::query_as("SELECT principal_id,membership_id FROM briefcase.organization_members WHERE org_id='alpha' AND actor_id='person'").fetch_one(&mut *tx).await?;
+        let active = json!({
+            "resource":{"id":before.1,"membership_id":"person[alpha]","principal_type":"carbon","version":7},
+            "principal":{"public_id":"person"},"membership":{"authorization_epoch":2,"tags":[]},"roles":{"org_role":"member"}
+        });
+        assert_eq!(
+            super::apply_member(&mut tx, &active).await?,
+            WebhookApplyOutcome::Applied
+        );
+        let removed = json!({"resource":{"id":before.1,"membership_id":"person[alpha]","principal_type":"carbon","version":8,"status":"removed"}});
+        assert_eq!(
+            super::apply_member(&mut tx, &removed).await?,
+            WebhookApplyOutcome::Applied
+        );
+        let retained = json!({"resource":{"id":before.1,"principal_id":before.0,"principal_type":"carbon","version":9,"status":"removed"}});
+        assert_eq!(
+            super::apply_member(&mut tx, &retained).await?,
+            WebhookApplyOutcome::Applied
+        );
+        let after:(Uuid,Uuid,String)=sqlx::query_as("SELECT principal_id,membership_id,membership_status FROM briefcase.organization_members WHERE org_id='alpha' AND actor_id='person'").fetch_one(&mut *tx).await?;
+        assert_eq!((after.0, after.1), before);
+        assert_eq!(after.2, "removed");
+        let mut foreign = removed;
+        foreign["resource"]["membership_id"] = json!("person[other]");
+        assert!(super::apply_member(&mut tx, &foreign).await.is_err());
+        tx.rollback().await?;
+        pool.close().await;
+        Ok(())
+    }
+
     #[test]
     fn test_environment_organization_ids_are_namespaced() {
         let environment_id = Uuid::parse_str("01990a9d-86f1-7000-8000-000000000099")
@@ -716,7 +806,7 @@ mod tests {
 
         let suffix = Uuid::new_v4().simple().to_string();
         let org_id = format!("wh-{suffix}");
-        let actor_id = format!("carbon:{suffix}");
+        let actor_id = format!("carbon-{suffix}");
         let organization_id = Uuid::now_v7();
         let membership_id = Uuid::now_v7();
         let principal_id = Uuid::now_v7();
@@ -725,7 +815,7 @@ mod tests {
             spec_version: "1.0".to_owned(),
             schema_version: 1,
             aggregate_version: 1,
-            aggregate_id: membership_id,
+            aggregate_id: membership_id.to_string(),
             aggregate_type: "membership".to_owned(),
             event_type: "organization.membership.updated.v1".to_owned(),
             organization_id: Some(organization_id),

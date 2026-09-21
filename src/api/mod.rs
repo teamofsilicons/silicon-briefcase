@@ -126,8 +126,11 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         Arc::clone(&object_store),
         settings.s3.temporary_directory.clone(),
     ));
+    let iam = IamClient::connect(&settings.iam)
+        .await?
+        .with_identity_databases(database.clone(), test_database.clone());
     let state = AppState {
-        iam: Arc::new(IamClient::connect(&settings.iam).await?),
+        iam: Arc::new(iam),
         metadata: MetadataService::new(metadata_repository),
         content,
         content_adapter: concrete_content,

@@ -57,7 +57,7 @@ impl IamClient {
             resilience::introspect(|| async { client.oauth().introspect(&request, None).await })
                 .await?;
         session_identity(
-            self.convert(response)?,
+            self.convert(self.prepare(response, environment).await?)?,
             self.application_identity(environment).0,
             environment,
         )
@@ -104,6 +104,7 @@ impl IamClient {
                 .map_err(|_| IamClientBuildError::InvalidIdentifier)?,
             service_app_secret: settings.app_secret.clone(),
             max_response_bytes: settings.max_response_bytes.get(),
+            identity_keys: super::canonical::IdentityKeys::unconfigured(),
         })
     }
 
@@ -111,7 +112,9 @@ impl IamClient {
     pub(crate) fn new_without_handshake(
         settings: &IamSettings,
     ) -> Result<Self, IamClientBuildError> {
-        Self::build(settings)
+        let mut client = Self::build(settings)?;
+        client.identity_keys = super::canonical::IdentityKeys::for_tests();
+        Ok(client)
     }
 
     fn scoped_client(
@@ -138,7 +141,7 @@ impl IamClient {
         }
     }
 
-    fn application_identity<'a>(
+    pub(super) fn application_identity<'a>(
         &'a self,
         environment: Option<&'a IamEnvironmentCredential>,
     ) -> (&'a ApplicationId, &'a SecretString) {
@@ -244,7 +247,10 @@ impl IamClient {
             )
             .await
             .map_err(|error| sdk_error(error, Operation::Token))?;
-        let tokens = validate_application_tokens(self.convert(tokens)?, None)?;
+        let tokens = validate_application_tokens(
+            self.convert(self.prepare(tokens, environment).await?)?,
+            None,
+        )?;
         if expected_actor
             .as_ref()
             .is_some_and(|actor| actor != tokens.actor())
@@ -321,7 +327,10 @@ impl IamClient {
             )
             .await
             .map_err(|error| sdk_error(error, Operation::Token))?;
-        validate_application_tokens(self.convert(tokens)?, None)
+        validate_application_tokens(
+            self.convert(self.prepare(tokens, environment).await?)?,
+            None,
+        )
     }
 
     /// Gets current token authority, including synchronous membership facts.
@@ -346,14 +355,19 @@ impl IamClient {
                 .await
         })
         .await?;
-        let snapshot = response.authorization.clone();
-        let scopes = response.scope.clone();
+        let response = self.prepare(response, environment).await?;
+        let snapshot = response.get("authorization").cloned();
+        let scopes = response
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let mut verified = validate_introspection(
             self.convert(response)?,
             expected_organization,
             self.application_identity(environment).0,
         )?;
-        let snapshot = snapshot.ok_or_else(|| invalid_response("authorization_missing"))?;
+        let snapshot: super::canonical::LocalAuthorization =
+            self.convert(snapshot.ok_or_else(|| invalid_response("authorization_missing"))?)?;
         if snapshot.principal_id != verified.principal_id
             || snapshot.membership_id != verified.membership_id
             || snapshot.authorization_epoch != verified.authorization_epoch
@@ -401,8 +415,12 @@ impl IamClient {
             .verify(&request)
             .await
             .map_err(|error| sdk_error(error, Operation::Obo))?;
-        let snapshot = response.authorization.clone();
-        if snapshot.principal_id != response.actor.principal_id {
+        let response = self.prepare(response, environment).await?;
+        let snapshot: super::canonical::LocalAuthorization =
+            self.convert(response["authorization"].clone())?;
+        if serde_json::to_value(snapshot.principal_id).ok().as_ref()
+            != response.pointer("/actor/principal_id")
+        {
             return Err(binding_mismatch("authorization.principal"));
         }
         let mut verified = validate_obo(
@@ -488,7 +506,7 @@ fn sdk_error(error: silicon_iam_client::Error, operation: Operation) -> IamClien
 }
 
 pub(super) fn session_identity(
-    response: models::TokenIntrospection,
+    response: super::canonical::LocalIntrospection,
     audience: &ApplicationId,
     environment: Option<&IamEnvironmentCredential>,
 ) -> Result<IamSessionIdentity, IamClientError> {
@@ -525,7 +543,7 @@ pub(super) fn session_identity(
     let mut identity = IamSessionIdentity {
         principal_id,
         actor_kind,
-        public_id: None,
+        public_id: response.public_id,
         organizations: Vec::new(),
         expires_at,
     };
@@ -566,7 +584,7 @@ pub(super) fn session_identity(
 }
 
 fn authorization(
-    snapshot: models::ApplicationAuthorization,
+    snapshot: super::canonical::LocalAuthorization,
     audience: &ApplicationId,
     organization: &OrganizationId,
     environment: Option<&IamEnvironmentCredential>,

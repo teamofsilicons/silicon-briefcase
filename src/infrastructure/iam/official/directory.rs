@@ -10,7 +10,7 @@ struct MemberPage {
 }
 #[derive(Deserialize)]
 struct DirectoryMember {
-    id: Uuid,
+    id: String,
     org_id: String,
     principal: models::ActorRef,
     status: models::MembershipStatus,
@@ -73,6 +73,15 @@ impl IamClient {
                     models::ActorRefType::Silicon => ActorKind::Silicon,
                     _ => return Err(invalid_response("directory.actor_type")),
                 };
+                if !super::super::valid_public_identity(
+                    match kind {
+                        ActorKind::Carbon => "carbon",
+                        ActorKind::Silicon => "silicon",
+                    },
+                    &member.principal.public_id,
+                ) {
+                    return Err(invalid_response("directory.public_id"));
+                }
                 let actor = ActorRef::new(
                     kind,
                     ActorId::new(member.principal.public_id.clone())
@@ -85,12 +94,16 @@ impl IamClient {
                     {
                         return Err(invalid_response("directory.duplicate_member"));
                     }
-                    found.push(directory_member(
-                        member,
-                        actor,
-                        caller.organization_id(),
-                        binding.organization_id,
-                    )?);
+                    found.push(
+                        self.resolve_directory_member(
+                            member,
+                            actor,
+                            caller.organization_id(),
+                            binding.organization_id,
+                            environment,
+                        )
+                        .await?,
+                    );
                 }
             }
             if !recipients.is_empty()
@@ -118,6 +131,45 @@ impl IamClient {
         }
         Err(invalid_response("directory.page_budget"))
     }
+    async fn resolve_directory_member(
+        &self,
+        member: DirectoryMember,
+        actor: ActorRef,
+        organization: &OrganizationId,
+        organization_id: Uuid,
+        environment: Option<&IamEnvironmentCredential>,
+    ) -> Result<RequestAuthContext, IamClientError> {
+        if member.id != format!("{}[{}]", member.principal.public_id, member.org_id) {
+            return Err(binding_mismatch("directory.membership_id"));
+        }
+        let selected = environment.and_then(|env| env.environment_id);
+        if environment.is_some() && selected.is_none() {
+            return Err(binding_mismatch("directory.environment"));
+        }
+        let principal_id = self
+            .identity_keys
+            .resolve(
+                selected,
+                match actor.kind() {
+                    ActorKind::Carbon => "carbon",
+                    ActorKind::Silicon => "silicon",
+                },
+                &member.principal.public_id,
+            )
+            .await?;
+        let membership_id = self
+            .identity_keys
+            .resolve(selected, "membership", &member.id)
+            .await?;
+        directory_member(
+            member,
+            actor,
+            organization,
+            organization_id,
+            principal_id,
+            membership_id,
+        )
+    }
 }
 
 fn directory_member(
@@ -125,11 +177,13 @@ fn directory_member(
     actor: ActorRef,
     organization: &OrganizationId,
     organization_id: Uuid,
+    principal_id: Uuid,
+    membership_id: Uuid,
 ) -> Result<RequestAuthContext, IamClientError> {
     if member.status != models::MembershipStatus::Active
         || member.removed_at.is_some()
-        || member.id.is_nil()
-        || member.principal.principal_id.is_nil()
+        || principal_id.is_nil()
+        || membership_id.is_nil()
         || member.version < 1
         || member.authorization_epoch < 1
     {
@@ -164,8 +218,8 @@ fn directory_member(
     )
     .with_iam_binding(IamMembershipBinding {
         organization_id,
-        principal_id: member.principal.principal_id,
-        membership_id: member.id,
+        principal_id,
+        membership_id,
         membership_version: member.version,
         authorization_epoch: member.authorization_epoch,
         tags: Some(tags),

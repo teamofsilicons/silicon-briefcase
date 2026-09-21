@@ -1,4 +1,4 @@
-//! Fail-closed domain adapter around official `silicon-iam-client` 1.8.
+//! Fail-closed domain adapter around official `silicon-iam-client` 3.0.
 //!
 //! IAM publishes token-introspection and OBO verification contracts.
 //! This adapter keeps those wire types isolated from Briefcase domain types and
@@ -49,12 +49,13 @@ pub struct IamClient {
     service_app_id: ApplicationId,
     service_app_secret: SecretString,
     max_response_bytes: usize,
+    identity_keys: canonical::IdentityKeys,
 }
 
 /// Live session identity, independent of any selected organization.
 #[derive(Debug)]
 pub struct IamSessionIdentity {
-    /// Stable Carbon or Silicon principal UUID.
+    /// Briefcase-owned key bound to the canonical Carbon or Silicon ID.
     pub principal_id: Uuid,
     /// Kind of the authenticated actor.
     pub actor_kind: ActorKind,
@@ -303,7 +304,9 @@ pub enum IamClientError {
     },
 }
 
+mod canonical;
 mod official;
+pub(crate) use canonical::valid_public_identity;
 fn valid_server_version_catalog(versions: &[String]) -> bool {
     if versions.is_empty() || versions.len() > 16 {
         return false;
@@ -879,7 +882,7 @@ mod tests {
         let identity = client
             .inspect_session(&SecretString::from(BEARER_TOKEN.to_owned()), None)
             .await?;
-        assert_eq!(identity.principal_id.to_string(), PRINCIPAL_ID);
+        assert!(!identity.principal_id.is_nil());
         assert_eq!(identity.public_id.as_deref(), Some("carbon-a"));
         assert_eq!(identity.organizations, vec![organization()]);
         for request in server.received_requests().await.unwrap_or_default() {
@@ -889,41 +892,48 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn login_identity_accepts_both_actor_types_and_empty_grants() -> anyhow::Result<()> {
-        for kind in ["carbon", "silicon"] {
+    #[tokio::test]
+    async fn login_identity_accepts_both_actor_types_and_empty_grants() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        for (kind, public_id) in [("carbon", "carbon-a"), ("silicon", "agent:tos")] {
             let mut body = login_inspection_response();
             body["actor_type"] = json!(kind);
+            body["public_id"] = json!(public_id);
             body["authorizations"][0]["actor_type"] = json!(kind);
+            body["authorizations"][0]["public_id"] = json!(public_id);
+            body["authorizations"][0]["membership_id"] = json!(format!("{public_id}[tos]"));
             let identity = super::official::session_identity(
-                serde_json::from_value(body.clone())?,
+                serde_json::from_value(client.prepare(body.clone(), None).await?)?,
                 &audience(),
                 None,
             )?;
             assert_eq!(serde_json::to_value(identity.actor_kind)?, json!(kind));
-            assert!(identity.public_id.is_some());
+            let key = identity.principal_id;
             body["authorizations"] = json!([]);
             let identity = super::official::session_identity(
-                serde_json::from_value(body)?,
+                serde_json::from_value(client.prepare(body, None).await?)?,
                 &audience(),
                 None,
             )?;
             assert!(identity.organizations.is_empty());
-            assert!(identity.public_id.is_none());
-            assert_eq!(identity.principal_id.to_string(), PRINCIPAL_ID);
+            assert_eq!(identity.public_id.as_deref(), Some(public_id));
+            assert_eq!(identity.principal_id, key);
         }
         Ok(())
     }
 
-    #[test]
-    fn login_identity_rejects_inactive_expired_and_mismatched_authority() -> anyhow::Result<()> {
-        let mut cases = Vec::new();
-        cases.push(json!({"active": false}));
+    #[tokio::test]
+    async fn login_identity_rejects_inactive_expired_and_mismatched_authority() -> anyhow::Result<()>
+    {
+        let server = MockServer::start().await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        let mut cases = vec![json!({"active": false})];
         for (field, value) in [
             ("expires_at", json!(0)),
             ("audience", json!("other>app")),
             ("client_id", json!("other>app")),
-            ("principal_id", json!(uuid::Uuid::nil())),
+            ("public_id", json!("other")),
             ("actor_type", json!("unknown")),
             ("authorizations", serde_json::Value::Null),
         ] {
@@ -932,7 +942,7 @@ mod tests {
             cases.push(body);
         }
         for (field, value) in [
-            ("principal_id", json!(uuid::Uuid::nil())),
+            ("public_id", json!(uuid::Uuid::nil())),
             ("actor_type", json!("silicon")),
             ("testing_environment_id", json!(TEST_ENVIRONMENT_ID)),
             ("audience", json!("other>app")),
@@ -943,20 +953,69 @@ mod tests {
             cases.push(body);
         }
         for body in cases {
-            assert!(
-                super::official::session_identity(serde_json::from_value(body)?, &audience(), None)
+            if let Ok(prepared) = client.prepare(body, None).await {
+                assert!(
+                    super::official::session_identity(
+                        serde_json::from_value(prepared)?,
+                        &audience(),
+                        None
+                    )
                     .is_err()
-            );
+                );
+            }
         }
+        let environment = environment_credential();
         let mut body = login_inspection_response();
         body["authorizations"][0]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
+        body["authorizations"][0]["audience"] = json!(TEST_APP_ID);
+        body["client_id"] = json!(TEST_APP_ID);
+        body["audience"] = json!(TEST_APP_ID);
+        let prepared = client.prepare(body, Some(&environment)).await?;
         assert!(
             super::official::session_identity(
-                serde_json::from_value(body)?,
-                &audience(),
-                Some(&environment_credential())
+                serde_json::from_value(prepared)?,
+                &environment.app_id,
+                Some(&environment)
             )
             .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_keys_are_stable_scoped_and_never_authenticated_by_private_uuid()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let client = IamClient::new_without_handshake(&client_settings(&server))?;
+        let legacy = login_inspection_response();
+        let production = client.prepare(legacy.clone(), None).await?;
+        let mut canonical = legacy.clone();
+        canonical
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("fixture"))?
+            .remove("principal_id");
+        canonical["public_id"] = json!("carbon-a");
+        assert_eq!(
+            client.prepare(canonical.clone(), None).await?["principal_id"],
+            production["principal_id"]
+        );
+        canonical["public_id"] = json!("other-carbon");
+        assert!(client.prepare(canonical, None).await.is_err());
+        let mut undisclosed = legacy.clone();
+        undisclosed["authorizations"] = json!([]);
+        assert!(client.prepare(undisclosed, None).await.is_err());
+        let environment = environment_credential();
+        let mut testing = legacy;
+        testing["client_id"] = json!(TEST_APP_ID);
+        testing["audience"] = json!(TEST_APP_ID);
+        testing["authorizations"][0]["audience"] = json!(TEST_APP_ID);
+        testing["authorizations"][0]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
+        assert!(client.prepare(testing.clone(), None).await.is_err());
+        let testing = client.prepare(testing, Some(&environment)).await?;
+        assert_ne!(testing["principal_id"], production["principal_id"]);
+        assert_ne!(
+            testing["authorizations"][0]["membership_id"],
+            production["authorizations"][0]["membership_id"]
         );
         Ok(())
     }
@@ -996,7 +1055,7 @@ mod tests {
             "public_id": "carbon-a",
             "organization_id": "01990a9d-86f1-7000-8000-000000000099",
             "org_id": "tos",
-            "membership_id": MEMBERSHIP_ID,
+            "membership_id": "carbon-a[tos]",
             "membership_version": 7,
             "authorization_epoch": 7,
             "audience": audience,
@@ -1258,7 +1317,7 @@ mod tests {
                         "actor_type": "carbon",
                         "client_id": IAM_APP_ID,
                         "org_id": "tos",
-                        "membership_id": MEMBERSHIP_ID,
+                        "membership_id": "carbon-a[tos]",
                         "session_id": SESSION_ID,
                         "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": IAM_APP_ID,
@@ -1283,8 +1342,8 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("published bearer exchange should verify: {error}"));
 
-        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
-        assert_eq!(verified.membership_id().to_string(), MEMBERSHIP_ID);
+        assert!(!verified.principal_id().is_nil());
+        assert!(!verified.membership_id().is_nil());
         server.verify().await;
     }
 
@@ -1311,7 +1370,7 @@ mod tests {
                         "actor_type": "carbon",
                         "client_id": TEST_APP_ID,
                         "org_id": "tos",
-                        "membership_id": MEMBERSHIP_ID,
+                        "membership_id": "carbon-a[tos]",
                         "session_id": SESSION_ID,
                         "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": TEST_APP_ID,
@@ -1358,7 +1417,7 @@ mod tests {
             .respond_with(move |_: &wiremock::Request| {
                 let response = ResponseTemplate::new(200).set_body_json(json!({
                     "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
-                    "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": MEMBERSHIP_ID,
+                    "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": "carbon-a[tos]",
                     "session_id": SESSION_ID, "scope": "self.identity.read self.membership.read self.tags.read",
                     "audience": TEST_APP_ID, "authorization": authorization_snapshot(TEST_APP_ID, true),
                     "authorization_epoch": 7, "issued_at": 1_700_000_000_i64, "expires_at": 4_070_908_800_i64
@@ -1377,7 +1436,7 @@ mod tests {
                 Some(&environment_credential()),
             )
             .await?;
-        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
+        assert!(!verified.principal_id().is_nil());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.verify().await;
         Ok(())
@@ -1445,7 +1504,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("published SLT exchange should succeed: {error}"));
 
         assert_eq!(tokens.expires_in_seconds(), 1_800);
-        assert_eq!(tokens.principal_id().to_string(), PRINCIPAL_ID);
+        assert!(!tokens.principal_id().is_nil());
         assert_eq!(tokens.actor().id().as_str(), "carbon-a");
         assert_eq!(
             tokens.organization_id().map(OrganizationId::as_str),
@@ -1492,7 +1551,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("published SLT exchange should succeed: {error}"));
 
         assert_eq!(tokens.expires_in_seconds(), 1_800);
-        assert_eq!(tokens.principal_id().to_string(), PRINCIPAL_ID);
+        assert!(!tokens.principal_id().is_nil());
         assert_eq!(tokens.actor().id().as_str(), "carbon-a");
         assert_eq!(
             tokens.organization_id().map(OrganizationId::as_str),
@@ -1876,7 +1935,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("introspection should verify: {error}"));
 
         assert_eq!(verified.organization_id().as_str(), "tos");
-        assert_eq!(verified.principal_id().to_string(), PRINCIPAL_ID);
+        assert!(!verified.principal_id().is_nil());
     }
 
     #[test]
@@ -2077,7 +2136,7 @@ mod tests {
 
     fn directory_fixture(removed: bool) -> serde_json::Value {
         json!({
-            "id": MEMBERSHIP_ID, "org_id": "tos",
+            "id": "carbon-a[tos]", "org_id": "tos",
             "principal": {"principal_id": PRINCIPAL_ID, "type": "carbon", "public_id": "carbon-a"},
             "status": if removed { "removed" } else { "active" }, "org_role": "member",
             "tags": [], "removed_at": if removed { Some("2026-09-14T12:34:56.123456Z") } else { None },
@@ -2149,11 +2208,10 @@ mod tests {
                     .await??
                     .ok_or_else(|| anyhow::anyhow!("active recipient missing"))?;
             assert_eq!(contexts.len(), 1);
-            assert_eq!(
+            assert!(
                 contexts[0]
                     .iam_binding()
-                    .map(|binding| binding.membership_id.to_string()),
-                Some(MEMBERSHIP_ID.to_owned())
+                    .is_some_and(|binding| !binding.membership_id.is_nil())
             );
         }
         Ok(())
