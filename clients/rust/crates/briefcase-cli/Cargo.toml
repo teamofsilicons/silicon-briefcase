@@ -17,6 +17,10 @@ authors.workspace = true
 name = "briefcase"
 path = "src/main.rs"
 
+[features]
+# Honeycomb owns binary updates for published native packages.
+honeycomb-managed = []
+
 [dependencies]
 briefcase-client.workspace = true
 clap = { version = "4.5.51", features = ["derive", "env", "wrap_help"] }

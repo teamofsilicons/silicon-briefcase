@@ -30,6 +30,9 @@ pub enum Outcome {
 
 /// Runs maintenance for a registered Silicon home without changing process environment.
 pub async fn automatic_for_state(state: &StateDirectory) -> Result<Outcome, CliError> {
+    if cfg!(feature = "honeycomb-managed") {
+        return Ok(Outcome::Skipped);
+    }
     let configuration = state.configuration()?;
     if !environment_switch().unwrap_or(configuration.auto_update) {
         return Ok(Outcome::Skipped);
@@ -51,6 +54,11 @@ pub async fn automatic_for_state(state: &StateDirectory) -> Result<Outcome, CliE
 ///
 /// Returns an error when crates.io, Cargo, or local state cannot be used.
 pub async fn update_now() -> Result<Outcome, CliError> {
+    if cfg!(feature = "honeycomb-managed") {
+        return Err(CliError::Usage(
+            "Honeycomb manages this installation; run `honeycomb update 'tos>briefcase'`".into(),
+        ));
+    }
     let state = StateDirectory::at(crate::daemon::root()?.join("installation"));
     let _lock = state.try_lock_update()?.ok_or_else(|| {
         CliError::Usage(
