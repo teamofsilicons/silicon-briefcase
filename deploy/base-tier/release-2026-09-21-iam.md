@@ -32,3 +32,13 @@ Verification before the canonical IAM switch:
 Eight older retained testing credentials were rejected directly by the preceding IAM service at discovery. They were not reset or rotated. Their stored ownership bindings were still imported and verified. An actual previously pending delegated upload was not completed during rollout; its retained bindings were verified, and the upload authority paths are covered by the regression suite.
 
 Deployment command: 0693de62-3cb7-42d5-9f1d-52a8601083af. Protected rollout state and backup manifests are retained on the host under `/var/lib/silicon-briefcase/releases/iam3-5247cc1-20260921-r2`. No credentials or identity export are committed to the repository.
+
+Verification after canonical IAM went live at revision `deea75e3d8f9b331bf9ef25e5d39c6546ed5a9fd`:
+
+- Immediately before the switch, normal refresh of the existing Maharaj and controlled testing families produced access tokens expiring at 11:02:47UTC and 11:02:50UTC. No new login was used. Both sessions read their 3 existing entries.
+- After the switch, those exact unexpired access tokens returned authentication status 200 and entry-list status 200. Local owner UUIDs stayed identical, and the production entry payload matched the original baseline.
+- The retained controlled testing refresh family returned 200 and its new access token read successfully. Exact retries of both the pre-switch and post-switch refresh requests returned the same access tokens, refresh tokens, and local owner keys.
+- The testing token remained rejected by the production route with 401.
+- Maharaj's Silicon connection list was unchanged and `silicon ping chef:bricks` reported online. No reconnect or registration replacement was performed.
+
+The successful IAM cutover command has the SSM ID prefix `d3aee19c`. Private session baselines and response evidence are retained under `/tmp/briefcase-iam3-release/retry`; token values are excluded from this record.
