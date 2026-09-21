@@ -6,8 +6,6 @@ for --testing-environment-id. Default rolls back; --apply commits verified bindi
 Identity export contents and connection secrets are never logged.
 """
 import argparse
-import csv
-import io
 import json
 import os
 import subprocess
@@ -59,30 +57,35 @@ def database_environment():
 
 def statement(rows, environment, apply):
     selected = environment or str(uuid.UUID(int=0))
-    data = io.StringIO()
-    csv.writer(data, lineterminator="\n").writerows(rows)
+    public_keys = {(kind, public) for kind, public, _ in rows}
+    local_keys = {(kind, local) for kind, _, local in rows}
+    if len(public_keys) != len(rows) or len(local_keys) != len(rows):
+        raise ValueError("trusted export contains conflicting identity bindings")
+    payload = json.dumps([dict(identity_kind=kind, public_id=public, local_id=local)
+        for kind, public, local in rows], separators=(",", ":")).replace("'", "''")
+    relation = f"SELECT * FROM jsonb_to_recordset('{payload}'::jsonb) AS imported(identity_kind text,public_id text,local_id uuid)"
     return f'''BEGIN;
+SET LOCAL standard_conforming_strings = on;
 SELECT set_config('briefcase.testing_environment_id','{environment or ""}',true);
 LOCK TABLE briefcase.iam_identity_bindings IN EXCLUSIVE MODE;
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM briefcase.iam_identity_backfill WHERE environment_id='{selected}') THEN
  RAISE EXCEPTION 'selected environment has no retained legacy bindings; verify database and environment'; END IF;
 END $$;
-CREATE TEMP TABLE identity_import(identity_kind text,public_id text,local_id uuid,
- PRIMARY KEY(identity_kind,public_id),UNIQUE(identity_kind,local_id)) ON COMMIT DROP;
-COPY identity_import FROM STDIN WITH(FORMAT csv);
-{data.getvalue()}\\.
 DO $$ BEGIN
- IF EXISTS(SELECT 1 FROM identity_import i JOIN briefcase.iam_identity_bindings b
+ IF EXISTS(WITH identity_import AS ({relation})
+ SELECT 1 FROM identity_import i JOIN briefcase.iam_identity_bindings b
  ON b.environment_id='{selected}' AND b.identity_kind=i.identity_kind
  AND (b.public_id=i.public_id OR b.local_id=i.local_id)
  WHERE b.public_id<>i.public_id OR b.local_id<>i.local_id) THEN
  RAISE EXCEPTION 'existing identity binding conflicts with trusted export'; END IF;
- IF EXISTS(SELECT 1 FROM briefcase.iam_identity_bindings b WHERE b.environment_id='{selected}'
+ IF EXISTS(WITH identity_import AS ({relation})
+ SELECT 1 FROM briefcase.iam_identity_bindings b WHERE b.environment_id='{selected}'
  AND NOT EXISTS(SELECT 1 FROM identity_import i WHERE i.identity_kind=b.identity_kind
  AND i.public_id=b.public_id AND i.local_id=b.local_id)) THEN
  RAISE EXCEPTION 'retained identity references missing from trusted export'; END IF;
 END $$;
+WITH identity_import AS ({relation})
 INSERT INTO briefcase.iam_identity_bindings
  SELECT '{selected}',identity_kind,public_id,local_id FROM identity_import
  ON CONFLICT(environment_id,identity_kind,public_id) DO NOTHING;

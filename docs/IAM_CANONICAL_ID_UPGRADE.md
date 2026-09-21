@@ -20,3 +20,5 @@ The import rejects missing historical mappings and conflicts instead of overwrit
 New signed webhook tombstones use `resource.membership_id` to identify the canonical membership. Retained notifications can still locate an existing member through its resource UUID. Profile aggregate keys accept bounded canonical identity strings; organization, event, and membership-resource UUIDs remain unchanged. No webhook cache replaces live IAM authorization.
 
 Validation includes the IAM network/authority suite, a fresh PostgreSQL upgrade under the restricted runtime role, production/test-world key isolation, canonical and retained tombstone projection, and check/apply/recheck plus conflict rollback for the backfill command. Database integration tests use `BRIEFCASE_CANONICAL_TEST_DATABASE_URL` and require a fresh disposable database; do not point them at an existing development or live database.
+
+The importer uses inline JSON recordsets and does not require database `TEMP` privileges. Imported public and local keys must each be unique within their kind.
