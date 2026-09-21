@@ -1,0 +1,41 @@
+name: Build browser release image
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/rust
+      - name: Check the committed browser and CLI sources
+        run: |
+          python3 scripts/sync-cli-docs.py --check
+          cargo test --locked --manifest-path clients/rust/Cargo.toml -p briefcase-cli -p briefcase-web
+          cargo clippy --locked --manifest-path clients/rust/Cargo.toml -p briefcase-cli -p briefcase-web --all-targets -- -D warnings
+      - name: Build browser assets
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Build exact-source ARM64 image
+        run: |
+          docker build --file Dockerfile.browser --label org.opencontainers.image.revision=$GITHUB_SHA --tag briefcase-browser:$GITHUB_SHA .
+          docker image inspect briefcase-browser:$GITHUB_SHA --format '{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
+          docker save briefcase-browser:$GITHUB_SHA | gzip > briefcase-browser.tar.gz
+          sha256sum briefcase-browser.tar.gz > briefcase-browser.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: briefcase-browser-arm64
+          path: briefcase-browser.tar.gz*
+          if-no-files-found: error
