@@ -171,8 +171,10 @@ See [Testing environments](testing-environments.md).
 Session tokens stay in the Rust browser gateway. The browser stores only an
 HttpOnly session cookie and, in a test tab, the public environment ID in
 sessionStorage. Environment app secrets stay on the gateway during test sign-in.
-Signing out of a test session preserves production access. Sessions expire after at most eight hours; gateway
-restarts require signing in again. HTTPS uses Secure, host-only cookies.
+Signing out of a test session preserves production access. The gateway saves
+sessions privately across restarts and refreshes access automatically. Sessions
+last up to IAM's 900-day refresh-family lifetime, subject to IAM revocation and
+browser cookie retention. HTTPS uses Secure, host-only cookies.
 
 See the [browser development guide](../web/README.md) for build commands, local
 preview, origin configuration, and same-origin gateway deployment.

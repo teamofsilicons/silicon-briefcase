@@ -5,6 +5,7 @@ mod files;
 mod organization;
 mod public;
 mod session;
+mod session_store;
 mod staging;
 mod telemetry;
 
@@ -33,6 +34,7 @@ struct App {
     cookie: &'static str,
     secure: bool,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<session::Session>>>>>,
+    session_storage: Option<Arc<session_store::Storage>>,
     login_lock: Arc<Mutex<()>>,
     login_salt: String,
     uploads: Arc<Semaphore>,
@@ -93,9 +95,16 @@ async fn main() -> anyhow::Result<()> {
         "Build the browser assets before running the HTTPS deployment"
     );
     let document_csp = document_policy(html.as_deref().unwrap_or(""))?;
+    let upstream = std::env::var("BRIEFCASE_API_URL")
+        .unwrap_or("https://backend.briefcase.teamofsilicons.com/api/v1/".into());
+    let session_directory = std::env::var_os("BRIEFCASE_WEB_SESSION_DIRECTORY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(".briefcase-web-sessions"));
+    let session_storage = session_store::Storage::open(&session_directory, &upstream, &origin)?;
+    let sessions = session::restore(&session_storage)?;
+    let logins = session_storage.read("logins")?.unwrap_or_default();
     let state = App {
-        upstream: std::env::var("BRIEFCASE_API_URL")
-            .unwrap_or("https://backend.briefcase.teamofsilicons.com/api/v1/".into()),
+        upstream,
         origin,
         cookie: if secure {
             "__Host-briefcase"
@@ -103,12 +112,13 @@ async fn main() -> anyhow::Result<()> {
             "briefcase_dev"
         },
         secure,
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        sessions: Arc::new(Mutex::new(sessions)),
+        session_storage: Some(session_storage.clone()),
         login_lock: Arc::new(Mutex::new(())),
-        login_salt: format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
+        login_salt: session_storage.salt.clone(),
         uploads: Arc::new(Semaphore::new(4)),
         staging: staging::Storage::from_env()?,
-        logins: Default::default(),
+        logins: Arc::new(Mutex::new(logins)),
         document_csp,
     };
     let json_routes = Router::new()

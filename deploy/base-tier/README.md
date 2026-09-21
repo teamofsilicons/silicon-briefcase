@@ -26,10 +26,19 @@ Create `/var/lib/silicon-briefcase/web-staging` owned by `65532:65532`, mode
 `0700`. Install `web-upload.conf` as the systemd drop-in
 `/etc/systemd/system/silicon-briefcase-web.service.d/upload.conf`; update its
 image reference together with each browser release. Run `systemctl daemon-reload`
-and restart the browser service. Browser restarts end in-memory browser sessions;
-users sign in again through IAM.
+and restart the browser service.
 
-The container stays read-only except for its private staging volume and small
+Create `/var/lib/silicon-briefcase/web-sessions` owned by `65532:65532`, mode
+`0700`, for the persistent `BRIEFCASE_WEB_SESSION_DIRECTORY` volume in the same
+drop-in. It contains private IAM credentials and must be retained across image
+updates. The gateway takes an exclusive process lock and verifies the saved API
+and browser origin before loading sessions; run one gateway against this directory.
+Sessions, pending login callbacks, refresh retries, and logout state survive
+restarts. The first upgrade from the old memory-only gateway requires one new
+sign-in because its old sessions were never stored. Local development defaults to
+`.briefcase-web-sessions` in the working directory.
+
+The container stays read-only except for its private staging and session volumes and small
 temporary mount. The gateway checks available filesystem space, reserves an
 additional 1 GiB of headroom, accounts for concurrent uploads, and removes staged
 files after use. Provision disk capacity for the intended upload workload;

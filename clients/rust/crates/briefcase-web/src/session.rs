@@ -11,14 +11,116 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+const SESSION_SECONDS: u32 = 900 * 24 * 60 * 60;
+
+fn storage_failure() -> Failure {
+    Failure(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The session could not be saved. Retry the same action.".into(),
+    )
+}
+
+#[derive(Deserialize, Serialize)]
+struct SavedSession {
+    api: String,
+    auth_org: String,
+    environment: Option<EnvironmentKey>,
+    tokens: SessionTokens,
+    expires: SystemTime,
+    deadline: SystemTime,
+    refresh_key: String,
+    refresh_started_at: Option<SystemTime>,
+    org: Option<String>,
+    organizations: Vec<String>,
+    testing: bool,
+    rejected: bool,
+    test_environment: Option<TestSelection>,
+    test_sessions: std::collections::HashMap<Uuid, String>,
+}
+
+impl Session {
+    fn save(&self) -> Result<()> {
+        let Some((storage, id)) = &self.durable else {
+            return Ok(());
+        };
+        storage
+            .write(
+                id,
+                &SavedSession {
+                    api: self.auth_config.api_base().to_string(),
+                    auth_org: self.auth_config.organization().to_owned(),
+                    environment: self.auth_config.environment().cloned(),
+                    tokens: self.tokens.clone(),
+                    expires: self.expires,
+                    deadline: self.deadline,
+                    refresh_key: self.refresh_key.as_str().to_owned(),
+                    refresh_started_at: self.refresh_started_at,
+                    org: self.org.clone(),
+                    organizations: self.organizations.clone(),
+                    testing: self.testing,
+                    rejected: self.rejected,
+                    test_environment: self.test_environment.clone(),
+                    test_sessions: self.test_sessions.clone(),
+                },
+            )
+            .map_err(|_| storage_failure())
+    }
+}
+
+pub(crate) fn restore(
+    storage: &Arc<crate::session_store::Storage>,
+) -> anyhow::Result<std::collections::HashMap<String, Arc<Mutex<Session>>>> {
+    let mut sessions = std::collections::HashMap::new();
+    for id in storage.identifiers()? {
+        let Some(saved): Option<SavedSession> = storage.read(&id)? else {
+            continue;
+        };
+        if saved.rejected || saved.deadline <= SystemTime::now() {
+            continue;
+        }
+        let mut auth_config = Config::for_sign_in(&saved.api)?.with_auto_update(false);
+        if !saved.auth_org.is_empty() {
+            auth_config = auth_config.with_organization(&saved.auth_org)?;
+        }
+        if let Some(environment) = saved.environment {
+            auth_config = auth_config.with_environment(environment);
+        }
+        let config = match &saved.org {
+            Some(org) => auth_config.clone().with_organization(org)?,
+            None => auth_config.clone(),
+        };
+        sessions.insert(
+            id.clone(),
+            Arc::new(Mutex::new(Session {
+                auth_config,
+                config,
+                tokens: saved.tokens,
+                expires: saved.expires,
+                deadline: saved.deadline,
+                refresh_key: IdempotencyKey::new(saved.refresh_key)?,
+                refresh_started_at: saved.refresh_started_at,
+                durable: Some((storage.clone(), id)),
+                org: saved.org,
+                organizations: saved.organizations,
+                testing: saved.testing,
+                rejected: saved.rejected,
+                test_environment: saved.test_environment,
+                test_sessions: saved.test_sessions,
+            })),
+        );
+    }
+    Ok(sessions)
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct LoginFlow {
     return_to: String,
-    deadline: Instant,
+    deadline: SystemTime,
     operation_id: Uuid,
     telemetry: bool,
 }
@@ -46,7 +148,7 @@ pub(crate) async fn start(
     }
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let mut flows = app.logins.lock().await;
-    flows.retain(|_, flow| flow.deadline > Instant::now());
+    flows.retain(|_, flow| flow.deadline > SystemTime::now());
     if flows.len() >= 256 {
         return Err(Failure(
             StatusCode::TOO_MANY_REQUESTS,
@@ -66,11 +168,16 @@ pub(crate) async fn start(
         nonce.clone(),
         LoginFlow {
             return_to,
-            deadline: Instant::now() + Duration::from_secs(600),
+            deadline: SystemTime::now() + Duration::from_secs(600),
             operation_id: Uuid::new_v4(),
             telemetry: crate::telemetry::enabled(&headers),
         },
     );
+    if let Some(storage) = &app.session_storage {
+        storage
+            .write("logins", &*flows)
+            .map_err(|_| storage_failure())?;
+    }
     let cookie = HeaderValue::from_str(&format!(
         "{}-login={nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{}",
         app.cookie,
@@ -133,7 +240,7 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
     let flows = app.logins.lock().await;
     let flow = flows
         .get(nonce)
-        .filter(|f| f.deadline > Instant::now())
+        .filter(|f| f.deadline > SystemTime::now())
         .ok_or_else(unauthenticated)?;
     let input = Login {
         org: None,
@@ -170,9 +277,11 @@ pub(crate) struct Session {
     auth_config: Config,
     config: Config,
     tokens: SessionTokens,
-    expires: Instant,
-    deadline: Instant,
+    expires: SystemTime,
+    deadline: SystemTime,
     refresh_key: IdempotencyKey,
+    refresh_started_at: Option<SystemTime>,
+    durable: Option<(Arc<crate::session_store::Storage>, String)>,
     org: Option<String>,
     organizations: Vec<String>,
     testing: bool,
@@ -238,7 +347,7 @@ async fn production_session(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<
         .cloned()
         .ok_or_else(unauthenticated)?;
     let parent = session.lock().await;
-    if parent.deadline <= Instant::now() || parent.rejected || parent.testing {
+    if parent.deadline <= SystemTime::now() || parent.rejected || parent.testing {
         return Err(unauthenticated());
     }
     drop(parent);
@@ -276,7 +385,7 @@ async fn standalone_test(
     let value = session.lock().await;
     if !value.testing
         || value.rejected
-        || value.deadline <= Instant::now()
+        || value.deadline <= SystemTime::now()
         || !value
             .test_environment
             .as_ref()
@@ -345,7 +454,7 @@ pub(crate) async fn login(
     }
     let (id, value) = establish(&app, input, crate::telemetry::enabled(&headers)).await?;
     Ok((
-        [(header::SET_COOKIE, cookie(&app, &id, 28800)?)],
+        [(header::SET_COOKIE, cookie(&app, &id, SESSION_SECONDS)?)],
         Json(value),
     )
         .into_response())
@@ -374,7 +483,7 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
         let mut sessions = app.sessions.lock().await;
         sessions.retain(|_, v| {
             v.try_lock()
-                .map_or(true, |s| s.deadline > Instant::now() && !s.rejected)
+                .map_or(true, |s| s.deadline > SystemTime::now() && !s.rejected)
         });
         if sessions.len() >= 1024 {
             return Err(Failure(
@@ -431,11 +540,16 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
         .unwrap_or_else(|| config.clone());
     let session = Session {
         auth_config,
-        expires: Instant::now() + Duration::from_secs(tokens.expires_in.min(86400)),
-        deadline: Instant::now() + Duration::from_secs(28800),
+        expires: SystemTime::now() + Duration::from_secs(tokens.expires_in.min(86400)),
+        deadline: SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS)),
         config,
         tokens,
         refresh_key: IdempotencyKey::random(),
+        refresh_started_at: None,
+        durable: app
+            .session_storage
+            .clone()
+            .map(|storage| (storage, id.clone())),
         org: session_org,
         organizations,
         testing,
@@ -443,6 +557,7 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
         test_environment: None,
         test_sessions: Default::default(),
     };
+    session.save()?;
     let response = view(&session);
     app.sessions
         .lock()
@@ -462,7 +577,7 @@ pub(crate) async fn select(
     }
     let session = lookup(&app, &headers).await?;
     let mut session = session.lock().await;
-    if session.deadline <= Instant::now() || session.rejected {
+    if session.deadline <= SystemTime::now() || session.rejected {
         return Err(unauthenticated());
     }
     refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
@@ -474,6 +589,7 @@ pub(crate) async fn select(
     }
     session.config = session.auth_config.clone().with_organization(&input.org)?;
     session.org = Some(input.org);
+    session.save()?;
     Ok(Json(view(&session)))
 }
 
@@ -497,7 +613,16 @@ pub(crate) async fn client(app: &App, headers: &HeaderMap) -> Result<Client> {
     Ok(client)
 }
 async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()> {
-    if session.expires <= Instant::now() + Duration::from_secs(30) {
+    for _ in 0..2 {
+        if session.expires > SystemTime::now() + Duration::from_secs(30)
+            && session.refresh_started_at.is_none()
+        {
+            return Ok(());
+        }
+        let started_at = *session
+            .refresh_started_at
+            .get_or_insert_with(SystemTime::now);
+        session.save()?;
         let client = Client::new_unchecked(
             session
                 .auth_config
@@ -510,8 +635,7 @@ async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()>
             .await;
         match result {
             Ok(tokens) => {
-                session.expires =
-                    Instant::now() + Duration::from_secs(tokens.expires_in.min(86400));
+                session.expires = started_at + Duration::from_secs(tokens.expires_in.min(86400));
                 session.organizations = tokens.organizations.clone();
                 if session
                     .org
@@ -525,21 +649,30 @@ async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()>
                 }
                 session.tokens = tokens;
                 session.refresh_key = IdempotencyKey::random();
+                session.refresh_started_at = None;
+                session.save()?;
             }
             Err(error) => {
                 if error.is_unauthenticated() {
                     session.rejected = true;
+                    session.save()?;
                 }
                 return Err(error.into());
             }
         }
+    }
+    if session.expires <= SystemTime::now() + Duration::from_secs(30) {
+        return Err(Failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The recovered session needs renewal. Retry the same action.".into(),
+        ));
     }
     Ok(())
 }
 async fn authenticated_client(app: &App, headers: &HeaderMap) -> Result<Client> {
     let session = lookup(app, headers).await?;
     let mut session = session.lock().await;
-    if session.deadline <= Instant::now() || session.rejected {
+    if session.deadline <= SystemTime::now() || session.rejected {
         return Err(unauthenticated());
     }
     refresh_if_needed(&mut session, crate::telemetry::enabled(headers)).await?;
@@ -560,7 +693,7 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result
     }
     let session = lookup(&app, &headers).await?;
     let mut session = session.lock().await;
-    if session.deadline <= Instant::now() || session.rejected {
+    if session.deadline <= SystemTime::now() || session.rejected {
         return Err(unauthenticated());
     }
     refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
@@ -568,16 +701,18 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result
 }
 pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
     if let Some(environment) = selected_environment(&headers)? {
-        if let Ok(parent) = production_session(&app, &headers).await
-            && let Some(id) = parent.lock().await.test_sessions.remove(&environment)
-        {
-            app.sessions.lock().await.remove(&id);
-            return Ok(Json(json!({"authenticated":false})).into_response());
+        if let Ok(parent) = production_session(&app, &headers).await {
+            let mut parent = parent.lock().await;
+            if let Some(id) = parent.test_sessions.get(&environment).cloned() {
+                reject(&app, &id).await?;
+                parent.test_sessions.remove(&environment);
+                parent.save()?;
+                return Ok(Json(json!({"authenticated":false})).into_response());
+            }
         }
-        let test = standalone_test(&app, &headers, environment).await?;
-        test.lock().await.rejected = true;
+        standalone_test(&app, &headers, environment).await?;
         if let Some(id) = identifier_named(&format!("{}-testing", app.cookie), &headers) {
-            app.sessions.lock().await.remove(&id);
+            reject(&app, &id).await?;
         }
         return Ok((
             [(header::SET_COOKIE, testing_cookie(&app, "", 0)?)],
@@ -586,13 +721,24 @@ pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result
             .into_response());
     }
     if let Some(id) = identifier(&app, &headers) {
-        app.sessions.lock().await.remove(&id);
+        reject(&app, &id).await?;
     }
     Ok((
         [(header::SET_COOKIE, cookie(&app, "", 0)?)],
         Json(json!({"authenticated":false})),
     )
         .into_response())
+}
+
+async fn reject(app: &App, id: &str) -> Result<()> {
+    let session = app.sessions.lock().await.get(id).cloned();
+    if let Some(session) = session {
+        let mut session = session.lock().await;
+        session.rejected = true;
+        session.save()?;
+        app.sessions.lock().await.remove(id);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -632,7 +778,7 @@ pub(crate) async fn enter_test(
         );
         let saved = lookup(&app, &selected).await?;
         let mut saved = saved.lock().await;
-        if saved.deadline <= Instant::now()
+        if saved.deadline <= SystemTime::now()
             || saved.rejected
             || !saved.test_environment.as_ref().is_some_and(|e| {
                 e.version == environment.version && e.key_generation == key.key_generation
@@ -676,7 +822,7 @@ pub(crate) async fn enter_test(
         .cloned()
         .ok_or_else(unauthenticated)?;
     let mut parent = parent.lock().await;
-    if parent.deadline <= Instant::now() || parent.rejected {
+    if parent.deadline <= SystemTime::now() || parent.rejected {
         return Err(unauthenticated());
     }
     let mut child = child.lock().await;
@@ -691,6 +837,8 @@ pub(crate) async fn enter_test(
         key_generation: environment.key_generation,
     });
     parent.test_sessions.insert(id, child_id);
+    child.save()?;
+    parent.save()?;
     Ok(Json(view(&child)))
 }
 
@@ -705,6 +853,7 @@ mod tests {
             cookie: "briefcase_dev",
             secure: false,
             sessions: Default::default(),
+            session_storage: None,
             login_lock: Default::default(),
             login_salt: "unit-test".into(),
             uploads: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -731,10 +880,192 @@ mod tests {
                 "access_token":"test-token","refresh_token":"test-refresh","token_type":"Bearer","expires_in":3600,
                 "scope":"profile","actor":{"principal_id":Uuid::new_v4(),"type":"carbon","public_id":"saket"},
                 "org_id":"tos","organizations":["tos"]
-            })).unwrap(), expires: Instant::now()+Duration::from_secs(3600),deadline:Instant::now()+Duration::from_secs(3600),
-            refresh_key:IdempotencyKey::random(),org:Some("tos".into()),organizations:vec!["tos".into()],
+            })).unwrap(), expires: SystemTime::now()+Duration::from_secs(3600),deadline:SystemTime::now()+Duration::from_secs(3600),
+            refresh_key:IdempotencyKey::random(), refresh_started_at:None, durable:None, org:Some("tos".into()),organizations:vec!["tos".into()],
             testing:test.is_some(),rejected:false,test_environment:environment,test_sessions:Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_production_test_isolation_and_durable_logout() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = "a".repeat(64);
+        let child_id = "b".repeat(64);
+        let environment = Uuid::new_v4();
+        {
+            let storage =
+                crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+            let mut parent = session(None);
+            parent.deadline = SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS));
+            parent.durable = Some((storage.clone(), owner.clone()));
+            parent.test_sessions.insert(environment, child_id.clone());
+            parent
+                .save()
+                .unwrap_or_else(|failure| panic!("{}", failure.1));
+            let mut child = session(Some(environment));
+            child.durable = Some((storage.clone(), child_id.clone()));
+            child
+                .save()
+                .unwrap_or_else(|failure| panic!("{}", failure.1));
+        }
+        {
+            let storage =
+                crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+            let mut app = app();
+            app.sessions = Arc::new(Mutex::new(restore(&storage).unwrap()));
+            app.session_storage = Some(storage);
+            let parent = lookup(&app, &headers(&owner, None)).await.ok().unwrap();
+            assert!(
+                parent.lock().await.deadline > SystemTime::now() + Duration::from_secs(8 * 3600)
+            );
+            let child = lookup(&app, &headers(&owner, Some(environment)))
+                .await
+                .ok()
+                .unwrap();
+            assert!(child.lock().await.testing);
+            assert!(lookup(&app, &headers(&child_id, None)).await.is_err());
+            logout(State(app.clone()), headers(&owner, Some(environment)))
+                .await
+                .ok()
+                .unwrap();
+            assert!(lookup(&app, &headers(&owner, None)).await.is_ok());
+        }
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let mut app = app();
+        app.sessions = Arc::new(Mutex::new(restore(&storage).unwrap()));
+        assert!(lookup(&app, &headers(&owner, None)).await.is_ok());
+        assert!(
+            lookup(&app, &headers(&owner, Some(environment)))
+                .await
+                .is_err()
+        );
+        logout(State(app.clone()), headers(&owner, None))
+            .await
+            .ok()
+            .unwrap();
+        assert!(restore(&storage).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_sign_in_keeps_its_operation_identity_across_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let operation;
+        let nonce;
+        {
+            let storage =
+                crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+            let mut app = app();
+            app.session_storage = Some(storage);
+            start(
+                State(app.clone()),
+                HeaderMap::new(),
+                Json(Start {
+                    return_to: Some("/".into()),
+                }),
+            )
+            .await
+            .ok()
+            .unwrap();
+            let logins = app.logins.lock().await;
+            let (saved_nonce, flow) = logins.iter().next().unwrap();
+            operation = flow.operation_id;
+            nonce = saved_nonce.clone();
+        }
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let logins: std::collections::HashMap<String, LoginFlow> =
+            storage.read("logins").unwrap().unwrap();
+        assert_eq!(logins[&nonce].operation_id, operation);
+        assert!(logins[&nonce].deadline > SystemTime::now());
+    }
+
+    #[tokio::test]
+    async fn logout_waits_for_a_refresh_owner_and_cannot_resurrect_on_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let mut app = app();
+        let id = "a".repeat(64);
+        let mut saved = session(None);
+        saved.durable = Some((storage.clone(), id.clone()));
+        saved.save().ok().unwrap();
+        let saved = Arc::new(Mutex::new(saved));
+        app.sessions.lock().await.insert(id.clone(), saved.clone());
+        app.session_storage = Some(storage.clone());
+        let mut refresh_owner = saved.lock().await;
+        let logout = tokio::spawn(logout(State(app), headers(&id, None)));
+        tokio::task::yield_now().await;
+        assert!(!logout.is_finished());
+        refresh_owner.tokens.refresh_token = "rotated".into();
+        refresh_owner.save().ok().unwrap();
+        drop(refresh_owner);
+        assert!(logout.await.unwrap().is_ok());
+        assert!(restore(&storage).unwrap().is_empty());
+        assert!(saved.lock().await.rejected);
+    }
+
+    #[tokio::test]
+    async fn uncertain_refresh_survives_restart_and_delayed_replay_is_renewed() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header, method, path},
+        };
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let id = "a".repeat(64);
+        let key = "original-refresh-attempt";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(header("idempotency-key", key))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(json!({"error":{"code":"unavailable","message":"retry"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        {
+            let storage =
+                crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+            let mut saved = session(None);
+            saved.auth_config = Config::for_sign_in(&format!("{}/api/v1/", server.uri())).unwrap();
+            saved.config = saved.auth_config.clone().with_organization("tos").unwrap();
+            saved.expires = SystemTime::UNIX_EPOCH;
+            saved.refresh_started_at = Some(SystemTime::UNIX_EPOCH);
+            saved.refresh_key = IdempotencyKey::new(key).unwrap();
+            saved.durable = Some((storage, id.clone()));
+            assert!(refresh_if_needed(&mut saved, false).await.is_err());
+            assert!(!saved.rejected);
+        }
+        server.reset().await;
+        for (old, new) in [("test-refresh", "replayed"), ("replayed", "fresh")] {
+            let mut tokens = session(None).tokens;
+            tokens.access_token = format!("access-{new}");
+            tokens.refresh_token = new.into();
+            let mock = Mock::given(method("POST"))
+                .and(path("/api/v1/auth/refresh"))
+                .and(body_json(json!({"refresh_token":old})));
+            if old == "test-refresh" {
+                mock.and(header("idempotency-key", key))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(&tokens))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            } else {
+                mock.respond_with(ResponseTemplate::new(200).set_body_json(&tokens))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+        }
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let sessions = restore(&storage).unwrap();
+        let mut recovered = sessions[&id].lock().await;
+        refresh_if_needed(&mut recovered, false)
+            .await
+            .unwrap_or_else(|failure| panic!("{}", failure.1));
+        assert_eq!(recovered.tokens.refresh_token, "fresh");
+        assert!(recovered.refresh_started_at.is_none());
+        let reloaded = restore(&storage).unwrap();
+        assert_eq!(reloaded[&id].lock().await.tokens.refresh_token, "fresh");
     }
     #[tokio::test]
     async fn standalone_test_cookie_never_authenticates_production_or_another_environment() {
@@ -917,7 +1248,7 @@ mod tests {
                 .environment()
                 .is_none()
         );
-        child.lock().await.deadline = Instant::now();
+        child.lock().await.deadline = SystemTime::now();
         assert!(client(&app, &headers(&owner, Some(id))).await.is_err());
         assert!(client(&app, &headers(&owner, None)).await.is_ok());
     }
@@ -946,7 +1277,7 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .deadline = Instant::now();
+            .deadline = SystemTime::now();
         assert!(lookup(&app, &headers(&owner, None)).await.is_err());
     }
     #[test]
@@ -971,7 +1302,7 @@ mod tests {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct TestSelection {
     id: Uuid,
     name: String,
@@ -1031,18 +1362,23 @@ pub(crate) async fn enter_secret(
         version: 0,
         key_generation: current.key_generation,
     });
+    child.save()?;
     let value = view(&child);
     drop(child);
     if let Some(parent) = parent {
         let mut parent = parent.lock().await;
-        if !parent.rejected && parent.deadline > Instant::now() {
+        if !parent.rejected && parent.deadline > SystemTime::now() {
             parent.test_sessions.insert(current.id, child_id.clone());
+            parent.save()?;
         }
     }
     // Its own cookie lets this test session continue even if production later
     // expires or signs out; the test world's credentials still govern access.
     Ok((
-        [(header::SET_COOKIE, testing_cookie(&app, &child_id, 28800)?)],
+        [(
+            header::SET_COOKIE,
+            testing_cookie(&app, &child_id, SESSION_SECONDS)?,
+        )],
         Json(value),
     )
         .into_response())

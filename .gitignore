@@ -3,6 +3,7 @@
 .DS_Store
 *.log
 *.profraw
+.briefcase-web-sessions/
 
 # Deployment configuration names real infrastructure and may carry an API key.
 /deploy/aws/production.env
