@@ -38,7 +38,6 @@ struct Fixture {
     owner: String,
     environment: Uuid,
     principal: Uuid,
-    membership: Uuid,
     organization: Uuid,
     secret: SecretString,
 }
@@ -97,7 +96,6 @@ impl Fixture {
             owner: format!("owner-{}", Uuid::new_v4().simple()),
             environment: Uuid::new_v4(),
             principal: Uuid::new_v4(),
-            membership: Uuid::new_v4(),
             organization: Uuid::new_v4(),
             secret: SecretString::from(format!("ask_{}xxxxxxxxxxx", Uuid::new_v4().simple())),
         };
@@ -142,9 +140,9 @@ impl Fixture {
     }
 
     fn snapshot(&self) -> Value {
-        json!({"principal_id":self.principal,"actor_type":"carbon","public_id":"test-carbon",
+        json!({"principal_id":self.principal,"actor_type":"carbon","public_id":"c:test-carbon",
             "organization_id":self.organization,"org_id":self.org,
-            "membership_id":self.membership,"membership_version":7,"authorization_epoch":7,
+            "membership_id":format!("c:test-carbon[{}]", self.org),"membership_version":7,"authorization_epoch":7,
             "audience":APP,"testing_environment_id":self.environment,
             "scopes":["self.identity.read","self.membership.read","self.tags.read"],
             "org_role":"owner","tags":[]})
@@ -152,7 +150,7 @@ impl Fixture {
 
     fn introspection(&self) -> Value {
         json!({"active":true,"principal_id":self.principal,"actor_type":"carbon","client_id":APP,
-            "org_id":self.org,"membership_id":self.membership,
+            "org_id":self.org,"membership_id":format!("c:test-carbon[{}]", self.org),
             "session_id":"01990a9d-86f1-7000-8000-000000000003",
             "scope":"self.identity.read self.membership.read self.tags.read","audience":APP,
             "authorization":self.snapshot(),"authorization_epoch":7,
@@ -208,7 +206,7 @@ impl Fixture {
             "self.tags.read"
         ]);
         json!({"valid":true,"proof_id":Uuid::new_v4(),"issuer_app_id":ISSUER,"audience":APP,
-            "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"test-carbon"},
+            "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"c:test-carbon"},
             "org_id":self.org,"endpoint":{"endpoint_id":ENDPOINT,"path":handlers::delegated::CREATE_FOLDER_PATH},
             "metadata":{},"expires_at":"2099-01-01T00:00:00Z","consumed_at":"2026-09-14T00:00:00Z"})
     }
@@ -540,7 +538,7 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
     assert_eq!(result.status(), http::StatusCode::OK);
     drop(result);
     for (org, path, world) in [
-        (f.org.as_str(), "private/test-carbon", Some(f.environment)),
+        (f.org.as_str(), "private/c:test-carbon", Some(f.environment)),
         (f.owner.as_str(), "public", Some(f.environment)),
         (f.org.as_str(), "public", Some(Uuid::new_v4())),
         (f.org.as_str(), "public", None),
@@ -724,7 +722,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
     // The exact actor owns this private tree independently of tag disclosure.
     f.state
         .metadata
-        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .get_entry_by_path(&current, &EntryPath::new("private/c:test-carbon")?)
         .await?;
     assert!(
         f.state
@@ -734,7 +732,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
             .is_err()
     );
     let assignments: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon' AND tag_id=$2",
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='c:test-carbon' AND tag_id=$2",
     ).bind(format!("{}:{}", f.environment, f.org)).bind(tag_id.to_string()).fetch_one(&f.data).await?;
     assert_eq!(
         assignments, 1,
@@ -754,7 +752,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
     );
     f.state
         .metadata
-        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .get_entry_by_path(&current, &EntryPath::new("private/c:test-carbon")?)
         .await?;
     assert!(
         f.state
@@ -764,7 +762,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
             .is_err()
     );
     let assignments: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon'",
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='c:test-carbon'",
     ).bind(format!("{}:{}", f.environment, f.org)).fetch_one(&f.data).await?;
     assert_eq!(
         assignments, 0,

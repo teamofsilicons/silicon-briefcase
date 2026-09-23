@@ -2,7 +2,7 @@
 
 This candidate changes public application IDs to bare handles and actor IDs to `c:` / `si:` handles, retaining the existing `/api/v1` route namespace. Backend, Rust client, CLI, browser gateway, and contract document are version 2.0.0. Identity-bearing operation revisions are synchronized in the service registry, client registry, OpenAPI, and operation inventory. Deploy the matching contract and consumers together.
 
-The source preserves the deployed backend changes from 5247cc1 and browser gateway changes from e33e20a. Source parity was checked before staging. The release pipeline pins Honeycomb packager b39b1ceb96997ec4c80cb5c5354130ecb9da73eb, which accepts the bare `briefcase` manifest. The candidate workflows produce six native CLI artifacts and ARM64 backend, gateway, and documentation image archives without publication or deployment.
+The source preserves the deployed backend changes from 5247cc1 and browser gateway changes from e33e20a, and integrates remote main through 51f3d28, including early-access recovery and glibc 2.28 native packaging checks. Source parity was checked before staging. The release pipeline pins Honeycomb packager b39b1ceb96997ec4c80cb5c5354130ecb9da73eb, which accepts the bare `briefcase` manifest. The candidate workflows produce six native CLI artifacts and ARM64 backend, gateway, and documentation image archives without publication or deployment.
 
 ## Migration and recovery gates
 
@@ -21,8 +21,9 @@ The matched host configuration and key files are archived in `/var/lib/silicon-b
 ## Local candidate validation
 
 - Backend library: 241 passed, one ignored; strict all-target/all-feature Clippy passed.
-- Client, CLI, and gateway workspace: 136 passed, two ignored; strict workspace all-target/all-feature Clippy passed.
-- Standalone client 2.0.0 Cargo package verification passed.
+- Client, CLI, and gateway workspace after main integration: 138 passed, two ignored; strict workspace all-target/all-feature Clippy passed.
+- Standalone client 2.0.0 Cargo package verification passed; all workspace crates packaged and verified.
+- OpenAPI/backend/client registry parity: four passed. Imported-world authorization on real PostgreSQL: nine passed after integrating typed membership fixtures. Linux ABI checker: six passed.
 - Four real PostgreSQL 16 migration tests passed, covering previews, rollback, collisions, preserved identity keys/content, path aliases, and testing-plane isolation.
 - Installer sequencing: three passed; no updater daemon is started automatically.
 - Documentation: 18 pages and 823 local links/assets checked. Web production build passed.

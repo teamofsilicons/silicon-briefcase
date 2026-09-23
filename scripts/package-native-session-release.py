@@ -60,7 +60,6 @@ def verify_binary(path: Path, target: str) -> None:
             )
     if not valid:
         raise SystemExit(f"Wrong native binary format or architecture for {target}: {path}")
-
     if target.startswith("linux-"):
         try:
             verify_glibc_requirements(data)

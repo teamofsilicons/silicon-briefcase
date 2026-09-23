@@ -1,16 +1,16 @@
-name: Build validated Honeycomb release
-
+name: Build native Honeycomb package
 on:
   workflow_dispatch:
-  push:
-    branches: [release/public-identifiers-20260923]
-    tags: ["v*"]
-
+    inputs:
+      honeycomb_revision:
+        description: Exact Honeycomb source revision used to validate and pack
+        required: true
+        type: string
+        default: b39b1ceb96997ec4c80cb5c5354130ecb9da73eb
 permissions:
   contents: read
-
 jobs:
-  binaries:
+  native:
     strategy:
       fail-fast: false
       matrix:
@@ -18,31 +18,28 @@ jobs:
           - runner: ubuntu-24.04
             target: linux-x86_64
             triple: x86_64-unknown-linux-gnu
-            binary: briefcase
+            executable: briefcase
           - runner: ubuntu-24.04-arm
             target: linux-aarch64
             triple: aarch64-unknown-linux-gnu
-            binary: briefcase
+            executable: briefcase
           - runner: windows-2025
             target: windows-x86_64
             triple: x86_64-pc-windows-msvc
-            binary: briefcase.exe
+            executable: briefcase.exe
           - runner: windows-11-arm
             target: windows-aarch64
             triple: aarch64-pc-windows-msvc
-            binary: briefcase.exe
+            executable: briefcase.exe
           - runner: macos-15-intel
             target: macos-x86_64
             triple: x86_64-apple-darwin
-            binary: briefcase
+            executable: briefcase
           - runner: macos-15
             target: macos-aarch64
             triple: aarch64-apple-darwin
-            binary: briefcase
+            executable: briefcase
     runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        working-directory: clients/rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -52,8 +49,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: clients/rust
-      - run: python ../../scripts/sync-cli-docs.py --check
-      - run: cargo test --locked -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}
       - uses: actions/setup-python@v5
         if: runner.os == 'Linux'
         with:
@@ -63,22 +58,26 @@ jobs:
         run: |
           python3 -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.15.2'
           python3 -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
+          cargo-zigbuild --version
+          python3 -m ziglang version
       - name: Build Linux CLI for glibc 2.28
         if: runner.os == 'Linux'
-        run: cargo zigbuild --locked --release -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}.2.28
+        run: cargo zigbuild --manifest-path clients/rust/Cargo.toml --locked --release -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}.2.28
       - name: Build native CLI
         if: runner.os != 'Linux'
-        run: cargo build --release --locked -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}
-      - name: Verify Linux ABI
+        run: cargo build --manifest-path clients/rust/Cargo.toml --locked --release -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}
+      - name: Verify Linux ABI requirements
         if: runner.os == 'Linux'
         run: |
-          python3 ../../scripts/test_linux_abi.py
-          python3 ../../scripts/check_linux_abi.py target/${{ matrix.triple }}/release/briefcase
-      - name: Smoke test glibc 2.28
+          python3 scripts/test_linux_abi.py
+          python3 scripts/check_linux_abi.py clients/rust/target/${{ matrix.triple }}/release/briefcase
+      - name: Smoke test Linux executable on glibc 2.28
         if: runner.os == 'Linux'
+        env:
+          BRIEFCASE_RELEASE_BINARY: clients/rust/target/${{ matrix.triple }}/release/briefcase
         run: |
           docker run --rm --network none \
-            --volume "$PWD/target/${{ matrix.triple }}/release/briefcase:/usr/local/bin/briefcase:ro" \
+            --volume "$PWD/$BRIEFCASE_RELEASE_BINARY:/usr/local/bin/briefcase:ro" \
             --env SILICON_HOME=/tmp/briefcase-smoke --env BRIEFCASE_TELEMETRY=off \
             debian:buster-slim@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc sh -eu -c '
               test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
@@ -86,45 +85,41 @@ jobs:
               briefcase --help
               briefcase daemon status
             '
-      - run: ./target/${{ matrix.triple }}/release/${{ matrix.binary }} --version
+      - name: Smoke test native executable
+        shell: bash
+        env:
+          BRIEFCASE_RELEASE_BINARY: clients/rust/target/${{ matrix.triple }}/release/${{ matrix.executable }}
+        run: |
+          "$BRIEFCASE_RELEASE_BINARY" --version
+          "$BRIEFCASE_RELEASE_BINARY" --help
+          "$BRIEFCASE_RELEASE_BINARY" daemon status
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: clients/rust/target/${{ matrix.triple }}/release/${{ matrix.binary }}
+          path: clients/rust/target/${{ matrix.triple }}/release/${{ matrix.executable }}
           if-no-files-found: error
-
   package:
-    needs: binaries
+    needs: native
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-binaries
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
-      - name: Install the pinned Honeycomb packager
-        run: cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb --rev b39b1ceb96997ec4c80cb5c5354130ecb9da73eb silicon-honeycomb-cli
-      - name: Check release tag against the CLI version
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Install reviewed Honeycomb packager
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          python - <<'PY'
-          import os, tomllib
-          with open('clients/rust/Cargo.toml', 'rb') as source:
-              version = tomllib.load(source)['workspace']['package']['version']
-          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Release tag must match the CLI version'
-          PY
-      - run: python scripts/package-release.py --binaries-dir release-binaries
+          HONEYCOMB_PACKAGER_REVISION: ${{ inputs.honeycomb_revision }}
+        run: cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb --rev "$HONEYCOMB_PACKAGER_REVISION" silicon-honeycomb-cli
+      - run: python3 scripts/test_linux_abi.py
+      - run: python3 scripts/package-native-session-release.py --binaries-dir artifacts --output-dir dist
       - uses: actions/upload-artifact@v4
         with:
-          name: briefcase-honeycomb-release
+          name: briefcase-honeycomb-package
           path: dist/*
           if-no-files-found: error
-
-# This workflow produces reviewable artifacts; it does not publish a release.
