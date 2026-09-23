@@ -20,7 +20,7 @@ The matched host configuration and key files are archived in `/var/lib/silicon-b
 
 ## Local candidate validation
 
-- Backend library: 241 passed, one ignored; strict all-target/all-feature Clippy passed.
+- Full backend all-target/all-feature suite with both disposable PostgreSQL control/data planes enabled: 260 passed, one ignored across 13 test binaries; strict all-target/all-feature Clippy and pinned Rust 1.98 formatting passed.
 - Client, CLI, and gateway workspace after main integration: 138 passed, two ignored; strict workspace all-target/all-feature Clippy passed.
 - Standalone client 2.0.0 Cargo package verification passed; all workspace crates packaged and verified.
 - OpenAPI/backend/client registry parity: four passed. Imported-world authorization on real PostgreSQL: nine passed after integrating typed membership fixtures. Linux ABI checker: six passed.

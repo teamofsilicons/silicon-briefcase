@@ -72,7 +72,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         runtime_control.clone(),
         runtime_data.clone(),
         &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-        "acme>storage",
+        "storage",
     )?
     .with_honeycomb_token(Some(SecretString::from(token)));
     assert!(store.authenticate_honeycomb(token).is_ok());
@@ -80,7 +80,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
     let id = Uuid::now_v7();
     let org = format!("honeycomb-{}", Uuid::new_v4().simple());
     let mut op: HoneycombOperation = serde_json::from_value(
-        json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":org,"app_id":"acme>storage","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}),
+        json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":org,"app_id":"storage","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}),
     )?;
     let mut wrong_app = op.clone();
     wrong_app.app_id = "briefcase".into();
@@ -100,7 +100,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         runtime_control,
         runtime_data,
         &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-        "other>archive",
+        "archive",
     )?;
     assert!(
         reconfigured
@@ -113,7 +113,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         "old identity replay must fail after reconfiguration"
     );
     let mut takeover = op.clone();
-    takeover.app_id = "other>archive".into();
+    takeover.app_id = "archive".into();
     assert!(
         reconfigured.honeycomb_operation(&takeover).await.is_err(),
         "changing an existing replay's identity must fail"
@@ -152,14 +152,14 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
     );
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path(format!(
-            "/api/v1/environments/{id}/apps/acme%3Estorage/activity"
+            "/api/v1/environments/{id}/apps/storage/activity"
         )))
         .respond_with(wiremock::ResponseTemplate::new(503))
         .mount(&server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path(format!(
-            "/api/v1/environments/{}/apps/acme%3Estorage/activity",
+            "/api/v1/environments/{}/apps/storage/activity",
             second.environment_id
         )))
         .respond_with(wiremock::ResponseTemplate::new(200))
@@ -222,7 +222,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         "another application's retirement preserves Briefcase data"
     );
     op.operation_id = Uuid::new_v4();
-    op.retired_apps = vec!["acme>storage".into()];
+    op.retired_apps = vec!["storage".into()];
     op.environment_revision = 3;
     // A fault scoped to this environment proves failed receipts recover on retry.
     // Dynamic identifiers and values below contain only a generated UUID and fixed text.
@@ -260,7 +260,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         .await?;
     let receipt = store.honeycomb_operation(&op).await?;
     assert_eq!(receipt["state"], "completed");
-    assert_eq!(receipt["retired_apps"], json!(["acme>storage"]));
+    assert_eq!(receipt["retired_apps"], json!(["storage"]));
     let state: String = sqlx::query_scalar(
         "SELECT state FROM briefcase.honeycomb_environments WHERE environment_id=$1",
     )

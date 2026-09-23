@@ -300,13 +300,13 @@ fn execution(
     })
 }
 
-fn create_input(organization: &str, name: String) -> TestingEnvironmentCreate {
+fn create_input(_organization: &str, name: String) -> TestingEnvironmentCreate {
     TestingEnvironmentCreate {
         name,
         description: Some("isolated integration sandbox".to_owned()),
         iam_environment_id: Uuid::now_v7(),
         iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
-        iam_app_id: format!("{organization}>briefcase"),
+        iam_app_id: "briefcase".to_owned(),
         iam_app_secret: SecretString::from(format!(
             "ask_{}{}",
             Uuid::new_v4().simple(),

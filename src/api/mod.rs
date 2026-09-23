@@ -829,11 +829,9 @@ pub(crate) mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
             let body: serde_json::Value = serde_json::from_slice(&bytes)?;
             if path.ends_with("/iam") {
-                assert!(
-                    body["app_id"].as_str().is_some_and(|id| {
-                        crate::domain::actor::is_canonical_iam_application_id(id)
-                    })
-                );
+                assert!(body["app_id"].as_str().is_some_and(|id| {
+                    crate::domain::actor::is_canonical_iam_application_id(id)
+                }));
                 assert!(body["test_environment_id"].is_null());
                 assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
             } else {

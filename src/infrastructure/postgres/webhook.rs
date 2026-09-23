@@ -806,7 +806,7 @@ mod tests {
 
         let suffix = Uuid::new_v4().simple().to_string();
         let org_id = format!("wh-{suffix}");
-        let actor_id = format!("carbon-{suffix}");
+        let actor_id = format!("c:carbon-{}", &suffix[..20]);
         let organization_id = Uuid::now_v7();
         let membership_id = Uuid::now_v7();
         let principal_id = Uuid::now_v7();
