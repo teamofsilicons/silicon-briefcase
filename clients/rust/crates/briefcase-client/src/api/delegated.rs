@@ -335,7 +335,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedCreateFolder>,
     ) -> Result<Entry> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
@@ -351,7 +351,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedListEntries>,
     ) -> Result<EntryPage> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
@@ -369,9 +369,9 @@ impl Client {
     ) -> Result<ContentStream> {
         let request = self.delegated_request(application, proof, manifest)?;
         let response = self
-            .receive_without_maintenance(request.timeout(self.transfer_timeout()))
+            .receive(request.timeout(self.transfer_timeout()))
             .await?;
-        Ok(ContentStream::without_maintenance(response))
+        Ok(ContentStream::new(response))
     }
 
     /// Trashes an entry using a stable operation UUID and a fresh bound proof.
@@ -386,7 +386,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedTrashEntry>,
     ) -> Result<()> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive(request.timeout(self.request_timeout()))
             .await
             .map(drop)
     }
@@ -463,7 +463,7 @@ impl Client {
         proof: OboProof,
         manifest: &DelegatedManifest<DelegatedInvite>,
     ) -> Result<crate::Invitation> {
-        self.receive_json_without_maintenance(
+        self.receive_json(
             self.delegated_request(app, proof, manifest)?
                 .timeout(self.request_timeout()),
         )
@@ -478,7 +478,7 @@ impl Client {
         proof: OboProof,
         manifest: &DelegatedManifest<DelegatedLinkAccess>,
     ) -> Result<crate::LinkAccess> {
-        self.receive_json_without_maintenance(
+        self.receive_json(
             self.delegated_request(app, proof, manifest)?
                 .timeout(self.request_timeout()),
         )

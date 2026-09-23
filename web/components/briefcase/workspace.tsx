@@ -456,14 +456,14 @@ export default function Workspace({
       if (editor.kind === 'share') {
         const [type, ...name] = editor.value.split(':');
         if (
-          !['carbon', 'silicon', 'email', 'tag'].includes(type) ||
+          !['c', 'si', 'email', 'tag'].includes(type) ||
           !name.join(':')
         )
           throw new Error(
-            'Use carbon:ID, silicon:ID, email:address, or tag:tag.',
+            'Use c:ID, si:ID, email:address, or tag:tag.',
           );
         await api('/entries/' + editor.entry!.id + '/invitations', 'POST', {
-          principal: { type, id: name.join(':') },
+          principal: { type: type === 'c' ? 'carbon' : type === 'si' ? 'silicon' : type, id: type === 'c' || type === 'si' ? editor.value : name.join(':') },
           access: rights,
           operation_id: editor.operation,
           inherit: editor.entry!.type === 'folder',
@@ -1320,7 +1320,7 @@ export default function Workspace({
             )}
             <label htmlFor="editor-value">
               {editor?.kind === 'share'
-                ? 'Member (carbon:id or silicon:id)'
+                ? 'Member (c:id or si:id)'
                 : editor?.kind === 'move'
                   ? 'Destination folder path'
                   : 'Name'}

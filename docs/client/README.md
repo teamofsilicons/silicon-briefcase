@@ -1,10 +1,10 @@
 # Official Rust client
 
-`briefcase-client` **1.1.0** speaks Briefcase API contract 1.1.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
+`briefcase-client` **2.0.0** speaks Briefcase API contract 2.0.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
 
 ```toml
 [dependencies]
-briefcase-client = "1.1.0"
+briefcase-client = "2.0.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 ```
@@ -31,7 +31,7 @@ client.download(file.id).await?.write_to_file("report-copy.pdf").await?;
 
 For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Login may be unscoped; select one of the returned authorized organizations with `with_organization`. The package owns no session or API cache. Applications own persistence and token rotation.
 
-`EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing. `IamEnvironmentKey` is the distinct 32-character IAM root credential used for dependency provisioning/pairing only. Both redact Debug output. See [Testing environments](../testing-environments.md).
+`EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing and redacts Debug output. Shared lifecycle management uses `honeycomb::manage_environment(&arguments)`, which invokes the official Honeycomb CLI with its own session and retry state. The library stores no Honeycomb credentials. Legacy direct management methods receive `testing_environment_managed_by_honeycomb`; use Honeycomb rather than an IAM root pairing. See [Testing environments](../testing-environments.md).
 
 ## Listing and content
 
@@ -78,9 +78,9 @@ For large or recoverable transfers, reserve private staging, upload with the ret
 
 Use `Error::is_not_found`, `is_forbidden`, `is_unauthenticated`, `code` and `retry_after` instead of parsing error prose. A contract mismatch is actionable before the first authenticated call. Error diagnostics redact tokens, app secrets, storage credentials and OBO proofs.
 
-The default-on maintenance helper checks crates.io at most hourly and can update a consuming Cargo lockfile. `Config::with_auto_update(false)` or `BRIEFCASE_CLIENT_AUTO_UPDATE=false` disables it. Production services should own dependency upgrades through reviewed builds. Delegated operations and unfinished transfers do not trigger package maintenance before authorization or during streaming.
+The Rust client is a normal project dependency. API calls never query crates.io, run Cargo, or change a consuming project's lockfile. Update dependencies explicitly and rebuild. `Config::with_auto_update` and `Config::with_update_manifest` remain compatibility no-ops, and `update_status()` always returns `Disabled`. Honeycomb manages CLI installation and updates.
 
-Use the [operation map](../api/operations.md), [sandbox example](examples/sandbox.rs), and crate API docs for additional request builders, storage configuration and environment lifecycle methods. All surfaces in this release target v1; development 0.x compatibility is not provided.
+Use the [operation map](../api/operations.md), [sandbox example](examples/sandbox.rs), and crate API docs for additional request builders, storage configuration and testing context methods. All surfaces in this release target v1; development 0.x compatibility is not provided.
 
 ## Reading the answers
 
@@ -133,7 +133,7 @@ let manifest = DelegatedCreateFolder {
 // method(), path(), body_sha256() and empty metadata {}. The SDK sends
 // manifest.body_bytes() unchanged, not a second serialization.
 let folder = client.create_folder_on_behalf_of(
-    &ApplicationId::new("tos>browser")?,
+    &ApplicationId::new("browser")?,
     OboProof::new(fresh_proof)?,
     &manifest,
 ).await?;
@@ -187,7 +187,7 @@ The existing small, immediate raw-body operation remains available:
 use briefcase_client::OnBehalfOfUpload;
 
 let entry = client
-    .create_file_on_behalf_of(&OnBehalfOfUpload::file("tos>app-notes", proof, "./generated.md"))
+    .create_file_on_behalf_of(&OnBehalfOfUpload::file("app-notes", proof, "./generated.md"))
     .await?;
 ```
 
@@ -242,7 +242,7 @@ recorded storage location; subsequent versions use the activated configuration.
 | Delegated uploads | `reserve_delegated_upload`, `transfer_delegated_upload`, `commit_delegated_upload`, `delegated_upload_status`, `cancel_delegated_upload` |
 | One-shot delegated upload | `create_file_on_behalf_of` |
 | IAM SLT session | `login_with_slt`, `refresh_session` |
-| Testing environments | `testing_environments`, `create_testing_environment`, lifecycle/key/self methods |
+| Testing environments | `honeycomb::manage_environment` for lifecycle; existing app-secret selection and current-context reads for file access |
 
 ## Public IAM information and live login status
 
@@ -277,8 +277,8 @@ Network, IAM, and test-plane failures remain errors. The caller owns token
 refresh and storage; the Rust package does not read `SILICON_HOME` or persist
 credentials. The stateful CLI handles these responsibilities.
 
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
-or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `c:alice`)
+or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production
 continues to require a one-time IAM login code.

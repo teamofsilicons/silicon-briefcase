@@ -83,7 +83,7 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
         json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":org,"app_id":"acme>storage","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}),
     )?;
     let mut wrong_app = op.clone();
-    wrong_app.app_id = "tos>briefcase".into();
+    wrong_app.app_id = "briefcase".into();
     assert!(store.honeycomb_operation(&wrong_app).await.is_err());
     let persisted: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM briefcase.honeycomb_environments WHERE environment_id=$1",
@@ -206,11 +206,11 @@ async fn retirement_selects_briefcase_waits_for_cleanup_and_allows_reimport() ->
     setup.commit().await?;
     op.operation_id = Uuid::new_v4();
     op.action = "retire-applications".into();
-    op.retired_apps = vec!["tos>other".into()];
+    op.retired_apps = vec!["other".into()];
     op.environment_revision = 2;
     let receipt = store.honeycomb_operation(&op).await?;
     assert_eq!(receipt["state"], "completed");
-    assert_eq!(receipt["retired_apps"], json!(["tos>other"]));
+    assert_eq!(receipt["retired_apps"], json!(["other"]));
     let remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM briefcase.organizations WHERE testing_environment_id=$1",
     )

@@ -7,9 +7,8 @@ use std::{
 
 use briefcase_client::{
     BucketConfiguration, Client, Config, Destination, Entry, EntryPage, EnvironmentKey,
-    IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries, NewFolder, NewGrant,
-    OnBehalfOfUpload, PermissionQuery, TestingEnvironment, TestingEnvironmentCreate,
-    TestingEnvironmentIamPairing, TestingEnvironmentUpdate, Upload, guess_content_type,
+    IdempotencyKey, ListEntries, NewFolder, NewGrant, OnBehalfOfUpload, PermissionQuery, Upload,
+    guess_content_type,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -177,7 +176,7 @@ pub async fn run(mut cli: Cli, testing: &mut Option<String>) -> Result<()> {
         Command::App(command) => application(&cli.global, &command, output).await,
         Command::Env(command) => environment(&cli.global, &command, output).await,
         Command::Config(command) => configure(&cli.global, &command, output),
-        Command::System(command) => system(&command, output).await,
+        Command::System(command) => system(&command),
         Command::Report { message, pr } => report(&cli.global, message, pr, output).await,
         Command::Daemon(command) => crate::daemon::command(command, output).await,
         Command::Docs { topic } => crate::manual::show(topic.as_deref(), output),
@@ -210,10 +209,6 @@ struct ResolvedSession {
     token: Option<String>,
     stored_session: Option<StoredSession>,
     credential_scope: CredentialScope,
-}
-
-fn session(global: &GlobalArgs) -> Result<ResolvedSession> {
-    resolve_session(global, true, true)
 }
 
 /// Resolves only the destination and optional test root for an operation that
@@ -1594,10 +1589,10 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
     let (kind, value) = args
         .principal
         .split_once(':')
-        .ok_or_else(|| CliError::usage("Use carbon:ID, silicon:ID, email:ADDRESS, or tag:TAG"))?;
+        .ok_or_else(|| CliError::usage("Use c:ID, si:ID, email:ADDRESS, or tag:TAG"))?;
     let principal = match kind {
-        "carbon" => briefcase_client::Recipient::Carbon(value.into()),
-        "silicon" => briefcase_client::Recipient::Silicon(value.into()),
+        "c" => briefcase_client::Recipient::Carbon(args.principal.clone()),
+        "si" => briefcase_client::Recipient::Silicon(args.principal.clone()),
         "email" => briefcase_client::Recipient::Email(value.into()),
         "tag" => briefcase_client::Recipient::Tag(value.into()),
         _ => return Err(CliError::usage("Unknown recipient type")),
@@ -1853,413 +1848,39 @@ async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) 
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the lifecycle verbs share state and rendering; one match keeps their policy together"
-)]
 async fn environment(global: &GlobalArgs, command: &EnvCommand, output: Output) -> Result<()> {
-    if matches!(
-        command,
-        EnvCommand::Current
-            | EnvCommand::Clean {
-                environment_id: None
-            }
-    ) {
-        require_test(global)?;
-        let session = session(global)?;
-        let client = if global.no_verify {
-            Client::new_unchecked(config(&session)?)?
-        } else {
-            Client::connect(config(&session)?).await?
-        };
-        return match command {
-            EnvCommand::Current => {
-                let current = client.current_testing_environment().await?;
-                if output.is_json() {
-                    output.json(&current);
-                } else {
-                    println!("id             {}", current.id);
-                    println!("name           {}", current.name);
-                    println!(
-                        "description    {}",
-                        current.description.as_deref().unwrap_or("-")
-                    );
-                    println!("key generation {}", current.key_generation);
-                    println!("created        {}", current.created_at);
-                }
-                Ok(())
-            }
-            EnvCommand::Clean {
-                environment_id: None,
-            } => {
-                let environment_id = require_test(global)?;
-                let state = StateDirectory::locate()?;
-                let credentials_lock = state.lock_credentials()?;
-                let mut credentials = state.credentials()?;
-                let scope = format!(
-                    "env:clean-current:{}",
-                    plane_scope(&session.profile_name, Some(environment_id))
-                );
-                let fingerprint = request_fingerprint(&serde_json::json!({
-                    "operation": "clean-current-testing-environment",
-                    "profile": session.profile_name,
-                    "url": session.url,
-                    "org": session.org,
-                    "environment_id": environment_id,
-                    "environment_key": session.environment_key,
-                }))?;
-                let pending =
-                    prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-                let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-                let cleaned = client
-                    .clean_current_testing_environment_with_key(&key)
-                    .await?;
-                credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-                state.save_credentials(&credentials)?;
-                drop(credentials_lock);
-                report_cleaning(output, &cleaned);
-                Ok(())
-            }
-            _ => unreachable!(),
-        };
-    }
-
-    if global.test.is_some() {
-        return Err(CliError::usage(
-            "testing-environment management commands run in production; use `env current` or UUID-less `env clean` with --test",
-        ));
-    }
-
-    let (client, management_session) = connect_resolved(global).await?;
-    let profile = management_session.profile_name;
-    let management_scope = management_session.credential_scope;
     match command {
-        EnvCommand::List { status } => {
-            let page = client.testing_environments(status.as_deref()).await?;
+        EnvCommand::Manage { arguments } => {
+            if global.test.is_some() || global.app_secret.is_some() || global.token.is_some() {
+                return Err(CliError::usage(
+                    "Honeycomb uses its own session; omit Briefcase test secrets/tokens and pass Honeycomb options after `env manage`",
+                ));
+            }
+            briefcase_client::honeycomb::manage_environment(arguments)?;
+        }
+        EnvCommand::Current => {
+            if global.test.is_none() {
+                return Err(CliError::usage(
+                    "select a test environment with --test or BRIEFCASE_APP_SECRET",
+                ));
+            }
+            let client = connect(global).await?;
+            let current = client.current_testing_environment().await?;
             if output.is_json() {
-                output.json(&page);
-            } else if page.items.is_empty() {
-                output.note("(no testing environments)");
+                output.json(&current);
             } else {
-                for environment in &page.items {
-                    println!(
-                        "{}  {:<20}  {:?}  key generation {}",
-                        environment.id,
-                        environment.name,
-                        environment.status,
-                        environment.key_generation
-                    );
-                }
+                println!("id             {}", current.id);
+                println!("name           {}", current.name);
+                println!("key generation {}", current.key_generation);
             }
         }
-        EnvCommand::Create {
-            name,
-            description,
-            iam_test_key,
-        } => {
-            let mut input = TestingEnvironmentCreate::new(name);
-            input.iam_test_key = iam_test_key
-                .clone()
-                .map(IamEnvironmentKey::new)
-                .transpose()?;
-            input.description.clone_from(description);
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:create:{profile}:{name}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "create-testing-environment",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "input": input,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let created = client
-                .create_testing_environment_with_key(&input, &key)
-                .await?;
-            credentials.set_testing_environment_key(
-                &profile,
-                created.environment.id,
-                created.key.clone(),
-            );
-            credentials.set_credential_scope(
-                &profile,
-                Some(created.environment.id),
-                management_scope.clone(),
-            );
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            if output.is_json() {
-                output.json(&created);
-            } else {
-                println!(
-                    "created {} ({})",
-                    created.environment.name, created.environment.id
-                );
-                println!("key: {}", created.key.expose_secret());
-                println!(
-                    "this device stored it; use `briefcase --test {} <command>`",
-                    created.environment.id
-                );
-            }
+        _ => {
+            return Err(CliError::usage(
+                "Honeycomb manages shared environments. Use `briefcase env manage create <org> <name>`, `briefcase env manage list`, or `briefcase env manage action <id> <action> --revision <revision>`. Enter Briefcase with BRIEFCASE_APP_SECRET and your test SLT.",
+            ));
         }
-        EnvCommand::Show { environment_id } => {
-            let value = client.testing_environment(*environment_id).await?;
-            report_environment(output, &value);
-        }
-        EnvCommand::Update {
-            environment_id,
-            name,
-            description,
-            clear_description,
-        } => {
-            let update = TestingEnvironmentUpdate {
-                name: name.clone(),
-                description: if *clear_description {
-                    Some(None)
-                } else {
-                    description.clone().map(Some)
-                },
-            };
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:update:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "update-testing-environment",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-                "update": update,
-            }))?;
-            let expected_version = credentials
-                .pending_mutation(&scope)
-                .filter(|pending| pending.request_fingerprint == fingerprint)
-                .and_then(|pending| pending.expected_version);
-            let expected_version = match expected_version {
-                Some(version) => version,
-                None => client.testing_environment(*environment_id).await?.version,
-            };
-            let pending = prepare_pending_mutation(
-                &state,
-                &mut credentials,
-                &scope,
-                &fingerprint,
-                Some(expected_version),
-            )?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .update_testing_environment_with_key(
-                    *environment_id,
-                    pending.expected_version.ok_or_else(|| {
-                        CliError::usage("the pending environment update has no expected version")
-                    })?,
-                    &update,
-                    &key,
-                )
-                .await?;
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            report_environment(output, &value);
-        }
-        EnvCommand::Delete { environment_id } => {
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:delete:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "delete-testing-environment",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .delete_testing_environment_with_key(*environment_id, &key)
-                .await?;
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            report_environment(output, &value);
-        }
-        EnvCommand::Restore { environment_id } => {
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:restore:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "restore-testing-environment",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .restore_testing_environment_with_key(*environment_id, &key)
-                .await?;
-            credentials.set_testing_environment_key(&profile, *environment_id, value.key.clone());
-            credentials.set_credential_scope(
-                &profile,
-                Some(*environment_id),
-                management_scope.clone(),
-            );
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            if output.is_json() {
-                output.json(&value);
-            } else {
-                report_environment(output, &value.environment);
-                println!("new key: {}", value.key.expose_secret());
-                println!("this device stored the replacement key");
-            }
-        }
-        EnvCommand::Key { environment_id } => {
-            // Keep a key fetch and its local replacement in the same critical
-            // section as rotation. Otherwise an earlier GET could arrive after
-            // a concurrent rotation and overwrite the new root with a stale one.
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let value = client.testing_environment_key(*environment_id).await?;
-            credentials.set_testing_environment_key(&profile, *environment_id, value.key.clone());
-            credentials.set_credential_scope(
-                &profile,
-                Some(*environment_id),
-                management_scope.clone(),
-            );
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            if output.is_json() {
-                output.json(&value);
-            } else {
-                println!("{}", value.key.expose_secret());
-            }
-        }
-        EnvCommand::PairIam {
-            environment_id,
-            iam_environment_id,
-            iam_environment_key,
-            iam_app_id,
-            iam_app_secret,
-        } => {
-            let iam_environment_key = match iam_environment_key {
-                Some(key) => IamEnvironmentKey::new(key.clone())?,
-                None => IamEnvironmentKey::new(prompt_secret("IAM environment root key: ")?)?,
-            };
-            let iam_app_secret = match iam_app_secret {
-                Some(secret) => IamApplicationSecret::new(secret.clone())?,
-                None => IamApplicationSecret::new(prompt_secret("IAM Application secret: ")?)?,
-            };
-            let pairing = TestingEnvironmentIamPairing::new(
-                *iam_environment_id,
-                iam_environment_key,
-                iam_app_id.clone(),
-                iam_app_secret,
-            );
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:pair-iam:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "replace-testing-environment-iam-pairing",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-                "pairing": pairing,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .replace_testing_environment_iam_pairing_with_key(*environment_id, &pairing, &key)
-                .await?;
-            // The previously saved test session belongs to the old IAM plane
-            // and must never be presented after an atomic re-pair.
-            credentials.remove_session(&profile, Some(*environment_id));
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            report_environment(output, &value);
-            output.note(
-                "the old test session was removed; sign in with an SLT from the new IAM plane",
-            );
-        }
-        EnvCommand::Clean {
-            environment_id: Some(environment_id),
-        } => {
-            let state = StateDirectory::locate()?;
-            let credentials_lock = state.lock_credentials()?;
-            let mut credentials = state.credentials()?;
-            let scope = format!("env:clean:{profile}:{environment_id}");
-            let fingerprint = request_fingerprint(&serde_json::json!({
-                "operation": "clean-testing-environment",
-                "profile": profile,
-                "url": client.config().api_base().as_str(),
-                "org": client.organization(),
-                "environment_id": environment_id,
-            }))?;
-            let pending =
-                prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-            let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let value = client
-                .clean_testing_environment_with_key(*environment_id, &key)
-                .await?;
-            credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-            state.save_credentials(&credentials)?;
-            drop(credentials_lock);
-            report_cleaning(output, &value);
-        }
-        EnvCommand::Current
-        | EnvCommand::Clean {
-            environment_id: None,
-        } => unreachable!(),
     }
     Ok(())
-}
-
-fn require_test(global: &GlobalArgs) -> Result<Uuid> {
-    global
-        .test
-        .ok_or_else(|| CliError::usage("this action is only possible for a test environment"))
-}
-
-fn report_environment(output: Output, environment: &TestingEnvironment) {
-    if output.is_json() {
-        output.json(environment);
-    } else {
-        println!("id             {}", environment.id);
-        println!("name           {}", environment.name);
-        println!(
-            "description    {}",
-            environment.description.as_deref().unwrap_or("-")
-        );
-        println!("status         {:?}", environment.status);
-        println!("key generation {}", environment.key_generation);
-        println!("last activity  {}", environment.last_activity_at);
-        println!("version        {}", environment.version);
-    }
-}
-
-fn report_cleaning(output: Output, cleaning: &briefcase_client::TestingEnvironmentCleaning) {
-    if output.is_json() {
-        output.json(cleaning);
-    } else {
-        output.note(&format!("erased {} rows", cleaning.erased_rows));
-    }
 }
 
 fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Result<()> {
@@ -2285,7 +1906,8 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
             if output.is_json() {
                 output.json(&serde_json::json!({
                     "profile": global.profile.as_deref().unwrap_or(&configuration.current_profile),
-                    "auto_update": configuration.auto_update,
+                    "auto_update": false,
+                    "update_manager": "honeycomb",
                     "telemetry": configuration.telemetry,
                 }));
             } else {
@@ -2300,14 +1922,7 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
                     "telemetry   {}",
                     if configuration.telemetry { "on" } else { "off" }
                 );
-                println!(
-                    "auto-update {}",
-                    if configuration.auto_update {
-                        "on"
-                    } else {
-                        "off"
-                    }
-                );
+                println!("auto-update off (managed by Honeycomb)");
             }
         }
         ConfigCommand::Set { key, value } if key == "telemetry" => {
@@ -2325,18 +1940,17 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
             output.note("telemetry restored to the default: on");
         }
         ConfigCommand::Set { key, value } if key == "auto-update" => {
-            configuration.auto_update = parse_switch(value)?;
+            if parse_switch(value)? {
+                return Err(update_migration_error());
+            }
+            configuration.auto_update = false;
             state.save_configuration(&configuration)?;
-            output.note(if configuration.auto_update {
-                "automatic CLI updates enabled"
-            } else {
-                "automatic CLI updates disabled"
-            });
+            output.note("Briefcase self-updates are disabled; Honeycomb manages updates.");
         }
         ConfigCommand::Unset { key } if key == "auto-update" => {
-            configuration.auto_update = true;
+            configuration.auto_update = false;
             state.save_configuration(&configuration)?;
-            output.note("automatic CLI updates restored to the default: on");
+            output.note("Briefcase self-updates remain disabled; Honeycomb manages updates.");
         }
         ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => {
             return Err(CliError::usage(format!(
@@ -2356,34 +1970,17 @@ fn parse_switch(value: &str) -> Result<bool> {
     }
 }
 
-async fn system(command: &SystemCommand, output: Output) -> Result<()> {
+fn update_migration_error() -> CliError {
+    CliError::Usage(
+        "Honeycomb manages Briefcase installation and updates; run `honeycomb update 'briefcase'`."
+            .into(),
+    )
+}
+
+fn system(command: &SystemCommand) -> Result<()> {
     match command {
-        SystemCommand::Update => match crate::updater::update_now().await? {
-            crate::updater::Outcome::Current(version) => {
-                if output.is_json() {
-                    output.json(&serde_json::json!({
-                        "status": "current",
-                        "version": version.to_string(),
-                    }));
-                } else {
-                    output.note(&format!("briefcase {version} is current"));
-                }
-            }
-            crate::updater::Outcome::Updated { from, to } => {
-                if output.is_json() {
-                    output.json(&serde_json::json!({
-                        "status": "updated",
-                        "from": from.to_string(),
-                        "to": to.to_string(),
-                    }));
-                } else {
-                    output.note(&format!("updated briefcase from {from} to {to}"));
-                }
-            }
-            crate::updater::Outcome::Skipped => {}
-        },
+        SystemCommand::Update => Err(update_migration_error()),
     }
-    Ok(())
 }
 
 async fn version(global: &GlobalArgs, output: Output) -> Result<()> {

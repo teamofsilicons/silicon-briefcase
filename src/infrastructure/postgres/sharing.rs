@@ -255,7 +255,7 @@ pub(super) async fn public_entry(
     tx: &mut Transaction<'_, Postgres>,
     path: &str,
 ) -> Result<PublicEntry, AppError> {
-    sqlx::query_as::<_, PublicEntry>("SELECT e.entry_id AS id,e.name,e.path,e.entry_type,e.content_type,e.size_bytes AS size FROM briefcase.entries e JOIN briefcase.organizations o ON o.org_id=e.org_id WHERE e.org_id=briefcase.current_org_id() AND o.lifecycle_status='active' AND e.path=$1 AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.link_public AND a.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.deleted_at IS NOT NULL)")
+    sqlx::query_as::<_, PublicEntry>("SELECT e.entry_id AS id,e.name,e.path,e.entry_type,e.content_type,e.size_bytes AS size FROM briefcase.entries e JOIN briefcase.organizations o ON o.org_id=e.org_id WHERE e.org_id=briefcase.current_org_id() AND o.lifecycle_status='active' AND e.path=briefcase.resolve_identifier_path($1) AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.link_public AND a.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.deleted_at IS NOT NULL)")
         .bind(path).fetch_optional(&mut **tx).await.map_err(db)?.ok_or(AppError::NotFound)
 }
 

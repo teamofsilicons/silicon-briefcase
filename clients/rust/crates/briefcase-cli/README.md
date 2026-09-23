@@ -7,12 +7,12 @@ download, and share organization files.
 cargo install briefcase-cli
 briefcase daemon install
 # Ask IAM for an unscoped SLT; choose the organization grants in IAM:
-iam login --app-id 'tos>briefcase'
+iam login --app-id 'briefcase'
 briefcase login <slt>
 
-briefcase ls private/cos:tos/notes --long
-briefcase put ./report.pdf private/cos:tos/notes
-briefcase share private/cos:tos/notes/report.pdf carbon:cos:tos --access read,update
+briefcase ls private/si:cos/notes --long
+briefcase put ./report.pdf private/si:cos/notes
+briefcase share private/si:cos/notes/report.pdf c:cos --access read,update
 briefcase find "is:md location:'public'"
 briefcase usage
 ```
@@ -65,17 +65,18 @@ appear in normal output; retain the logical operation UUID for status recovery.
 Every ordinary command also works in an isolated plane as
 `briefcase --test <environment-uuid> <command>`. `briefcase env` manages those
 planes and remembers UUID-to-secret mappings without putting app secrets on the
-command line. The persistent daemon checks crates.io hourly by default; use
-`briefcase config set auto-update off` to opt out. The check runs independently of commands, including while the CLI is idle.
+command line. Honeycomb owns CLI updates for every build. Use
+`honeycomb update 'briefcase'`; Briefcase never runs an independent updater.
+Remove an older service used only for updates with `briefcase daemon uninstall`.
 
 [service]: https://briefcase.teamofsilicons.com
 [package]: https://crates.io/crates/briefcase-client
 [guide]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/cli/README.md
 
 In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
-or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production
 continues to require a one-time IAM login code.
 
-Run `briefcase docs cli` for the bundled offline manual. `briefcase report <message> --pr <optional-PR-link>` submits a bug report; `briefcase daemon status` inspects the persistent hourly updater. See the [CLI guide](https://docs.briefcase.teamofsilicons.com/cli/) for service installation and configuration.
+Run `briefcase docs cli` for the bundled offline manual. `briefcase report <message> --pr <optional-PR-link>` submits a bug report; `briefcase daemon status` inspects the optional background service. See the [CLI guide](https://docs.briefcase.teamofsilicons.com/cli/) for service installation and configuration.

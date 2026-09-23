@@ -710,12 +710,11 @@ fn date(key: &str, value: &str) -> Result<Date, FilterError> {
 
 fn actor(key: &str, value: &str) -> Result<ActorSelector, FilterError> {
     let trimmed = value.trim();
-    let inner = trimmed
-        .strip_prefix('@')
-        .map(str::trim)
-        .and_then(|value| value.strip_prefix('{'))
+    let without_at = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
+    let inner = without_at
+        .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))
-        .unwrap_or(trimmed);
+        .unwrap_or(without_at);
     let inner = inner.trim();
     if inner.is_empty() {
         return Err(FilterError::InvalidValue {
@@ -725,8 +724,8 @@ fn actor(key: &str, value: &str) -> Result<ActorSelector, FilterError> {
     // The first segment may name a principal kind. IAM identifiers themselves
     // may contain colons, so only that first segment is ever consumed.
     let (kind, id) = match inner.split_once(':') {
-        Some(("carbon", id)) => (Some(ActorKind::Carbon), id),
-        Some(("silicon", id)) => (Some(ActorKind::Silicon), id),
+        Some(("c", _)) => (Some(ActorKind::Carbon), inner),
+        Some(("si", _)) => (Some(ActorKind::Silicon), inner),
         _ => (None, inner),
     };
     let id = id.trim();
@@ -864,8 +863,7 @@ mod tests {
 
     #[test]
     fn actor_selectors_keep_colons_inside_identifiers() -> Result<(), FilterError> {
-        let query =
-            FilterQuery::parse("from:@{carbon:cos:tos} to:@{silicon:agent} for:@{cos:tos}")?;
+        let query = FilterQuery::parse("from:@{c:cos} to:@{si:agent} for:@{cos}")?;
         let expression = query.expression.ok_or(FilterError::Empty)?;
         let parsed = predicates(&expression);
         assert_eq!(
@@ -873,15 +871,15 @@ mod tests {
             vec![
                 &FilterPredicate::CreatedBy(ActorSelector {
                     kind: Some(ActorKind::Carbon),
-                    id: "cos:tos".to_owned(),
+                    id: "c:cos".to_owned(),
                 }),
                 &FilterPredicate::SharedWith(ActorSelector {
                     kind: Some(ActorKind::Silicon),
-                    id: "agent".to_owned(),
+                    id: "si:agent".to_owned(),
                 }),
                 &FilterPredicate::AccessibleTo(ActorSelector {
                     kind: None,
-                    id: "cos:tos".to_owned(),
+                    id: "cos".to_owned(),
                 }),
             ]
         );

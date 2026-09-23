@@ -149,7 +149,7 @@ impl Client {
             .header("idempotency-key", idempotency_key.as_str())
             .body(body)
             .timeout(self.request_timeout());
-        let tokens: SessionTokens = self.receive_json_without_maintenance(request).await?;
+        let tokens: SessionTokens = self.receive_json(request).await?;
         require_session_organization(tokens.org_id.as_deref(), self.organization())?;
         Ok(tokens)
     }

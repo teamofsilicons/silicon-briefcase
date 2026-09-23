@@ -72,7 +72,7 @@ impl ActorRef {
 
 impl std::fmt::Display for ActorRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}:{}", self.actor_type, self.id)
+        formatter.write_str(&self.id)
     }
 }
 
@@ -756,9 +756,9 @@ mod tests {
 
     #[test]
     fn an_actor_reads_as_kind_and_identifier() {
-        let actor = ActorRef::carbon("cos:tos");
+        let actor = ActorRef::carbon("c:cos");
         assert_eq!(actor.actor_type, ActorType::Carbon);
-        assert_eq!(actor.to_string(), "carbon:cos:tos");
+        assert_eq!(actor.to_string(), "c:cos");
     }
 
     #[test]

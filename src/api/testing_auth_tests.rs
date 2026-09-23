@@ -23,8 +23,8 @@ use crate::{
     request_context,
 };
 
-const APP: &str = "tos>briefcase";
-const ISSUER: &str = "tos>waveform";
+const APP: &str = "briefcase";
+const ISSUER: &str = "waveform";
 const TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ENDPOINT: &str = "briefcase.folders.create";
@@ -86,7 +86,7 @@ impl Fixture {
             runtime_control,
             runtime_data,
             &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-            "tos>briefcase",
+            "briefcase",
         )?));
         let fixture = Self {
             state,
@@ -318,7 +318,7 @@ async fn imported_world_bearer_rejects_wrong_org_world_audience_and_revoked_auth
         match field {
             "org_id" => body["authorization"][field] = json!(f.owner),
             "testing_environment_id" => body["authorization"][field] = json!(Uuid::new_v4()),
-            "audience" => body["authorization"][field] = json!("tos>another-app"),
+            "audience" => body["authorization"][field] = json!("another-app"),
             "active" => body = json!({"active":false}),
             _ => body["authorization"][field] = Value::Null,
         }
@@ -417,14 +417,14 @@ async fn imported_world_delegation_rejects_unbound_scope_identity_org_and_world(
             "missing_scope" => proof["authorization"]["scopes"] = f.snapshot()["scopes"].clone(),
             "foreign_scope" => {
                 proof["authorization"]["scopes"][0] =
-                    json!("obo:tos>another-app:briefcase.folders.create");
+                    json!("obo:another-app:briefcase.folders.create");
             }
             "wrong_endpoint" => proof["endpoint"]["endpoint_id"] = json!("briefcase.files.create"),
             "wrong_org" => proof["org_id"] = json!(f.owner),
             "wrong_world" => {
                 proof["authorization"]["testing_environment_id"] = json!(Uuid::new_v4());
             }
-            "wrong_audience" => proof["audience"] = json!("tos>another-app"),
+            "wrong_audience" => proof["audience"] = json!("another-app"),
             "wrong_actor" => proof["authorization"]["public_id"] = json!("another-carbon"),
             "no_role" => proof["authorization"]["org_role"] = Value::Null,
             "no_tags" => proof["authorization"]["tags"] = Value::Null,
@@ -647,10 +647,10 @@ async fn raw_recording_upload(tags_disclosed: bool) -> anyhow::Result<()> {
     let mut proof = f.proof_response();
     proof["endpoint"] =
         json!({"endpoint_id":"briefcase.files.create","path":handlers::obo::CREATE_FILE_PATH});
-    proof["authorization"]["scopes"][0] = json!("obo:tos>briefcase:briefcase.files.create");
+    proof["authorization"]["scopes"][0] = json!("obo:briefcase:briefcase.files.create");
     if !tags_disclosed {
         proof["authorization"]["scopes"] = json!([
-            "obo:tos>briefcase:briefcase.files.create",
+            "obo:briefcase:briefcase.files.create",
             "self.identity.read",
             "self.membership.read"
         ]);

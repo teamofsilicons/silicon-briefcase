@@ -1,11 +1,6 @@
 //! The client itself: one deployment, one organization, no stored state.
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use secrecy::ExposeSecret as _;
@@ -18,10 +13,7 @@ use crate::{
     contract::{API_VERSION, ServiceVersion},
     error::{ApiError, Error, Result, WireErrorEnvelope, transport},
     models::ServiceStatus,
-    update::{
-        CLIENT_CRATE, CLIENT_VERSION, Release, UpdateStatus, check, explicitly_disabled,
-        find_manifest, update_dependency,
-    },
+    update::UpdateStatus,
 };
 
 /// A key that makes a retried mutation return the first answer again.
@@ -77,7 +69,6 @@ impl Default for IdempotencyKey {
 pub struct Client {
     http: reqwest::Client,
     config: Config,
-    updater: Arc<AutomaticUpdater>,
 }
 
 impl Client {
@@ -93,13 +84,7 @@ impl Client {
     /// contract, and a transport error when it cannot be reached.
     pub async fn connect(config: Config) -> Result<Self> {
         let client = Self::new_unchecked(config)?;
-        // A caller may already hold a two-minute SLT or 60-second OBO proof
-        // when it connects. Contract negotiation must not spend that
-        // credential's lifetime on registry or Cargo maintenance.
-        client
-            .version_without_maintenance()
-            .await?
-            .check_compatibility()?;
+        client.version().await?.check_compatibility()?;
         Ok(client)
     }
 
@@ -125,17 +110,7 @@ impl Client {
             .map_err(|error| {
                 Error::Configuration(format!("HTTP client could not be built: {error}"))
             })?;
-        let disabled_by_environment = std::env::var("BRIEFCASE_CLIENT_AUTO_UPDATE")
-            .is_ok_and(|value| explicitly_disabled(&value));
-        let updater = AutomaticUpdater::shared(
-            config.auto_update && !disabled_by_environment,
-            config.update_manifest.clone(),
-        );
-        Ok(Self {
-            http,
-            config,
-            updater,
-        })
+        Ok(Self { http, config })
     }
 
     /// Returns the configuration this client was built with.
@@ -144,13 +119,10 @@ impl Client {
         &self.config
     }
 
-    /// Reports the latest best-effort update result for this Cargo project.
-    ///
-    /// Maintenance runs in the background after ordinary operations, at most
-    /// hourly. This remains the preceding result while a check is in flight.
+    /// Runtime dependency updates are retired; always returns `Disabled`.
     #[must_use]
     pub fn update_status(&self) -> UpdateStatus {
-        self.updater.status()
+        UpdateStatus::Disabled
     }
 
     /// Returns the selected organization, or an empty string for sign-in-only clients.
@@ -166,15 +138,6 @@ impl Client {
     /// Returns an error when the deployment cannot be reached, or answers
     /// `406` because it serves no API major this build speaks.
     pub async fn version(&self) -> Result<ServiceVersion> {
-        self.version_response(true).await
-    }
-
-    async fn version_without_maintenance(&self) -> Result<ServiceVersion> {
-        self.version_response(false).await
-    }
-
-    async fn version_response(&self, run_maintenance: bool) -> Result<ServiceVersion> {
-        let _maintenance = run_maintenance.then(|| self.maintenance());
         let url = self.origin_url(&["api", "version"])?;
         let request = self
             .http
@@ -182,7 +145,7 @@ impl Client {
             .header("briefcase-supported-api-versions", API_VERSION)
             .timeout(self.config.request_timeout);
         let request = self.apply_environment(request);
-        let response = self.receive_without_maintenance(request).await?;
+        let response = self.receive(request).await?;
         let selected_header = response
             .headers()
             .get("briefcase-api-version")
@@ -340,21 +303,7 @@ impl Client {
     where
         T: DeserializeOwned,
     {
-        let _maintenance = self.maintenance();
         let response = self.receive(request).await?;
-        Self::decode_json(response).await
-    }
-
-    /// Sends a credential-sensitive request without package maintenance.
-    /// A later ordinary operation triggers the shared default-on updater.
-    pub(crate) async fn receive_json_without_maintenance<T>(
-        &self,
-        request: RequestBuilder,
-    ) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let response = self.receive_without_maintenance(request).await?;
         Self::decode_json(response).await
     }
 
@@ -370,212 +319,16 @@ impl Client {
 
     /// Sends a request that answers with no content.
     pub(crate) async fn receive_empty(&self, request: RequestBuilder) -> Result<()> {
-        let _maintenance = self.maintenance();
         self.receive(request).await.map(drop)
     }
 
     /// Sends a request and returns the raw successful response.
     pub(crate) async fn receive(&self, request: RequestBuilder) -> Result<Response> {
-        self.receive_without_maintenance(request).await
-    }
-
-    /// Defers background maintenance until the whole operation or stream ends.
-    pub(crate) fn maintenance(&self) -> Maintenance {
-        Maintenance {
-            updater: Arc::clone(&self.updater),
-        }
-    }
-
-    /// Sends immediately, leaving automatic maintenance for a later ordinary
-    /// request so a short-lived or one-use credential cannot expire first.
-    pub(crate) async fn receive_without_maintenance(
-        &self,
-        request: RequestBuilder,
-    ) -> Result<Response> {
         let response = request.send().await.map_err(transport)?;
         if response.status().is_success() {
             return Ok(response);
         }
         Err(Error::Api(api_error(response).await))
-    }
-}
-
-/// A response-lifetime guard; dropping it never waits for registry or Cargo.
-pub(crate) struct Maintenance {
-    updater: Arc<AutomaticUpdater>,
-}
-
-impl Drop for Maintenance {
-    fn drop(&mut self) {
-        self.updater.schedule();
-    }
-}
-
-const UPDATE_INTERVAL: Duration = Duration::from_hours(1);
-
-// No credentials or API data live here. Keeping one maintenance state per
-// canonical manifest also throttles callers that construct a Client per call.
-static PROJECT_UPDATERS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<AutomaticUpdater>>>> =
-    OnceLock::new();
-
-#[derive(Debug)]
-struct AutomaticUpdater {
-    enabled: bool,
-    manifest: Option<PathBuf>,
-    state: Mutex<UpdaterState>,
-}
-
-#[derive(Debug, Default)]
-struct UpdaterState {
-    in_flight: bool,
-    last_checked: Option<Instant>,
-    status: UpdateStatus,
-}
-
-impl UpdaterState {
-    fn is_due(&self, now: Instant) -> bool {
-        !self.in_flight
-            && self
-                .last_checked
-                .is_none_or(|checked| now.saturating_duration_since(checked) >= UPDATE_INTERVAL)
-    }
-}
-
-impl AutomaticUpdater {
-    fn shared(enabled: bool, manifest: Option<PathBuf>) -> Arc<Self> {
-        if !enabled {
-            return Arc::new(Self::new(false, None));
-        }
-        let manifest = manifest
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|directory| find_manifest(&directory))
-            })
-            .and_then(|path| {
-                let absolute = if path.is_absolute() {
-                    path
-                } else {
-                    std::env::current_dir().ok()?.join(path)
-                };
-                Some(absolute.canonicalize().unwrap_or(absolute))
-            });
-        let Some(project) = manifest.as_ref() else {
-            return Arc::new(Self::new(true, None));
-        };
-        let Ok(mut projects) = PROJECT_UPDATERS.get_or_init(Mutex::default).lock() else {
-            // A poisoned coordination lock must not affect API operations.
-            return Arc::new(Self::new(false, None));
-        };
-        Arc::clone(
-            projects
-                .entry(project.clone())
-                .or_insert_with(|| Arc::new(Self::new(true, manifest))),
-        )
-    }
-
-    fn new(enabled: bool, manifest: Option<PathBuf>) -> Self {
-        Self {
-            enabled,
-            manifest,
-            state: Mutex::new(UpdaterState::default()),
-        }
-    }
-
-    fn status(&self) -> UpdateStatus {
-        self.state.lock().map_or_else(
-            |_| UpdateStatus::Failed {
-                reason: "update status lock was poisoned".to_owned(),
-            },
-            |state| state.status.clone(),
-        )
-    }
-
-    fn schedule(self: &Arc<Self>) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if !self.enabled {
-            state.status = UpdateStatus::Disabled;
-            return;
-        }
-        if !state.is_due(Instant::now()) {
-            return;
-        }
-        state.last_checked = Some(Instant::now());
-        let Some(manifest) = self.manifest.clone() else {
-            state.status = UpdateStatus::NoCargoProject;
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            state.status = UpdateStatus::Failed {
-                reason: "automatic maintenance requires a running Tokio runtime".to_owned(),
-            };
-            return;
-        };
-        state.in_flight = true;
-        drop(state);
-        let attempt = UpdateAttempt {
-            updater: Arc::clone(self),
-            result: None,
-        };
-        runtime.spawn(async move {
-            let release = match check(CLIENT_CRATE, CLIENT_VERSION).await {
-                Ok(release) => release,
-                Err(error) => {
-                    attempt.finish(UpdateStatus::Failed {
-                        reason: error.to_string(),
-                    });
-                    return;
-                }
-            };
-            // Cargo is synchronous. Move both it and the attempt guard to the
-            // blocking pool: unrelated API I/O keeps running, and cancellation
-            // cannot clear ownership while Cargo is still changing the lockfile.
-            tokio::task::spawn_blocking(move || {
-                attempt.finish(apply_release(&manifest, release));
-            });
-        });
-    }
-}
-
-struct UpdateAttempt {
-    updater: Arc<AutomaticUpdater>,
-    result: Option<UpdateStatus>,
-}
-
-impl UpdateAttempt {
-    fn finish(mut self, result: UpdateStatus) {
-        self.result = Some(result);
-    }
-}
-
-impl Drop for UpdateAttempt {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.updater.state.lock() {
-            state.in_flight = false;
-            state.last_checked = Some(Instant::now());
-            state.status = self.result.take().unwrap_or_else(|| UpdateStatus::Failed {
-                reason: "automatic maintenance was interrupted".to_owned(),
-            });
-        }
-    }
-}
-
-fn apply_release(manifest: &std::path::Path, release: Release) -> UpdateStatus {
-    if !release.update_available() {
-        return UpdateStatus::Current {
-            version: release.current,
-        };
-    }
-    match update_dependency(manifest, CLIENT_CRATE, &release.latest) {
-        Ok(()) => UpdateStatus::Updated {
-            from: release.current,
-            to: release.latest,
-        },
-        Err(error) => UpdateStatus::Failed {
-            reason: error.to_string(),
-        },
     }
 }
 
@@ -649,63 +402,20 @@ fn fallback_code(status: StatusCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc, time::Instant};
-
+    use super::{Client, IdempotencyKey};
     use crate::config::Config;
     use crate::update::UpdateStatus;
 
-    use super::{
-        AutomaticUpdater, Client, IdempotencyKey, Maintenance, UPDATE_INTERVAL, UpdateAttempt,
-        UpdaterState,
-    };
-
     #[test]
-    fn completion_guard_defers_maintenance_until_the_operation_ends() {
-        let updater = Arc::new(AutomaticUpdater::new(false, None));
-        let guard = Maintenance {
-            updater: Arc::clone(&updater),
-        };
-        assert_eq!(updater.status(), UpdateStatus::NotChecked);
-        drop(guard);
-        assert_eq!(updater.status(), UpdateStatus::Disabled);
-    }
-
-    #[test]
-    fn hourly_throttle_never_overlaps_an_in_flight_check() {
-        let now = Instant::now();
-        let mut state = UpdaterState::default();
-        assert!(state.is_due(now));
-        state.last_checked = Some(now);
-        assert!(!state.is_due(now));
-        assert!(!state.is_due(now + std::time::Duration::from_secs(3_599)));
-        assert!(state.is_due(now + UPDATE_INTERVAL));
-        state.in_flight = true;
-        assert!(!state.is_due(now + UPDATE_INTERVAL * 2));
-    }
-
-    #[test]
-    fn abandoned_update_releases_ownership_and_throttles_retries() {
-        let updater = Arc::new(AutomaticUpdater::new(true, None));
-        updater.state.lock().unwrap().in_flight = true;
-        drop(UpdateAttempt {
-            updater: Arc::clone(&updater),
-            result: None,
-        });
-        let state = updater.state.lock().unwrap();
-        assert!(!state.in_flight);
-        assert!(!state.is_due(Instant::now()));
-        assert!(matches!(state.status, UpdateStatus::Failed { .. }));
-    }
-
-    #[test]
-    fn independent_clients_share_project_maintenance_but_not_opt_out_policy() {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let first = AutomaticUpdater::shared(true, Some(manifest.clone()));
-        let second = AutomaticUpdater::shared(true, Some(manifest.clone()));
-        let disabled = AutomaticUpdater::shared(false, Some(manifest));
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(!Arc::ptr_eq(&first, &disabled));
-        assert!(!disabled.enabled);
+    fn legacy_update_options_cannot_enable_runtime_updates() {
+        for enabled in [false, true] {
+            let config = Config::new("https://briefcase.example/api/v1/", "tos")
+                .unwrap()
+                .with_auto_update(enabled)
+                .with_update_manifest("/missing/Cargo.toml");
+            let client = Client::new_unchecked(config).unwrap();
+            assert_eq!(client.update_status(), UpdateStatus::Disabled);
+        }
     }
 
     fn client() -> Client {

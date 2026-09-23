@@ -2,9 +2,8 @@
 //!
 //! The package holds no login session or API cache. Whatever a caller wants
 //! remembered between runs — tokens, environment UUID-to-key mappings, a
-//! default organization — belongs to the caller. Dependency maintenance is the
-//! deliberate exception: its default-on best-effort updater can advance the
-//! consuming Cargo lockfile and has explicit config/environment opt-outs.
+//! default organization — belongs to the caller. Dependency updates also belong
+//! to the consuming project; API calls never change its manifest or lockfile.
 
 use std::{path::PathBuf, time::Duration};
 
@@ -159,12 +158,12 @@ impl<'de> Deserialize<'de> for IamEnvironmentKey {
     }
 }
 
-/// Canonical organization-qualified IAM Application ID.
+/// Canonical bare IAM Application ID.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ApplicationId(String);
 
 impl ApplicationId {
-    /// Validates `{org_id}>{handle}` without normalizing caller input.
+    /// Validates the bare application handle without normalizing caller input.
     ///
     /// # Errors
     ///
@@ -172,13 +171,14 @@ impl ApplicationId {
     /// canonical public identifier grammar.
     pub fn new(value: impl Into<String>) -> Result<Self, Error> {
         let value = value.into();
-        let valid = value.matches('>').count() == 1
-            && value.split_once('>').is_some_and(|(organization, handle)| {
-                valid_handle(organization, 50, false) && valid_handle(handle, 80, true)
+        let valid = (1..=80).contains(&value.len())
+            && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            && value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
             });
         if !valid {
             return Err(Error::Configuration(
-                "IAM Application ID must be canonical {org_id}>{handle}".into(),
+                "IAM Application ID must be a bare lowercase handle".into(),
             ));
         }
         Ok(Self(value))
@@ -288,14 +288,6 @@ impl<'de> Deserialize<'de> for IamApplicationSecret {
     }
 }
 
-fn valid_handle(value: &str, maximum: usize, first_letter: bool) -> bool {
-    (3..=maximum).contains(&value.len())
-        && (!first_letter || value.as_bytes().first().is_some_and(u8::is_ascii_lowercase))
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-}
-
 /// The credential a client presents.
 #[derive(Clone)]
 pub enum Credential {
@@ -347,10 +339,8 @@ pub struct Config {
     pub(crate) transfer_timeout: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) user_agent: String,
-    pub(crate) auto_update: bool,
     pub(crate) telemetry: bool,
     pub(crate) telemetry_source: crate::telemetry::Source,
-    pub(crate) update_manifest: Option<PathBuf>,
 }
 
 impl Config {
@@ -460,10 +450,8 @@ impl Config {
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             user_agent: concat!("briefcase-client/", env!("CARGO_PKG_VERSION")).to_owned(),
-            auto_update: true,
             telemetry: true,
             telemetry_source: crate::telemetry::Source::Sdk,
-            update_manifest: None,
         })
     }
 
@@ -521,17 +509,15 @@ impl Config {
         self
     }
 
-    /// Enables or disables the default-on best-effort crates.io updater.
+    /// Compatibility no-op. Update dependencies through Cargo and rebuild.
     #[must_use]
-    pub const fn with_auto_update(mut self, enabled: bool) -> Self {
-        self.auto_update = enabled;
+    pub const fn with_auto_update(self, _enabled: bool) -> Self {
         self
     }
 
-    /// Selects the Cargo manifest whose lockfile automatic updates maintain.
+    /// Compatibility no-op. Runtime requests never modify Cargo projects.
     #[must_use]
-    pub fn with_update_manifest(mut self, manifest: impl Into<PathBuf>) -> Self {
-        self.update_manifest = Some(manifest.into());
+    pub fn with_update_manifest(self, _manifest: impl Into<PathBuf>) -> Self {
         self
     }
 
@@ -658,10 +644,10 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "IamApplicationSecret(<redacted>)");
 
         assert_eq!(
-            ApplicationId::new("acme>briefcase").unwrap().as_str(),
-            "acme>briefcase"
+            ApplicationId::new("briefcase").unwrap().as_str(),
+            "briefcase"
         );
-        assert!(ApplicationId::new("briefcase").is_err());
+        assert!(ApplicationId::new("acme>briefcase").is_err());
         assert!(ApplicationId::new("Acme>briefcase").is_err());
         assert!(IamApplicationSecret::new("ask_short").is_err());
     }

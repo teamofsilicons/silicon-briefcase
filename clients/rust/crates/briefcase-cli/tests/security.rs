@@ -70,18 +70,18 @@ fn entry_document() -> Value {
         "type": "file",
         "visibility": "full",
         "name": "note.txt",
-        "path": "apps/tos>notes/private/cos:tester/note.txt",
+        "path": "apps/notes/private/cos:tester/note.txt",
         "parent_id": null,
         "root_type": "private",
         "tag": null,
         "content_type": "text/plain",
         "size": 4,
         "render": "document",
-        "permanent_url": "https://briefcase.example/org/tos/apps/tos%3Enotes/private/cos:tester/note.txt",
+        "permanent_url": "https://briefcase.example/org/tos/apps/notes/private/cos:tester/note.txt",
         "content_url": null,
         "download_url": null,
         "owner": {"type": "carbon", "id": "cos:tester"},
-        "origin_app_id": "tos>notes",
+        "origin_app_id": "notes",
         "effective_access": ["read", "update"],
         "created_at": "2026-09-04T00:00:00Z",
         "updated_at": "2026-09-04T00:00:00Z",
@@ -558,7 +558,7 @@ async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
     let mut second_entry = entry_document();
     second_entry["id"] = json!("01a067ce-7f19-7790-820a-0be6b3d4f829");
     second_entry["name"] = json!("second.txt");
-    second_entry["path"] = json!("apps/tos>notes/private/cos:tester/second.txt");
+    second_entry["path"] = json!("apps/notes/private/cos:tester/second.txt");
     Mock::given(method("GET"))
         .and(path("/api/v1/entries"))
         .and(query_param("cursor", "page-one"))
@@ -711,7 +711,7 @@ async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session
     Mock::given(method("POST"))
         .and(path("/api/v1/obo/files"))
         .and(header("x-org-id", "tos"))
-        .and(header("x-app-id", "tos>notes"))
+        .and(header("x-app-id", "notes"))
         .and(header("x-iam-obo-access-proof", "proof-once"))
         .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
         .mount(&server)
@@ -723,7 +723,7 @@ async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session
             "app".into(),
             "upload".into(),
             "--app-id".into(),
-            "tos>notes".into(),
+            "notes".into(),
             "--proof-stdin".into(),
             file.display().to_string(),
         ],
@@ -934,7 +934,7 @@ async fn iam_discovery_does_not_read_or_send_member_credentials() {
     Mock::given(method("GET"))
         .and(path("/api/v1/iam"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "app_id": "tos>briefcase", "test_environment_id": null, "iam_environment_id": null
+            "app_id": "briefcase", "test_environment_id": null, "iam_environment_id": null
         })))
         .expect(1)
         .mount(&server)
@@ -946,7 +946,7 @@ async fn iam_discovery_does_not_read_or_send_member_credentials() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["app_id"], "tos>briefcase");
+    assert_eq!(value["app_id"], "briefcase");
     for request in server.received_requests().await.unwrap() {
         assert!(request.headers.get("authorization").is_none());
     }
@@ -1468,4 +1468,57 @@ async fn telemetry_preference_persists_and_never_attaches_command_arguments() {
     assert!(event["duration_ms"].is_number());
     assert!(!String::from_utf8_lossy(&telemetry.body).contains("profiles"));
     assert!(!telemetry.headers.contains_key("authorization"));
+}
+
+#[test]
+fn legacy_updater_settings_cannot_reenable_briefcase_updates() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join(".briefcase");
+    std::fs::create_dir_all(&state).unwrap();
+    let config_path = state.join("config.json");
+    let original = json!({
+        "auto_update": true,
+        "telemetry": false,
+        "current_profile": "kept",
+        "profiles": {"kept": {"url": "http://127.0.0.1:1/api/v1/", "org": "tos"}}
+    });
+    std::fs::write(&config_path, original.to_string()).unwrap();
+    let invoke = |args: &[&str]| {
+        clean_cli()
+            .env("HOME", home.path())
+            .env("BRIEFCASE_HOME", &state)
+            .env("BRIEFCASE_DAEMON_HOME", home.path().join("daemon"))
+            .env("BRIEFCASE_AUTO_UPDATE", "on")
+            .env("BRIEFCASE_TELEMETRY", "off")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let shown = invoke(&["config", "show", "--json"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["auto_update"], false);
+    assert_eq!(shown["update_manager"], "honeycomb");
+    for args in [
+        vec!["config", "set", "auto-update", "on"],
+        vec!["system", "update"],
+    ] {
+        let result = invoke(&args);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Honeycomb"));
+        let saved: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(saved, original);
+    }
+    for args in [
+        vec!["config", "unset", "auto-update"],
+        vec!["config", "set", "auto-update", "off"],
+    ] {
+        assert!(invoke(&args).status.success());
+        let saved: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(saved["auto_update"], false);
+        assert_eq!(saved["telemetry"], false);
+        assert_eq!(saved["profiles"], original["profiles"]);
+    }
+    assert!(!home.path().join("daemon/installation").exists());
+    assert!(!state.join("update.json").exists());
 }

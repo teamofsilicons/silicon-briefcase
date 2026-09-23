@@ -27,14 +27,14 @@ fn snapshot(
         "organization_id":"01990a9d-86f1-7000-8000-000000000002",
         "membership_id":"01990a9d-86f1-7000-8000-000000000003",
         "actor_type":"carbon","public_id":"member-a","org_id":"client-org",
-        "membership_version":7,"authorization_epoch":7,"audience":"tos>briefcase",
+        "membership_version":7,"authorization_epoch":7,"audience":"briefcase",
         "testing_environment_id":null,"org_role":"member","scopes":scopes,"tags":tags
     }))?)
 }
 
 #[test]
 fn production_authorization_preserves_unknown_and_explicit_empty_tags() -> anyhow::Result<()> {
-    let app = ApplicationId::new("tos>briefcase")?;
+    let app = ApplicationId::new("briefcase")?;
     let org = OrganizationId::new("client-org")?;
     let unknown = authorization(
         snapshot(&Value::Null, false)?,
@@ -72,7 +72,7 @@ fn production_authorization_preserves_unknown_and_explicit_empty_tags() -> anyho
 
 #[test]
 fn scope_disclosure_inconsistency_and_missing_role_remain_rejected() -> anyhow::Result<()> {
-    let app = ApplicationId::new("tos>briefcase")?;
+    let app = ApplicationId::new("briefcase")?;
     let org = OrganizationId::new("client-org")?;
     for mismatched in [snapshot(&Value::Null, true)?, snapshot(&json!([]), false)?] {
         assert!(authorization(mismatched, &app, &org, None, AuthenticationMode::Bearer).is_err());
@@ -97,7 +97,7 @@ fn scope_disclosure_inconsistency_and_missing_role_remain_rejected() -> anyhow::
 
 #[test]
 fn undisclosed_tags_do_not_block_explicit_actor_grants_or_ownership() -> anyhow::Result<()> {
-    let app = ApplicationId::new("tos>briefcase")?;
+    let app = ApplicationId::new("briefcase")?;
     let org = OrganizationId::new("client-org")?;
     let context = authorization(
         snapshot(&Value::Null, false)?,

@@ -51,7 +51,7 @@ Content-Type: application/json
   "operation_id": "<non-nil UUID matching op>",
   "environment_id": "<non-nil UUID matching id>",
   "org_id": "<organization matching org>",
-  "app_id": "tos>briefcase",
+  "app_id": "briefcase",
   "environment_revision": 1,
   "generation": 1,
   "key_version": 1,
@@ -75,7 +75,7 @@ again. Retirement of other applications preserves Briefcase data. `snapshot`,
 null, an empty string and an empty array respectively. Unknown fields are rejected.
 All path identities must match the body. The operation's `app_id` must match the
 current application identity configured by `BRIEFCASE_IAM_APP_ID`. The examples
-use the deployed `tos>briefcase` identity; other deployments use their configured ID.
+use the deployed `briefcase` identity; other deployments use their configured ID.
 
 Persist the complete input and operation UUID before dispatch. Repeating the same
 operation with unchanged inputs recovers its result. Reusing an operation UUID with
@@ -93,7 +93,7 @@ PUT and GET return a durable, secret-free receipt:
 {
   "operation_id": "<UUID>",
   "environment_id": "<UUID>",
-  "app_id": "tos>briefcase",
+  "app_id": "briefcase",
   "environment_revision": 1,
   "generation": 1,
   "key_version": 1,
@@ -135,7 +135,7 @@ Content-Type: application/json
 ```
 
 The activity path uses the URL-encoded current `BRIEFCASE_IAM_APP_ID`; the example
-shows `tos>briefcase`. The origin comes from `BRIEFCASE_HONEYCOMB_BASE_URL`. Requests
+shows `briefcase`. The origin comes from `BRIEFCASE_HONEYCOMB_BASE_URL`. Requests
 reject redirects and
 use a five-second timeout. Successful delivery advances the recorded activity only
 for the same active generation and key version; failed delivery remains retryable.
@@ -151,7 +151,7 @@ disable, restoration and an explicitly authorized purge. Verify that the same UU
 is used throughout and that stale requests, credentials and events fail closed.
 Confirm activity reaches Honeycomb and interrupted operations recover their receipts.
 These checks require deployed services; local package validation alone cannot prove
-them. Existing `tos>briefcase` IAM identity adoption into Honeycomb must preserve its
+them. Existing `briefcase` IAM identity adoption into Honeycomb must preserve its
 identity and credentials through Honeycomb's supported adoption workflow.
 
 ## Build the release archive
@@ -167,5 +167,5 @@ python3 scripts/package-release.py
 Use `--honeycomb /path/to/honeycomb` if it is not on PATH. The script checks native
 binary OS/architecture and version metadata, stages `honeycomb.yaml` at the root,
 runs Honeycomb validation, packs the archive, then validates the archive again.
-The output is `dist/briefcase-1.1.0.tar.gz` with SHA-256 and binary hash records.
+The output is `dist/briefcase-2.0.0.tar.gz` with SHA-256 and binary hash records.
 Building an archive does not publish a release or adopt the IAM application.

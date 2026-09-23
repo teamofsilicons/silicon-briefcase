@@ -1,6 +1,14 @@
 # Briefcase HTTP API
 
-Official contract **1.1.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 59 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
+> Shared testing lifecycle has moved to Honeycomb. Legacy management routes beneath
+> `/organizations/{org_id}/testing-environments` and the selected-plane cleaning route
+> now return `testing_environment_managed_by_honeycomb`. Their historical shapes below
+> are compatibility references, not supported lifecycle operations. Use
+> [Honeycomb management](../testing-environments.md) and retain ordinary app-secret
+> data-plane selection. The protected [participant contract](../honeycomb-integration.md)
+> is a separate service integration.
+
+Official contract **2.0.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 59 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
 
 ## Authentication and negotiation
 

@@ -568,11 +568,8 @@ mod tests {
 
     #[test]
     fn obo_debug_redacts_the_single_use_proof_and_content() {
-        let request = OnBehalfOfUpload::bytes(
-            "tos>notes",
-            "obo_secret_proof",
-            b"secret file body".to_vec(),
-        );
+        let request =
+            OnBehalfOfUpload::bytes("notes", "obo_secret_proof", b"secret file body".to_vec());
         let rendered = format!("{request:?}");
         assert!(!rendered.contains("obo_secret_proof"));
         assert!(!rendered.contains("secret file body"));
@@ -586,7 +583,7 @@ mod tests {
         let request = TestingEnvironmentIamPairing::new(
             uuid::Uuid::from_u128(1),
             IamEnvironmentKey::new(root).unwrap(),
-            ApplicationId::new("tos>briefcase").unwrap(),
+            ApplicationId::new("briefcase").unwrap(),
             IamApplicationSecret::new(app_secret.clone()).unwrap(),
         );
         let rendered = format!("{request:?}");

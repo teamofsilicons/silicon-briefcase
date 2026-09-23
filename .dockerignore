@@ -9,6 +9,7 @@ target
 web/node_modules
 docs-site/node_modules
 docs-site/dist
+dist
 web/dist/*
 !web/dist/client/
 !web/dist/client/**

@@ -12,7 +12,7 @@ Initial scope: implement the September changes in `UNDERSTANDING.md`, initially 
 - [x] Concurrent 2 GiB accounting including reservations, bin and versions; ten active environments including restore races.
 - [x] Signed raw-body IAM webhook routing, duplicate/out-of-order handling, no real test delivery or secret persistence in logs/payloads.
 - [x] CLI/SDK parity, SLT-only login, SILICON_HOME and optional ISI metadata.
-- [x] Durable daemon, hourly updates independent of CLI use, opt-out, service installation and lifecycle controls.
+- [x] Durable daemon, service installation and lifecycle controls. Independent CLI and SDK updaters were subsequently removed; Honeycomb owns CLI updates.
 - [x] Realtime WebSocket prewarming and outgoing webhook/unhook are excluded by the user clarification: Briefcase uses request/response operations and a pulled inbox. Incoming IAM webhooks remain in scope.
 - [x] Bug reports through SDK and CLI, optional PR and contribution guidance.
 - [x] Bundled traversable command documentation, examples, actionable errors and repository/docs/package links.
@@ -24,7 +24,7 @@ Initial scope: implement the September changes in `UNDERSTANDING.md`, initially 
 
 The new daemon update requirement supersedes the old command-triggered schedule; the existing update opt-out remains. Shared daemon transport must not merge credentials, identities or production/testing subscriptions. Existing versioned S3 locations remain authoritative for old objects when an organization changes its active storage configuration.
 
-The user clarified that Briefcase does not need outgoing webhook prewarming. The daemon is required for hourly updates; no outgoing realtime relay is being added.
+The user clarified that Briefcase does not need outgoing webhook prewarming. The daemon originally provided hourly updates; that updater has since been removed. No outgoing realtime relay is being added.
 
 ## Verification evidence
 

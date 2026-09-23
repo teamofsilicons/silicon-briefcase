@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 1.1.0
+  version: 2.0.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
     access.
 servers:
@@ -45,7 +45,7 @@ paths:
                 $ref: '#/components/schemas/IamInfo'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /auth/status:
     get:
       tags:
@@ -72,7 +72,7 @@ paths:
                 $ref: '#/components/schemas/LoginStatus'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /version:
     get:
       tags:
@@ -158,7 +158,7 @@ paths:
           description: IAM or the configured testing plane is unavailable
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /auth/refresh:
     post:
       tags:
@@ -198,7 +198,7 @@ paths:
           description: IAM or the configured testing plane is unavailable
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /organizations/{org_id}/testing-environments:
     parameters:
     - $ref: '#/components/parameters/OrgId'
@@ -229,7 +229,7 @@ paths:
                 $ref: '#/components/schemas/TestingEnvironmentPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     post:
       tags:
       - Testing environments
@@ -246,7 +246,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /organizations/{org_id}/testing-environments/{environment_id}:
     parameters:
     - $ref: '#/components/parameters/OrgId'
@@ -271,7 +271,7 @@ paths:
                 $ref: '#/components/schemas/TestingEnvironment'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     patch:
       tags:
       - Testing environments
@@ -349,7 +349,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /organizations/{org_id}/testing-environments/{environment_id}/cleanings:
     parameters:
     - $ref: '#/components/parameters/OrgId'
@@ -415,7 +415,7 @@ paths:
                 $ref: '#/components/schemas/TestingEnvironmentSelf'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /testing-environment/cleanings:
     post:
       tags:
@@ -1007,7 +1007,7 @@ paths:
           description: The organization has no storage capacity left
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/uploads/reserve:
     post:
       tags:
@@ -1047,7 +1047,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/uploads/commit:
     post:
       tags:
@@ -1087,7 +1087,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/uploads/status:
     post:
       tags:
@@ -1127,7 +1127,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/uploads/cancel:
     post:
       tags:
@@ -1166,7 +1166,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/uploads/{upload_id}/content:
     put:
       tags:
@@ -1220,7 +1220,7 @@ paths:
           description: Content exceeds the reservation or maximum size
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/folders/create:
     post:
       tags:
@@ -1261,7 +1261,7 @@ paths:
           description: Name or logical operation conflicts with existing state
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/entries/list:
     post:
       tags:
@@ -1298,7 +1298,7 @@ paths:
           description: Parent is absent or not visible
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/files/read:
     post:
       tags:
@@ -1336,7 +1336,7 @@ paths:
           description: The bound byte range is unsatisfiable
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/entries/trash:
     post:
       tags:
@@ -1373,7 +1373,7 @@ paths:
           description: Logical operation or current entry state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /entries/{entry_id}/versions:
     get:
       tags:
@@ -1713,7 +1713,7 @@ paths:
                 $ref: '#/components/schemas/LogPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /public/{org_id}/{path}:
     get:
       operationId: readPublicEntry
@@ -1799,7 +1799,7 @@ paths:
       x-iam-critical: true
       description: IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and
         calling application. Require critical user approval in the IAM endpoint catalog.
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /obo/link-access:
     post:
       operationId: setLinkAccessOnBehalfOfMember
@@ -1833,7 +1833,7 @@ paths:
       x-iam-critical: true
       description: IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and
         calling application. Require critical user approval in the IAM endpoint catalog.
-      x-operation-version: 1.1.0
+      x-operation-version: 2.0.0
 components:
   securitySchemes:
     uploadCapability:

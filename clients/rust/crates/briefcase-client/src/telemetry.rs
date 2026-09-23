@@ -14,7 +14,7 @@ pub enum Source {
     Sdk,
     /// Command-line interface.
     Cli,
-    /// Persistent local updater.
+    /// Persistent local background service.
     Daemon,
     /// Browser application.
     Web,

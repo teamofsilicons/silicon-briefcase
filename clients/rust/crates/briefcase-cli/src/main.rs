@@ -20,7 +20,6 @@ mod render;
 mod run;
 mod state;
 mod telemetry;
-mod updater;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {

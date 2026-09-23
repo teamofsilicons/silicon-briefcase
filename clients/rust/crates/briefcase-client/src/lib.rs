@@ -6,10 +6,9 @@
 //! Everything Briefcase exposes to a client, and nothing it does internally.
 //! The package holds no login session or API cache: a [`Config`] is passed in,
 //! a [`Client`] comes out, and credentials remembered between runs belong to
-//! the caller. Its only process-external maintenance behavior is a default-on,
-//! best-effort crates.io check that can advance the consuming Cargo lockfile;
-//! [`Config::with_auto_update`] disables that when dependency updates are
-//! caller-owned.
+//! the caller. API requests never query package registries or run Cargo.
+//! Update this dependency through the consuming project and rebuild.
+//! [`Config::with_auto_update`] remains a compatibility no-op.
 //!
 //! # Getting started
 //!

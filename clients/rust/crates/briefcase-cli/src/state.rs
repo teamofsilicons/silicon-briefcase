@@ -28,10 +28,6 @@ const CONFIG_FILE: &str = "config.json";
 const CREDENTIALS_FILE: &str = "credentials.json";
 /// Cross-process lock protecting state read/modify/write transactions.
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
-/// Non-secret updater throttle state.
-const UPDATE_FILE: &str = "update.json";
-/// Separate from credentials so maintenance never delays session renewal.
-const UPDATE_LOCK_FILE: &str = "update.lock";
 
 /// Something the CLI could not read or write locally.
 #[derive(Debug, thiserror::Error)]
@@ -80,8 +76,8 @@ pub struct Profile {
 /// Every saved profile, and which one is current.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Configuration {
-    /// Whether the installed CLI checks crates.io at most once per hour.
-    #[serde(default = "enabled")]
+    /// Legacy preference, ignored on read; Honeycomb manages CLI updates.
+    #[serde(default, skip_deserializing)]
     pub auto_update: bool,
     /// Default-on operational diagnostics; separate from explicit bug reports.
     #[serde(default = "enabled")]
@@ -97,7 +93,7 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            auto_update: true,
+            auto_update: false,
             telemetry: true,
             current_profile: default_profile_name(),
             profiles: BTreeMap::new(),
@@ -107,17 +103,6 @@ impl Default for Configuration {
 
 fn enabled() -> bool {
     true
-}
-
-/// Non-secret throttle state for the hourly CLI updater.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct UpdateState {
-    /// Newest CLI version known to be installed when a check was attempted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checked_version: Option<String>,
-    /// Time of the most recent check attempt.
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub checked_at: Option<OffsetDateTime>,
 }
 
 fn default_profile_name() -> String {
@@ -483,18 +468,6 @@ impl Drop for CredentialsLock {
     }
 }
 
-/// Exclusive cross-process ownership of CLI package maintenance.
-#[derive(Debug)]
-pub struct UpdateLock {
-    file: File,
-}
-
-impl Drop for UpdateLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.file);
-    }
-}
-
 /// The shared Silicon home is the default parent for Briefcase state and its
 /// configured-home pointer. The app-specific state override is resolved first.
 fn default_home() -> Result<PathBuf, StateError> {
@@ -582,6 +555,7 @@ impl StateDirectory {
     }
 
     /// Uses an explicit state directory without changing process environment.
+    #[cfg(test)]
     #[must_use]
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -644,42 +618,6 @@ impl StateDirectory {
         Ok(CredentialsLock { file })
     }
 
-    /// Reads the updater throttle state, or an empty value when absent.
-    pub fn update_state(&self) -> Result<UpdateState, StateError> {
-        self.read_json(UPDATE_FILE)
-    }
-
-    /// Claims updater ownership without waiting for another process's Cargo.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the private lock file cannot be opened or secured.
-    pub fn try_lock_update(&self) -> Result<Option<UpdateLock>, StateError> {
-        self.ensure_directory()?;
-        let path = self.root.join(UPDATE_LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| StateError::File {
-                path: path.display().to_string(),
-                action: "opened",
-                source,
-            })?;
-        restrict_to_owner(&path, 0o600)?;
-        match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Some(UpdateLock { file })),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(source) => Err(StateError::File {
-                path: path.display().to_string(),
-                action: "locked",
-                source,
-            }),
-        }
-    }
-
     /// Writes the profiles.
     ///
     /// # Errors
@@ -696,11 +634,6 @@ impl StateDirectory {
     /// Returns an error when the directory or file cannot be written.
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<(), StateError> {
         self.write_json(CREDENTIALS_FILE, credentials, 0o600)
-    }
-
-    /// Records a crates.io check attempt without storing credentials.
-    pub fn save_update_state(&self, state: &UpdateState) -> Result<(), StateError> {
-        self.write_json(UPDATE_FILE, state, 0o600)
     }
 
     /// Returns where the token file lives, so a message can name it.
@@ -814,18 +747,6 @@ mod tests {
 
     use super::{Configuration, Credentials, Profile, StateDirectory, StoredSession};
 
-    #[test]
-    fn updater_lock_is_nonblocking_and_independent_of_credentials() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = StateDirectory::at(directory.path());
-        let credentials = state.lock_credentials().unwrap();
-        let update = state.try_lock_update().unwrap().unwrap();
-        assert!(state.try_lock_update().unwrap().is_none());
-        drop(update);
-        assert!(state.try_lock_update().unwrap().is_some());
-        drop(credentials);
-    }
-
     fn session(expires_in: Duration) -> StoredSession {
         StoredSession {
             access_token: "access-secret-value".to_owned(),
@@ -850,14 +771,14 @@ mod tests {
 
         assert!(state.configuration().unwrap().profiles.is_empty());
         assert!(state.credentials().unwrap().tokens.is_empty());
-        assert!(state.configuration().unwrap().auto_update);
+        assert!(!state.configuration().unwrap().auto_update);
     }
 
     #[test]
-    fn old_configuration_files_gain_default_on_updates() {
+    fn old_configuration_files_keep_updates_disabled() {
         let configuration: Configuration =
             serde_json::from_str(r#"{"current_profile":"default","profiles":{}}"#).unwrap();
-        assert!(configuration.auto_update);
+        assert!(!configuration.auto_update);
         assert!(configuration.telemetry);
     }
 

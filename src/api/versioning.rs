@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "1.1.0";
+pub const CONTRACT_VERSION: &str = "2.0.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -47,59 +47,59 @@ pub struct OperationVersion {
 pub const OPERATIONS: [OperationVersion; 60] = [
     operation(
         "reserveDelegatedUpload",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/uploads/reserve",
     ),
     operation(
         "commitDelegatedUpload",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/uploads/commit",
     ),
     operation(
         "getDelegatedUploadStatus",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/uploads/status",
     ),
     operation(
         "cancelDelegatedUpload",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/uploads/cancel",
     ),
     operation(
         "transferDelegatedUpload",
-        "1.0.0",
+        "2.0.0",
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
-    operation("readIamInfo", "1.0.0", "GET", "/iam"),
-    operation("readLoginStatus", "1.0.0", "GET", "/auth/status"),
+    operation("readIamInfo", "2.0.0", "GET", "/iam"),
+    operation("readLoginStatus", "2.0.0", "GET", "/auth/status"),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
-    operation("exchangeShortLivedToken", "1.0.0", "POST", "/auth/slt"),
+    operation("exchangeShortLivedToken", "2.0.0", "POST", "/auth/slt"),
     operation(
         "refreshApplicationSession",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/auth/refresh",
     ),
     operation(
         "listTestingEnvironments",
-        "1.0.0",
+        "2.0.0",
         "GET",
         "/organizations/{org_id}/testing-environments",
     ),
     operation(
         "createTestingEnvironment",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/organizations/{org_id}/testing-environments",
     ),
     operation(
         "getTestingEnvironment",
-        "1.0.0",
+        "2.0.0",
         "GET",
         "/organizations/{org_id}/testing-environments/{environment_id}",
     ),
@@ -123,7 +123,7 @@ pub const OPERATIONS: [OperationVersion; 60] = [
     ),
     operation(
         "replaceTestingEnvironmentIamPairing",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
     ),
@@ -141,7 +141,7 @@ pub const OPERATIONS: [OperationVersion; 60] = [
     ),
     operation(
         "describeCurrentTestingEnvironment",
-        "1.0.0",
+        "2.0.0",
         "GET",
         "/testing-environment",
     ),
@@ -175,28 +175,28 @@ pub const OPERATIONS: [OperationVersion; 60] = [
         "/org/{org_id}/{path}",
     ),
     operation("uploadFile", "1.0.0", "POST", "/uploads"),
-    operation("createFileOnBehalfOfMember", "1.0.0", "POST", "/obo/files"),
+    operation("createFileOnBehalfOfMember", "2.0.0", "POST", "/obo/files"),
     operation(
         "createFolderOnBehalfOfMember",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/folders/create",
     ),
     operation(
         "listEntriesOnBehalfOfMember",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/entries/list",
     ),
     operation(
         "readFileOnBehalfOfMember",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/files/read",
     ),
     operation(
         "trashEntryOnBehalfOfMember",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/entries/trash",
     ),
@@ -286,17 +286,17 @@ pub const OPERATIONS: [OperationVersion; 60] = [
         "PUT",
         "/entries/{entry_id}/link-access",
     ),
-    operation("listEntryLogs", "1.0.0", "GET", "/entries/{entry_id}/logs"),
+    operation("listEntryLogs", "2.0.0", "GET", "/entries/{entry_id}/logs"),
     operation("readPublicEntry", "1.1.0", "GET", "/public/{org_id}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/obo/invitations",
     ),
     operation(
         "setLinkAccessOnBehalfOfMember",
-        "1.1.0",
+        "2.0.0",
         "POST",
         "/obo/link-access",
     ),

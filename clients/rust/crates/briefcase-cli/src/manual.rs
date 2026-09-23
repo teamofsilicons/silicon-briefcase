@@ -94,10 +94,10 @@ fn workflow(command: &str) -> &'static str {
             "Use these commands with an IAM OBO proof for an application acting as a member. The application namespace and the member's current rights both limit access. Read `briefcase docs client` before integrating."
         }
         "config" => {
-            "Use `briefcase config show` to inspect saved settings. `briefcase config set auto-update off` disables this home's automatic updates; `briefcase config home <directory>` selects its state location."
+            "Use `briefcase config show` to inspect saved settings. Independent updates are retired; Honeycomb manages releases. `briefcase config home <directory>` selects its state location."
         }
         "daemon" | "system" | "version" => {
-            "Install persistent hourly updates with `briefcase daemon install`; inspect them with `briefcase daemon status`. `briefcase system update` performs an explicit update now."
+            "Update with `honeycomb update 'briefcase'`. The optional daemon has no updater. Remove a service used only for updates with `briefcase daemon uninstall`."
         }
         "report" => {
             "Include reproduction steps, expected behavior, and actual behavior. An optional --pr links a fix. Reports use the selected organization and test environment."

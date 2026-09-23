@@ -71,7 +71,7 @@ async fn lifecycle_is_durable_fenced_and_waits_for_provider_cleanup() -> anyhow:
         runtime_control,
         runtime_data,
         &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-        "tos>briefcase",
+        "briefcase",
     )?
     .with_honeycomb_token(Some(SecretString::from(token)));
     assert!(store.authenticate_honeycomb(token).is_ok());
@@ -79,7 +79,7 @@ async fn lifecycle_is_durable_fenced_and_waits_for_provider_cleanup() -> anyhow:
     let id = Uuid::now_v7();
     let org = format!("honeycomb-{}", Uuid::new_v4().simple());
     let mut op: HoneycombOperation = serde_json::from_value(
-        json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":org,"app_id":"tos>briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}),
+        json!({"operation_id":Uuid::new_v4(),"environment_id":id,"org_id":org,"app_id":"briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}),
     )?;
     let first = store.honeycomb_operation(&op).await?;
     assert_eq!(first["state"], "completed");
@@ -101,7 +101,7 @@ async fn lifecycle_is_durable_fenced_and_waits_for_provider_cleanup() -> anyhow:
     let mut context: silicon_iam_client::models::ApplicationTestingContext =
         serde_json::from_value(json!({
         "environment_id":id,"environment":{"environment_id":id,"org_id":org,"name":"Honeycomb test","description":null,"version":1,"key_generation":1,"cleaned_at":null,"created_at":"2026-09-16T00:00:00Z","creator_type":"carbon","creator_id":"owner"},
-        "application":{"app_id":"tos>briefcase","base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30}}))?;
+        "application":{"app_id":"briefcase","base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30}}))?;
     let secret = SecretString::from(format!("ask_{}{}", Uuid::new_v4().simple(), "x".repeat(11)));
     let access = store
         .discover_at_revision(
@@ -114,7 +114,7 @@ async fn lifecycle_is_durable_fenced_and_waits_for_provider_cleanup() -> anyhow:
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path(format!(
-            "/api/v1/environments/{id}/apps/tos%3Ebriefcase/activity"
+            "/api/v1/environments/{id}/apps/briefcase/activity"
         )))
         .and(wiremock::matchers::header(
             "x-testing-environment-key",
@@ -141,7 +141,7 @@ async fn lifecycle_is_durable_fenced_and_waits_for_provider_cleanup() -> anyhow:
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
-                .set_body_json(json!({"environment_id":id,"app_id":"tos>briefcase"})),
+                .set_body_json(json!({"environment_id":id,"app_id":"briefcase"})),
         )
         .expect(1)
         .mount(&server)

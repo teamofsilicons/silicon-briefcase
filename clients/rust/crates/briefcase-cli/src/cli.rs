@@ -193,7 +193,7 @@ pub enum Command {
     /// Stored CLI settings.
     #[command(subcommand)]
     Config(ConfigCommand),
-    /// Maintenance of the installed CLI.
+    /// Installation and update guidance.
     #[command(subcommand)]
     System(SystemCommand),
     /// Submit a bug report, optionally linking a proposed fix.
@@ -207,7 +207,7 @@ pub enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Manage the shared background service for hourly updates.
+    /// Manage the shared background service. Honeycomb manages updates.
     #[command(subcommand)]
     Daemon(DaemonCommand),
     /// Read bundled usage or development documentation without network access.
@@ -334,7 +334,7 @@ pub struct MkdirArgs {
     #[arg(long)]
     pub tag: Option<String>,
 
-    /// Invite a member as the folder is created, as `carbon:cos:tos=read,write`.
+    /// Invite a member as the folder is created, as `c:cos=read,write`.
     #[arg(long = "invite", value_name = "PRINCIPAL=RIGHTS")]
     pub invites: Vec<Invitation>,
 }
@@ -427,7 +427,7 @@ pub struct ShareArgs {
     /// Entry to share.
     pub target: Target,
 
-    /// Recipient: carbon:ID, silicon:ID, email:ADDRESS, or tag:TAG.
+    /// Recipient: c:ID, si:ID, email:ADDRESS, or tag:TAG.
     pub principal: String,
 
     /// Rights to convey, comma separated. Read is always included.
@@ -612,6 +612,12 @@ pub struct AppRequestArgs {
 /// Testing-environment lifecycle and key-authorized self operations.
 #[derive(Subcommand)]
 pub enum EnvCommand {
+    /// Manage shared environments through Honeycomb; arguments follow `honeycomb environments`.
+    Manage {
+        /// Honeycomb arguments, e.g. `create tos sandbox` or `action ID clean --revision 3`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     /// List active or recoverable environments.
     List {
         /// `active`, `deleted`, or `all`.
@@ -692,7 +698,7 @@ pub enum EnvCommand {
 /// Stored CLI settings.
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show the current updater policy and profile.
+    /// Show the current settings and profile.
     Show,
     /// Set the parent directory for the private `.briefcase` state directory.
     Home {
@@ -701,14 +707,14 @@ pub enum ConfigCommand {
     },
     /// Set a supported setting.
     Set {
-        /// `auto-update` or `telemetry`.
+        /// `auto-update` (off only) or `telemetry`.
         key: String,
         /// `on` or `off`.
         value: String,
     },
     /// Restore a supported setting to its default.
     Unset {
-        /// `auto-update` or `telemetry`.
+        /// `auto-update` (off only) or `telemetry`.
         key: String,
     },
 }
@@ -730,10 +736,10 @@ pub enum DaemonCommand {
     Uninstall,
 }
 
-/// Installed-CLI maintenance.
+/// Installed-CLI update guidance.
 #[derive(Subcommand)]
 pub enum SystemCommand {
-    /// Check crates.io now and install the latest CLI release.
+    /// Show migration guidance for Honeycomb-managed updates.
     Update,
 }
 
@@ -837,7 +843,7 @@ impl FromStr for Target {
     }
 }
 
-/// A member, as `carbon:cos:tos` or `silicon:atlas`.
+/// A member, as `c:saket` or `si:atlas`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Principal(pub ActorRef);
 
@@ -845,20 +851,24 @@ impl FromStr for Principal {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (kind, id) = value.trim().split_once(':').ok_or_else(|| {
-            "a member is written kind:id, such as carbon:cos:tos or silicon:atlas".to_owned()
-        })?;
-        let actor_type = match kind.trim().to_ascii_lowercase().as_str() {
-            "carbon" => ActorType::Carbon,
-            "silicon" => ActorType::Silicon,
-            other => return Err(format!("{other} is not carbon or silicon")),
+        let (prefix, handle) = value
+            .split_once(':')
+            .ok_or_else(|| "a member is written c:<handle> or si:<handle>".to_owned())?;
+        let (actor_type, maximum) = match prefix {
+            "c" => (ActorType::Carbon, 30),
+            "si" => (ActorType::Silicon, 50),
+            _ => return Err("a member is written c:<handle> or si:<handle>".to_owned()),
         };
-        if id.trim().is_empty() {
-            return Err("a member identifier is required after the kind".to_owned());
+        if !(3..=maximum).contains(&handle.len())
+            || !handle.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return Err("invalid member handle".to_owned());
         }
         Ok(Self(ActorRef {
             actor_type,
-            id: id.trim().to_owned(),
+            id: value.to_owned(),
         }))
     }
 }
@@ -890,7 +900,7 @@ impl FromStr for Rights {
     }
 }
 
-/// An invitation attached to a new folder, as `carbon:cos:tos=read,write`.
+/// An invitation attached to a new folder, as `c:cos=read,write`.
 #[derive(Clone, Debug)]
 pub struct Invitation {
     /// Member being invited.
@@ -904,8 +914,7 @@ impl FromStr for Invitation {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let (principal, rights) = value.split_once('=').ok_or_else(|| {
-            "an invitation is written principal=rights, such as carbon:cos:tos=read,write"
-                .to_owned()
+            "an invitation is written principal=rights, such as c:cos=read,write".to_owned()
         })?;
         Ok(Self {
             principal: principal.parse::<Principal>()?.0,
@@ -943,8 +952,8 @@ mod tests {
 
     #[test]
     fn a_member_keeps_the_colons_in_their_own_identifier() {
-        let principal: Principal = "carbon:cos:tos".parse().unwrap();
-        assert_eq!(principal.0.id, "cos:tos");
+        let principal: Principal = "c:cos".parse().unwrap();
+        assert_eq!(principal.0.id, "c:cos");
         assert_eq!(principal.0.actor_type.as_str(), "carbon");
         assert!("person:cos:tos".parse::<Principal>().is_err());
         assert!("carbon".parse::<Principal>().is_err());
@@ -960,10 +969,10 @@ mod tests {
 
     #[test]
     fn an_invitation_carries_a_member_and_their_rights() {
-        let invitation: Invitation = "silicon:atlas=read,update".parse().unwrap();
-        assert_eq!(invitation.principal.id, "atlas");
+        let invitation: Invitation = "si:atlas=read,update".parse().unwrap();
+        assert_eq!(invitation.principal.id, "si:atlas");
         assert_eq!(invitation.access.len(), 2);
-        assert!("silicon:atlas".parse::<Invitation>().is_err());
+        assert!("si:atlas".parse::<Invitation>().is_err());
     }
 
     #[test]
@@ -1009,7 +1018,7 @@ mod tests {
             "--iam-environment-id",
             &iam_id,
             "--iam-app-id",
-            "tos>briefcase",
+            "briefcase",
         ])
         .unwrap();
         assert!(matches!(
@@ -1082,12 +1091,29 @@ mod tests {
                 "app",
                 "upload",
                 "--app-id",
-                "tos>notes",
+                "notes",
                 "--proof",
                 "proof",
                 "note.md",
             ])
             .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "briefcase",
+                "app",
+                "upload",
+                "--app-id",
+                "tos>notes",
+                "--proof",
+                "proof",
+                "note.md",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["briefcase", "app", "upload", "--app-id", "notes", "note.md",])
+                .is_ok()
         );
         assert!(
             Cli::try_parse_from([
@@ -1096,30 +1122,6 @@ mod tests {
                 "upload",
                 "--app-id",
                 "notes",
-                "--proof",
-                "proof",
-                "note.md",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "tos>notes",
-                "note.md",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "tos>notes",
                 "--proof-stdin",
                 "note.md",
             ])
@@ -1131,7 +1133,7 @@ mod tests {
                 "app",
                 "upload",
                 "--app-id",
-                "tos>notes",
+                "notes",
                 "--proof",
                 "proof",
                 "--proof-stdin",

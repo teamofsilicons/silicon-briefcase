@@ -157,7 +157,7 @@ impl MetadataRepository for PostgresRepository {
             entry_columns!(),
             " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() \
-                AND path = $1 AND deleted_at IS NULL",
+                AND path = briefcase.resolve_identifier_path($1) AND deleted_at IS NULL",
         ))
         .bind(path.as_str())
         .fetch_optional(&mut *request.transaction)
@@ -189,7 +189,7 @@ impl MetadataRepository for PostgresRepository {
             " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() \
                 AND deleted_at IS NULL \
-                AND (entry_id = ANY($1) OR path = ANY($2)) \
+                AND (entry_id = ANY($1) OR path = ANY(ARRAY(SELECT briefcase.resolve_identifier_path(value) FROM unnest($2::text[]) value))) \
               ORDER BY path COLLATE \"C\"",
         ))
         .bind(&identifiers)

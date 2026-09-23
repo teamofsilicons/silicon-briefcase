@@ -13,8 +13,8 @@ proofs. It never turns an IAM authorization snapshot into a reusable grant.
 The backend imports registry `silicon-iam-client = "=1.8.0"`. Its typed methods
 own all IAM network calls, API-version negotiation, redirects, and transport.
 Runtime dependency auto-updates are disabled for the backend: upgrading the
-dependency requires a deliberate build and deployment. This is distinct from
-the default-on client/CLI updater behavior described in their own guides.
+dependency requires a deliberate build and deployment. The Briefcase Rust
+client also requires explicit dependency updates; Honeycomb manages CLI updates.
 
 IAM must provide the current authorization snapshot contract (backend
 migration 0067 and testing migration 9003). Briefcase cross-checks identity,
@@ -73,13 +73,13 @@ caused the original live IAM delay.
 
 | Value | Meaning | Who keeps it |
 | --- | --- | --- |
-| `tos>briefcase` | Canonical public production Application ID | Public configuration |
+| `briefcase` | Canonical public production Application ID | Public configuration |
 | `01a070db-89b4-7542-83f1-4fad5cbce625` | Internal Application UUID; resource for admin step-up | Non-secret operator metadata |
 | Application secret | Backend authentication to IAM | AWS Secrets Manager; never client responses |
 | Webhook signing secret and key version | Verify IAM's exact signed body | IAM and Briefcase backend secret stores |
 | Test Application secret | Fresh credential for the imported Application in one IAM test plane | Encrypted Briefcase pairing; never substitute production secret |
 | IAM test root | Select outbound IAM test plane and match signed test webhooks | Encrypted pairing |
-| Briefcase test selector | The paired IAM test Application secret; selects the sandbox and key-authorized self-service | Authorized operator/client secret storage |
+| Briefcase test selector | The paired IAM test Application secret; selects the sandbox; does not grant lifecycle administration | Authorized operator/client secret storage |
 
 Do not log credentials, persist raw webhook envelopes, copy secrets into docs,
 or place them in build context. The provisioned production secret is named
@@ -109,7 +109,7 @@ with current authority, verified-channel step-up and version/idempotency checks.
 
 ## Approval procedure
 
-1. Inspect `iam --url https://backend.iam.teamofsilicons.com -o json app webhook 'tos>briefcase'`.
+1. Inspect `iam --url https://backend.iam.teamofsilicons.com -o json app webhook 'briefcase'`.
    The pending URL must be exactly `https://backend.briefcase.teamofsilicons.com/webhook/`.
 2. Use a direct Carbon session for the owning organization's current owner or
    admin, or a current IAM `applications.review` reviewer. Do not use the
@@ -126,7 +126,7 @@ with current authority, verified-channel step-up and version/idempotency checks.
 
    Complete the code prompt through the user's verified channel. Treat the
    returned assertion as a short-lived credential; do not paste it into logs.
-5. Run the official IAM CLI's `app approve-webhook 'tos>briefcase'` with the
+5. Run the official IAM CLI's `app approve-webhook 'briefcase'` with the
    fresh assertion supplied through its global `--step-up` option. Keep the
    same session, organization, service URL and production/test context as the
    inspection. Avoid putting the literal assertion into shell history.
@@ -166,7 +166,8 @@ delivered, or successfully replayed a webhook.
 
 The caller-facing companion to this section is the [OBO guide](obo.md).
 
-Register these fixed paths in the Briefcase Application's IAM endpoint catalog.
+Configure these fixed paths in the Briefcase Application through Honeycomb.
+IAM uses the accepted endpoint catalog for proof issuance and verification.
 Every operation uses `POST`; endpoint IDs must not be repointed to other paths.
 
 | Endpoint ID | Registered path | IAM metadata schema |
@@ -198,9 +199,10 @@ proof separately authorizes publication. See [delegated uploads](api/delegated-u
 
 Webhook approval and OBO catalog registration are separate operations.
 Confirm the Briefcase Application's `self.identity.read` and
-`self.membership.read` disclosure and catalog registration before making OBO calls.
+`self.membership.read` disclosure and accepted Honeycomb endpoint configuration
+before making OBO calls.
 The issuing member's Application token needs the exact
-`obo:tos>briefcase:<endpoint_id>` grant. Delegated `self.identity.read`, `self.membership.read` and
+`obo:briefcase:<endpoint_id>` grant; `obo.issue` is obsolete. Delegated `self.identity.read`, `self.membership.read` and
 `self.tags.read` disclosures require their intersection across the parent token,
 current exact consent, issuer approval and recipient approval. Briefcase requires
 identity and role disclosure. Tags may be undisclosed: they remain unknown,
@@ -208,7 +210,7 @@ never authorize tag-based access and never overwrite directory assignments.
 Explicit owner, actor, role and permission-grant authority remains available.
 Disclosed empty tags still replace assignments; scope/disclosure inconsistencies fail closed.
 The snapshot must include exactly the verified endpoint's canonical delegated
-scope, for example `obo:tos>briefcase:briefcase.files.create`. Briefcase validates
+scope, for example `obo:briefcase:briefcase.files.create`. Briefcase validates
 the audience and endpoint components, rejects missing or foreign OBO scopes,
 and preserves IAM's sorted, unique scope-set contract. The [API](obo.md#choose-an-operation)
 documents the exact request bodies and recovery behavior. Proofs remain
@@ -231,11 +233,12 @@ contact for invitation mail. IAM does not reveal other members' emails; see
 
 Register `briefcase.invitations.create` (`POST /api/v1/obo/invitations`) and
 `briefcase.link_access.update` (`POST /api/v1/obo/link-access`) as critical,
-user-approved endpoints with empty metadata schemas. All other existing file
+user-approved endpoints in Honeycomb with empty metadata schemas. All other existing file
 CRUD endpoints remain noncritical. Every OBO path stays inside the calling
 app's namespace and the represented actor's permissions. See [OBO](obo.md).
 
-Testing callers now pass only the paired IAM test app secret. The backend
-retains the IAM environment key needed by the SDK's `application.testing-context`
-verification. Production and testing Application credentials are never
-interchangeable. Rotate in IAM and replace the Briefcase pairing together.
+Testing callers pass the imported IAM test app secret. Briefcase validates it
+through the official SDK and discovers its environment without manual pairing.
+Honeycomb owns creation, imports, root-key rotation and lifecycle; IAM remains
+the runtime identity authority. Production and testing credentials are never
+interchangeable. See [participant integration](honeycomb-integration.md).

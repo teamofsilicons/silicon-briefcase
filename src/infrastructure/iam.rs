@@ -700,26 +700,14 @@ fn valid_native_scope(scope: &str) -> bool {
         })
 }
 
-// IAM public IDs: Carbon handles or globally qualified Silicon handles.
-// This checks syntax only. IAM must resolve the actor in the selected world
-// and issue the session; no local identity lookup grants authentication.
+// Prefixes classify identities; IAM still authorizes them in the selected world.
 fn testing_login_actor(value: &str) -> Option<ActorRef> {
-    let kind = if let Some((local, organization)) = value.split_once(':') {
-        if !is_canonical_iam_organization_id(local)
-            || !is_canonical_iam_organization_id(organization)
-        {
-            return None;
-        }
+    let kind = if canonical::valid_public_identity("silicon", value) {
         ActorKind::Silicon
-    } else {
-        if !(3..=30).contains(&value.len())
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'1'..=b'9' | b'_' | b'-'))
-        {
-            return None;
-        }
+    } else if canonical::valid_public_identity("carbon", value) {
         ActorKind::Carbon
+    } else {
+        return None;
     };
     Some(ActorRef::new(kind, ActorId::new(value).ok()?))
 }
@@ -809,7 +797,7 @@ mod tests {
     const PRINCIPAL_ID: &str = "01990a9d-86f1-7000-8000-000000000001";
     const MEMBERSHIP_ID: &str = "01990a9d-86f1-7000-8000-000000000002";
     const SESSION_ID: &str = "01990a9d-86f1-7000-8000-000000000003";
-    const IAM_APP_ID: &str = "tos>briefcase";
+    const IAM_APP_ID: &str = "briefcase";
     const IAM_APP_SECRET: &str = "ask_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TEST_APP_ID: &str = IAM_APP_ID;
     const TEST_APP_SECRET: &str = "ask_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -840,7 +828,7 @@ mod tests {
     }
 
     fn application() -> ApplicationId {
-        ApplicationId::new("tos>silicon-dm").unwrap_or_else(|error| panic!("test fixture: {error}"))
+        ApplicationId::new("silicon-dm").unwrap_or_else(|error| panic!("test fixture: {error}"))
     }
 
     fn client_settings(server: &MockServer) -> IamSettings {
@@ -883,7 +871,7 @@ mod tests {
             .inspect_session(&SecretString::from(BEARER_TOKEN.to_owned()), None)
             .await?;
         assert!(!identity.principal_id.is_nil());
-        assert_eq!(identity.public_id.as_deref(), Some("carbon-a"));
+        assert_eq!(identity.public_id.as_deref(), Some("c:carbon-a"));
         assert_eq!(identity.organizations, vec![organization()]);
         for request in server.received_requests().await.unwrap_or_default() {
             assert!(request.headers.get("x-org-id").is_none());
@@ -896,7 +884,7 @@ mod tests {
     async fn login_identity_accepts_both_actor_types_and_empty_grants() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         let client = IamClient::new_without_handshake(&client_settings(&server))?;
-        for (kind, public_id) in [("carbon", "carbon-a"), ("silicon", "agent:tos")] {
+        for (kind, public_id) in [("carbon", "c:carbon-a"), ("silicon", "si:agent")] {
             let mut body = login_inspection_response();
             body["actor_type"] = json!(kind);
             body["public_id"] = json!(public_id);
@@ -994,7 +982,7 @@ mod tests {
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("fixture"))?
             .remove("principal_id");
-        canonical["public_id"] = json!("carbon-a");
+        canonical["public_id"] = json!("c:carbon-a");
         assert_eq!(
             client.prepare(canonical.clone(), None).await?["principal_id"],
             production["principal_id"]
@@ -1052,10 +1040,10 @@ mod tests {
         json!({
             "principal_id": PRINCIPAL_ID,
             "actor_type": "carbon",
-            "public_id": "carbon-a",
+            "public_id": "c:carbon-a",
             "organization_id": "01990a9d-86f1-7000-8000-000000000099",
             "org_id": "tos",
-            "membership_id": "carbon-a[tos]",
+            "membership_id": "c:carbon-a[tos]",
             "membership_version": 7,
             "authorization_epoch": 7,
             "audience": audience,
@@ -1080,42 +1068,37 @@ mod tests {
     #[test]
     fn canonical_delegation_scopes_preserve_component_and_set_boundaries() {
         for scope in [
-            "obo:tos>briefcase:briefcase.files.create",
-            "obo:123-org>app-name:files.create:v2",
+            "obo:briefcase:briefcase.files.create",
+            "obo:app-name:files.create:v2",
             "self.identity.read",
         ] {
             assert!(super::valid_scope_set(scope), "{scope}");
         }
-        let maximum = format!(
-            "obo:{}>{}:{}",
-            "o".repeat(50),
-            "a".repeat(80),
-            "e".repeat(128)
-        );
+        let maximum = format!("obo:{}:{}", "a".repeat(80), "e".repeat(128));
         assert!(super::valid_scope_set(&maximum));
         for scope in [
-            "obo:tos:briefcase.files.create",
+            "obo:tos>briefcase:briefcase.files.create",
             "obo:tos>>briefcase:files.create",
-            "obo:tos>briefcase:",
-            "obo:tos>briefcase:ab",
-            "obo:tos>briefcase:1bad",
-            "obo:tos>briefcase:files>create",
+            "obo:briefcase:",
+            "obo:briefcase:ab",
+            "obo:briefcase:1bad",
+            "obo:briefcase:files>create",
             "obo:Tos>briefcase:files.create",
-            "obo:tos>ab:files.create",
-            "obo:tos>briefcase:files/create",
+            "obo:1bad:files.create",
+            "obo:briefcase:files/create",
             "self>identity.read",
             "self.identity.read self.identity.read",
-            "self.tags.read obo:tos>briefcase:files.create",
+            "self.tags.read obo:briefcase:files.create",
             " self.identity.read",
         ] {
             assert!(!super::valid_scope_set(scope), "{scope}");
         }
         assert!(!super::valid_scope_set(&format!(
-            "obo:tos>briefcase:{}",
+            "obo:briefcase:{}",
             "e".repeat(129)
         )));
         assert!(super::valid_scope_set(
-            "obo:tos>briefcase:files.create self.identity.read self.membership.read self.tags.read"
+            "obo:briefcase:files.create self.identity.read self.membership.read self.tags.read"
         ));
     }
 
@@ -1129,7 +1112,7 @@ mod tests {
             "actor": {
                 "principal_id": PRINCIPAL_ID,
                 "type": "carbon",
-                "public_id": "carbon-a"
+                "public_id": "c:carbon-a"
             },
             "org_id": "tos"
         })
@@ -1154,7 +1137,7 @@ mod tests {
         assert!(matches!(
             IamEnvironmentCredential::new(
                 SecretString::from(TEST_ENVIRONMENT_KEY.to_owned()),
-                "briefcase".to_owned(),
+                "tos>briefcase".to_owned(),
                 SecretString::from(TEST_APP_SECRET.to_owned()),
             ),
             Err(IamClientBuildError::InvalidIdentifier)
@@ -1208,7 +1191,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/application-directory/tos%3Ebriefcase"))
+            .and(path("/api/v1/application-directory/briefcase"))
             .and(header("authorization", test_basic_authorization()))
             .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
             .and(header("silicon-iam-supported-api-versions", "v1"))
@@ -1278,7 +1261,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("test fixture: {error}"));
         let credential = IamEnvironmentCredential::new(
             SecretString::from(TEST_ENVIRONMENT_KEY.to_owned()),
-            "other>briefcase".to_owned(),
+            "other-briefcase".to_owned(),
             SecretString::from(TEST_APP_SECRET.to_owned()),
         )
         .unwrap_or_else(|error| panic!("test fixture: {error}"));
@@ -1317,7 +1300,7 @@ mod tests {
                         "actor_type": "carbon",
                         "client_id": IAM_APP_ID,
                         "org_id": "tos",
-                        "membership_id": "carbon-a[tos]",
+                        "membership_id": "c:carbon-a[tos]",
                         "session_id": SESSION_ID,
                         "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": IAM_APP_ID,
@@ -1370,7 +1353,7 @@ mod tests {
                         "actor_type": "carbon",
                         "client_id": TEST_APP_ID,
                         "org_id": "tos",
-                        "membership_id": "carbon-a[tos]",
+                        "membership_id": "c:carbon-a[tos]",
                         "session_id": SESSION_ID,
                         "scope": "self.identity.read self.membership.read self.tags.read",
                         "audience": TEST_APP_ID,
@@ -1417,7 +1400,7 @@ mod tests {
             .respond_with(move |_: &wiremock::Request| {
                 let response = ResponseTemplate::new(200).set_body_json(json!({
                     "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
-                    "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": "carbon-a[tos]",
+                    "client_id": TEST_APP_ID, "org_id": "tos", "membership_id": "c:carbon-a[tos]",
                     "session_id": SESSION_ID, "scope": "self.identity.read self.membership.read self.tags.read",
                     "audience": TEST_APP_ID, "authorization": authorization_snapshot(TEST_APP_ID, true),
                     "authorization_epoch": 7, "issued_at": 1_700_000_000_i64, "expires_at": 4_070_908_800_i64
@@ -1480,7 +1463,7 @@ mod tests {
             .and(header("idempotency-key", "login-operation-0001"))
             .and(header("content-type", "application/x-www-form-urlencoded"))
             .and(body_string(format!(
-                "app_id=tos%3Ebriefcase&slt={SHORT_LIVED_TOKEN}"
+                "app_id=briefcase&slt={SHORT_LIVED_TOKEN}"
             )))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1505,7 +1488,7 @@ mod tests {
 
         assert_eq!(tokens.expires_in_seconds(), 1_800);
         assert!(!tokens.principal_id().is_nil());
-        assert_eq!(tokens.actor().id().as_str(), "carbon-a");
+        assert_eq!(tokens.actor().id().as_str(), "c:carbon-a");
         assert_eq!(
             tokens.organization_id().map(OrganizationId::as_str),
             Some("tos")
@@ -1527,7 +1510,7 @@ mod tests {
             .and(header("idempotency-key", "login-operation-0001"))
             .and(header("content-type", "application/x-www-form-urlencoded"))
             .and(body_string(format!(
-                "app_id=tos%3Ebriefcase&slt={SHORT_LIVED_TOKEN}"
+                "app_id=briefcase&slt={SHORT_LIVED_TOKEN}"
             )))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1552,7 +1535,7 @@ mod tests {
 
         assert_eq!(tokens.expires_in_seconds(), 1_800);
         assert!(!tokens.principal_id().is_nil());
-        assert_eq!(tokens.actor().id().as_str(), "carbon-a");
+        assert_eq!(tokens.actor().id().as_str(), "c:carbon-a");
         assert_eq!(
             tokens.organization_id().map(OrganizationId::as_str),
             Some("tos")
@@ -1565,7 +1548,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_actor_login_uses_only_the_paired_iam_credentials() -> anyhow::Result<()> {
-        for (actor_id, actor_type) in [("alice", "carbon"), ("worker:tos", "silicon")] {
+        for (actor_id, actor_type) in [("c:alice", "carbon"), ("si:worker", "silicon")] {
             let server = MockServer::start().await;
             let mut response = application_token_response();
             response["actor"]["public_id"] = json!(actor_id);
@@ -1576,7 +1559,7 @@ mod tests {
                 .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
                 .and(header("idempotency-key", "test-actor-login-0001"))
                 .and(body_string(format!(
-                    "app_id=tos%3Ebriefcase&slt={}",
+                    "app_id=briefcase&slt={}",
                     actor_id.replace(':', "%3A")
                 )))
                 .respond_with(ResponseTemplate::new(200).set_body_json(response))
@@ -1602,7 +1585,7 @@ mod tests {
     {
         let server = MockServer::start().await;
         let client = IamClient::new_without_handshake(&client_settings(&server))?;
-        for value in ["alice", "worker:tos"] {
+        for value in ["alice", "si:worker"] {
             assert!(matches!(
                 client
                     .exchange_short_lived_token(
@@ -1620,8 +1603,8 @@ mod tests {
             "alice\n",
             "a",
             "alice0",
-            "worker:tos:extra",
-            "tos>worker",
+            "si:worker:extra",
+            "worker",
             "ALICE",
             BEARER_TOKEN,
             TEST_APP_SECRET,
@@ -1678,7 +1661,7 @@ mod tests {
             assert!(
                 client
                     .exchange_short_lived_token(
-                        &SecretString::from("alice".to_owned()),
+                        &SecretString::from("c:alice".to_owned()),
                         "test-actor-login-0001",
                         Some(&environment_credential()),
                     )
@@ -1705,7 +1688,7 @@ mod tests {
             .and(header("idempotency-key", "refresh-operation-0001"))
             .and(header("content-type", "application/x-www-form-urlencoded"))
             .and(body_string(format!(
-                "app_id=tos%3Ebriefcase&refresh_token={REFRESH_TOKEN}"
+                "app_id=briefcase&refresh_token={REFRESH_TOKEN}"
             )))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1757,13 +1740,13 @@ mod tests {
                     .set_body_json(json!({
                         "valid": true,
                         "proof_id": "01990a9d-86f1-7000-8000-000000000004",
-                        "issuer_app_id": "tos>silicon-dm",
+                        "issuer_app_id": "silicon-dm",
                         "audience": IAM_APP_ID,
                         "authorization": delegated_snapshot(IAM_APP_ID, false),
                         "actor": {
                             "principal_id": PRINCIPAL_ID,
                             "type": "carbon",
-                            "public_id": "carbon-a"
+                            "public_id": "c:carbon-a"
                         },
                         "org_id": "tos",
                         "endpoint": {
@@ -1796,9 +1779,9 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("published OBO exchange should verify: {error}"));
 
-        assert_eq!(verified.actor.id().as_str(), "carbon-a");
+        assert_eq!(verified.actor.id().as_str(), "c:carbon-a");
         assert_eq!(verified.endpoint_id, "briefcase.files.create");
-        assert_eq!(verified.issuer.as_str(), "tos>silicon-dm");
+        assert_eq!(verified.issuer.as_str(), "silicon-dm");
         server.verify().await;
     }
 
@@ -1868,13 +1851,13 @@ mod tests {
                     .set_body_json(json!({
                         "valid": true,
                         "proof_id": "01990a9d-86f1-7000-8000-000000000004",
-                        "issuer_app_id": "tos>silicon-dm",
+                        "issuer_app_id": "silicon-dm",
                         "audience": TEST_APP_ID,
                         "authorization": delegated_snapshot(TEST_APP_ID, true),
                         "actor": {
                             "principal_id": PRINCIPAL_ID,
                             "type": "carbon",
-                            "public_id": "carbon-a"
+                            "public_id": "c:carbon-a"
                         },
                         "org_id": "tos",
                         "endpoint": {
@@ -2010,10 +1993,10 @@ mod tests {
             "actor": {
                 "principal_id": "01990a9d-86f1-7000-8000-000000000003",
                 "type": "silicon",
-                "public_id": "researcher:tos"
+                "public_id": "si:researcher"
             },
             "org_id": "tos",
-            "issuer_app_id": "tos>silicon-dm",
+            "issuer_app_id": "silicon-dm",
             "audience": IAM_APP_ID,
             "endpoint": {
                 "endpoint_id": "briefcase.files.create",
@@ -2046,7 +2029,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("OBO contract should verify: {error}"));
 
-        assert_eq!(verified.actor.id().as_str(), "researcher:tos");
+        assert_eq!(verified.actor.id().as_str(), "si:researcher");
         assert_eq!(verified.organization_id.as_str(), "tos");
         assert_eq!(verified.metadata["name"], json!("q3.pdf"));
     }
@@ -2054,11 +2037,8 @@ mod tests {
     #[test]
     fn obo_issuer_audience_endpoint_and_organization_all_fail_closed() {
         let cases = [
-            (
-                json!({ "issuer_app_id": "tos>different-app" }),
-                "issuer_app_id",
-            ),
-            (json!({ "audience": "tos>someone-else" }), "audience"),
+            (json!({ "issuer_app_id": "different-app" }), "issuer_app_id"),
+            (json!({ "audience": "someone-else" }), "audience"),
             (
                 json!({
                     "endpoint": {
@@ -2116,8 +2096,8 @@ mod tests {
                 "public_id": "external-app"
             },
             "org_id": "tos",
-            "issuer_app_id": "tos>silicon-dm",
-            "audience": "tos>briefcase",
+            "issuer_app_id": "silicon-dm",
+            "audience": "briefcase",
             "endpoint": {
                 "endpoint_id": "briefcase.files.create",
                 "path": "/api/v1/obo/files"
@@ -2136,8 +2116,8 @@ mod tests {
 
     fn directory_fixture(removed: bool) -> serde_json::Value {
         json!({
-            "id": "carbon-a[tos]", "org_id": "tos",
-            "principal": {"principal_id": PRINCIPAL_ID, "type": "carbon", "public_id": "carbon-a"},
+            "id": "c:carbon-a[tos]", "org_id": "tos",
+            "principal": {"principal_id": PRINCIPAL_ID, "type": "carbon", "public_id": "c:carbon-a"},
             "status": if removed { "removed" } else { "active" }, "org_role": "member",
             "tags": [], "removed_at": if removed { Some("2026-09-14T12:34:56.123456Z") } else { None },
             "version": 7, "authorization_epoch": 7
@@ -2167,7 +2147,7 @@ mod tests {
         let client = IamClient::new_without_handshake(&client_settings(&server))?;
         let caller = RequestAuthContext::new(
             organization(),
-            ActorRef::new(ActorKind::Carbon, ActorId::new("carbon-a")?),
+            ActorRef::new(ActorKind::Carbon, ActorId::new("c:carbon-a")?),
             OrganizationRole::Member,
             [],
             AuthenticationMode::Bearer,

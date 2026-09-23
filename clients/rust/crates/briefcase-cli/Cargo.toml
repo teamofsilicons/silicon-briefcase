@@ -17,6 +17,10 @@ authors.workspace = true
 name = "briefcase"
 path = "src/main.rs"
 
+[features]
+# Release archives opt in at build time, including when run outside the installer.
+honeycomb-managed = []
+
 [dependencies]
 briefcase-client.workspace = true
 clap = { version = "4.5.51", features = ["derive", "env", "wrap_help"] }

@@ -1,24 +1,24 @@
 # Silicon Briefcase
 
-Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **1.1.0** source release.
+Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **2.0.0** source release.
 
 ## Install and use
 
 ```sh
-curl -fsSL https://docs.briefcase.teamofsilicons.com/install.sh | sh
+honeycomb install 'briefcase'
 briefcase iam --json
 briefcase login <IAM-short-lived-token>
 briefcase --org <organization> ls
 ```
 
-The installer sets up the CLI and persistent hourly updater on macOS/Linux.
+Honeycomb installs the native CLI and manages its updates on Linux, macOS, and Windows.
 Obtain the short-lived token from IAM; Briefcase never needs your password.
 Run `briefcase docs cli` for offline instructions, or traverse
 `briefcase <command> --help` to discover each operation.
 
-For development from this checkout, install the reviewed source with
-`BRIEFCASE_INSTALL_SOURCE=clients/rust/crates/briefcase-cli sh docs/install.sh`.
-The hosted installer becomes available when this documentation build is deployed.
+Update the CLI with `honeycomb update 'briefcase'`. Rust applications use
+the normal `briefcase-client` Cargo dependency; see the [Rust client guide](client/README.md).
+For local CLI development, use `cargo install --path clients/rust/crates/briefcase-cli`.
 
 ## Start here
 
@@ -32,7 +32,7 @@ The hosted installer becomes available when this documentation build is deployed
 | [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, mail and audit history |
 | [OBO applications](obo.md) | Act inside an app namespace with current user permissions |
 | [Delegated uploads](api/delegated-uploads.md) | Reserve, transfer, publish and recover staged uploads |
-| [Testing environments](testing-environments.md) | Select a paired test plane using its IAM app secret |
+| [Testing environments](testing-environments.md) | Manage in Honeycomb and enter with the IAM app secret |
 | [IAM integration](iam-integration.md) | Configure scopes, critical endpoints and signed webhooks |
 | [Version policy](version-policy.md) | Negotiation, compatibility, deprecation and sunset |
 | [Deployment](deployment.md) | Run the backend, gateway, worker, storage and docs |

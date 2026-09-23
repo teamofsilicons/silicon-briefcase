@@ -2421,7 +2421,7 @@ mod tests {
             .connect_lazy("postgres://localhost/briefcase")
             .unwrap_or_else(|error| panic!("lazy pool must build: {error}"));
         let key = SecretString::from(general_purpose::STANDARD.encode([7_u8; 32]));
-        TestingEnvironmentStore::new(pool.clone(), pool, &key, "tos>briefcase")
+        TestingEnvironmentStore::new(pool.clone(), pool, &key, "briefcase")
             .unwrap_or_else(|error| panic!("store must build: {error}"))
     }
 

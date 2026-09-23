@@ -309,8 +309,6 @@ impl Client {
         if let Some(range) = range {
             request = request.header(reqwest::header::RANGE, range.header_value());
         }
-        Ok(ContentStream::without_maintenance(
-            self.receive(request).await?,
-        ))
+        Ok(ContentStream::new(self.receive(request).await?))
     }
 }

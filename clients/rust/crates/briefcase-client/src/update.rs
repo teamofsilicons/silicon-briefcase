@@ -1,7 +1,5 @@
-//! Best-effort crates.io version discovery and Cargo-aware updates.
-//!
-//! Compiled Rust code cannot replace itself safely. The package updater advances
-//! the consuming project's lockfile; the next build loads the new release.
+//! Explicit dependency maintenance helpers. API requests never run updates.
+//! CLI installation and updates are managed by Honeycomb.
 
 use std::{
     ffi::OsString,
@@ -70,6 +68,9 @@ impl Release {
 /// A registry lookup or Cargo operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
+    /// CLI binaries are installed and updated through Honeycomb.
+    #[error("Honeycomb manages Briefcase CLI updates; run honeycomb update 'briefcase'")]
+    HoneycombManaged,
     /// The registry URL was invalid.
     #[error("invalid crates.io URL: {0}")]
     Url(#[from] url::ParseError),
@@ -167,61 +168,29 @@ pub fn update_dependency(
     }
 }
 
-/// Installs one exact binary crate release for the next invocation.
+/// Compatibility shim: CLI installation is managed by Honeycomb.
 ///
 /// # Errors
-///
-/// Returns an error when Cargo cannot start or refuses the installation.
-pub fn install_binary(package: &str, binary: &str, version: &Version) -> Result<(), UpdateError> {
-    install_binary_in(package, binary, version, None)
+/// Always returns [`UpdateError::HoneycombManaged`].
+pub fn install_binary(
+    _package: &str,
+    _binary: &str,
+    _version: &Version,
+) -> Result<(), UpdateError> {
+    Err(UpdateError::HoneycombManaged)
 }
 
-/// Installs into an explicit Cargo installation root, preserving a custom CLI location.
+/// Compatibility shim: CLI installation is managed by Honeycomb.
 ///
 /// # Errors
-/// Returns an error when Cargo cannot install the selected release.
+/// Always returns [`UpdateError::HoneycombManaged`].
 pub fn install_binary_at(
-    package: &str,
-    binary: &str,
-    version: &Version,
-    root: &Path,
+    _package: &str,
+    _binary: &str,
+    _version: &Version,
+    _root: &Path,
 ) -> Result<(), UpdateError> {
-    install_binary_in(package, binary, version, Some(root))
-}
-
-fn install_binary_in(
-    package: &str,
-    binary: &str,
-    version: &Version,
-    root: Option<&Path>,
-) -> Result<(), UpdateError> {
-    let mut command = Command::new(cargo_program());
-    if let Some(root) = root {
-        command.arg("install").arg("--root").arg(root);
-    } else {
-        command.arg("install");
-    }
-    let status = command
-        .arg(package)
-        .arg("--bin")
-        .arg(binary)
-        .arg("--version")
-        .arg(format!("={version}"))
-        .arg("--locked")
-        .arg("--force")
-        .stdin(Stdio::null())
-        // Keep the CLI command's machine-readable stdout intact even when
-        // package maintenance runs after it. Cargo progress remains on stderr.
-        .stdout(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(UpdateError::CargoFailed {
-            package: package.to_owned(),
-            version: version.clone(),
-        })
-    }
+    Err(UpdateError::HoneycombManaged)
 }
 
 /// Finds the nearest `Cargo.toml` at or above `start`.
@@ -259,7 +228,25 @@ pub fn explicitly_disabled(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateStatus, explicitly_disabled, find_manifest};
+    use super::{UpdateError, UpdateStatus, Version, explicitly_disabled, find_manifest};
+
+    #[test]
+    fn legacy_binary_installers_direct_callers_to_honeycomb() {
+        let version = Version::new(99, 0, 0);
+        assert!(matches!(
+            super::install_binary("briefcase-cli", "briefcase", &version),
+            Err(UpdateError::HoneycombManaged)
+        ));
+        assert!(matches!(
+            super::install_binary_at(
+                "briefcase-cli",
+                "briefcase",
+                &version,
+                std::path::Path::new("/missing")
+            ),
+            Err(UpdateError::HoneycombManaged)
+        ));
+    }
 
     #[test]
     fn false_spellings_are_explicit() {

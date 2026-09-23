@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install Briefcase and its persistent hourly updater; IAM sign-in is separate.
+# Bootstrap Briefcase from Cargo; IAM sign-in is separate.
 set -eu
 case "$(uname -s)" in
   Darwin|Linux) ;;
@@ -27,5 +27,4 @@ elif [ -n "${BRIEFCASE_INSTALL_VERSION:-}" ]; then
 else
   cargo "+$BRIEFCASE_RUST_VERSION" install briefcase-cli --root "$BRIEFCASE_INSTALL_ROOT" --locked --bin briefcase --force
 fi
-briefcase daemon install
-printf '%s\n' 'Briefcase and its hourly updater are installed.' 'Next: briefcase iam --json' 'Then: briefcase login <IAM-short-lived-token>' 'Offline documentation: briefcase docs cli'
+printf '%s\n' 'Briefcase is installed. Manage future updates through Honeycomb.' 'Next: briefcase iam --json' 'Then: briefcase login <IAM-short-lived-token>' 'Offline documentation: briefcase docs cli'

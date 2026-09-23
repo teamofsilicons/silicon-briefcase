@@ -14,7 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{cli::DaemonCommand, render::Output, run::CliError, state::StateDirectory, updater};
+use crate::{cli::DaemonCommand, render::Output, run::CliError, state::StateDirectory};
 
 mod service;
 
@@ -231,36 +231,12 @@ async fn serve() -> Result<(), CliError> {
         briefcase_client::telemetry::Stage::Started,
     )
     .await;
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut maintenance: Option<tokio::task::JoinHandle<()>> = None;
     let mut terminate =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(io)?;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
-            _ = interval.tick() => {
-                if maintenance.as_ref().is_none_or(tokio::task::JoinHandle::is_finished) {
-                    let homes = registry.homes.clone();
-                    maintenance = Some(tokio::spawn(async move {
-                        for home in homes {
-                            // Missing homes are not recreated by maintenance.
-                            if !home.is_dir() { continue; }
-                            let state = StateDirectory::at(home);
-                            let result = updater::automatic_for_state(&state).await;
-                            if !matches!(result, Ok(updater::Outcome::Skipped)) {
-                                crate::telemetry::daemon_event(&state, "update_check", if result.is_ok() { briefcase_client::telemetry::Stage::Completed } else { briefcase_client::telemetry::Stage::Failed }).await;
-                            }
-                            match result {
-                                Ok(updater::Outcome::Updated { from, to }) => eprintln!("briefcase daemon: updated {from} to {to}"),
-                                Err(error) => eprintln!("briefcase daemon: update check failed: {error}"),
-                                _ => (),
-                            }
-                        }
-                    }));
-                }
-            }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(io)?;
                 let mut reader = BufReader::new(stream);
@@ -269,7 +245,7 @@ async fn serve() -> Result<(), CliError> {
                 if !matches!(read, Ok(Ok(_))) || line.len() > 8192 { continue; }
                 let mut stop = false;
                 let response = match serde_json::from_str::<Request>(&line) {
-                    Ok(Request::Status) => json!({"running": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION"), "homes": registry.homes}),
+                    Ok(Request::Status) => json!({"running": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION"), "auto_update": false, "update_manager": "honeycomb", "homes": registry.homes}),
                     Ok(Request::Stop) => { stop = true; json!({"running": false}) },
                     Ok(Request::Register { state }) => {
                         match state.canonicalize() {
@@ -290,10 +266,6 @@ async fn serve() -> Result<(), CliError> {
                 if stop { break; }
             }
         }
-    }
-    // Finish any in-flight installer instead of leaving an orphan Cargo writer.
-    if let Some(task) = maintenance {
-        let _ = task.await;
     }
     std::fs::remove_file(socket_path).map_err(io)?;
     drop(lock);

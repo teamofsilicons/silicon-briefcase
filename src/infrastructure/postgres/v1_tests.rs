@@ -259,14 +259,11 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         AuthenticationMode::Bearer,
     )?;
     let app_mode = AuthenticationMode::OnBehalfOf {
-        application_id: ApplicationId::new("tos>notes")?,
+        application_id: ApplicationId::new("notes")?,
     };
     let app = context(&org, "owner:tos", OrganizationRole::Owner, app_mode)?;
     let app_root = service.application_folder(&app).await?;
-    assert_eq!(
-        app_root.entry.path.as_str(),
-        "apps/tos>notes/private/owner:tos"
-    );
+    assert_eq!(app_root.entry.path.as_str(), "apps/notes/private/owner:tos");
     assert_eq!(
         service.application_folder(&app).await?.entry.id,
         app_root.entry.id,
@@ -280,7 +277,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "even an OBO owner stays inside the calling app"
     );
     let public = service
-        .get_entry_by_path(&app, &EntryPath::new("apps/tos>notes/public")?)
+        .get_entry_by_path(&app, &EntryPath::new("apps/notes/public")?)
         .await?;
     let shared = service
         .create_folder(
@@ -310,7 +307,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "viewer:tos",
         OrganizationRole::Member,
         AuthenticationMode::OnBehalfOf {
-            application_id: ApplicationId::new("tos>notes")?,
+            application_id: ApplicationId::new("notes")?,
         },
     )?;
     assert_eq!(
@@ -320,7 +317,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
             .entry
             .path
             .as_str(),
-        "apps/tos>notes/private/viewer:tos"
+        "apps/notes/private/viewer:tos"
     );
     assert!(
         service

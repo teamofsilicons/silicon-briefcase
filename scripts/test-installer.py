@@ -36,12 +36,13 @@ class InstallerTests(unittest.TestCase):
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             return result, calls
 
-    def test_registry_install_starts_the_daemon_after_cargo(self):
-        result, calls = self.run_installer(BRIEFCASE_INSTALL_VERSION='1.1.0')
+    def test_registry_install_uses_pinned_version_without_starting_a_daemon(self):
+        result, calls = self.run_installer(BRIEFCASE_INSTALL_VERSION='2.0.0')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls[0][:3], ['rustup', 'toolchain', 'install'])
-        self.assertEqual(calls[1], ['cargo', '+1.98.0', 'install', 'briefcase-cli', '--root', calls[1][calls[1].index('--root') + 1], '--locked', '--version', '=1.1.0', '--bin', 'briefcase', '--force'])
-        self.assertEqual(calls[2], ['briefcase', 'daemon', 'install'])
+        self.assertEqual(calls[1], ['cargo', '+1.98.0', 'install', 'briefcase-cli', '--root', calls[1][calls[1].index('--root') + 1], '--locked', '--version', '=2.0.0', '--bin', 'briefcase', '--force'])
+        self.assertEqual(len(calls), 2)
+        self.assertIn('Manage future updates through Honeycomb.', result.stdout)
 
     def test_source_paths_are_single_arguments(self):
         source = '/tmp/briefcase source with spaces'
@@ -53,7 +54,7 @@ class InstallerTests(unittest.TestCase):
         result, calls = self.run_installer(INSTALL_TEST_FAIL='cargo')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(call[0] == 'briefcase' for call in calls))
-        self.assertNotIn('are installed', result.stdout)
+        self.assertNotIn('Briefcase is installed.', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

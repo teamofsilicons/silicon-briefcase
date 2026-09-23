@@ -169,7 +169,7 @@ pub(crate) async fn start(
     let mut url = url::Url::parse("https://auth.iam.teamofsilicons.com/login")
         .map_err(|_| bad("Invalid IAM sign-in URL"))?;
     url.query_pairs_mut()
-        .append_pair("app_id", "tos>briefcase")
+        .append_pair("app_id", "briefcase")
         .append_pair("redirect_uri", &callback);
     flows.insert(
         nonce.clone(),
@@ -897,7 +897,7 @@ mod tests {
         }
         let environment = test.map(|id| serde_json::from_value(json!({
             "id":id,"org_id":"tos","name":"Demo","description":null,"status":"active",
-            "iam_environment_id":Uuid::new_v4(),"iam_app_id":"tos>briefcase",
+            "iam_environment_id":Uuid::new_v4(),"iam_app_id":"briefcase",
             "created_by":{"type":"carbon","id":"saket"},"key_generation":1,"key_rotated_at":null,
             "last_activity_at":"2026-09-11T00:00:00Z","cleaned_at":null,"deleted_at":null,"purge_after":null,
             "version":1,"created_at":"2026-09-11T00:00:00Z","updated_at":"2026-09-11T00:00:00Z"

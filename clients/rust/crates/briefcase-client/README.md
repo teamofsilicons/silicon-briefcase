@@ -6,20 +6,15 @@ applications.
 
 Everything the service exposes to a client, and nothing it does internally.
 Application behavior remains stateless: it holds no login session or API
-cache — a `Config` goes in and a `Client` comes out. Its default-on maintenance
-hook may advance this package in the consuming project's `Cargo.lock` after
-an ordinary operation completes. It runs in the background at most hourly,
-sharing the throttle across clients for the same Cargo manifest in a process.
-Downloads defer maintenance until the stream ends, fails, or is dropped;
-contract negotiation and short-lived IAM credential exchanges do not trigger
-it. Failed checks never change API results. Short-lived processes may exit
-before background maintenance finishes; no background schedule runs without
-completed operations. The next build loads an updated package, not the running
-process. Disable maintenance explicitly when a caller owns dependency updates.
+cache — a `Config` goes in and a `Client` comes out. API calls never query a
+package registry, run Cargo, or change the consuming project's lockfile.
+Update the dependency explicitly and rebuild. `with_auto_update` and
+`with_update_manifest` remain compatibility no-ops; `update_status()` always
+reports `Disabled`. Honeycomb manages CLI installation and updates.
 
 ```toml
 [dependencies]
-briefcase-client = "1.1.0"
+briefcase-client = "2.0.0"
 ```
 
 ```rust
@@ -93,7 +88,7 @@ let manifest = DelegatedCreateFolder {
 // manifest.body_bytes() is exactly what this SDK will send, not a re-serialization.
 let proof = OboProof::new(fresh_proof_from_iam)?;
 let folder = client.create_folder_on_behalf_of(
-    &ApplicationId::new("tos>notes")?, proof, &manifest,
+    &ApplicationId::new("notes")?, proof, &manifest,
 ).await?;
 ```
 

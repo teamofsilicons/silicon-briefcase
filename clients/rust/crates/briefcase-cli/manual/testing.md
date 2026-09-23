@@ -1,6 +1,41 @@
 # Testing environments
 
-An IAM testing Application secret selects an isolated Briefcase environment:
+Honeycomb owns shared environment creation, application imports, credential rotation,
+cleaning, disabling, restoration and expiry. IAM authenticates test identities and
+OBO proofs. Briefcase owns isolated files, permissions, storage limits and cleanup.
+
+## Create and manage through Honeycomb
+
+Install and sign in to the official [Honeycomb CLI](https://docs.honeycomb.teamofsilicons.com/installation/),
+then run its environment commands directly or through Briefcase:
+
+```bash
+briefcase env manage create tos integration --description 'Release integration tests'
+briefcase env manage list
+briefcase env manage get <environment-id>
+briefcase env manage import <environment-id> 'briefcase' --revision <current-revision>
+briefcase env manage action <environment-id> clean --revision <current-revision>
+```
+
+`briefcase env manage <arguments...>` invokes `honeycomb environments <arguments...>`
+through the Rust client's `honeycomb::manage_environment`. It uses Honeycomb's own
+saved session, authorization and retry state. Do not pass Briefcase bearer tokens,
+`--test`, or app secrets to this management command. Read the current revision
+before each mutation and follow Honeycomb's recovery instructions after an uncertain
+result. [Honeycomb's testing guide](https://docs.honeycomb.teamofsilicons.com/testing-environments/)
+describes imports, dependency pins, root-key retrieval and lifecycle actions.
+
+Honeycomb's 32-character alphanumeric `testing_key` grants test-world administration.
+The imported Briefcase application's IAM `app_secret` selects its sandbox and does
+not grant a signed-in actor administrator permissions. No manual pairing or root-key
+entry is needed for ordinary Briefcase use.
+
+The old direct Briefcase management commands and HTTP routes return
+`testing_environment_managed_by_honeycomb` with recovery guidance. `briefcase env current`
+still reads the selected Briefcase test environment. Use Honeycomb for lifecycle
+management, including cleaning; an app secret cannot authorize local self-service cleanup.
+
+## Select Briefcase's test plane
 
 ```http
 X-Briefcase-App-Secret: ask_<43 base64url characters>
@@ -8,9 +43,14 @@ Authorization: Bearer <IAM test access token>
 X-Org-ID: interface-test-org
 ```
 
-The secret selects the environment; the test actor's current IAM membership, role, tags and permissions determine what it can do. Production credentials do not authenticate a test actor. Unknown, invalid, deleted, or mismatched secrets never fall back to production.
+Briefcase validates the app secret with IAM for `briefcase` and discovers the
+shared environment automatically. The test actor's current membership, role, tags
+and permissions determine its file access. Production credentials do not authenticate
+a test actor. Unknown, invalid, disabled, deleted or mismatched secrets fail without
+falling back to production.
 
-The environment's production owner (for example, `tos`) manages its lifecycle.
+The environment's production owner (for example, `tos`) manages its lifecycle
+through Honeycomb.
 `X-Org-ID` selects the **data organization inside that world** (for example,
 `interface-test-org`); these IDs do not need to match. Each bearer or OBO request
 must receive current IAM authority for that exact data organization, application
@@ -23,62 +63,15 @@ Resolving this routing context grants no access: only entries with public-link
 policy are visible under that world's tenant RLS. A private path, wrong world,
 missing world selector, pending reset, or inactive world remains unavailable.
 
-Each environment has a **2 GiB** storage ceiling, including retained versions and reservations. Briefcase permits **10 active environments** across the deployment. Exceeding the test storage ceiling returns `In test enviorment you are limited to a total storage of 2gb per enviorment.`
-
-## Create and manage in IAM
-
-Create the environment, bootstrap test actors, and import `tos>briefcase` in IAM.
-Give Briefcase the returned test `app_secret`. The first metadata lookup or sign-in
-validates it with IAM and initializes Briefcase storage automatically. No manual
-pairing, Briefcase production login, or IAM environment root key is needed.
-
-Briefcase fixes the application ID to its configured IAM application and asks IAM
-to authenticate the secret. IAM returns the environment UUID and authoritative
-lifecycle metadata. Briefcase validates this on every selected request; a secret
-prefix alone never selects a world or authorizes an actor.
-
-IAM owns environment creation, identities, permissions, names, secret rotation,
-retirement, restoration, and reset. Briefcase owns files, file grants, storage limits,
-and provider cleanup. IAM name changes appear on next use. Rotation accepts the
-new application secret automatically. Retirement blocks new requests; restoration
-allows them again. After IAM resets and the application is reimported, Briefcase
-erases the old files and identity projections before accepting the new world.
-Provider object deletion runs through its durable cleanup queue.
-
-Briefcase keeps its local storage record for recovery and cleanup; IAM retirement
-does not immediately physically delete files. Local Briefcase cleanup and explicit
-retirement are still available, and a locally retired record must be restored
-explicitly. The local idle retirement policy applies only to legacy pairings.
-
-## Optional creation through Briefcase
-
-The API provisions the IAM application testing environment and then creates the empty Briefcase plane. Configure the production Briefcase application and its dependency catalog in IAM first. Production members authorized by IAM can create environments using:
-
-```bash
-briefcase env create integration --description 'Release integration tests'
-```
-
-Or `POST /organizations/{org_id}/testing-environments` with a production bearer, matching `X-Org-ID`, an `Idempotency-Key`, and:
-
-```json
-{"name":"integration","description":"Release integration tests"}
-```
-
-An optional `iam_test_key` joins an existing IAM dependency environment. The JSON result contains the environment metadata (`id`, `name`, `iam_environment_id`, and other fields) alongside `key`; **key is the IAM test application secret**, not a separate Briefcase-generated credential. The CLI stores it privately under the environment UUID. Reuse the same idempotency key and request after an uncertain response.
-
-The optional key is the **32-character alphanumeric IAM environment root key**,
-not an `ask_…` Application secret. Omit it to provision a new IAM test world.
-For the CLI, supply `--iam-test-key` or set `BRIEFCASE_IAM_TEST_KEY` from your
-secret manager before running `briefcase env create`. The Rust client exposes
-the same option as `TestingEnvironmentCreate.iam_test_key`, typed as
-`Option<IamEnvironmentKey>`.
-
-Existing paired environments are supported and migrate to application-only validation on their next use. The backend uses the official IAM SDK for provisioning and verification.
+Each environment has a **2 GiB** storage ceiling, including retained and deleted
+versions and upload reservations. Briefcase permits **10 active environments**
+across the deployment; restoration also requires capacity. Exceeding test storage
+returns `In test enviorment you are limited to a total storage of 2gb per enviorment.`
 
 ## Test sign-in
 
 In testing, **SLT accepts either an IAM-issued test login code or an existing
-Carbon/Silicon public ID**, such as `alice` or `worker:tos`. Select the paired
+Carbon/Silicon public ID**, such as `c:alice` or `si:worker`. Select the paired
 environment with its app secret and send either value in the existing `slt` field:
 
 ```http
@@ -87,7 +80,7 @@ X-Briefcase-App-Secret: ask_<43 base64url characters>
 Idempotency-Key: test-login-operation-0001
 Content-Type: application/json
 
-{"slt":"worker:tos"}
+{"slt":"si:worker"}
 ```
 
 The ID shortcut signs in as that actor in the paired IAM world, selecting its
@@ -128,57 +121,48 @@ let config = Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/",
 let client = Client::connect(config.clone()).await?;
 // Persist this key before exchange and reuse it after an uncertain result.
 let login_key = IdempotencyKey::random();
-let session = client.login_with_slt_with_key("worker:tos", &login_key).await?;
+let session = client.login_with_slt_with_key("si:worker", &login_key).await?;
 let client = Client::connect(config.with_token(session.access_token)).await?;
 let page = client.list_entries(&ListEntries::default()).await?;
 # Ok(())
 # }
 ```
 
-`EnvironmentKey` validates and redacts the app secret. `IamEnvironmentKey` is the distinct 32-character IAM root key used only for optional dependency provisioning or pairing replacement. The library holds no session store; callers own token refresh and persistence.
+`EnvironmentKey` validates and redacts the app secret. The library holds no session store; callers own token refresh and persistence. Root environment administration belongs to Honeycomb, not a Briefcase test session.
 
 ## Browser
 
 From the sign-in screen, choose **Sign in to a test environment** and enter the
-app secret and IAM-issued test SLT or existing actor ID. The organisation is
-optional; IAM supplies the granted workspaces.
-No production login is required. A separate HttpOnly testing cookie cannot
-satisfy a production request; exiting testing restores an existing production
-session or shows the production sign-in screen.
+app secret and IAM-issued test SLT or existing actor ID. No production login is
+required. The organization is optional; IAM supplies the granted workspaces.
 
+When signed in to production, open **Test environments** in the sidebar. Choose
+**Manage environments in Honeycomb** to administer the shared world, or enter the
+Briefcase app secret and **Test SLT or Carbon/Silicon ID** to enter an existing one.
+Credentials are masked and cleared when the drawer closes. An uncertain exchange
+keeps its operation identity for retry with the same input.
 
-Open **Test environments** in the sidebar. Choose **Create**, provide a name
-and optional description, and optionally enter an existing root key in
-**IAM test key (optional)**. Leave it blank for a new IAM test world. The field
-is masked, validates the root-key format, and is cleared when its dialog closes.
-An uncertain create request keeps its exact input and operation ID for retry.
-
-Under **Enter with an app secret**, enter the test app secret and either value in
-**IAM test SLT or Carbon/Silicon ID**. The same masked field appears when opening an
-environment with **View as testing environment**. The gateway keeps credentials server-side and attaches the
-test session to the existing browser session. A persistent testing banner
-identifies the environment. Exit returns the tab to production without signing
-out the production session. A tab stores only the public environment UUID,
-never its app secret. The drawer clears entered credentials when it closes.
+The gateway keeps credentials server-side. The tab stores only the public environment
+UUID. A persistent testing banner shows the environment, signed-in identity and exit
+control. Production and testing sessions use separate HttpOnly cookies; leaving
+testing restores the production session or asks you to sign in.
 
 ## Lifecycle and authority
 
-| Action | Route beneath `/organizations/{org_id}/testing-environments` |
-| --- | --- |
-| List active/deleted/all | `GET /?status=active|deleted|all` |
-| Read metadata | `GET /{id}` |
-| Rename/describe | `PATCH /{id}` with strong `If-Match` |
-| Read selected app secret | `GET /{id}/key` |
-| Replace IAM pairing | `POST /{id}/iam-pairings` |
-| Erase Briefcase data | `POST /{id}/cleanings` |
-| Retire locally | `DELETE /{id}` |
-| Restore during recovery window | `POST /{id}/restorations` |
+Honeycomb sends authenticated participant operations independently of member test
+sessions. The shared `environment_id`, lifecycle revision, cleaning generation and
+key version fence stale work. Cleaning blocks access, clears files, versions, grants,
+uploads and other test records, and reports completion only after provider cleanup.
+Old requests, jobs or webhook generations cannot repopulate cleared data.
 
-Management uses a production actor session and creator/administrator authorization. Data cleaning is also available to a holder of the test secret at `POST /testing-environment/cleanings`; it requires an idempotency key. This erases isolated Briefcase data and schedules provider cleanup without deleting the IAM dependency environment.
+Disabling blocks access immediately. Restoration makes retained data available when
+authorized, but never reverses a clean. Honeycomb decides inactivity and recovery
+policy; Briefcase reports activity and executes the requested lifecycle operations.
+Shared environments are excluded from Briefcase's legacy idle-retirement policy.
+A public environment UUID conveys no authority.
 
-Rotate test credentials **in IAM**, then use the new app secret directly. Discovery updates the stored credential automatically; the old one fails IAM validation. `briefcase env pair-iam` remains available for legacy management. There is no independent Briefcase key-rotation endpoint. Pairing replacement cannot transfer existing identity-bound data to a different IAM environment. Use a new environment when identities change.
-
-Retirement immediately invalidates local access. Restoration requires an active, valid IAM pairing and reactivates its current app secret. IAM retirement or secret invalidation also prevents further data-plane requests because Briefcase validates the live testing context. Briefcase does not silently restore or erase a shared IAM dependency graph. Legacy paired Briefcase planes retire after 30 idle days and retain their recorded recovery deadline; metadata responses report the authoritative `purge_after`.
+See [Honeycomb participant integration](honeycomb-integration.md) for the protected
+service contract, required configuration and deployment acceptance boundaries.
 
 ## Storage and webhook isolation
 

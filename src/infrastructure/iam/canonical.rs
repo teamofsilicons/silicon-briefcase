@@ -278,10 +278,10 @@ pub(crate) fn valid_public_identity(kind: &str, id: &str) -> bool {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
     };
     match kind {
-        "carbon" => label(id),
-        "silicon" => id
-            .split_once(':')
-            .is_some_and(|(name, org)| label(name) && label(org)),
+        "carbon" => id
+            .strip_prefix("c:")
+            .is_some_and(|handle| handle.len() <= 30 && label(handle)),
+        "silicon" => id.strip_prefix("si:").is_some_and(label),
         _ => false,
     }
 }
