@@ -49,6 +49,9 @@ DO $$ DECLARE r record; missing boolean; BEGIN
  END LOOP;
  FOR r IN SELECT c.table_name,c.column_name,replace(c.column_name,'_id','_type') AS kind_column
  FROM information_schema.columns c WHERE c.table_schema='briefcase' AND c.table_name IN (SELECT relname FROM pg_class WHERE relnamespace='briefcase'::regnamespace AND relkind='r') AND c.data_type='text' AND c.column_name LIKE '%\_id' ESCAPE '\'
+ -- Signed webhook aggregate IDs belong to the historical event contract;
+ -- legacy events use UUIDs here, not public principal identifiers.
+ AND NOT (c.table_name='webhook_receipts' AND c.column_name='aggregate_id')
  AND EXISTS(SELECT 1 FROM information_schema.columns k WHERE k.table_schema=c.table_schema AND k.table_name=c.table_name AND k.column_name=replace(c.column_name,'_id','_type'))
  AND EXISTS(SELECT 1 FROM information_schema.columns o WHERE o.table_schema=c.table_schema AND o.table_name=c.table_name AND o.column_name='org_id')
  ORDER BY c.table_name,c.column_name LOOP

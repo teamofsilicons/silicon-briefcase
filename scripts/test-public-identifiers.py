@@ -100,6 +100,11 @@ class MigrationTest(unittest.TestCase):
   self.assertEqual(self.run_sql("SELECT actor_id FROM briefcase.organization_members WHERE org_id='tos' AND actor_type='carbon'"),'c:saket')
   self.assertEqual(self.run_sql("SELECT actor_id FROM briefcase.organization_members WHERE org_id='"+environment+":tos'"),'c:tester')
   self.assertEqual(self.run_sql("SET briefcase.testing_environment_id='"+environment+"'; SELECT briefcase.resolve_iam_identity_key('"+environment+"','carbon','c:tester',gen_random_uuid())").splitlines()[-1],'55555555-5555-4555-8555-555555555555')
+ def test_signed_webhook_aggregate_uuid_and_receipt_remain_exact(self):
+  self.run_sql("INSERT INTO briefcase.webhook_receipts(source,event_id,org_id,event_type,aggregate_type,aggregate_id,aggregate_version,signature_timestamp,payload_sha256,status,processed_at) VALUES('silicon-iam','historical-uuid-event','tos','silicon.updated','silicon','33333333-3333-4333-8333-333333333333',1,now(),decode(repeat('ab',32),'hex'),'processed',now())")
+  before=self.run_sql("SELECT to_jsonb(r)::text FROM briefcase.webhook_receipts r")
+  self.run_sql(m.statement(MAP,True))
+  self.assertEqual(self.run_sql("SELECT to_jsonb(r)::text FROM briefcase.webhook_receipts r"),before)
  def test_missing_map_and_path_collision_fail_atomically(self):
   before=json.loads(self.state())
   missing={**MAP,'identities':MAP['identities'][:1]}
