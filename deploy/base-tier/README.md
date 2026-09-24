@@ -67,8 +67,13 @@ Build and check `docs-site`, then build `Dockerfile.docs` from the repository
 root. This scratch image packages only `/docs`; it is an immutable content
 artifact and is never run. Pin it by its ECR digest, create a stopped container,
 and use `docker cp <container>:/docs/. <release-directory>` to extract it.
-Store releases beneath `/var/www/briefcase-docs/releases/<commit>` and atomically
-replace the `current` symlink after verifying `index.html` and `openapi.yaml`.
+Store releases beneath `/var/www/briefcase-docs/releases/<commit>`. After extraction,
+explicitly run `chmod 0755 <release-directory>` so Nginx can traverse the release
+even when the deployment shell uses `umask 077`. Check that nested directories are
+traversable and static files are readable by Nginx, then verify `index.html` and
+`openapi.yaml` before atomically replacing the `current` symlink. Check the public
+docs page and OpenAPI URL after switching; HTTP 403 can indicate a directory-mode
+error even when the extracted content and symlink are correct.
 
 Point `docs.briefcase.teamofsilicons.com` at the host's Elastic IP with
 `deploy/dns.sh --host docs.briefcase.teamofsilicons.com --type A --value <ip> --apply`.

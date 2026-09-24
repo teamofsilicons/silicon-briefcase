@@ -140,6 +140,7 @@ pub(crate) async fn create_file(
         content_type,
         idempotency_key,
         request_hash,
+        self_destruct: None,
     };
     let staged = StagedContent {
         path: file.path(),

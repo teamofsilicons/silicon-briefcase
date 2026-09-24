@@ -166,6 +166,7 @@ async fn publish(
         content_type: "text/markdown".to_owned(),
         idempotency_key: IdempotencyKey::new(key.to_owned())?,
         request_hash: [3; 32],
+        self_destruct: None,
     };
     let published = match repository
         .prepare_small_upload(context, &command, &payload)

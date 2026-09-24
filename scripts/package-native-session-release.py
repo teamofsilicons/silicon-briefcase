@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage six prebuilt managed CLIs and validate/pack a Honeycomb release.
 
-Local builds are read from target/<triple>/release. CI can pass
+Local builds are read from clients/rust/target/<triple>/release. CI can pass
 --binaries-dir containing <honeycomb-target>/briefcase[.exe] instead.
 Requires Python 3.11+ and the Honeycomb CLI; never adds source or configuration.
 """
@@ -80,7 +80,7 @@ def main() -> None:
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "clients/rust/Cargo.toml").read_text())["workspace"]["package"]["version"]
     manifest = (ROOT / "honeycomb.yaml").read_text()
-    for key, expected in (("app_id", "tos>briefcase"), ("version", version)):
+    for key, expected in (("app_id", "briefcase"), ("version", version)):
         match = re.search(rf"^{key}:\s*[\"']?([^\s\"'#]+)[\"']?\s*(?:#.*)?$", manifest, re.MULTILINE)
         if not match or match.group(1) != expected:
             raise SystemExit(f"honeycomb.yaml {key} must match {expected!r}")

@@ -176,6 +176,11 @@ pub enum FilterPredicate {
     IsRender(RenderKind),
     /// Has the given file extension.
     HasExtension(String),
+    /// Carries a live expiring share that gave the caller access or that the
+    /// caller manages (`is:expiring`).
+    IsExpiring,
+    /// A file whose self-destruct timer is still running (`is:self-destruct`).
+    IsSelfDestruct,
     /// Lives under the given path prefix.
     InLocation(GlobTerm),
     /// The caller holds the given effective access.
@@ -710,12 +715,11 @@ fn date(key: &str, value: &str) -> Result<Date, FilterError> {
 
 fn actor(key: &str, value: &str) -> Result<ActorSelector, FilterError> {
     let trimmed = value.trim();
-    let inner = trimmed
-        .strip_prefix('@')
-        .map(str::trim)
-        .and_then(|value| value.strip_prefix('{'))
+    let without_at = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
+    let inner = without_at
+        .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))
-        .unwrap_or(trimmed);
+        .unwrap_or(without_at);
     let inner = inner.trim();
     if inner.is_empty() {
         return Err(FilterError::InvalidValue {
@@ -725,8 +729,8 @@ fn actor(key: &str, value: &str) -> Result<ActorSelector, FilterError> {
     // The first segment may name a principal kind. IAM identifiers themselves
     // may contain colons, so only that first segment is ever consumed.
     let (kind, id) = match inner.split_once(':') {
-        Some(("carbon", id)) => (Some(ActorKind::Carbon), id),
-        Some(("silicon", id)) => (Some(ActorKind::Silicon), id),
+        Some(("c", _)) => (Some(ActorKind::Carbon), inner),
+        Some(("si", _)) => (Some(ActorKind::Silicon), inner),
         _ => (None, inner),
     };
     let id = id.trim();
@@ -768,6 +772,12 @@ fn is_predicate(key: &str, value: &str) -> Result<FilterPredicate, FilterError> 
         "archive" => return Ok(FilterPredicate::IsRender(RenderKind::Archive)),
         "code" => return Ok(FilterPredicate::IsRender(RenderKind::Code)),
         "unsupported" => return Ok(FilterPredicate::IsRender(RenderKind::Unsupported)),
+        // Lifetime values are matched before the extension fall-through, so
+        // `is:expiring` never means a `.expiring` file.
+        "expiring" => return Ok(FilterPredicate::IsExpiring),
+        "self-destruct" | "self_destruct" | "selfdestruct" => {
+            return Ok(FilterPredicate::IsSelfDestruct);
+        }
         _ => {}
     }
     let extension_is_plausible = !value.is_empty()
@@ -854,6 +864,21 @@ mod tests {
     }
 
     #[test]
+    fn lifetime_values_win_over_the_extension_fall_through() -> Result<(), FilterError> {
+        for (text, expected) in [
+            ("is:expiring", FilterPredicate::IsExpiring),
+            ("is:self-destruct", FilterPredicate::IsSelfDestruct),
+            ("is:self_destruct", FilterPredicate::IsSelfDestruct),
+        ] {
+            assert_eq!(
+                FilterQuery::parse(text)?.expression,
+                Some(FilterExpression::Predicate(expected))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn negation_accepts_both_spellings() -> Result<(), FilterError> {
         let dash = FilterQuery::parse("-is:folder")?.expression;
         let word = FilterQuery::parse("not is:folder")?.expression;
@@ -864,8 +889,7 @@ mod tests {
 
     #[test]
     fn actor_selectors_keep_colons_inside_identifiers() -> Result<(), FilterError> {
-        let query =
-            FilterQuery::parse("from:@{carbon:cos:tos} to:@{silicon:agent} for:@{cos:tos}")?;
+        let query = FilterQuery::parse("from:@{c:cos} to:@{si:agent} for:@{cos}")?;
         let expression = query.expression.ok_or(FilterError::Empty)?;
         let parsed = predicates(&expression);
         assert_eq!(
@@ -873,15 +897,15 @@ mod tests {
             vec![
                 &FilterPredicate::CreatedBy(ActorSelector {
                     kind: Some(ActorKind::Carbon),
-                    id: "cos:tos".to_owned(),
+                    id: "c:cos".to_owned(),
                 }),
                 &FilterPredicate::SharedWith(ActorSelector {
                     kind: Some(ActorKind::Silicon),
-                    id: "agent".to_owned(),
+                    id: "si:agent".to_owned(),
                 }),
                 &FilterPredicate::AccessibleTo(ActorSelector {
                     kind: None,
-                    id: "cos:tos".to_owned(),
+                    id: "cos".to_owned(),
                 }),
             ]
         );

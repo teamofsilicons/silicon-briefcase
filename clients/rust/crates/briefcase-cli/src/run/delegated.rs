@@ -117,9 +117,9 @@ impl Prepared {
     ) -> Result<()> {
         match self {
             Self::Invite(manifest) => {
-                output.json(&client.invite_on_behalf_of(app, proof, manifest).await?);
+                output.invitation(&client.invite_on_behalf_of(app, proof, manifest).await?);
             }
-            Self::Link(manifest) => output.json(
+            Self::Link(manifest) => output.link(
                 &client
                     .set_link_access_on_behalf_of(app, proof, manifest)
                     .await?,

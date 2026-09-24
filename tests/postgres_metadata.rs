@@ -42,11 +42,11 @@ use silicon_briefcase::{
 };
 use uuid::Uuid;
 
-const ACTOR_ID: &str = "cos:tos";
+const ACTOR_ID: &str = "c:cos";
 const APPLICATION_ID: &str = "silicon-dm";
-const VIEWER_ID: &str = "cos:filter-viewer";
-const PEER_ID: &str = "cos:ancestor-peer";
-const OUTSIDER_ID: &str = "cos:ancestor-outsider";
+const VIEWER_ID: &str = "c:filter-viewer";
+const PEER_ID: &str = "c:ancestor-peer";
+const OUTSIDER_ID: &str = "c:ancestor-outsider";
 
 fn settings(url: String) -> DatabaseSettings {
     DatabaseSettings {
@@ -425,7 +425,7 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             &context,
             &ListEntriesQuery {
                 parent_id: Some(owned_folder.entry.id),
-                filter: Some(FilterQuery::parse(&format!("for:@{{carbon:{VIEWER_ID}}}"))?),
+                filter: Some(FilterQuery::parse(&format!("for:@{{{VIEWER_ID}}}"))?),
                 page: PageRequest::new(None, 100)?,
             },
         )
@@ -441,9 +441,7 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             &context,
             &ListEntriesQuery {
                 parent_id: Some(owned_folder.entry.id),
-                filter: Some(FilterQuery::parse(&format!(
-                    "for:@{{carbon:{OUTSIDER_ID}}}"
-                ))?),
+                filter: Some(FilterQuery::parse(&format!("for:@{{{OUTSIDER_ID}}}"))?),
                 page: PageRequest::new(None, 100)?,
             },
         )
@@ -480,7 +478,7 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
     let exhaustive = FilterQuery::parse(
         "last:5 (between:12-06-2020=12-07-2030 or after:20-08-2020) before:01-01-2035 \
          location:'private' (contains:'apple' or has:'cat') name:'q*' \
-         from:@{carbon:cos:tos} to:@{carbon:someone} for:@{silicon:agent} \
+         from:@{c:cos} to:@{c:someone} for:@{si:agent} \
          -is:image is:md permissions:read sort:oldest",
     )?;
     repository
@@ -733,6 +731,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 principal: member.authorization().actor().clone(),
                 access: GrantedAccess::new([AccessRight::Update]),
                 inherits_to_descendants: true,
+                lifetime: None,
             },
             &MutationMetadata::new(
                 Some(IdempotencyKey::new("metadata-operation-3".to_owned())?),

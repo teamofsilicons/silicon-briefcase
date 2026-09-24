@@ -223,8 +223,8 @@ There should be a centeral notification system where it would contain all the in
 
 For each file there would be a permanent url, this is the url that would request the authenticated user's token to check if the person has access to the file and is rendered only if they have access to the file, otherwise it returns file not found. 
 
-The said url is gonna be a clean url so it's gonna show the folder structure very clearly, for eg for a file shared from org tos from private folder of cos:tos with the folder name top_secret and file name this_secret.md. The url of the stored file would look like:
-`briefcase.teamofsilicons.com/org/tos/private/cos:tos/top_secret/this_secret.md/`
+The said url is gonna be a clean url so it's gonna show the folder structure very clearly, for eg for a file shared from org tos from private folder of si:cos with the folder name top_secret and file name this_secret.md. The url of the stored file would look like:
+`briefcase.teamofsilicons.com/org/tos/private/si:cos/top_secret/this_secret.md/`
 
 Whenever someone requests from this url it should only be rendered if the user has the permissions to view the file. Or see the options accordingly for when they can perform other CRUD operations.
 
@@ -275,6 +275,30 @@ I should be able to invite other silicons or carbons or specific email to view m
 
 For each invited carbon or silicon also send them a mail that you have been invited to this file/folder. We use postmark to send the emails. You would send the email via `briefcase@teamofsilicons.com`. For the emails you send ensure to send it to the email they are registered in the org with and not the main personal email until both match. 
 
+# Expires after
+
+For each file or folder during sharing i can set it to expire after a set time (an expiring share), this wont be enabled by default but can be set as an expiring share, in which i can set a time between 1 min and 1 month (30 days), in steps of 1 minute. Any kind of share can be an expiring share: inviting carbons/silicons, tags, emails, or anyone with the link can view. An expiring share only ever gives Read access (view/download).
+
+And i could list down the people or the type of share that i wanna do and that share would be valid for the set time and after that time the access for those set of people (and only that set of people invited in that run) will be revoked. An expiring share is its own grant: if someone also has access from another invite, a tag, or a public folder, that access stays after the expiring share expires.
+
+Expiry is strict: the moment the time passes the share must stop working, checked on every request, not left to a cleanup that runs later.
+
+Before it expires it should be possible to extend it, shorten it, make it permanent, or revoke it early.
+
+No email or notification is sent when an expiring share expires. Creating, changing and expiring an expiring share are all maintained in the logs. Apps can also create expiring shares through the OBO endpoints (invite, and anyone with the link can view).
+
+# Self Destruct
+
+While uploading a file i can set a file to be self destruct (1 min to 1 month (30 days), in steps of 1 minute) and then after that much time the file will get auto deleted for good (permanently). It doesn't go to the bin, and its space returns to the total available space immediately. The timer starts when the upload finishes.
+
+Self destruct can only be set while uploading, it's not possible to turn it on for an already existing file. Uploading a new version of the file doesn't change the timer.
+
+If the file is deleted by hand before the timer runs out, it is also permanently deleted and doesn't go to the bin.
+
+During that time period there should be an option to be able to make the file permanent. Only the creator, org_admins and org_owners can make it permanent.
+
+Setting self destruct, making the file permanent and the deletion are all maintained in the file and folder logs. No warning is sent before the file gets deleted.
+
 
 # Filter
 
@@ -299,6 +323,8 @@ There can be any possible PnC for the filters, i should be able to combine multi
 FIltering should only happen with the files i have access to.
 
 is: takes three vocabularies at once. Entry kind — is:file, is:folder (is:directory aliased). Renderer category — is:image, video, document, spreadsheet, presentation, audio, archive, code, unsupported, i.e. the nine buckets from §Files supported. Anything else alphanumeric and ≤16 chars falls through to a file extension, leading dot stripped (src/domain/filter.rs:727). So is:document is any file that opens in the document renderer — pdf, docx, md; is:md is literally .md.
+
+is: also takes two lifetime values: is:expiring matches files and folders with an active expiring share, either one that gives me my access or one i can manage; is:self-destruct matches files whose self destruct timer is still running. These are checked before the extension fall-through, so is:expiring never means an .expiring extension.
 
 has: is content-only, matched against extracted document text.
 
@@ -343,7 +369,7 @@ For versioning we have Contract Governance/API/service contract lifecycle manage
 
 # How other apps would use Briefcase
 
-Refer to how OBO access works on [https://docs.iam.teamofsilicons.com/api/obo/], we will need to expose a list of requests that the other applications should be able to perform on us. We will expose the endpoints to:
+For other apps to use Briefcase, we would configure our OBO endpoints in Honeycomb. Briefcase would still verify the proof with IAM and check what the user can access before performing the action. We will expose the endpoints to:
 1) Create a new file for that user in the private folder - non critical endpoint
 2) Create a new file in public folder for that user - non critical endpoint
 3) Read/Update/Delete the file of that user in the specific app directory - non critical endpoint. This only let's the app perform actions inside the specific app directory only for the files that carbon/silicon has the appropriate access to. 
@@ -362,25 +388,33 @@ For all the app specific data and even the scope of the said application is just
 
 # Testing Environment
 
-We will have a test environment for Briefcase itself. This would work exactly like the main application, with the same functions, APIs, permission checks, and workflows, but with completely isolated data.
+For testing we would use the environments managed by Honeycomb. IAM would still handle the test identities, login and authorization, and Briefcase would handle its own test files and permissions.
 
-When a test environment is created, it would start empty.
+A test environment is basically the same Briefcase where I can test uploading files, deleting stuff, sharing folders, and checking the user's permissions. It starts empty and uses the same APIs and workflows with completely isolated data.
 
-Refer to [how IAM manages testing environments](https://docs.iam.teamofsilicons.com/api/testing-environments/) for environment creation, test identities, application imports, authentication, webhooks, and lifecycle.
+### Environment Lifecycle
 
-A test environment is basically the same Briefcase where I can test uploading files, deleting stuff, sharing folders, and checking whether the correct person has the correct set of permissions. It uses test IAM and test Briefcase together, so the entire flow can be tested inside one sandbox.
+Briefcase would accept authenticated instructions from Honeycomb to prepare the environment, update its key version, clean, disable, restore and permanently remove its test data. Keep the same environment_id across the services. Each operation must be safe to retry and report whether Briefcase's work is pending, completed or failed. These instructions must work even when the test sessions have been disabled.
+
+For creation and restoration, Briefcase would only allow test access once Honeycomb confirms all required services are ready. If IAM enforces this shared readiness, Briefcase must check that current IAM state before allowing access. Finishing its own preparation alone does not make the environment ready.
+
+Cleaning keeps the environment but clears its files, versions, permissions, uploads and other test data. Block access while cleaning and check the environment revision and cleaning generation so old requests, jobs or webhooks cannot bring back cleared data. Only report completion once the required storage cleanup has finished. Cleaning must keep Briefcase linked to the environment, so later deletion, restoration and permanent removal still reach it even before apps are reimported.
+
+Honeycomb decides inactivity expiry and the recovery period. Briefcase reports activity and carries out the cleanup instead of independently retiring the shared environment. Disabling blocks access immediately, restoring makes retained data available again when authorized, and permanent removal clears the remaining storage. Restoring cannot undo a clean.
 
 ### Using a Test Environment
 
-In the client app, website, CLI, or API, passing the test environment’s `app_secret` would select that application’s test environment. No manual pairing or separately entering the IAM environment root key should be needed. Briefcase should validate the secret with IAM and identify the correct environment automatically.
+In the client app, website, CLI, or API, passing the test environment’s `app_secret` would select that application’s test environment. No manual pairing or separately entering the environment root key should be needed. Briefcase should validate the secret with IAM and identify the correct environment automatically.
 
 For logging in, it would ask for an SLT. In a test environment, this can either be an IAM-issued test SLT or the public ID of an existing Carbon/Silicon in the test sandbox. Entering the ID would sign me in as that test user. Unknown or inactive identities should be rejected. This shortcut must never work in production.
 
-The IAM environment root key gives administrative control over the test world. The application’s `app_secret` selects its sandbox. Once signed in as a particular user, actions must follow that user’s actual permissions. Possessing the secret must not make every signed-in user bypass permission checks.
+The testing_key managed by Honeycomb gives administrative control over the test world. The application’s `app_secret` selects its sandbox. Once signed in as a particular user, actions must follow that user’s actual permissions. Possessing the secret must not make every signed-in user bypass permission checks.
 
 If an administrative or god view is provided, it should be separate and clearly labelled so it cannot be confused with testing what a normal user is allowed to do.
 
 ### Website and CLI
+
+Environment creation and management from the website, CLI or client would go through Honeycomb. Briefcase would still let me enter an existing environment and use its normal file commands.
 
 On the website, I should be able to enter the `app_secret` from settings or the sign-in screen. Without a selected test environment, the application would use production.
 
@@ -499,7 +533,7 @@ every app cli must support the following commands:
 App Internals:
 All apps are suggested to make a rust library which is stateless. then 2 things that uses the rust library: always running daemon, and a cli interface that talks to the daemon.
 
-At the end, on the docs page, there should be one curl + sh command to run to install and get everything setup to start using it. not auth, just technical setup on the system like installing the right set of things.
+On the docs page, show `honeycomb install 'briefcase'` to install the CLI, followed by how to log in.
 
 CLI design should be focused on giving details and helping finding the right command to use. CLI will often have lots of commands and it should be like a tree that can be traversed using --help.
 
@@ -562,4 +596,10 @@ We ship highly configurable apps with sensible defaults. Very much like VS Code.
 
 # Updates
 
-All CLIs when installed, within their daemon run a update checker hourly. Update the CLI to the newest one if a update is found. Don't rely on user usage to check for updates.
+For each Briefcase app release, provide one Honeycomb-compatible .tar.gz with [honeycomb.yaml](honeycomb.yaml) at the archive root and the prebuilt CLI for all required targets. Use this file to map the `briefcase` command for app_id `briefcase` to each target's executable. Before packaging, set the version to the app release version and include the binaries at the paths defined in the file. Run `honeycomb validate` and then `honeycomb pack` to create the archive. Refer to [Honeycomb docs](https://docs.honeycomb.teamofsilicons.com/) for packaging, installation and updates. The CLI uses the app's release version. Installation and updates would be handled by Honeycomb, so Briefcase must not run its own updater for a Honeycomb-managed installation. The Rust client package remains a normal project dependency.
+
+# Identifier schema
+
+Silicon IDs use `si:{silicon_id}` (for example `si:cos`), Carbon IDs use `c:{carbon_id}` (for example `c:saket`), and application IDs use the bare `{app_id}` (for example `briefcase`). The components after `si:` and `c:` are handles; each prefix appears exactly once. Silicon IDs and application IDs do not contain an organisation component. Organisation membership and application ownership are stored separately under `org_id`.
+
+Outside the schema patterns above, fields and standalone placeholders named `silicon_id`, `sid`, `carbon_id`, or `cid` carry the complete prefixed public ID; `app_id` carries the bare application ID. This applies to authentication, API and CLI inputs and outputs, configuration, permissions, URLs, events and stored identity references. Where a CLI selector uses `@`, it precedes the complete ID, such as `@si:cos` or `@c:saket`.

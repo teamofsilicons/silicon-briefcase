@@ -9,7 +9,7 @@ verifies that proof with IAM, consumes it, and then acts as the represented
 member — with that member's current role and tags, never more. There is no
 long-lived delegated key to store, leak, or revoke.
 
-- Audience Application: `tos>briefcase`
+- Audience Application: `briefcase`
 - Briefcase API base: `https://backend.briefcase.teamofsilicons.com/api/v1`
 - IAM base: `https://backend.iam.teamofsilicons.com/`
 
@@ -20,9 +20,9 @@ are wire names from the IAM contract, kept verbatim throughout this guide.
 
 Briefcase supports the following proof-authorized operations. Discover the
 audience's registered endpoints with
-`GET {iam}/api/v1/obo-access/applications/tos>briefcase/endpoints`
-(URL-encode the `>`). Register the fixed paths below before issuing proofs;
-registration is separate in production and each imported IAM test Application.
+`GET {iam}/api/v1/obo-access/applications/briefcase/endpoints`
+(URL-encode the `>`). Configure the fixed paths below in Honeycomb before issuing proofs. IAM consumes
+the accepted configuration at runtime; test imports pin their own accepted configuration.
 
 | Endpoint ID | Method and registered path | Metadata schema |
 | --- | --- | --- |
@@ -58,14 +58,17 @@ before sending either production or sandbox operations.
 
 You need all five of these. Briefcase fails closed on any of them.
 
-1. **Your Application is registered in IAM and approved for the Briefcase endpoint.**
+1. **Your Application is configured through Honeycomb, registered in IAM and
+   approved for the Briefcase endpoint.**
    IAM validates the applications and the represented member's selected organization.
    The member's data organization can differ from an application's owning Team;
    Briefcase must receive the exact organization authorized by the proof.
 2. **A subject token: the member's IAM access token, issued to *your*
    Application** (`oat_…`). A token issued to some other Application is refused.
-3. **The exact `obo:tos>briefcase:<endpoint_id>` grant on that subject token.**
+3. **The exact `obo:briefcase:<endpoint_id>` grant on that subject token.**
    IAM also checks current consent and application approval for the endpoint.
+   Honeycomb configures the external endpoint scope; the obsolete `obo.issue`
+   grant is not required.
 4. **`self.membership.read` and `self.identity.read` disclosure**,
    present in the subject token, its current exact consent, the issuer's approved
    scopes and Briefcase's approved scopes. Briefcase requires the delegated
@@ -74,7 +77,7 @@ You need all five of these. Briefcase fails closed on any of them.
    replace directory tags, and cannot confer tag-based access. Explicit actor,
    owner, role and permission-grant authority still applies. A disclosed empty
    list is distinct from unknown. Its scope set must
-   contain the exact `obo:tos>briefcase:<endpoint_id>` verified by IAM; canonical
+   contain the exact `obo:briefcase:<endpoint_id>` verified by IAM; canonical
    `org>app` audience syntax is distinct from native IAM scope syntax.
 5. **Your Application's own secret**, used only for HTTP Basic and the HMAC on
    the IAM exchange. It is never sent to Briefcase.
@@ -122,7 +125,7 @@ briefcase app prepare-upload --operation-id "$UPLOAD_OPERATION_ID" \
 briefcase app request upload-reserve --body manifest.json --describe
 # Ask IAM for a fresh proof using the described endpoint, method and exact body.
 briefcase app request upload-reserve --body manifest.json \
-  --app-id 'tos>your-app' --capability-file upload.capability
+  --app-id 'your-app' --capability-file upload.capability
 # The hidden prompt accepts the proof; keep the returned upload_id.
 briefcase app transfer "$UPLOAD_ID" ./recording.webm \
   --capability-file upload.capability
@@ -131,7 +134,7 @@ briefcase app transfer "$UPLOAD_ID" ./recording.webm \
 Transfer only stages bytes. Prepare `{"operation_id":"<original UUID>",
 "upload_id":"<returned UUID>"}` in `commit.json`, describe `upload-commit`,
 obtain a new IAM proof, and send `briefcase app request upload-commit --body commit.json
---app-id 'tos>your-app'`. Use `upload-status` with a body containing only the
+--app-id 'your-app'`. Use `upload-status` with a body containing only the
 original `operation_id` after an uncertain response. The
 [upload guide](api/delegated-uploads.md) specifies states, limits, cancellation
 and cleanup. Keep capability files owner-only; they are credentials.
@@ -161,7 +164,7 @@ then writes anything.
 ```json
 {
   "subject_token": "oat_…",
-  "audience": "tos>briefcase",
+  "audience": "briefcase",
   "endpoint_id": "briefcase.files.create",
   "metadata": {
     "path": "",
@@ -192,7 +195,7 @@ be.
 
 ```http
 POST /api/v1/obo/files
-X-App-ID: tos>your-app
+X-App-ID: your-app
 X-IAM-OBO-Access-Proof: obo_…
 Content-Type: application/octet-stream
 
@@ -243,6 +246,9 @@ obtained cannot be redirected somewhere else.
   files.
 - **Quota is the member's.** The Team's storage and daily upload allowances
   apply exactly as they do to that member's own uploads.
+- **No self destruct.** Neither this endpoint nor the delegated upload
+  protocol can set a self-destruct timer yet, so an app cannot create a
+  self-destructing file. Only a member's own `POST /uploads` can.
 
 This is not a recoverable operation: after an uncertain response, a fresh proof
 is a *new* attempt, not an idempotent retry. Read back the destination folder
@@ -261,7 +267,7 @@ originating-app metadata is attribution rather than a separate ownership rule.
 
 Register `briefcase.invitations.create` at `POST /api/v1/obo/invitations` and
 `briefcase.link_access.update` at `POST /api/v1/obo/link-access` as **critical**
-IAM endpoints. They require user approval. Both use empty endpoint metadata;
+endpoints in Honeycomb. IAM enforces their user approval at runtime. Both use empty endpoint metadata;
 the entire operation is bound into the exact JSON body SHA-256.
 
 ```json
@@ -271,6 +277,26 @@ the entire operation is bound into the exact JSON body SHA-256.
 ```json
 {"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true}
 ```
+
+Either can be an [expiring share](sharing.md#expiring-shares) that ends by itself: add
+`expires_in_minutes` (1 to 43,200) inside `invitation`, or beside `enabled: true`
+for an expiring link. An expiring share is read-only, so `access` must be `["read"]`.
+The field is part of the exact body bound into the proof digest; add it before
+you hash, never after.
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","invitation":{"principal":{"type":"carbon","id":"alex:tos"},"access":["read"],"inherit":true,"expires_in_minutes":1440}}
+```
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true,"expires_in_minutes":60}
+```
+
+Both endpoints stay critical whether or not the share is an expiring share. The
+link endpoint follows the normal [expiring link rules](sharing.md#expiring-links):
+resending minutes restarts a live expiring link's clock, and `enabled: false` ends
+it. Changing or revoking an expiring invitation has no OBO endpoint; the member does
+that directly.
 
 Use `delegated::DelegatedInvite` and `delegated::DelegatedLinkAccess` in Rust,
 or `briefcase app request invite --body manifest.json --describe` and
@@ -311,8 +337,8 @@ X-Briefcase-App-Secret: <ask_ test Application secret>
 ```
 
 The test app secret does not replace the proof, and a proof from the wrong plane cannot
-fall back to production. Register the endpoint in the paired IAM test plane
-before testing. Full setup is in the
+fall back to production. Import the accepted endpoint configuration through
+Honeycomb before testing. Full setup is in the
 [testing-environment guide](testing-environments.md).
 
 ## One-shot Rust call
@@ -326,7 +352,7 @@ use briefcase_client::OnBehalfOfUpload;
 // `proof` is the access_proof you just exchanged for exactly these bytes.
 let entry = client
     .create_file_on_behalf_of(
-        &OnBehalfOfUpload::file("tos>your-app", proof, "./report.pdf"),
+        &OnBehalfOfUpload::file("your-app", proof, "./report.pdf"),
     )
     .await?;
 ```
@@ -341,8 +367,8 @@ pipe or device.
 Useful for trying the flow before you write code:
 
 ```bash
-briefcase app upload --app-id 'tos>your-app' ./report.pdf              # hidden proof prompt
-briefcase app upload --app-id 'tos>your-app' --proof-stdin ./report.pdf < proof.txt
+briefcase app upload --app-id 'your-app' ./report.pdf              # hidden proof prompt
+briefcase app upload --app-id 'your-app' --proof-stdin ./report.pdf < proof.txt
 ```
 
 The destination, name and media type come from the proof, so the command takes
@@ -352,7 +378,7 @@ never `--proof` in a shared shell, where the process list would expose them.
 ## One-shot checklist
 
 - [ ] Authorized data organization; subject token issued to your Application.
-- [ ] Exact `obo:tos>briefcase:<endpoint_id>`, `self.membership.read`, and `self.identity.read` grants present.
+- [ ] Exact `obo:briefcase:<endpoint_id>`, `self.membership.read`, and `self.identity.read` grants present.
 - [ ] `self.tags.read` disclosed when relying on tag-based access.
 - [ ] Digest taken over the exact bytes you will send.
 - [ ] `/api/v1/obo/files` bound as the path, with its `/api/v1` prefix.

@@ -33,7 +33,7 @@ println!("{}", entry.permanent_url);
 
 ```bash
 # Ask IAM for an unscoped SLT for the canonical Application first.
-iam login --app-id 'tos>briefcase'
+iam login --app-id 'briefcase'
 briefcase login <slt>
 briefcase --org tos put ./report.pdf private/cos:tos/notes
 briefcase --org tos share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
@@ -89,7 +89,7 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-Client, CLI and gateway 1.1.0 target API v1 and contract 1.1.0. Publish the
+Client, CLI and gateway 2.0.0 target API v1 and contract 2.0.0. Publish the
 client before the CLI after deploying the backend contract. They share one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
 Link-access responses include the shareable file or folder `url`; the browser displays it with a copy action.
@@ -107,8 +107,8 @@ The API this speaks to lives in
 contract, and its `docs/` directory the canonical API/client/CLI integration
 guides. The local pages above retain compatibility links to those guides.
 
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
-or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `c:alice`)
+or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production
 continues to require a one-time IAM login code.

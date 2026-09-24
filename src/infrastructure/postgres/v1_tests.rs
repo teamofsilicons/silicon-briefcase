@@ -99,7 +99,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         .get_entry_by_path(&owner, &EntryPath::new("private/owner:tos")?)
         .await?;
     assert!(
-        repo.set_link_access(&owner, private.id(), true, &mutation()?)
+        repo.set_link_access(&owner, private.id(), true, None, &mutation()?)
             .await
             .is_err()
     );
@@ -107,7 +107,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         .get_entry_by_path(&owner, &EntryPath::new("private")?)
         .await?;
     assert!(
-        repo.set_link_access(&owner, container.id(), true, &mutation()?)
+        repo.set_link_access(&owner, container.id(), true, None, &mutation()?)
             .await
             .is_err()
     );
@@ -136,7 +136,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         Err(AppError::NotFound)
     ));
     let shared = repo
-        .set_link_access(&owner, folder.entry.id, true, &mutation()?)
+        .set_link_access(&owner, folder.entry.id, true, None, &mutation()?)
         .await?;
     assert_eq!(shared.path, folder.entry.path);
     assert_eq!(
@@ -167,18 +167,18 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         "anonymous permission does not widen authenticated member grants"
     );
     assert!(
-        repo.set_link_access(&viewer, folder.entry.id, false, &mutation()?)
+        repo.set_link_access(&viewer, folder.entry.id, false, None, &mutation()?)
             .await
             .is_err()
     );
-    repo.set_link_access(&owner, folder.entry.id, false, &mutation()?)
+    repo.set_link_access(&owner, folder.entry.id, false, None, &mutation()?)
         .await?;
     assert!(matches!(
         repo.public_entry(&tenant, child.entry.path.as_str()).await,
         Err(AppError::NotFound)
     ));
     for i in 0..105 {
-        repo.set_link_access(&owner, child.entry.id, i % 2 == 0, &mutation()?)
+        repo.set_link_access(&owner, child.entry.id, i % 2 == 0, None, &mutation()?)
             .await?;
     }
     let first = repo.logs(&owner, folder.entry.id, None, 100).await?;
@@ -259,14 +259,11 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         AuthenticationMode::Bearer,
     )?;
     let app_mode = AuthenticationMode::OnBehalfOf {
-        application_id: ApplicationId::new("tos>notes")?,
+        application_id: ApplicationId::new("notes")?,
     };
     let app = context(&org, "owner:tos", OrganizationRole::Owner, app_mode)?;
     let app_root = service.application_folder(&app).await?;
-    assert_eq!(
-        app_root.entry.path.as_str(),
-        "apps/tos>notes/private/owner:tos"
-    );
+    assert_eq!(app_root.entry.path.as_str(), "apps/notes/private/owner:tos");
     assert_eq!(
         service.application_folder(&app).await?.entry.id,
         app_root.entry.id,
@@ -280,7 +277,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "even an OBO owner stays inside the calling app"
     );
     let public = service
-        .get_entry_by_path(&app, &EntryPath::new("apps/tos>notes/public")?)
+        .get_entry_by_path(&app, &EntryPath::new("apps/notes/public")?)
         .await?;
     let shared = service
         .create_folder(
@@ -310,7 +307,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "viewer:tos",
         OrganizationRole::Member,
         AuthenticationMode::OnBehalfOf {
-            application_id: ApplicationId::new("tos>notes")?,
+            application_id: ApplicationId::new("notes")?,
         },
     )?;
     assert_eq!(
@@ -320,7 +317,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
             .entry
             .path
             .as_str(),
-        "apps/tos>notes/private/viewer:tos"
+        "apps/notes/private/viewer:tos"
     );
     assert!(
         service
@@ -339,6 +336,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "research-id",
         GrantedAccess::new([AccessRight::Update]),
         true,
+        None,
         &mutation()?,
     )
     .await?;
@@ -392,6 +390,7 @@ async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()
         "research-id",
         GrantedAccess::new([AccessRight::Update]),
         true,
+        None,
         &mutation()?,
     )
     .await?;

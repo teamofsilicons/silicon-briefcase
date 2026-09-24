@@ -4,6 +4,7 @@ mod cleanup;
 mod delegated_cleanup;
 mod email;
 mod extraction;
+pub(crate) mod lifetimes;
 mod maintenance;
 mod outbox;
 mod policy;
@@ -133,6 +134,12 @@ impl WorkerRuntime {
                     break;
                 }
                 _ = poll_timer.tick() => {
+                    // Lifetimes run on the fast tick: a self-destructing file
+                    // should be gone within a poll interval of its deadline.
+                    Self::sweep_lifetimes(pool, self.batch_size, false).await;
+                    if let Some(test_pool) = test_pool {
+                        crate::telemetry::testing(Self::sweep_lifetimes(test_pool, self.batch_size, true)).await;
+                    }
                     if let Err(error) = outbox::process_batch(
                         pool,
                         &email, false,
@@ -188,6 +195,26 @@ impl WorkerRuntime {
             }
         }
         Ok(())
+    }
+
+    async fn sweep_lifetimes(pool: &PgPool, batch_size: i64, testing: bool) {
+        match lifetimes::sweep(pool, batch_size).await {
+            Ok(stats) if stats.is_empty() => {}
+            Ok(stats) => info!(
+                event = "lifetime_sweep_completed",
+                testing,
+                self_destructed = stats.self_destructed,
+                expiring_shares_expired = stats.expiring_shares_expired,
+                expiring_links_expired = stats.expiring_links_expired,
+                "self-destruct and expiring expiry sweep completed"
+            ),
+            Err(_) => error!(
+                event = "lifetime_sweep_failed",
+                testing,
+                error_code = "lifetime_sweep_database_error",
+                "self-destruct and expiring expiry sweep failed"
+            ),
+        }
     }
 
     async fn run_maintenance<O>(&self, pool: &PgPool, objects: &O)

@@ -300,13 +300,13 @@ fn execution(
     })
 }
 
-fn create_input(organization: &str, name: String) -> TestingEnvironmentCreate {
+fn create_input(_organization: &str, name: String) -> TestingEnvironmentCreate {
     TestingEnvironmentCreate {
         name,
         description: Some("isolated integration sandbox".to_owned()),
         iam_environment_id: Uuid::now_v7(),
         iam_environment_key: SecretString::from(Uuid::new_v4().simple().to_string()),
-        iam_app_id: format!("{organization}>briefcase"),
+        iam_app_id: "briefcase".to_owned(),
         iam_app_secret: SecretString::from(format!(
             "ask_{}{}",
             Uuid::new_v4().simple(),
@@ -1193,12 +1193,8 @@ async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Res
     let repository = PostgresRepository::new(production.clone()).with_test_pool(data.clone());
     reconcile_roots(&repository, &control_context).await?;
     let master_key = SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=");
-    let store = TestingEnvironmentStore::new(
-        production.clone(),
-        data.clone(),
-        &master_key,
-        "tos>briefcase",
-    )?;
+    let store =
+        TestingEnvironmentStore::new(production.clone(), data.clone(), &master_key, "briefcase")?;
     let environment = store
         .create(
             &control_context,
@@ -1252,6 +1248,7 @@ async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Res
                     principal: peer_context.authorization().actor().clone(),
                     access: GrantedAccess::READ_ONLY,
                     inherits_to_descendants: false,
+                    lifetime: None,
                 },
                 &mutation(format!("grant-peer-{suffix}"), b"grant-peer")?,
                 Capability::ManagePermissions,
@@ -1359,12 +1356,8 @@ async fn testing_environments_are_encrypted_idempotent_and_isolated() -> anyhow:
         cleanup_returns_not_found: true,
     });
     let master_key = SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=");
-    let store = TestingEnvironmentStore::new(
-        production.clone(),
-        data.clone(),
-        &master_key,
-        "tos>briefcase",
-    )?;
+    let store =
+        TestingEnvironmentStore::new(production.clone(), data.clone(), &master_key, "briefcase")?;
 
     let mut created_environment_ids = Vec::new();
     let result = AssertUnwindSafe(async {
@@ -2360,7 +2353,7 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
     let mut context: silicon_iam_client::models::ApplicationTestingContext =
         serde_json::from_value(serde_json::json!({
             "environment_id":id,"environment":{"environment_id":id,"org_id":org,"name":"IAM sandbox","description":null,"version":1,"key_generation":1,"cleaned_at":null,"created_at":"2026-09-13T00:00:00Z","creator_type":"carbon","creator_id":"owner"},
-            "application":{"app_id":"tos>briefcase","base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30}
+            "application":{"app_id":"briefcase","base_url":"https://briefcase.example.test","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":30}
         }))?;
     let metadata = context
         .environment
@@ -2372,7 +2365,7 @@ async fn iam_discovery_initializes_once_and_tracks_renames_and_resets() -> anyho
         production.clone(),
         data.clone(),
         &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-        "tos>briefcase",
+        "briefcase",
     )?;
     // Two first requests must not need a production actor or create duplicates.
     let (a, b) = tokio::join!(

@@ -133,17 +133,9 @@ external_identifier!(
 /// Returns whether a string is IAM's canonical public Application ID.
 #[must_use]
 pub fn is_canonical_iam_application_id(value: &str) -> bool {
-    let Some((organization, local_id)) = value.split_once('>') else {
-        return false;
-    };
-    value.bytes().filter(|byte| *byte == b'>').count() == 1
-        && is_canonical_iam_organization_id(organization)
-        && (3..=80).contains(&local_id.len())
-        && local_id
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_lowercase)
-        && local_id.bytes().all(|byte| {
+    (1..=80).contains(&value.len())
+        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
         })
 }
@@ -371,14 +363,14 @@ mod tests {
 
     #[test]
     fn iam_application_and_organization_ids_are_canonical() {
-        assert!(is_canonical_iam_application_id("tos>briefcase"));
-        assert!(is_canonical_iam_application_id("team-2>briefcase_api-1"));
-        assert!(!is_canonical_iam_application_id("silicon-briefcase"));
+        assert!(is_canonical_iam_application_id("briefcase"));
+        assert!(is_canonical_iam_application_id("briefcase_api-1"));
+        assert!(!is_canonical_iam_application_id("2briefcase"));
         assert!(!is_canonical_iam_application_id("tos>2briefcase"));
         assert!(!is_canonical_iam_application_id("tos>Briefcase"));
-        assert!(!is_canonical_iam_application_id("tos>briefcase>other"));
+        assert!(!is_canonical_iam_application_id("briefcase>other"));
         assert!(!is_canonical_iam_application_id("to>briefcase"));
-        assert!(!is_canonical_iam_application_id("tos>ab"));
+        assert!(is_canonical_iam_application_id("ab"));
         assert!(is_canonical_iam_organization_id("team-of-silicons"));
         assert!(!is_canonical_iam_organization_id("Team"));
     }

@@ -21,24 +21,34 @@ use super::common::{OwnedAncestorPrincipal, push_owned_ancestor_access};
 /// The lowercase extension of an entry name, or `NULL` when it has none.
 const EXTENSION: &str = r"lower(substring(entry.name from '\.([^.]+)$'))";
 
+/// Who is filtering. Only `is:expiring` depends on it: an expiring share matches when it
+/// gave the caller their access or when the caller manages it.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::infrastructure::postgres) struct FilterCaller<'a> {
+    pub kind: &'static str,
+    pub id: &'a str,
+    pub administrator: bool,
+}
+
 /// Appends one filter expression as a parenthesized boolean SQL fragment.
 pub(in crate::infrastructure::postgres) fn push_expression(
     builder: &mut QueryBuilder<Postgres>,
     expression: &FilterExpression,
+    caller: FilterCaller<'_>,
 ) {
     debug_assert!(
         !expression.requires_policy_evaluation(),
         "permission predicates require service-side exact evaluation"
     );
     match expression {
-        FilterExpression::All(children) => push_group(builder, children, " AND "),
-        FilterExpression::Any(children) => push_group(builder, children, " OR "),
+        FilterExpression::All(children) => push_group(builder, children, " AND ", caller),
+        FilterExpression::Any(children) => push_group(builder, children, " OR ", caller),
         FilterExpression::Not(inner) => {
             builder.push("NOT (");
-            push_expression(builder, inner);
+            push_expression(builder, inner, caller);
             builder.push(")");
         }
-        FilterExpression::Predicate(predicate) => push_predicate(builder, predicate),
+        FilterExpression::Predicate(predicate) => push_predicate(builder, predicate, caller),
     }
 }
 
@@ -53,10 +63,11 @@ pub(in crate::infrastructure::postgres) fn push_expression(
 pub(in crate::infrastructure::postgres) fn push_database_predicate_matches(
     builder: &mut QueryBuilder<Postgres>,
     expression: &FilterExpression,
+    caller: FilterCaller<'_>,
 ) {
     builder.push("ARRAY[");
     let mut count = 0_usize;
-    push_database_predicates(builder, expression, &mut count);
+    push_database_predicates(builder, expression, &mut count, caller);
     builder.push("]::boolean[]");
 }
 
@@ -64,6 +75,7 @@ fn push_database_predicates(
     builder: &mut QueryBuilder<Postgres>,
     expression: &FilterExpression,
     count: &mut usize,
+    caller: FilterCaller<'_>,
 ) {
     match expression {
         FilterExpression::Predicate(FilterPredicate::HasPermission(_)) => {}
@@ -75,14 +87,14 @@ fn push_database_predicates(
             // the projected array and keep nullable facts (for example, an
             // extensionless file's suffix) decodable as `Vec<bool>`.
             builder.push("COALESCE((");
-            push_predicate(builder, predicate);
+            push_predicate(builder, predicate, caller);
             builder.push("), FALSE)");
             *count += 1;
         }
-        FilterExpression::Not(inner) => push_database_predicates(builder, inner, count),
+        FilterExpression::Not(inner) => push_database_predicates(builder, inner, count, caller),
         FilterExpression::All(children) | FilterExpression::Any(children) => {
             for child in children {
-                push_database_predicates(builder, child, count);
+                push_database_predicates(builder, child, count, caller);
             }
         }
     }
@@ -92,6 +104,7 @@ fn push_group(
     builder: &mut QueryBuilder<Postgres>,
     children: &[FilterExpression],
     separator: &str,
+    caller: FilterCaller<'_>,
 ) {
     if children.is_empty() {
         builder.push("TRUE");
@@ -102,13 +115,17 @@ fn push_group(
         if index > 0 {
             builder.push(separator);
         }
-        push_expression(builder, child);
+        push_expression(builder, child, caller);
     }
     builder.push(")");
 }
 
 #[allow(clippy::too_many_lines)]
-fn push_predicate(builder: &mut QueryBuilder<Postgres>, predicate: &FilterPredicate) {
+fn push_predicate(
+    builder: &mut QueryBuilder<Postgres>,
+    predicate: &FilterPredicate,
+    caller: FilterCaller<'_>,
+) {
     match predicate {
         FilterPredicate::ChangedAfter(day) => {
             builder.push("entry.updated_at >= ");
@@ -166,10 +183,71 @@ fn push_predicate(builder: &mut QueryBuilder<Postgres>, predicate: &FilterPredic
             builder.push_bind(term.prefix_pattern());
             builder.push(r" ESCAPE '\'");
         }
+        FilterPredicate::IsExpiring => push_expiring_match(builder, caller),
+        FilterPredicate::IsSelfDestruct => {
+            builder.push(
+                "(entry.entry_type = 'file' AND entry.self_destruct_at IS NOT NULL \
+                  AND entry.self_destruct_at > clock_timestamp())",
+            );
+        }
         FilterPredicate::HasPermission(_) => {
             unreachable!("permission predicates are evaluated by domain policy")
         }
     }
+}
+
+/// `is:expiring`: a live expiring share that either gave the caller their access (on
+/// this entry or inherited from a folder above it), or sits on this entry and
+/// is the caller's to manage — they created it, own the entry, or administer
+/// the organization. The effective-grant view already drops expired shares.
+fn push_expiring_match(builder: &mut QueryBuilder<Postgres>, caller: FilterCaller<'_>) {
+    builder.push(
+        "(EXISTS (SELECT 1 FROM briefcase.entry_closure AS expiring_path \
+                   JOIN briefcase.effective_permission_grants AS expiring_grant \
+                     ON expiring_grant.org_id = expiring_path.org_id \
+                    AND expiring_grant.entry_id = expiring_path.ancestor_id \
+                  WHERE expiring_path.org_id = entry.org_id \
+                    AND expiring_path.descendant_id = entry.entry_id \
+                    AND expiring_grant.expires_at IS NOT NULL \
+                    AND expiring_grant.revoked_at IS NULL \
+                    AND (expiring_path.depth = 0 OR expiring_grant.inherits_to_descendants) \
+                    AND expiring_grant.principal_type = ",
+    );
+    builder.push_bind(caller.kind);
+    builder.push(" AND expiring_grant.principal_id = ");
+    builder.push_bind(caller.id.to_owned());
+    builder.push(") OR ((entry.owner_type = ");
+    builder.push_bind(caller.kind);
+    builder.push(" AND entry.owner_id = ");
+    builder.push_bind(caller.id.to_owned());
+    builder.push(") OR ");
+    builder.push_bind(caller.administrator);
+    builder.push(
+        ") AND (entry.link_expires_at > clock_timestamp() \
+               OR EXISTS (SELECT 1 FROM briefcase.permission_grants AS own_expiring \
+                           WHERE own_expiring.org_id = entry.org_id AND own_expiring.entry_id = entry.entry_id \
+                             AND own_expiring.revoked_at IS NULL AND own_expiring.expires_at > clock_timestamp()) \
+               OR EXISTS (SELECT 1 FROM briefcase.tag_permission_grants AS own_tag_expiring \
+                           WHERE own_tag_expiring.org_id = entry.org_id AND own_tag_expiring.entry_id = entry.entry_id \
+                             AND own_tag_expiring.revoked_at IS NULL AND own_tag_expiring.expires_at > clock_timestamp())) \
+          OR EXISTS (SELECT 1 FROM briefcase.permission_grants AS granted_expiring \
+                      WHERE granted_expiring.org_id = entry.org_id AND granted_expiring.entry_id = entry.entry_id \
+                        AND granted_expiring.revoked_at IS NULL AND granted_expiring.expires_at > clock_timestamp() \
+                        AND granted_expiring.granted_by_type = ",
+    );
+    builder.push_bind(caller.kind);
+    builder.push(" AND granted_expiring.granted_by_id = ");
+    builder.push_bind(caller.id.to_owned());
+    builder.push(
+        ") OR EXISTS (SELECT 1 FROM briefcase.tag_permission_grants AS granted_tag_expiring \
+                      WHERE granted_tag_expiring.org_id = entry.org_id AND granted_tag_expiring.entry_id = entry.entry_id \
+                        AND granted_tag_expiring.revoked_at IS NULL AND granted_tag_expiring.expires_at > clock_timestamp() \
+                        AND granted_tag_expiring.granted_by_type = ",
+    );
+    builder.push_bind(caller.kind);
+    builder.push(" AND granted_tag_expiring.granted_by_id = ");
+    builder.push_bind(caller.id.to_owned());
+    builder.push("))");
 }
 
 fn push_day(builder: &mut QueryBuilder<Postgres>, day: Date) {

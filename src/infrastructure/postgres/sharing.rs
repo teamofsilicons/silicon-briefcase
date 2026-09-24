@@ -12,6 +12,7 @@ use super::{
 };
 use crate::{
     application::{context::ExecutionContext, service::MutationMetadata},
+    domain::lifetime::LifetimeMinutes,
     domain::{
         ids::EntryId,
         permission::{Capability, EntryVisibility},
@@ -34,6 +35,8 @@ pub(crate) struct LinkAccess {
     pub enabled: bool,
     pub effective: bool,
     pub inherited_from: Option<Uuid>,
+    /// When this entry's own expiring link ends; `None` when permanent or off.
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 impl PostgresRepository {
@@ -73,13 +76,18 @@ impl PostgresRepository {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn set_link_access(
         &self,
         context: &ExecutionContext,
         id: EntryId,
         enabled: bool,
+        lifetime: Option<LifetimeMinutes>,
         metadata: &MutationMetadata,
     ) -> Result<LinkAccess, AppError> {
+        if lifetime.is_some() && !enabled {
+            return Err(AppError::validation("expiring_link_requires_enabled"));
+        }
         let mut request = begin(self, context).await.map_err(repo_error)?;
         let entry = load_entry(&mut request.transaction, context, id, false, true)
             .await
@@ -114,17 +122,65 @@ impl PostgresRepository {
         .await
         .map_err(repo_error)?;
         if !matches!(claim, common::IdempotencyClaim::Replay(_)) {
-            sqlx::query("UPDATE briefcase.entries SET link_public=$2 WHERE org_id=briefcase.current_org_id() AND entry_id=$1")
-                .bind(id.as_uuid()).bind(enabled).execute(&mut *request.transaction).await.map_err(db)?;
+            let (live, previous_expires_at): (bool, Option<OffsetDateTime>) = sqlx::query_as(
+                "SELECT link_public AND (link_expires_at IS NULL OR link_expires_at > clock_timestamp()), \
+                        CASE WHEN link_expires_at > clock_timestamp() THEN link_expires_at END \
+                   FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND entry_id=$1 FOR UPDATE",
+            )
+            .bind(id.as_uuid())
+            .fetch_one(&mut *request.transaction)
+            .await
+            .map_err(db)?;
+            // An expiring link is its own share: it never shortens a permanent
+            // link that is already on.
+            if lifetime.is_some() && live && previous_expires_at.is_none() {
+                return Err(AppError::conflict("link_already_permanent"));
+            }
+            // An expiring link that ended moments ago may not be swept yet. Record
+            // its expiry before this change overwrites the setting, exactly as
+            // the sweep would have.
+            sqlx::query(
+                "INSERT INTO briefcase.audit_events \
+                        (org_id, audit_id, entry_id, actor_type, actor_id, action, request_id, metadata, occurred_at) \
+                 SELECT org_id, briefcase.new_uuid_v7(), entry_id, owner_type, owner_id, \
+                        'entry.expiring_link_expired.v1', 'worker:share-expiry', \
+                        jsonb_build_object('expires_at', link_expires_at, 'automatic', true), link_expires_at \
+                   FROM briefcase.entries \
+                  WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
+                    AND link_expires_at <= clock_timestamp()",
+            )
+            .bind(id.as_uuid())
+            .execute(&mut *request.transaction)
+            .await
+            .map_err(db)?;
+            let expires_at: Option<OffsetDateTime> = sqlx::query_scalar(
+                "UPDATE briefcase.entries SET link_public=$2, \
+                        link_expires_at = CASE WHEN $3::integer IS NULL THEN NULL \
+                                               ELSE clock_timestamp() + make_interval(mins => $3) END \
+                  WHERE org_id=briefcase.current_org_id() AND entry_id=$1 RETURNING link_expires_at",
+            )
+            .bind(id.as_uuid())
+            .bind(enabled)
+            .bind(lifetime.map(LifetimeMinutes::as_i32))
+            .fetch_one(&mut *request.transaction)
+            .await
+            .map_err(db)?;
+            let action = match (enabled, expires_at, previous_expires_at) {
+                (true, Some(_), None) => "entry.expiring_link_enabled.v1",
+                (true, Some(_), Some(_)) => "entry.expiring_link_changed.v1",
+                (true, None, Some(_)) => "entry.expiring_link_made_permanent.v1",
+                (false, _, Some(_)) => "entry.expiring_link_revoked.v1",
+                _ => "entry.link_access_changed.v1",
+            };
             error(
                 record_change(
                     &mut request.transaction,
                     &request.context,
                     Some(id.as_uuid()),
-                    "entry.link_access_changed.v1",
+                    action,
                     "entry",
                     &id.to_string(),
-                    json!({"enabled":enabled}),
+                    json!({"enabled":enabled,"expires_at":expires_at.map(common::rfc3339),"previous_expires_at":previous_expires_at.map(common::rfc3339)}),
                 )
                 .await,
             )?;
@@ -255,7 +311,7 @@ pub(super) async fn public_entry(
     tx: &mut Transaction<'_, Postgres>,
     path: &str,
 ) -> Result<PublicEntry, AppError> {
-    sqlx::query_as::<_, PublicEntry>("SELECT e.entry_id AS id,e.name,e.path,e.entry_type,e.content_type,e.size_bytes AS size FROM briefcase.entries e JOIN briefcase.organizations o ON o.org_id=e.org_id WHERE e.org_id=briefcase.current_org_id() AND o.lifecycle_status='active' AND e.path=$1 AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.link_public AND a.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.deleted_at IS NOT NULL)")
+    sqlx::query_as::<_, PublicEntry>("SELECT e.entry_id AS id,e.name,e.path,e.entry_type,e.content_type,e.size_bytes AS size FROM briefcase.entries e JOIN briefcase.organizations o ON o.org_id=e.org_id WHERE e.org_id=briefcase.current_org_id() AND o.lifecycle_status='active' AND e.path=briefcase.resolve_identifier_path($1) AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.link_public AND (a.link_expires_at IS NULL OR a.link_expires_at > clock_timestamp()) AND a.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=e.org_id AND c.descendant_id=e.entry_id AND a.deleted_at IS NOT NULL)")
         .bind(path).fetch_optional(&mut **tx).await.map_err(db)?.ok_or(AppError::NotFound)
 }
 
@@ -265,9 +321,9 @@ async fn read_link(
     path: crate::domain::entry::EntryPath,
     can_manage: bool,
 ) -> Result<LinkAccess, AppError> {
-    let enabled = sqlx::query_scalar("SELECT link_public FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND entry_id=$1")
+    let (enabled, expires_at): (bool, Option<OffsetDateTime>) = sqlx::query_as("SELECT link_public AND (link_expires_at IS NULL OR link_expires_at > clock_timestamp()), CASE WHEN link_expires_at > clock_timestamp() THEN link_expires_at END FROM briefcase.entries WHERE org_id=briefcase.current_org_id() AND entry_id=$1")
         .bind(id).fetch_one(&mut **tx).await.map_err(db)?;
-    let inherited_from: Option<Uuid> = sqlx::query_scalar("SELECT a.entry_id FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=briefcase.current_org_id() AND c.descendant_id=$1 AND c.depth>0 AND a.link_public AND a.deleted_at IS NULL ORDER BY c.depth LIMIT 1")
+    let inherited_from: Option<Uuid> = sqlx::query_scalar("SELECT a.entry_id FROM briefcase.entry_closure c JOIN briefcase.entries a ON a.org_id=c.org_id AND a.entry_id=c.ancestor_id WHERE c.org_id=briefcase.current_org_id() AND c.descendant_id=$1 AND c.depth>0 AND a.link_public AND (a.link_expires_at IS NULL OR a.link_expires_at > clock_timestamp()) AND a.deleted_at IS NULL ORDER BY c.depth LIMIT 1")
         .bind(id).fetch_optional(&mut **tx).await.map_err(db)?;
     Ok(LinkAccess {
         path,
@@ -275,6 +331,7 @@ async fn read_link(
         enabled,
         effective: enabled || inherited_from.is_some(),
         inherited_from,
+        expires_at,
     })
 }
 

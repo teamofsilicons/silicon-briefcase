@@ -116,6 +116,8 @@ pub struct EntryRow {
     pub created_at: OffsetDateTime,
     /// Last metadata update timestamp.
     pub updated_at: OffsetDateTime,
+    /// When a self-destructing file is permanently deleted.
+    pub self_destruct_at: Option<OffsetDateTime>,
 }
 
 /// Immutable metadata for one file content version.
@@ -200,6 +202,8 @@ pub struct PermissionGrantRow {
     pub revoked_by_id: Option<String>,
     /// Grant creation timestamp.
     pub created_at: OffsetDateTime,
+    /// When an expiring share ends; `None` for a permanent grant.
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 /// Validated organization-owned object storage configuration.
@@ -298,6 +302,8 @@ pub struct MultipartUploadRow {
     pub created_at: OffsetDateTime,
     /// Last state-change timestamp.
     pub updated_at: OffsetDateTime,
+    /// Self-destruct lifetime applied when the session publishes a new file.
+    pub self_destruct_minutes: Option<i32>,
 }
 
 /// One uploaded provider multipart part.
@@ -481,7 +487,8 @@ macro_rules! entry_columns {
         "org_id, entry_id, parent_id, entry_type, name, path, root_type, tag_id, \
          system_kind, owner_type, owner_id, origin_app_id, content_type, size_bytes, \
          current_version_id, created_by_type, created_by_id, updated_by_type, \
-         updated_by_id, deletion_batch_id, deleted_at, purge_after, created_at, updated_at"
+         updated_by_id, deletion_batch_id, deleted_at, purge_after, created_at, updated_at, \
+         self_destruct_at"
     };
 }
 

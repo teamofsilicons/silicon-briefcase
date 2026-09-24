@@ -60,13 +60,12 @@ fn definition(exe: &str, home: &str, runtime: &str, state: &str, path: &str, mac
         )
     } else {
         format!(
-            "[Unit]\nDescription=Briefcase automatic updates\nAfter=network-online.target\n\n[Service]\nExecStart={} daemon run\nEnvironment={}\nEnvironment={}\nEnvironment={}\nEnvironment={}\nEnvironment={}\nEnvironment={}\nRestart=always\nRestartSec=10\nTimeoutStopSec=600\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=Briefcase background service\nAfter=network-online.target\n\n[Service]\nExecStart={} daemon run\nEnvironment={}\nEnvironment={}\nEnvironment={}\nEnvironment={}\nEnvironment={}\nRestart=always\nRestartSec=10\nTimeoutStopSec=600\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",
             systemd(exe),
             systemd(&format!("HOME={home}")),
             systemd(&format!("BRIEFCASE_DAEMON_HOME={runtime}")),
             systemd(&format!("BRIEFCASE_HOME={state}")),
             systemd(&format!("PATH={path}")),
-            systemd("BRIEFCASE_AUTO_UPDATE="),
             systemd(&format!("RUSTUP_TOOLCHAIN={toolchain}"))
         )
     }

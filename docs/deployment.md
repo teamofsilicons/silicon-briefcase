@@ -57,7 +57,7 @@ Prepare a private JSON file using a secure editor/secret manager. Its schema is:
 
 ```json
 {
-  "BRIEFCASE_IAM_APP_ID": "tos>briefcase",
+  "BRIEFCASE_IAM_APP_ID": "briefcase",
   "BRIEFCASE_IAM_APP_SECRET": "<existing-IAM-application-secret>",
   "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET": "<configured-webhook-secret>",
   "BRIEFCASE_IAM_WEBHOOK_KEY_VERSION": 1,
@@ -86,7 +86,7 @@ This is first-time provisioning only. The hosted secret already exists; use
 passwords, encryption key, and unrelated fields. Updating Secrets Manager does
 not itself reload running processes: deploy/restart in a planned sequence.
 
-The canonical Application ID is `tos>briefcase`, not its internal UUID. The
+The canonical Application ID is `briefcase`, not its internal UUID. The
 Application secret comes from IAM; the webhook signing secret is the shared
 value supplied to IAM and configured here. Both are server-side secrets, not
 CLI login inputs. During webhook rotation, retain prior key versions using
@@ -262,7 +262,7 @@ instance started them.
 
 ## First official release deployment
 
-Deploy backend **1.1.0** with official client, CLI and browser gateway **1.1.0**.
+Deploy backend **2.0.0** with official client, CLI and browser gateway **2.0.0**.
 Development 0.x consumers are unsupported. Apply all forward migrations to
 both configured databases before starting the new binaries. Keep the role grants
 for the API and worker separate. The first release introduces app namespace

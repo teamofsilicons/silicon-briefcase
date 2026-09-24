@@ -23,8 +23,8 @@ use crate::{
     request_context,
 };
 
-const APP: &str = "tos>briefcase";
-const ISSUER: &str = "tos>waveform";
+const APP: &str = "briefcase";
+const ISSUER: &str = "waveform";
 const TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ENDPOINT: &str = "briefcase.folders.create";
@@ -85,7 +85,7 @@ impl Fixture {
             runtime_control,
             runtime_data,
             &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-            "tos>briefcase",
+            "briefcase",
         )?));
         let fixture = Self {
             state,
@@ -140,9 +140,9 @@ impl Fixture {
     }
 
     fn snapshot(&self) -> Value {
-        json!({"principal_id":self.principal,"actor_type":"carbon","public_id":"test-carbon",
+        json!({"principal_id":self.principal,"actor_type":"carbon","public_id":"c:test-carbon",
             "organization_id":self.organization,"org_id":self.org,
-            "membership_id":format!("test-carbon[{}]", self.org),"membership_version":7,"authorization_epoch":7,
+            "membership_id":format!("c:test-carbon[{}]", self.org),"membership_version":7,"authorization_epoch":7,
             "audience":APP,"testing_environment_id":self.environment,
             "scopes":["self.identity.read","self.membership.read","self.tags.read"],
             "org_role":"owner","tags":[]})
@@ -150,7 +150,7 @@ impl Fixture {
 
     fn introspection(&self) -> Value {
         json!({"active":true,"principal_id":self.principal,"actor_type":"carbon","client_id":APP,
-            "org_id":self.org,"membership_id":format!("test-carbon[{}]", self.org),
+            "org_id":self.org,"membership_id":format!("c:test-carbon[{}]", self.org),
             "session_id":"01990a9d-86f1-7000-8000-000000000003",
             "scope":"self.identity.read self.membership.read self.tags.read","audience":APP,
             "authorization":self.snapshot(),"authorization_epoch":7,
@@ -206,7 +206,7 @@ impl Fixture {
             "self.tags.read"
         ]);
         json!({"valid":true,"proof_id":Uuid::new_v4(),"issuer_app_id":ISSUER,"audience":APP,
-            "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"test-carbon"},
+            "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"c:test-carbon"},
             "org_id":self.org,"endpoint":{"endpoint_id":ENDPOINT,"path":handlers::delegated::CREATE_FOLDER_PATH},
             "metadata":{},"expires_at":"2099-01-01T00:00:00Z","consumed_at":"2026-09-14T00:00:00Z"})
     }
@@ -316,7 +316,7 @@ async fn imported_world_bearer_rejects_wrong_org_world_audience_and_revoked_auth
         match field {
             "org_id" => body["authorization"][field] = json!(f.owner),
             "testing_environment_id" => body["authorization"][field] = json!(Uuid::new_v4()),
-            "audience" => body["authorization"][field] = json!("tos>another-app"),
+            "audience" => body["authorization"][field] = json!("another-app"),
             "active" => body = json!({"active":false}),
             _ => body["authorization"][field] = Value::Null,
         }
@@ -415,14 +415,14 @@ async fn imported_world_delegation_rejects_unbound_scope_identity_org_and_world(
             "missing_scope" => proof["authorization"]["scopes"] = f.snapshot()["scopes"].clone(),
             "foreign_scope" => {
                 proof["authorization"]["scopes"][0] =
-                    json!("obo:tos>another-app:briefcase.folders.create");
+                    json!("obo:another-app:briefcase.folders.create");
             }
             "wrong_endpoint" => proof["endpoint"]["endpoint_id"] = json!("briefcase.files.create"),
             "wrong_org" => proof["org_id"] = json!(f.owner),
             "wrong_world" => {
                 proof["authorization"]["testing_environment_id"] = json!(Uuid::new_v4());
             }
-            "wrong_audience" => proof["audience"] = json!("tos>another-app"),
+            "wrong_audience" => proof["audience"] = json!("another-app"),
             "wrong_actor" => proof["authorization"]["public_id"] = json!("another-carbon"),
             "no_role" => proof["authorization"]["org_role"] = Value::Null,
             "no_tags" => proof["authorization"]["tags"] = Value::Null,
@@ -508,6 +508,7 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
             &context,
             public_root.id(),
             true,
+            None,
             &crate::application::service::MutationMetadata::new(None, [1; 32]),
         )
         .await?;
@@ -538,7 +539,7 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
     assert_eq!(result.status(), http::StatusCode::OK);
     drop(result);
     for (org, path, world) in [
-        (f.org.as_str(), "private/test-carbon", Some(f.environment)),
+        (f.org.as_str(), "private/c:test-carbon", Some(f.environment)),
         (f.owner.as_str(), "public", Some(f.environment)),
         (f.org.as_str(), "public", Some(Uuid::new_v4())),
         (f.org.as_str(), "public", None),
@@ -645,10 +646,10 @@ async fn raw_recording_upload(tags_disclosed: bool) -> anyhow::Result<()> {
     let mut proof = f.proof_response();
     proof["endpoint"] =
         json!({"endpoint_id":"briefcase.files.create","path":handlers::obo::CREATE_FILE_PATH});
-    proof["authorization"]["scopes"][0] = json!("obo:tos>briefcase:briefcase.files.create");
+    proof["authorization"]["scopes"][0] = json!("obo:briefcase:briefcase.files.create");
     if !tags_disclosed {
         proof["authorization"]["scopes"] = json!([
-            "obo:tos>briefcase:briefcase.files.create",
+            "obo:briefcase:briefcase.files.create",
             "self.identity.read",
             "self.membership.read"
         ]);
@@ -722,7 +723,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
     // The exact actor owns this private tree independently of tag disclosure.
     f.state
         .metadata
-        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .get_entry_by_path(&current, &EntryPath::new("private/c:test-carbon")?)
         .await?;
     assert!(
         f.state
@@ -732,7 +733,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
             .is_err()
     );
     let assignments: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon' AND tag_id=$2",
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='c:test-carbon' AND tag_id=$2",
     ).bind(format!("{}:{}", f.environment, f.org)).bind(tag_id.to_string()).fetch_one(&f.data).await?;
     assert_eq!(
         assignments, 1,
@@ -752,7 +753,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
     );
     f.state
         .metadata
-        .get_entry_by_path(&current, &EntryPath::new("private/test-carbon")?)
+        .get_entry_by_path(&current, &EntryPath::new("private/c:test-carbon")?)
         .await?;
     assert!(
         f.state
@@ -762,7 +763,7 @@ async fn imported_world_undisclosed_tags_preserve_directory_but_never_authorize_
             .is_err()
     );
     let assignments: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='test-carbon'",
+        "SELECT count(*) FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='c:test-carbon'",
     ).bind(format!("{}:{}", f.environment, f.org)).fetch_one(&f.data).await?;
     assert_eq!(
         assignments, 0,

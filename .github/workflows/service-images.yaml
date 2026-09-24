@@ -1,0 +1,52 @@
+name: Build service image candidates
+on:
+  push:
+    branches: [release/public-identifiers-20260923]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  images:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            dockerfile: Dockerfile
+          - component: web
+            dockerfile: Dockerfile.browser
+          - component: docs
+            dockerfile: Dockerfile.docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: matrix.component != 'backend'
+        with:
+          node-version: 24
+      - name: Build browser assets
+        if: matrix.component == 'web'
+        run: npm ci && npm run build
+        working-directory: web
+      - name: Build documentation assets
+        if: matrix.component == 'docs'
+        run: npm ci && npm run build && npm run check
+        working-directory: docs-site
+      - name: Build and save immutable ARM64 candidate
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          docker build --label org.opencontainers.image.revision="$GITHUB_SHA" -f "$DOCKERFILE" -t "briefcase-$COMPONENT:candidate" .
+          mkdir candidate
+          docker image inspect "briefcase-$COMPONENT:candidate" > candidate/image.json
+          printf '%s\n' "$GITHUB_SHA" > candidate/SOURCE_REVISION
+          docker save "briefcase-$COMPONENT:candidate" | gzip > "candidate/briefcase-$COMPONENT-arm64.tar.gz"
+          (cd candidate && sha256sum *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: briefcase-${{ matrix.component }}-arm64-candidate
+          path: candidate/*
+          retention-days: 14
+# Artifacts only; no registry push, publication, or deployment.

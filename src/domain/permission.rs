@@ -180,13 +180,33 @@ pub struct PermissionGrantParts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionGrant {
     parts: PermissionGrantParts,
+    expires_at: Option<OffsetDateTime>,
 }
 
 impl PermissionGrant {
-    /// Rehydrates or creates a grant from already validated facts.
+    /// Rehydrates or creates a permanent grant from already validated facts.
     #[must_use]
     pub const fn from_parts(parts: PermissionGrantParts) -> Self {
-        Self { parts }
+        Self {
+            parts,
+            expires_at: None,
+        }
+    }
+
+    /// Marks the grant as an expiring share that ends at `expires_at`.
+    ///
+    /// `None` keeps it permanent. Expired shares are never loaded as grants,
+    /// so a grant with an expiry is live until that instant.
+    #[must_use]
+    pub const fn with_expiry(mut self, expires_at: Option<OffsetDateTime>) -> Self {
+        self.expires_at = expires_at;
+        self
+    }
+
+    /// Returns when an expiring share ends, or `None` for a permanent grant.
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<OffsetDateTime> {
+        self.expires_at
     }
 
     /// Returns the grant identifier.

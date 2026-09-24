@@ -40,6 +40,7 @@ jobs:
       - run: PGPASSWORD=briefcase-ci psql -h localhost -U briefcase -d briefcase -f deploy/postgres/001_runtime_roles.sql
       - run: PGPASSWORD=briefcase-ci psql -h localhost -U briefcase -d briefcase -c 'CREATE DATABASE briefcase_test'
       - run: cargo test --locked --all-targets --all-features -- --test-threads=1
+      - run: IDENTIFIER_TEST_POSTGRES="$BRIEFCASE_TEST_CONTROL_DATABASE_URL" python3 scripts/test-public-identifiers.py
 
   rust-client:
     runs-on: ubuntu-latest

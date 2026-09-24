@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    /// Register an existing, absolute Briefcase state directory for maintenance.
+    /// Register an existing, absolute Briefcase state directory with the daemon.
     Register {
         /// Private state directory; credentials are never included in IPC.
         state: PathBuf,

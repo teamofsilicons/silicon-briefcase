@@ -7,11 +7,16 @@
 use std::io::Write as _;
 
 use briefcase_client::{
-    ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, Notification,
-    NotificationInbox, OrganizationUsage, PermissionInspection, SearchResult,
+    ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, Invitation,
+    InvitationPage, LinkAccess, Notification, NotificationInbox, OrganizationUsage,
+    PermissionInspection, Recipient, SearchResult,
 };
 use serde::Serialize;
-use time::{OffsetDateTime, format_description::BorrowedFormatItem, macros::format_description};
+use time::{
+    OffsetDateTime, UtcOffset,
+    format_description::{BorrowedFormatItem, well_known::Rfc3339},
+    macros::format_description,
+};
 
 const TIMESTAMP: &[BorrowedFormatItem<'_>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]");
@@ -58,6 +63,10 @@ impl Output {
             println!("(nothing here)");
             return;
         }
+        // The column appears only when something listed will self-destruct, so
+        // a file about to vanish is never mistaken for an ordinary one.
+        let self_destructing = entries.iter().any(|entry| entry.self_destruct_at.is_some());
+        let now = OffsetDateTime::now_utc();
         let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
             let mut row = vec![
@@ -66,6 +75,13 @@ impl Output {
                 entry.size.map_or_else(|| "-".to_owned(), human_size),
                 entry.updated_at.map_or_else(|| "-".to_owned(), timestamp),
             ];
+            if self_destructing {
+                row.push(
+                    entry
+                        .self_destruct_at
+                        .map_or_else(|| "-".to_owned(), |moment| relative(moment, now)),
+                );
+            }
             if long {
                 row.push(
                     entry
@@ -79,6 +95,9 @@ impl Output {
             rows.push(row);
         }
         let mut headers = vec!["", "NAME", "SIZE", "UPDATED"];
+        if self_destructing {
+            headers.push("SELF-DESTRUCTS");
+        }
         if long {
             headers.extend(["OWNER", "ACCESS", "PATH"]);
         }
@@ -150,6 +169,15 @@ impl Output {
         }
         if let Some(deleted) = entry.deleted_at {
             fields.push(("in the bin since", timestamp(deleted)));
+        }
+        if let Some(moment) = entry.self_destruct_at {
+            fields.push((
+                "self-destructs",
+                format!(
+                    "{}; deleted for good, never to the bin",
+                    deadline(moment, OffsetDateTime::now_utc())
+                ),
+            ));
         }
         fields.push(("url", entry.permanent_url.to_string()));
 
@@ -324,6 +352,53 @@ impl Output {
         );
     }
 
+    /// Prints one invitation as JSON, then says on stderr when an expiring share
+    /// ends, unless JSON was asked for.
+    ///
+    /// Standard output stays the service's JSON either way, so a script that
+    /// never passed `--json` keeps parsing it.
+    pub fn invitation(self, invitation: &Invitation) {
+        self.json(invitation);
+        self.expiring_note(invitation);
+    }
+
+    /// Prints a page of invitations as JSON, then notes each expiring share's end.
+    pub fn invitations(self, page: &InvitationPage) {
+        self.json(page);
+        for invitation in &page.items {
+            self.expiring_note(invitation);
+        }
+    }
+
+    /// Prints a link setting as JSON, then notes when an expiring link ends.
+    pub fn link(self, link: &LinkAccess) {
+        self.json(link);
+        if let Some(expires_at) = &link.expires_at {
+            self.aside(&format!(
+                "expiring link ends {}",
+                rfc3339_deadline(expires_at)
+            ));
+        }
+    }
+
+    fn expiring_note(self, invitation: &Invitation) {
+        if let Some(expires_at) = &invitation.expires_at {
+            self.aside(&format!(
+                "expiring share {} for {} ends {}",
+                invitation.id,
+                recipient(&invitation.invitation.principal),
+                rfc3339_deadline(expires_at)
+            ));
+        }
+    }
+
+    /// Prints a person-only remark to stderr, leaving stdout for the answer.
+    pub fn aside(self, message: &str) {
+        if !self.json {
+            eprintln!("{}", terminal_text(message));
+        }
+    }
+
     /// Writes raw bytes to standard output, for `cat`.
     ///
     /// # Errors
@@ -361,6 +436,14 @@ fn notification_row(notification: &Notification) -> Vec<String> {
             .as_ref()
             .map_or_else(|| "-".to_owned(), |subject| subject.path.clone()),
     ]
+}
+
+fn recipient(principal: &Recipient) -> String {
+    match principal {
+        Recipient::Carbon(id) | Recipient::Silicon(id) => id.clone(),
+        Recipient::Email(address) => format!("email:{address}"),
+        Recipient::Tag(tag) => format!("tag:{tag}"),
+    }
 }
 
 fn kind_marker(entry: &Entry) -> &'static str {
@@ -414,6 +497,57 @@ pub fn timestamp(moment: OffsetDateTime) -> String {
     moment
         .format(TIMESTAMP)
         .unwrap_or_else(|_| moment.unix_timestamp().to_string())
+}
+
+/// Formats a deadline as its UTC minute and how far away it is, such as
+/// `2026-09-24 18:05 UTC (in 2h 5m)`.
+#[must_use]
+pub fn deadline(moment: OffsetDateTime, now: OffsetDateTime) -> String {
+    format!(
+        "{} UTC ({})",
+        timestamp(moment.to_offset(UtcOffset::UTC)),
+        relative(moment, now)
+    )
+}
+
+/// Formats a wire RFC 3339 deadline, or returns it untouched when unreadable.
+fn rfc3339_deadline(value: &str) -> String {
+    OffsetDateTime::parse(value, &Rfc3339).map_or_else(
+        |_| value.to_owned(),
+        |moment| deadline(moment, OffsetDateTime::now_utc()),
+    )
+}
+
+/// Says how far away a deadline is, such as `in 2h 5m`, rounding up to the
+/// minute so a deadline never reads as sooner than it is.
+#[must_use]
+pub fn relative(moment: OffsetDateTime, now: OffsetDateTime) -> String {
+    let seconds = (moment - now).whole_seconds();
+    if seconds <= 0 {
+        return "due now".to_owned();
+    }
+    let minutes = u64::try_from(seconds).unwrap_or(u64::MAX).div_ceil(60);
+    format!("in {}", span(minutes))
+}
+
+/// Formats a whole number of minutes in days, hours and minutes, such as
+/// `1d 12h` or `2h 5m`.
+#[must_use]
+pub fn span(minutes: u64) -> String {
+    let parts: Vec<String> = [
+        (minutes / (24 * 60), "d"),
+        (minutes % (24 * 60) / 60, "h"),
+        (minutes % 60, "m"),
+    ]
+    .into_iter()
+    .filter(|(amount, _)| *amount > 0)
+    .map(|(amount, unit)| format!("{amount}{unit}"))
+    .collect();
+    if parts.is_empty() {
+        "0m".to_owned()
+    } else {
+        parts.join(" ")
+    }
 }
 
 /// Prints a value as JSON.
@@ -478,7 +612,36 @@ fn push_cell(line: &mut String, cell: &str, width: usize, last: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::human_size;
+    use super::{deadline, human_size, relative, span};
+    use time::macros::datetime;
+
+    #[test]
+    fn spans_read_in_days_hours_and_minutes() {
+        assert_eq!(span(0), "0m");
+        assert_eq!(span(1), "1m");
+        assert_eq!(span(90), "1h 30m");
+        assert_eq!(span(120), "2h");
+        assert_eq!(span(2_160), "1d 12h");
+        assert_eq!(span(43_200), "30d");
+        assert_eq!(span(43_199), "29d 23h 59m");
+    }
+
+    #[test]
+    fn deadlines_say_when_and_how_far_away_in_utc() {
+        let now = datetime!(2026-09-24 16:00:00 UTC);
+        assert_eq!(
+            relative(datetime!(2026-09-24 18:05:00 UTC), now),
+            "in 2h 5m"
+        );
+        // A partial minute rounds up, never down to "sooner than it is".
+        assert_eq!(relative(datetime!(2026-09-24 16:00:01 UTC), now), "in 1m");
+        assert_eq!(relative(now, now), "due now");
+        assert_eq!(relative(datetime!(2026-09-24 15:00:00 UTC), now), "due now");
+        assert_eq!(
+            deadline(datetime!(2026-09-24 20:05:00 +02:00), now),
+            "2026-09-24 18:05 UTC (in 2h 5m)"
+        );
+    }
 
     #[test]
     fn sizes_read_the_way_people_write_them() {

@@ -6,12 +6,12 @@ lacks — and what it adds is remembering which deployment you meant, printing
 answers you can read, and giving a script an exit code it can branch on.
 
 ```bash
-cargo install briefcase-cli      # installs the `briefcase` binary
+honeycomb install 'briefcase'  # installs the native `briefcase` binary
 briefcase --help                 # every command, every option
 briefcase ls --help              # one command in detail
 ```
 
-This guide targets CLI **1.1.0** and API contract **1.1.0**.
+This guide targets CLI **2.0.0** and API contract **2.0.0**.
 Development 0.x releases are unsupported. For local development, install with
 `cargo install --path clients/rust/crates/briefcase-cli`.
 
@@ -23,7 +23,7 @@ password, verification code, or Application secret, and it never redirects a
 terminal login:
 
 ```bash
-iam login --app-id 'tos>briefcase'
+iam login --app-id 'briefcase'
 briefcase login <slt>
 # Or run `briefcase login` and paste only the SLT at the hidden prompt.
 ```
@@ -140,8 +140,7 @@ without a home directory, saved profile, network connection, or login.
 `iam --json` reads the selected deployment's public IAM configuration without
 sending a member access token. It returns `app_id`, `test_environment_id`, and
 `iam_environment_id`. Use the `app_id` when requesting the single-use SLT from
-IAM in production. In testing, supply either an IAM-issued test SLT or a Carbon/Silicon ID. Production returns null for both environment IDs. No app secret or
-app secret is printed. URL/profile overrides apply as usual.
+IAM in production. In testing, supply either an IAM-issued test SLT or a Carbon/Silicon ID. Production returns null for both environment IDs. No app secret is printed. URL/profile overrides apply as usual.
 
 `login status --json` checks the session with IAM and returns one JSON object:
 
@@ -185,50 +184,65 @@ durable multipart path above that threshold; callers do not need a delegated
 upload flow for ordinary member uploads.
 Each paired testing environment is isolated from production IAM, limited to
 2 GiB of aggregate content and at most 10 active environments per deployment;
-deleted environments remain recoverable for two days. A Briefcase test bearer
+Honeycomb controls shared recovery and expiry policy. A Briefcase test bearer
 and its IAM testing app secret are both required for test-plane requests.
 
 ## Testing environments
 
-Create IAM and Briefcase together: `briefcase env create integration`.
-The result is stored as a UUID-to-IAM-test-app-secret mapping. Use
-`briefcase --test <environment-id> login <test-actor-id>` and then the same file
-commands with `--test`. In testing the SLT can be an IAM-issued test login code or the existing Carbon or Silicon ID
-(e.g. `alice` or `worker:tos`); omit the argument to enter that ID at the prompt.
-Alternatively, set `BRIEFCASE_APP_SECRET` or pass
-`--app-secret`; the CLI resolves the environment and keeps its login separate.
-The testing footer is always printed to stderr, including on errors.
+Manage shared environments through the official Honeycomb CLI and its own login:
 
-Use `env list`, `env show`, `env key`, `env edit`, `env clean`, `env delete`, and
-`env restore` to manage the local Briefcase plane. Rotate credentials in IAM
-and run `env pair-iam` with the replacement pairing. There is no independent
-Briefcase key rotation. IAM test actors retain their real role/tag permissions.
-See [Testing environments](../testing-environments.md) for provisioning,
-lifecycle, storage isolation, and exact HTTP/Rust equivalents.
+```bash
+briefcase env manage create tos integration
+briefcase env manage list
+briefcase env manage import <environment-id> 'briefcase' --revision <current-revision>
+briefcase env manage action <environment-id> clean --revision <current-revision>
+```
+
+Arguments after `env manage` follow `honeycomb environments`. Install and sign in to
+Honeycomb first. Management uses its own authorization and retry state; omit Briefcase
+`--test`, bearer tokens and app secrets for these commands. Legacy direct lifecycle
+commands explain how to recover through Honeycomb. `env current` remains available
+for the currently selected Briefcase test plane.
+
+Enter an imported environment using `BRIEFCASE_APP_SECRET` or `--app-secret`, then
+`briefcase login <test-slt-or-actor-id>`. The CLI saves the UUID-to-app-secret mapping;
+subsequent `briefcase --test <environment-id> login <test-actor-id>` and normal file
+commands reuse that selection. IAM-issued test SLTs and existing Carbon/Silicon IDs
+(such as `c:alice` or `si:worker`) are accepted only in testing. The actor's real
+role/tag permissions still apply. Production and testing sessions stay separate.
+The testing footer always prints to stderr, including on errors.
+
+See [Testing environments](../testing-environments.md) for lifecycle ownership,
+storage isolation, browser entry and HTTP/Rust examples.
 
 ## Addressing entries
 
 Anywhere a command takes an entry, it takes the path its permanent URL shows —
-`private/cos:tos/notes/report.pdf` — or the entry's identifier. A leading slash
+`private/si:cos/notes/report.pdf` — or the entry's identifier. A leading slash
 is fine.
 
 ## Browsing
 
 ```bash
 briefcase ls                                    # the organization base
-briefcase ls private/cos:tos/notes --long       # size, owner, what you may do
+briefcase ls private/si:cos/notes --long       # size, owner, what you may do
 briefcase ls public/handbook --all              # follow every page
 briefcase ls public/handbook --cursor "$NEXT"   # resume a previous page
-briefcase stat private/cos:tos/notes/report.pdf # one entry in full
+briefcase stat private/si:cos/notes/report.pdf # one entry in full
 
 briefcase find "is:md location:'public' after:01-01-2026"
 briefcase find "permissions:delete" --all
 briefcase find "is:md" --cursor "$NEXT"
+briefcase find "is:expiring"                         # entries with an active expiring share
+briefcase find "is:self-destruct"                # files whose timer is running
 briefcase search "quarterly revenue"
 ```
 
 `find` takes the service's filter language; `search` looks inside filenames and
-extracted document text and says which one matched. Without `--all`, `ls` and
+extracted document text and says which one matched. `is:expiring` matches files and
+folders with an active expiring share, either one that gives you your access or one
+you can manage; `is:self-destruct` matches files whose self-destruct timer is
+still running. Without `--all`, `ls` and
 `find` return one page and preserve the service's opaque `next_cursor`: human
 output prints a continuation hint, while JSON contains `items` and
 `next_cursor`. Pass that value back unchanged with `--cursor`. `--all` follows
@@ -241,25 +255,26 @@ fails explicitly if a broken deployment repeats a cursor.
 briefcase mkdir notes --type private            # /notes, a Private root
 briefcase mkdir handbook --type public          # /handbook, a Public root
 briefcase mkdir specs --type tag --tag engineering
-briefcase mkdir private/cos:tos/notes            # explicitly inside your folder
+briefcase mkdir private/si:cos/notes            # explicitly inside your folder
 briefcase mkdir public/handbook                  # explicitly inside Public
-briefcase mkdir private/cos:tos/notes/quarterly # inside an existing folder
-briefcase mkdir shared --type private --invite carbon:cos:tos=read,write
+briefcase mkdir private/si:cos/notes/quarterly # inside an existing folder
+briefcase mkdir shared --type private --invite c:cos=read,write
 
-briefcase put report.pdf figures.csv private/cos:tos/notes/quarterly
+briefcase put report.pdf figures.csv private/si:cos/notes/quarterly
 briefcase put report.pdf public/handbook --name q3-report.pdf
 
-briefcase get private/cos:tos/notes/quarterly/report.pdf -o ./local.pdf
-briefcase cat private/cos:tos/notes/quarterly/notes.md
+briefcase get private/si:cos/notes/quarterly/report.pdf -o ./local.pdf
+briefcase cat private/si:cos/notes/quarterly/notes.md
 
-briefcase mv private/cos:tos/notes/a.md private/cos:tos/notes/b.md   # rename
-briefcase mv private/cos:tos/notes/b.md public/handbook/b.md         # move
-briefcase rm private/cos:tos/notes/quarterly/draft.md                # to the bin
+briefcase mv private/si:cos/notes/a.md private/si:cos/notes/b.md   # rename
+briefcase mv private/si:cos/notes/b.md public/handbook/b.md         # move
+briefcase rm private/si:cos/notes/quarterly/draft.md                # to the bin
 ```
 
 `mkdir`, every individual file in `put`, `mv`, and version `restore` also
 persist an intent fingerprint and idempotency key before sending. Upload
-fingerprints include the source file's SHA-256 digest. Path-addressed rename,
+fingerprints include the source file's SHA-256 digest and any `--self-destruct`
+lifetime. Path-addressed rename,
 move, and restore retain the resolved entry UUID; nested folder creation,
 uploads, and moves also retain the resolved destination-folder UUID. Rerunning
 after a lost success response therefore replays the original request without
@@ -270,8 +285,8 @@ Uploading a name that an active file already carries publishes that file's next
 version. Every version is retained:
 
 ```bash
-briefcase versions private/cos:tos/notes/quarterly/report.pdf
-briefcase restore private/cos:tos/notes/quarterly/report.pdf "$VERSION_ID"
+briefcase versions private/si:cos/notes/quarterly/report.pdf
+briefcase restore private/si:cos/notes/quarterly/report.pdf "$VERSION_ID"
 ```
 
 Deleting is recoverable for 45 days:
@@ -286,6 +301,40 @@ briefcase bin restore "$ENTRY_ID"
 `bin list` uses the same cursor, JSON page, and exhaustive `--all` behavior as
 `ls` and `find`.
 
+### Self-destructing files
+
+```bash
+briefcase put scratch.md private/si:cos/notes --self-destruct 2h
+briefcase stat private/si:cos/notes/scratch.md      # self-destructs … UTC (in 2h)
+briefcase find "is:self-destruct"
+briefcase keep private/si:cos/notes/scratch.md      # stop the timer
+```
+
+`put --self-destruct <DURATION>` makes each new file delete itself permanently
+1 minute to 30 days after its upload finishes. DURATION is whole minutes (`90`)
+or a number with `m`, `h` or `d` (`90m`, `2h`, `7d`, `1d12h`); anything outside
+1 to 43,200 minutes is refused before a request is sent.
+
+- Only a new file can self-destruct. A name that already exists in the folder is
+  refused with `self_destruct_requires_new_file` rather than becoming a new
+  version; upload under another `--name` instead.
+- When the timer runs out the file is deleted for good. It never enters the bin
+  and cannot be restored, and its space is returned at once.
+- `briefcase rm` on a self-destructing file is also permanent, and says so.
+- Uploading a new version later does not change the timer.
+- `briefcase keep <target>...` stops the timer and makes the file permanent.
+  Only the file's creator and organization admins and owners may keep it;
+  anyone else is refused (exit code `4`). Keeping a file whose timer is not
+  running is refused with `not_self_destructing`, which is also what a retry
+  after a lost response sees. `--json` prints `[{"entry_id", "path"}]` for the
+  kept files.
+
+`stat` shows a `self-destructs` line with the UTC deadline and how far away it
+is; `ls` and `find` add a `SELF-DESTRUCTS` column whenever a listed file has a
+running timer. The JSON entry carries `self_destruct_at` (RFC 3339, `null` for a
+permanent file). Setting the timer, keeping the file and its deletion are all
+recorded in `briefcase logs`; no warning is sent before deletion.
+
 `bin restore` saves its operation key before sending. If the response is lost,
 rerun the exact command with the same profile and environment to recover that
 restore. The pending operation is cleared after success; restoring a later
@@ -294,17 +343,59 @@ deletion uses a new key.
 ## Sharing
 
 ```bash
-briefcase share private/cos:tos/notes carbon:cos:tos --access read,write --inherit
-briefcase shares private/cos:tos/notes
-briefcase unshare private/cos:tos/notes "$GRANT_ID"
+briefcase share private/si:cos/notes c:cos --access read,write --inherit
+briefcase shares private/si:cos/notes
+briefcase unshare private/si:cos/notes "$GRANT_ID"
 
-briefcase access private/cos:tos/notes public/handbook   # what may I do here?
+briefcase access private/si:cos/notes public/handbook   # what may I do here?
 ```
 
-Members are written `kind:id` — `carbon:cos:tos`, `silicon:atlas` — and rights
+Members use their complete public ID — `c:cos`, `si:atlas` — and rights
 are a comma-separated set of `read`, `write`, `update`. Delete cannot be granted. They are
 independent: `write` adds files to a folder, `update` changes a file that is
 already there, and neither conveys `delete`.
+
+### Expiring shares
+
+```bash
+briefcase share private/si:cos/notes/report.pdf email:alex@example.com --expires-after 2h
+briefcase share private/si:cos/notes tag:engineering --inherit --expires-after 7d
+briefcase shares private/si:cos/notes             # expiring grants carry expires_at
+briefcase expiry private/si:cos/notes "$GRANT_ID" --expires-in 3d   # extend or shorten
+briefcase expiry private/si:cos/notes "$GRANT_ID" --permanent       # keep for good
+briefcase unshare private/si:cos/notes "$GRANT_ID"                # end it early
+briefcase link private/si:cos/notes/report.pdf --expires-after 30m         # expiring link
+```
+
+Any share can be an expiring share: a member, an email contact, a tag, or
+anyone with the link. It lasts 1 minute to 30 days, written as whole minutes
+(`90`) or with `m`, `h` or `d` (`90m`, `2h`, `7d`, `1d12h`); the CLI refuses
+anything outside 1 to 43,200 minutes before sending, and says why.
+
+- An expiring share is read-only (view and download). `--expires-after` with `--access`
+  other than `read` is refused locally.
+- It is its own grant. When it ends only that access goes; access the recipient
+  holds through another share, a tag or a public folder stays.
+- Expiry is strict: access stops the moment the time passes.
+- `briefcase expiry <target> <grant-id> --expires-in <DURATION>` restarts the clock
+  from now; `--permanent` keeps the access for good (folding into a permanent
+  grant the recipient already holds). Exactly one of the two is required. A share
+  that has ended is gone and reads as not found (exit code `3`); a permanent
+  grant is refused with `not_an_expiring_share`.
+- `briefcase unshare` ends an expiring share early, like any grant.
+- Nobody is notified when an expiring share ends or is revoked. Creating, changing and
+  ending it are recorded in `briefcase logs`.
+
+For a link, `link --expires-after <DURATION>` turns on an expiring link, and repeating it on a
+live expiring link restarts the clock. `link --enabled true` makes an expiring link
+permanent; `link --enabled false` ends it. A permanent link must be turned off
+before it can become an expiring link (`link_already_permanent`).
+
+`share`, `shares`, `expiring` and `link` print the service's JSON on standard output
+even without `--json`; expiring grants and links carry `expires_at` (RFC 3339,
+absent or `null` when permanent). Without `--json`, the CLI also writes a line
+to standard error saying when each expiring share or link ends, in UTC and relative
+to now, so scripts that parse standard output are unaffected.
 
 Read and clear sharing notifications:
 
@@ -336,12 +427,12 @@ for verified-email limitations, tag membership, and inherited link settings.
 ## Everything else
 
 ```bash
-briefcase history private/cos:tos/notes/report.pdf   # who did what, when
+briefcase history private/si:cos/notes/report.pdf   # who did what, when
 briefcase usage                                      # storage and today's uploads
 briefcase version                                    # client and server contracts
 briefcase storage configure --bucket … --region … --role-arn … --account …
-briefcase app upload --app-id 'tos>app-notes' ./generated.md # hidden proof prompt
-briefcase app upload --app-id 'tos>app-notes' --proof-stdin ./generated.md < proof.txt
+briefcase app upload --app-id 'app-notes' ./generated.md # hidden proof prompt
+briefcase app upload --app-id 'app-notes' --proof-stdin ./generated.md < proof.txt
 ```
 
 `storage configure` prints its operation UUID to stderr before submitting the
@@ -366,8 +457,8 @@ JSON file, then describe it locally before asking IAM for a proof:
 
 ```bash
 briefcase app request folder-create --body folder.json --describe
-briefcase app request folder-create --body folder.json --app-id 'tos>app-notes'
-briefcase app request file-read --body read.json --app-id 'tos>app-notes' --output ./download.bin
+briefcase app request folder-create --body folder.json --app-id 'app-notes'
+briefcase app request file-read --body read.json --app-id 'app-notes' --output ./download.bin
 ```
 
 `--describe` only reads the bounded JSON file (at most 1 MiB), validates the
@@ -380,8 +471,11 @@ Unknown JSON fields are rejected. See the [API request schemas](../obo.md#json-c
 for the body fields.
 
 The available operations are `folder-create`, `entries-list`, `file-read`,
-`entry-trash`, `upload-reserve`, `upload-commit`, `upload-status`, and
-`upload-cancel`. Each request uses fresh IAM authorization; no proof is cached
+`entry-trash`, `invite`, `link-access`, `upload-reserve`, `upload-commit`,
+`upload-status`, and `upload-cancel`. `invite` and `link-access` accept an
+optional `expires_in_minutes` (1 to 43,200) — inside `invitation` for `invite`,
+and beside `"enabled": true` for `link-access` — to create a read-only expiring
+share or expiring link. It is part of the exact body the proof binds. Each request uses fresh IAM authorization; no proof is cached
 or retried automatically. Keep a mutation's `operation_id` and body unchanged
 when obtaining a fresh proof for a retry. A file read requires `--output`
 before any proof or request is sent. Its destination appears only after the
@@ -397,7 +491,7 @@ hashes the file with bounded memory and prints a credential-free JSON manifest:
 ```bash
 briefcase app prepare-upload ./recording.webm --operation-id "$OPERATION_ID" --parent-path public/recordings > reserve.json
 briefcase app request upload-reserve --body reserve.json --describe
-briefcase app request upload-reserve --body reserve.json --app-id 'tos>app-notes' --capability-file ./upload.cap
+briefcase app request upload-reserve --body reserve.json --app-id 'app-notes' --capability-file ./upload.cap
 briefcase app transfer "$UPLOAD_ID" ./recording.webm --capability-file ./upload.cap
 ```
 
@@ -482,19 +576,23 @@ briefcase: upgrade the CLI, or pass --no-verify to call it anyway at your own ri
 Upgrading the CLI is the answer. `--no-verify` exists for a deliberate rollout
 where the mismatch is known and accepted.
 
-## Background service and automatic updates
+## Installation, updates, and the background service
 
-Install the CLI and its login service in one step on macOS or Linux:
+Install the native CLI on Linux, macOS or Windows:
 
 ```sh
-curl -fsSL https://docs.briefcase.teamofsilicons.com/install.sh | sh
+honeycomb install 'briefcase'
 ```
 
-The installer sets up Rust when needed, installs the CLI, and starts the current
-user's launchd or systemd service. Authentication is separate: obtain an SLT
-from IAM, then run `briefcase login <slt>`. Linux needs a working user systemd
-session. For a headless machine that must run after logout, its administrator
-can enable user lingering, or run `briefcase daemon run` under a supervisor.
+Honeycomb installs the binary and manages version selection and replacement; it
+does not require Rust or automatically install Briefcase's optional daemon. Update
+with `honeycomb update 'briefcase'`. All Briefcase builds disable independent
+updates, including direct Cargo installations. `briefcase system update` directs
+you to Honeycomb. Authentication is separate: obtain an IAM SLT, then run
+`briefcase login <slt>`.
+
+The optional daemon supports macOS launchd and Linux user systemd. A headless host
+can run `briefcase daemon run` under a supervisor. Install it explicitly when needed:
 
 ```bash
 briefcase daemon install   # install and start the login service
@@ -515,33 +613,26 @@ Briefcase uses a pulled notification inbox, so this daemon does not open a
 WebSocket or deliver outgoing webhooks. Incoming IAM webhooks remain a backend
 integration.
 
-The daemon checks registered homes' update policies every minute and performs
-at most one registry attempt per hour for the shared installation. It checks even when no CLI
-commands run. A newer stable release is installed with Cargo; the next CLI
-invocation uses it. Failed attempts are throttled too. Updates share an
-exclusive lock with `briefcase system update`, preserving command results and
-preventing concurrent installers even across different Silicon homes.
+Briefcase has no periodic package checks or automatic Cargo installation. The
+optional daemon keeps its local IPC and lifecycle controls, but never updates
+binaries. After upgrading an older installation, restart an existing daemon with
+`briefcase daemon stop` followed by `briefcase daemon start` so it runs the new
+code. If it was installed only for updates, remove it with
+`briefcase daemon uninstall`.
 
 ```bash
-briefcase config show
-briefcase config set auto-update off  # persistently opt this home out
-briefcase config unset auto-update    # restore default-on behavior
-briefcase system update              # explicit check, ignoring the throttle
+briefcase config show                # reports auto_update=false and update_manager=honeycomb
+briefcase config set auto-update off  # accepted for older scripts
+briefcase config unset auto-update    # keeps independent updates disabled
+honeycomb update 'briefcase'
 ```
 
-The binary installation is shared. If multiple homes register, an enabled home
-can update that shared binary; opt out in every registered home to disable all
-automatic installation. `BRIEFCASE_AUTO_UPDATE=off` disables maintenance for a
-foreground daemon started with that environment. Changing an environment
-variable on a separate CLI invocation does not change the running service.
+`config set auto-update on` returns Honeycomb migration guidance. Saved enabled
+preferences and `BRIEFCASE_AUTO_UPDATE` cannot activate the retired updater.
+The Rust package never schedules dependency maintenance after requests or streams;
+update its Cargo dependency explicitly and rebuild.
 
-The package schedules separate, best-effort hourly maintenance in the
-background after an ordinary operation completes. Download streams defer it
-until EOF, failure, or abandonment. Clients targeting the same Cargo manifest
-share the in-process throttle. Neither updater replaces code already loaded
-in a running process.
-
-Invitation, revocation, and link-setting commands save their exact operation identity and entry ID before sending. Repeating an interrupted command reuses that intent; it cannot silently target a new file that moved into the old path. `briefcase shares TARGET --cursor CURSOR --json` retrieves further invitation pages (100 per page).
+Invitation, revocation, expiring-change, and link-setting commands save their exact operation identity and entry ID before sending. Repeating an interrupted command reuses that intent; it cannot silently target a new file that moved into the old path. `briefcase shares TARGET --cursor CURSOR --json` retrieves further invitation pages (100 per page).
 
 
 ## Report a bug or contribute a fix

@@ -15,7 +15,7 @@ fn cli(runtime: &Path, state: &Path, args: &[&str]) -> Output {
         .env("BRIEFCASE_TELEMETRY", "off")
         .env("BRIEFCASE_DAEMON_HOME", runtime)
         .env("BRIEFCASE_HOME", state)
-        .env("BRIEFCASE_AUTO_UPDATE", "off")
+        .env("BRIEFCASE_AUTO_UPDATE", "on")
         .env_remove("BRIEFCASE_TEST")
         .env_remove("BRIEFCASE_APP_SECRET")
         .args(args)
@@ -47,6 +47,12 @@ fn two_silicon_homes_share_one_live_daemon_and_can_stop_it() {
         runtime: runtime.clone(),
         state: first.clone(),
     };
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(
+        first.join("config.json"),
+        r#"{"auto_update":true,"telemetry":false}"#,
+    )
+    .unwrap();
     let start = cli(&runtime, &first, &["daemon", "start"]);
     assert!(
         start.status.success(),
@@ -56,6 +62,8 @@ fn two_silicon_homes_share_one_live_daemon_and_can_stop_it() {
     let before: Value =
         serde_json::from_slice(&cli(&runtime, &first, &["daemon", "status"]).stdout).unwrap();
     assert_eq!(before["running"], true);
+    assert_eq!(before["auto_update"], false);
+    assert_eq!(before["update_manager"], "honeycomb");
     let second_start = cli(&runtime, &second, &["daemon", "start"]);
     assert!(second_start.status.success());
     let after: Value =
@@ -74,6 +82,7 @@ fn two_silicon_homes_share_one_live_daemon_and_can_stop_it() {
         std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
         0o700
     );
+    assert!(!runtime.join("installation").exists());
     assert!(!first.join("update.json").exists());
     assert!(!second.join("update.json").exists());
     assert!(cli(&runtime, &first, &["daemon", "stop"]).status.success());
@@ -143,7 +152,7 @@ fn installing_a_login_service_writes_valid_private_configuration() {
         .env("HOME", &home)
         .env("BRIEFCASE_HOME", &state)
         .env("BRIEFCASE_DAEMON_HOME", &runtime)
-        .env("BRIEFCASE_AUTO_UPDATE", "off")
+        .env("BRIEFCASE_AUTO_UPDATE", "on")
         .env("BRIEFCASE_TOKEN", "not-for-service-definition")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .args(["daemon", "install"])

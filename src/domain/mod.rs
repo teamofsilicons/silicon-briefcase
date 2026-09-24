@@ -8,6 +8,7 @@ pub mod actor;
 pub mod entry;
 pub mod filter;
 pub mod ids;
+pub mod lifetime;
 pub mod media;
 pub mod multipart;
 pub mod notification;

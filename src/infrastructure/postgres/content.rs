@@ -28,6 +28,7 @@ use crate::{
         service::{AuthorizableEntry, MutationMetadata},
     },
     config::S3Settings,
+    domain::lifetime::LifetimeMinutes,
     domain::{
         entry::EntryKind,
         ids::{EntryId, MultipartUploadId, StorageConfigurationId, VersionId},
@@ -43,7 +44,7 @@ use super::{
     PostgresRepository,
     metadata::common::{
         IdempotencyClaim, actor_kind, begin, boundary_columns, claim_idempotency,
-        complete_idempotency, load_entry, map_sql, record_change,
+        complete_idempotency, load_entry, map_sql, record_change, rfc3339,
     },
     quota,
 };
@@ -160,6 +161,13 @@ impl ContentRepository for PostgresContentRepository {
             command.name.as_str(),
         )
         .await?;
+        reject_self_destruct_version(
+            &mut request.transaction,
+            command.parent_id,
+            command.name.as_str(),
+            command.self_destruct,
+        )
+        .await?;
         let proposed_entry_id = EntryId::new();
         let metadata = keyed_metadata(&command.idempotency_key, command.request_hash);
         let entry_id = match claim_idempotency(
@@ -252,6 +260,7 @@ impl ContentRepository for PostgresContentRepository {
             &preparation.key,
             stored,
             storage,
+            command.self_destruct,
         )
         .await?;
         let metadata = keyed_metadata(&command.idempotency_key, command.request_hash);
@@ -317,6 +326,13 @@ impl ContentRepository for PostgresContentRepository {
             context,
             command.parent_id,
             command.name.as_str(),
+        )
+        .await?;
+        reject_self_destruct_version(
+            &mut request.transaction,
+            command.parent_id,
+            command.name.as_str(),
+            command.self_destruct,
         )
         .await?;
         let proposed_upload_id = MultipartUploadId::new();
@@ -403,9 +419,9 @@ impl ContentRepository for PostgresContentRepository {
                     name, content_type, declared_size_bytes, part_size_bytes, expected_part_count, \
                     storage_backend, storage_config_id, bucket_name, storage_region, \
                     storage_prefix, storage_encryption_mode, storage_kms_key_arn, object_key, \
-                    provider_upload_id, expires_at \
+                    provider_upload_id, expires_at, self_destruct_minutes \
              ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8, $9, \
-                       $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                       $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
         )
         .bind(preparation.upload_id.as_uuid())
         .bind(command.parent_id.as_uuid())
@@ -432,6 +448,7 @@ impl ContentRepository for PostgresContentRepository {
         .bind(preparation.key.as_str())
         .bind(provider_upload_id)
         .bind(preparation.expires_at)
+        .bind(command.self_destruct.map(LifetimeMinutes::as_i32))
         .execute(&mut *request.transaction)
         .await
         .map_err(database_error)?;
@@ -705,6 +722,16 @@ impl ContentRepository for PostgresContentRepository {
             &preparation.key,
             stored,
             storage,
+            row.self_destruct_minutes
+                .map(|minutes| {
+                    u32::try_from(minutes)
+                        .ok()
+                        .and_then(|minutes| LifetimeMinutes::new(minutes).ok())
+                        .ok_or(AppError::Internal {
+                            category: "persisted_data",
+                        })
+                })
+                .transpose()?,
         )
         .await?;
         sqlx::query(
@@ -1703,7 +1730,7 @@ async fn find_multipart(
                     expected_part_count, storage_backend, storage_config_id, bucket_name, \
                     storage_region, storage_prefix, storage_encryption_mode, storage_kms_key_arn, \
                     object_key, provider_upload_id, status, completed_entry_id, expires_at, \
-                    completed_at, aborted_at, created_at, updated_at \
+                    completed_at, aborted_at, created_at, updated_at, self_destruct_minutes \
                FROM briefcase.multipart_uploads \
               WHERE org_id = briefcase.current_org_id() AND upload_id = $1 FOR UPDATE",
         )
@@ -1714,7 +1741,7 @@ async fn find_multipart(
                     expected_part_count, storage_backend, storage_config_id, bucket_name, \
                     storage_region, storage_prefix, storage_encryption_mode, storage_kms_key_arn, \
                     object_key, provider_upload_id, status, completed_entry_id, expires_at, \
-                    completed_at, aborted_at, created_at, updated_at \
+                    completed_at, aborted_at, created_at, updated_at, self_destruct_minutes \
                FROM briefcase.multipart_uploads \
               WHERE org_id = briefcase.current_org_id() AND upload_id = $1",
         )
@@ -1784,6 +1811,7 @@ async fn publish_file_content(
     key: &ObjectKey,
     stored: &StoredObject,
     storage: StorageReference<'_>,
+    self_destruct: Option<LifetimeMinutes>,
 ) -> std::result::Result<EntryId, AppError> {
     // The day's allowance is charged here rather than at reservation time:
     // this is the one statement every upload reaches, exactly once, and the
@@ -1795,6 +1823,11 @@ async fn publish_file_content(
     {
         if kind != "file" {
             return Err(conflict("entry_name_exists"));
+        }
+        // Self destruct is chosen when a file is first uploaded; a new
+        // version never starts or changes the timer.
+        if self_destruct.is_some() {
+            return Err(conflict("self_destruct_requires_new_file"));
         }
         return publish_next_version(
             transaction,
@@ -1820,9 +1853,11 @@ async fn publish_file_content(
         "INSERT INTO briefcase.entries ( \
                 org_id, entry_id, parent_id, entry_type, name, root_type, tag_id, owner_type, \
                 owner_id, origin_app_id, content_type, size_bytes, current_version_id, \
-                created_by_type, created_by_id, updated_by_type, updated_by_id \
+                created_by_type, created_by_id, updated_by_type, updated_by_id, self_destruct_at \
          ) SELECT briefcase.current_org_id(), $1, parent.entry_id, 'file', $2, $3, parent.tag_id, \
-                  $4, $5, $6, $7, $8, $9, $4, $5, $4, $5 \
+                  $4, $5, $6, $7, $8, $9, $4, $5, $4, $5, \
+                  CASE WHEN $11::integer IS NULL THEN NULL \
+                       ELSE clock_timestamp() + make_interval(mins => $11) END \
              FROM briefcase.entries AS parent \
             WHERE parent.org_id = briefcase.current_org_id() AND parent.entry_id = $10 \
               AND parent.deleted_at IS NULL AND parent.entry_type = 'folder'",
@@ -1842,6 +1877,7 @@ async fn publish_file_content(
     .bind(to_i64(size)?)
     .bind(version_id.as_uuid())
     .bind(parent.entry.id.as_uuid())
+    .bind(self_destruct.map(LifetimeMinutes::as_i32))
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -1901,7 +1937,46 @@ async fn publish_file_content(
     )
     .await
     .map_err(map_metadata)?;
+    if let Some(lifetime) = self_destruct {
+        let self_destruct_at: Option<OffsetDateTime> = sqlx::query_scalar(
+            "SELECT self_destruct_at FROM briefcase.entries \
+              WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
+        )
+        .bind(entry_id.as_uuid())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+        record_change(
+            transaction,
+            tenant,
+            Some(entry_id.as_uuid()),
+            "entry.self_destruct_set.v1",
+            "entry",
+            &entry_id.to_string(),
+            json!({"minutes": lifetime.minutes(), "self_destruct_at": self_destruct_at.map(rfc3339)}),
+        )
+        .await
+        .map_err(map_metadata)?;
+    }
     Ok(entry_id)
+}
+
+/// Refuses a self-destruct upload that would version an existing file, before
+/// any bytes are sent. Publication repeats the check under its own lock.
+async fn reject_self_destruct_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    parent_id: EntryId,
+    name: &str,
+    self_destruct: Option<LifetimeMinutes>,
+) -> std::result::Result<(), AppError> {
+    if self_destruct.is_some()
+        && find_named_child(transaction, parent_id, name, false)
+            .await?
+            .is_some_and(|(_, kind)| kind == "file")
+    {
+        return Err(conflict("self_destruct_requires_new_file"));
+    }
+    Ok(())
 }
 
 /// Adds the next immutable version to an existing file and makes it current.

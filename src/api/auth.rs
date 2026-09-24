@@ -407,10 +407,7 @@ mod tests {
             "x-iam-obo-access-proof",
             HeaderValue::from_static(OBO_PROOF),
         );
-        proof_only.insert(
-            "x-app-id",
-            HeaderValue::from_static("org-example>app-example"),
-        );
+        proof_only.insert("x-app-id", HeaderValue::from_static("app-example"));
         // An application must use the OBO endpoint, not the bearer surface.
         assert!(require_bearer_shape(&proof_only).is_err());
         assert!(obo_credentials(&proof_only).is_ok());
@@ -431,10 +428,7 @@ mod tests {
             "x-iam-obo-access-proof",
             HeaderValue::from_static(OBO_PROOF),
         );
-        headers.insert(
-            "x-app-id",
-            HeaderValue::from_static("org-example>app-example"),
-        );
+        headers.insert("x-app-id", HeaderValue::from_static("app-example"));
 
         assert!(require_bearer_shape(&headers).is_err());
         assert!(obo_credentials(&headers).is_err());

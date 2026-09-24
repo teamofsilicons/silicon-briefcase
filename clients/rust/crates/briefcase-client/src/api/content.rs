@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 
 use crate::{
-    client::{Client, IdempotencyKey, Maintenance},
+    client::{Client, IdempotencyKey},
     error::{Error, Result, io, transport},
     models::{Entry, FileVersionPage},
     requests::{ByteRange, Destination, OnBehalfOfUpload, Upload, UploadSource},
@@ -22,7 +22,6 @@ pub struct ContentStream {
     content_type: Option<String>,
     content_length: Option<u64>,
     content_range: Option<String>,
-    maintenance: Option<Maintenance>,
 }
 
 impl std::fmt::Debug for ContentStream {
@@ -37,8 +36,8 @@ impl std::fmt::Debug for ContentStream {
 }
 
 impl ContentStream {
-    /// Wraps a delegated response without ordinary package maintenance hooks.
-    pub(crate) fn without_maintenance(response: reqwest::Response) -> Self {
+    /// Wraps a successful response for streaming.
+    pub(crate) fn new(response: reqwest::Response) -> Self {
         let header = |name: reqwest::header::HeaderName| {
             response
                 .headers()
@@ -51,7 +50,6 @@ impl ContentStream {
             content_length: response.content_length(),
             content_range: header(reqwest::header::CONTENT_RANGE),
             response,
-            maintenance: None,
         }
     }
 
@@ -79,18 +77,11 @@ impl ContentStream {
     ///
     /// Returns a transport error when the stream breaks mid-file.
     pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>> {
-        let result = self
-            .response
+        self.response
             .chunk()
             .await
             .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
-            .map_err(transport);
-        if !matches!(&result, Ok(Some(_))) {
-            // EOF or an error ends the transfer. Dropping a partly consumed
-            // ContentStream also drops this guard without blocking the caller.
-            self.maintenance.take();
-        }
-        result
+            .map_err(transport)
     }
 
     /// Reads the whole body into memory.
@@ -98,8 +89,7 @@ impl ContentStream {
     /// # Errors
     ///
     /// Returns a transport error when the stream breaks mid-file.
-    pub async fn bytes(mut self) -> Result<Vec<u8>> {
-        let _maintenance = self.maintenance.take();
+    pub async fn bytes(self) -> Result<Vec<u8>> {
         Ok(self.response.bytes().await.map_err(transport)?.to_vec())
     }
 
@@ -110,7 +100,6 @@ impl ContentStream {
     /// Returns an I/O error when the file cannot be written, and a transport
     /// error when the stream breaks mid-file.
     pub async fn write_to_file(mut self, path: impl AsRef<Path>) -> Result<u64> {
-        let _maintenance = self.maintenance.take();
         let path = path.as_ref();
         let display = path.display().to_string();
         let mut file = tokio::fs::File::create(path)
@@ -168,11 +157,14 @@ impl Client {
             .mime_str(&content_type)
             .map_err(|error| Error::Configuration(format!("invalid content type: {error}")))?;
 
-        let form = match &upload.destination {
+        let mut form = match &upload.destination {
             Destination::Id(id) => Form::new().text("parent_id", id.to_string()),
             Destination::Path(path) => Form::new().text("path", path.clone()),
+        };
+        if let Some(minutes) = upload.self_destruct_minutes {
+            form = form.text("self_destruct_minutes", minutes.to_string());
         }
-        .part("file", part);
+        let form = form.part("file", part);
 
         let request = self
             .request(Method::POST, self.api_url(&["uploads"])?)
@@ -233,7 +225,6 @@ impl Client {
     }
 
     async fn open_content(&self, url: url::Url, range: Option<ByteRange>) -> Result<ContentStream> {
-        let maintenance = self.maintenance();
         let mut request = self
             .request(Method::GET, url)
             .timeout(self.transfer_timeout());
@@ -253,7 +244,6 @@ impl Client {
             content_length: response.content_length(),
             content_range: header(reqwest::header::CONTENT_RANGE),
             response,
-            maintenance: Some(maintenance),
         })
     }
 
@@ -366,7 +356,6 @@ impl Client {
             .header("content-type", "application/octet-stream")
             .body(body)
             .timeout(self.transfer_timeout());
-        self.receive_json_without_maintenance(self.apply_environment(request))
-            .await
+        self.receive_json(self.apply_environment(request)).await
     }
 }

@@ -44,7 +44,7 @@ use common::{
     IdempotencyClaim, OwnedAncestorPrincipal, Result, actor_kind, actor_ref, begin,
     boundary_columns, build_authorizable, claim_idempotency, complete_idempotency, current_member,
     decode_access, encode_access, internal, load_entry, map_sql, permission_grant,
-    push_owned_ancestor_access, record_change, resolve_tag_id, retention_deadline,
+    push_owned_ancestor_access, record_change, resolve_tag_id, retention_deadline, rfc3339,
 };
 
 async fn load_boundary_container(
@@ -157,7 +157,7 @@ impl MetadataRepository for PostgresRepository {
             entry_columns!(),
             " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() \
-                AND path = $1 AND deleted_at IS NULL",
+                AND path = briefcase.resolve_identifier_path($1) AND deleted_at IS NULL",
         ))
         .bind(path.as_str())
         .fetch_optional(&mut *request.transaction)
@@ -189,7 +189,7 @@ impl MetadataRepository for PostgresRepository {
             " FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() \
                 AND deleted_at IS NULL \
-                AND (entry_id = ANY($1) OR path = ANY($2)) \
+                AND (entry_id = ANY($1) OR path = ANY(ARRAY(SELECT briefcase.resolve_identifier_path(value) FROM unnest($2::text[]) value))) \
               ORDER BY path COLLATE \"C\"",
         ))
         .bind(&identifiers)
@@ -214,13 +214,19 @@ impl MetadataRepository for PostgresRepository {
         let scan = filter.map_or(SortOrder::Newest, FilterQuery::scan_order);
         let cursor = decode_optional::<ChangeCursor>(query.page.cursor.as_deref())?;
         let page_size = query.page.limit;
+        let actor = context.authorization().actor();
+        let caller = filter_sql::FilterCaller {
+            kind: actor_kind(actor.kind()),
+            id: actor.id().as_str(),
+            administrator: context.authorization().role().has_administrative_access(),
+        };
         let mut builder = QueryBuilder::<Postgres>::new(concat!("SELECT ", entry_columns!()));
         let policy_expression = filter
             .and_then(|filter| filter.expression.as_ref())
             .filter(|expression| expression.requires_policy_evaluation());
         builder.push(", ");
         if let Some(expression) = policy_expression {
-            filter_sql::push_database_predicate_matches(&mut builder, expression);
+            filter_sql::push_database_predicate_matches(&mut builder, expression, caller);
         } else {
             builder.push("ARRAY[]::boolean[]");
         }
@@ -255,7 +261,7 @@ impl MetadataRepository for PostgresRepository {
             .filter(|expression| !expression.requires_policy_evaluation())
         {
             builder.push(" AND ");
-            filter_sql::push_expression(&mut builder, expression);
+            filter_sql::push_expression(&mut builder, expression, caller);
         }
         builder.push(match scan {
             SortOrder::Newest => " ORDER BY entry.updated_at DESC, entry.entry_id DESC LIMIT ",
@@ -625,7 +631,9 @@ impl MetadataRepository for PostgresRepository {
             .fetch_one(&mut *request.transaction)
             .await
             .map_err(map_sql)?;
-            if !recoverable_root {
+            // A deleted self-destructing file skips the bin, so it is never a
+            // recoverable root; only an exact replay of its own delete succeeds.
+            if !recoverable_root && entry.entry.self_destruct_at.is_none() {
                 return Err(MetadataRepositoryError::NotFound);
             }
             if let IdempotencyClaim::Replay(Some(replayed_id)) = claim_idempotency(
@@ -658,21 +666,31 @@ impl MetadataRepository for PostgresRepository {
             _ => return Err(MetadataRepositoryError::Conflict),
         }
         let batch_id = Uuid::now_v7();
+        // Self-destructing files never go to the bin, even when deleted by
+        // hand or inside a deleted folder. They form their own batch, purged
+        // at once, so restoring the folder cannot bring them back and the
+        // folder's 45 days never hold their storage.
+        let permanent_batch_id = Uuid::now_v7();
         let deleted_at = OffsetDateTime::now_utc();
         let purge_after = retention_deadline();
         let actor = context.authorization().actor();
-        sqlx::query(
-            "UPDATE briefcase.entries AS entry \
-                SET deletion_batch_id = $2, deleted_at = $3, purge_after = $4, \
-                    updated_by_type = $5, updated_by_id = $6 \
-              WHERE entry.org_id = briefcase.current_org_id() \
-                AND entry.deleted_at IS NULL \
-                AND EXISTS ( \
-                    SELECT 1 FROM briefcase.entry_closure AS subtree \
-                     WHERE subtree.org_id = entry.org_id \
-                       AND subtree.ancestor_id = $1 \
-                       AND subtree.descendant_id = entry.entry_id \
-                )",
+        let permanently_deleted = sqlx::query_scalar::<_, i64>(
+            "WITH deleted AS ( \
+                 UPDATE briefcase.entries AS entry \
+                    SET deletion_batch_id = CASE WHEN entry.self_destruct_at IS NULL THEN $2 ELSE $7 END, \
+                        deleted_at = $3, \
+                        purge_after = CASE WHEN entry.self_destruct_at IS NULL THEN $4 ELSE $3 END, \
+                        updated_by_type = $5, updated_by_id = $6 \
+                  WHERE entry.org_id = briefcase.current_org_id() \
+                    AND entry.deleted_at IS NULL \
+                    AND EXISTS ( \
+                        SELECT 1 FROM briefcase.entry_closure AS subtree \
+                         WHERE subtree.org_id = entry.org_id \
+                           AND subtree.ancestor_id = $1 \
+                           AND subtree.descendant_id = entry.entry_id \
+                    ) \
+                 RETURNING entry.self_destruct_at \
+             ) SELECT count(*) FILTER (WHERE self_destruct_at IS NOT NULL) FROM deleted",
         )
         .bind(entry_id.as_uuid())
         .bind(batch_id)
@@ -680,17 +698,28 @@ impl MetadataRepository for PostgresRepository {
         .bind(purge_after)
         .bind(actor_kind(actor.kind()))
         .bind(actor.id().as_str())
-        .execute(&mut *request.transaction)
+        .bind(permanent_batch_id)
+        .fetch_one(&mut *request.transaction)
         .await
         .map_err(map_sql)?;
+        let permanent = entry.entry.self_destruct_at.is_some();
         record_change(
             &mut request.transaction,
             &request.context,
             Some(entry_id.as_uuid()),
-            "entry.subtree_deleted.v1",
+            if permanent {
+                "entry.self_destruct_deleted.v1"
+            } else {
+                "entry.subtree_deleted.v1"
+            },
             "entry",
             &entry_id.to_string(),
-            json!({"deletion_batch_id": batch_id, "purge_after": purge_after}),
+            if permanent {
+                json!({"deletion_batch_id": permanent_batch_id, "permanent": true})
+            } else {
+                json!({"deletion_batch_id": batch_id, "purge_after": purge_after,
+                       "self_destructing_files_deleted_permanently": permanently_deleted})
+            },
         )
         .await?;
         complete_idempotency(
@@ -716,10 +745,11 @@ impl MetadataRepository for PostgresRepository {
         let rows = sqlx::query_as::<_, PermissionGrantRow>(
             "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                     inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
-                    revoked_by_type, revoked_by_id, created_at \
+                    revoked_by_type, revoked_by_id, created_at, expires_at \
                FROM briefcase.permission_grants \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
                 AND revoked_at IS NULL AND grant_id > $2 \
+                AND (expires_at IS NULL OR expires_at > clock_timestamp()) \
               ORDER BY grant_id LIMIT $3",
         )
         .bind(query.entry_id.as_uuid())
@@ -803,45 +833,76 @@ impl MetadataRepository for PostgresRepository {
             }
         };
         let actor = context.authorization().actor();
-        let row = sqlx::query_as::<_, PermissionGrantRow>(
-            // Granting a principal who already holds a grant amends it rather
-            // than colliding with it: the contract has no operation that edits
-            // a grant, so the alternative would be revoking access and issuing
-            // it again, which briefly removes the access being widened and
-            // tells the recipient their access was revoked.
-            "INSERT INTO briefcase.permission_grants ( \
-                    org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
-                    inherits_to_descendants, granted_by_type, granted_by_id \
-             ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8) \
-             ON CONFLICT (org_id, entry_id, principal_type, principal_id) \
-                  WHERE revoked_at IS NULL \
-             DO UPDATE SET access_mask = EXCLUDED.access_mask, \
-                           inherits_to_descendants = EXCLUDED.inherits_to_descendants, \
-                           granted_by_type = EXCLUDED.granted_by_type, \
-                           granted_by_id = EXCLUDED.granted_by_id \
-             RETURNING org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
-                       inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
-                       revoked_by_type, revoked_by_id, created_at",
-        )
-        .bind(command.entry_id.as_uuid())
-        .bind(grant_id.as_uuid())
-        .bind(actor_kind(command.principal.kind()))
-        .bind(command.principal.id().as_str())
-        .bind(encode_access(command.access))
-        .bind(command.inherits_to_descendants)
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .fetch_one(&mut *request.transaction)
-        .await
-        .map_err(map_sql)?;
+        let row = if let Some(lifetime) = command.lifetime {
+            // An expiring share never amends a permanent grant: it is its own row,
+            // so its expiry removes only the access it conveyed.
+            sqlx::query_as::<_, PermissionGrantRow>(
+                "INSERT INTO briefcase.permission_grants ( \
+                        org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
+                        inherits_to_descendants, granted_by_type, granted_by_id, expires_at \
+                 ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8, \
+                           clock_timestamp() + make_interval(mins => $9)) \
+                 RETURNING org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
+                           inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                           revoked_by_type, revoked_by_id, created_at, expires_at",
+            )
+            .bind(command.entry_id.as_uuid())
+            .bind(grant_id.as_uuid())
+            .bind(actor_kind(command.principal.kind()))
+            .bind(command.principal.id().as_str())
+            .bind(encode_access(command.access))
+            .bind(command.inherits_to_descendants)
+            .bind(actor_kind(actor.kind()))
+            .bind(actor.id().as_str())
+            .bind(lifetime.as_i32())
+            .fetch_one(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?
+        } else {
+            sqlx::query_as::<_, PermissionGrantRow>(
+                // Granting a principal who already holds a grant amends it rather
+                // than colliding with it: the contract has no operation that edits
+                // a grant, so the alternative would be revoking access and issuing
+                // it again, which briefly removes the access being widened and
+                // tells the recipient their access was revoked.
+                "INSERT INTO briefcase.permission_grants ( \
+                        org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
+                        inherits_to_descendants, granted_by_type, granted_by_id \
+                 ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8) \
+                 ON CONFLICT (org_id, entry_id, principal_type, principal_id) \
+                      WHERE revoked_at IS NULL AND expires_at IS NULL \
+                 DO UPDATE SET access_mask = EXCLUDED.access_mask, \
+                               inherits_to_descendants = EXCLUDED.inherits_to_descendants, \
+                               granted_by_type = EXCLUDED.granted_by_type, \
+                               granted_by_id = EXCLUDED.granted_by_id \
+                 RETURNING org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
+                           inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
+                           revoked_by_type, revoked_by_id, created_at, expires_at",
+            )
+            .bind(command.entry_id.as_uuid())
+            .bind(grant_id.as_uuid())
+            .bind(actor_kind(command.principal.kind()))
+            .bind(command.principal.id().as_str())
+            .bind(encode_access(command.access))
+            .bind(command.inherits_to_descendants)
+            .bind(actor_kind(actor.kind()))
+            .bind(actor.id().as_str())
+            .fetch_one(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?
+        };
         record_change(
             &mut request.transaction,
             &request.context,
             Some(command.entry_id.as_uuid()),
-            "permission.granted.v1",
+            if row.expires_at.is_some() {
+                "permission.expiring_share_granted.v1"
+            } else {
+                "permission.granted.v1"
+            },
             "entry",
             &command.entry_id.to_string(),
-            json!({"grant_id": grant_id, "principal":command.principal, "access": access_rights(command.access),"inherit":command.inherits_to_descendants}),
+            json!({"grant_id": grant_id, "principal":command.principal, "access": access_rights(command.access),"inherit":command.inherits_to_descendants,"expires_at":row.expires_at.map(rfc3339)}),
         )
         .await?;
         complete_idempotency(
@@ -895,7 +956,7 @@ impl MetadataRepository for PostgresRepository {
         let row = sqlx::query_as::<_, PermissionGrantRow>(
             "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                     inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
-                    revoked_by_type, revoked_by_id, created_at \
+                    revoked_by_type, revoked_by_id, created_at, expires_at \
                FROM briefcase.permission_grants \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1 AND grant_id = $2 \
               FOR UPDATE",
@@ -921,6 +982,13 @@ impl MetadataRepository for PostgresRepository {
         if row.revoked_at.is_some() {
             return Err(MetadataRepositoryError::Conflict);
         }
+        // An expired expiring share is already gone; there is nothing to revoke.
+        if row
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
+        {
+            return Err(MetadataRepositoryError::NotFound);
+        }
         let actor = context.authorization().actor();
         sqlx::query(
             "UPDATE briefcase.permission_grants \
@@ -939,7 +1007,11 @@ impl MetadataRepository for PostgresRepository {
             &mut request.transaction,
             &request.context,
             Some(command.entry_id.as_uuid()),
-            "permission.revoked.v1",
+            if row.expires_at.is_some() {
+                "permission.expiring_share_revoked.v1"
+            } else {
+                "permission.revoked.v1"
+            },
             "entry",
             &command.entry_id.to_string(),
             json!({"grant_id": command.grant_id}),
@@ -953,6 +1025,12 @@ impl MetadataRepository for PostgresRepository {
             Some(command.grant_id.as_uuid()),
         )
         .await?;
+        // An expiring share ends without a notification, whether it expires or is
+        // ended early; the entry's log records it either way.
+        if row.expires_at.is_some() {
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(());
+        }
         let principal = actor_ref(&row.principal_type, &row.principal_id)?;
         notifications::insert(
             &mut request.transaction,
@@ -1706,6 +1784,7 @@ impl MetadataRepository for PostgresRepository {
                  SELECT 1 FROM briefcase.permission_grants \
                   WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
                     AND grant_id = $2 AND revoked_at IS NULL \
+                    AND (expires_at IS NULL OR expires_at > clock_timestamp()) \
              )",
         )
         .bind(entry_id.as_uuid())
@@ -1727,7 +1806,7 @@ async fn find_grant(
         sqlx::query_as::<_, PermissionGrantRow>(
             "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                     inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
-                    revoked_by_type, revoked_by_id, created_at \
+                    revoked_by_type, revoked_by_id, created_at, expires_at \
                FROM briefcase.permission_grants \
               WHERE org_id = briefcase.current_org_id() AND grant_id = $1 FOR UPDATE",
         )
@@ -1739,7 +1818,7 @@ async fn find_grant(
         sqlx::query_as::<_, PermissionGrantRow>(
             "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
                     inherits_to_descendants, granted_by_type, granted_by_id, revoked_at, \
-                    revoked_by_type, revoked_by_id, created_at \
+                    revoked_by_type, revoked_by_id, created_at, expires_at \
                FROM briefcase.permission_grants \
               WHERE org_id = briefcase.current_org_id() AND grant_id = $1",
         )

@@ -24,6 +24,8 @@ export type Entry = {
   owner: { type: string; id: string } | null;
   permanent_url: string;
   deleted_at: string | null;
+  /** When a self-destructing file is deleted for good. */
+  self_destruct_at?: string | null;
 };
 export type Page = { items: Entry[]; next_cursor: string | null };
 export class ApiError extends Error {

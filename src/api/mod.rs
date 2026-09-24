@@ -298,7 +298,7 @@ fn sharing_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/entries/{entry_id}/invitations/{grant_id}",
-            delete(invitations::revoke),
+            delete(invitations::revoke).patch(invitations::change),
         )
         .route(
             "/api/v1/entries/{entry_id}/link-access",
@@ -392,6 +392,10 @@ fn ordinary_routes() -> Router<AppState> {
         .route(
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/self-destruct",
+            delete(entries::make_permanent),
         )
         .route("/api/v1/usage", get(usage::organization_usage))
         .route("/api/v1/bin", get(entries::list_bin))
@@ -501,7 +505,7 @@ pub(crate) mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 60] = [
+    const CONTRACT: [(&str, &str, &str); 62] = [
         ("/version", "get", "200"),
         ("/iam", "get", "200"),
         ("/auth/status", "get", "200"),
@@ -600,6 +604,8 @@ pub(crate) mod tests {
             "delete",
             "204",
         ),
+        ("/entries/{entry_id}/invitations/{grant_id}", "patch", "200"),
+        ("/entries/{entry_id}/self-destruct", "delete", "204"),
         ("/entries/{entry_id}/link-access", "get", "200"),
         ("/entries/{entry_id}/link-access", "put", "200"),
         ("/entries/{entry_id}/logs", "get", "200"),
@@ -829,7 +835,9 @@ pub(crate) mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
             let body: serde_json::Value = serde_json::from_slice(&bytes)?;
             if path.ends_with("/iam") {
-                assert!(body["app_id"].as_str().is_some_and(|id| id.contains('>')));
+                assert!(body["app_id"].as_str().is_some_and(|id| {
+                    crate::domain::actor::is_canonical_iam_application_id(id)
+                }));
                 assert!(body["test_environment_id"].is_null());
                 assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
             } else {
@@ -923,7 +931,7 @@ pub(crate) mod tests {
                 database.clone(),
                 database,
                 &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-                "tos>briefcase",
+                "briefcase",
             )?
             .with_honeycomb_token(Some(SecretString::from(token))),
         ));
@@ -933,7 +941,7 @@ pub(crate) mod tests {
         let path = format!(
             "/internal/honeycomb/organizations/tos/testing-environments/{id}/operations/{operation}"
         );
-        let body=serde_json::json!({"operation_id":operation,"environment_id":id,"org_id":"other-org","app_id":"tos>briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}).to_string();
+        let body=serde_json::json!({"operation_id":operation,"environment_id":id,"org_id":"other-org","app_id":"briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}).to_string();
         for supplied in [
             None,
             Some("Bearer member-session"),
@@ -1034,7 +1042,7 @@ pub(crate) mod tests {
         let iam_base = Url::parse("http://127.0.0.1:9/")?;
         let iam = IamClient::new_without_handshake(&IamSettings {
             base_url: iam_base,
-            app_id: "tos>briefcase".to_owned(),
+            app_id: "briefcase".to_owned(),
             app_secret: SecretString::from(
                 "ask_0123456789012345678901234567890123456789012".to_owned(),
             ),

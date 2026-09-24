@@ -564,6 +564,7 @@ impl DelegatedUploadRepository for PostgresContentRepository {
                 backend: &row.storage_backend,
                 configuration_id: row.storage_config_id,
             },
+            None,
         )
         .await?;
         if published.as_uuid() != expected_entry {

@@ -318,6 +318,25 @@ pub(crate) async fn delete_entry(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Stops a file's self-destruct timer so the file is kept.
+pub(crate) async fn make_permanent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Result<StatusCode, AppError> {
+    let entry_id = extract::entry_id(extract::path(path)?)?;
+    let resource = entry_id.to_string();
+    let context =
+        extract::authenticate(&state, &headers, IamAction::UpdateEntry, &resource).await?;
+    let metadata = extract::mutation(&headers, "make_permanent", &resource, &(), false)?;
+    state
+        .content_adapter
+        .metadata_repository()
+        .make_permanent(&context, entry_id, &metadata)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Lists recoverable entries, newest deletion first, one page at a time.
 pub(crate) async fn list_bin(
     State(state): State<AppState>,

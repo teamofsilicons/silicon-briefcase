@@ -2,10 +2,11 @@ name: Build native Honeycomb package
 on:
   workflow_dispatch:
     inputs:
-      honeycomb_version:
-        description: Reviewed published silicon-honeycomb-cli version used to validate and pack
+      honeycomb_revision:
+        description: Exact Honeycomb source revision used to validate and pack
         required: true
         type: string
+        default: b39b1ceb96997ec4c80cb5c5354130ecb9da73eb
 permissions:
   contents: read
 jobs:
@@ -113,8 +114,8 @@ jobs:
           path: artifacts
       - name: Install reviewed Honeycomb packager
         env:
-          HONEYCOMB_PACKAGER_VERSION: ${{ inputs.honeycomb_version }}
-        run: cargo install --locked silicon-honeycomb-cli --version "$HONEYCOMB_PACKAGER_VERSION"
+          HONEYCOMB_PACKAGER_REVISION: ${{ inputs.honeycomb_revision }}
+        run: cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb --rev "$HONEYCOMB_PACKAGER_REVISION" silicon-honeycomb-cli
       - run: python3 scripts/test_linux_abi.py
       - run: python3 scripts/package-native-session-release.py --binaries-dir artifacts --output-dir dist
       - uses: actions/upload-artifact@v4

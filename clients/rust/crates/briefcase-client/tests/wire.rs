@@ -108,7 +108,7 @@ fn environment_document(key: Option<&str>) -> serde_json::Value {
         "description": "wire coverage",
         "status": "active",
         "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f802",
-        "iam_app_id": "tos>briefcase",
+        "iam_app_id": "briefcase",
         "created_by": {"type": "carbon", "id": "cos:tester"},
         "key_generation": 1,
         "key_rotated_at": null,
@@ -188,11 +188,20 @@ async fn connecting_refuses_a_deployment_serving_another_revision() {
 }
 
 #[tokio::test]
-async fn contract_negotiation_defers_maintenance_until_an_ordinary_request() {
+async fn contract_negotiation_and_requests_keep_runtime_updates_disabled() {
     let server = MockServer::start().await;
-    let client = connected(&server).await;
+    let connected = connected(&server).await;
+    let client = Client::connect(
+        connected
+            .config()
+            .clone()
+            .with_auto_update(true)
+            .with_update_manifest("/missing/Cargo.toml"),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(client.update_status(), UpdateStatus::NotChecked);
+    assert_eq!(client.update_status(), UpdateStatus::Disabled);
 
     Mock::given(method("GET"))
         .and(path("/api/v1/entries"))
@@ -481,11 +490,11 @@ async fn a_hidden_entry_reads_exactly_like_a_missing_one() {
 async fn an_application_sends_its_proof_and_never_a_bearer() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    assert_eq!(client.update_status(), UpdateStatus::NotChecked);
+    assert_eq!(client.update_status(), UpdateStatus::Disabled);
 
     Mock::given(method("POST"))
         .and(path("/api/v1/obo/files"))
-        .and(header("x-app-id", "acme>app-notes"))
+        .and(header("x-app-id", "app-notes"))
         .and(header("x-iam-obo-access-proof", "proof-abc"))
         .and(header("content-type", "application/octet-stream"))
         .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
@@ -494,13 +503,13 @@ async fn an_application_sends_its_proof_and_never_a_bearer() {
 
     client
         .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "acme>app-notes",
+            "app-notes",
             "proof-abc",
             b"written by an application".to_vec(),
         ))
         .await
         .expect("the application file must be created");
-    assert_eq!(client.update_status(), UpdateStatus::NotChecked);
+    assert_eq!(client.update_status(), UpdateStatus::Disabled);
 
     let requests = server.received_requests().await.unwrap_or_default();
     let obo = requests
@@ -568,7 +577,7 @@ async fn a_testing_key_selects_the_plane_without_replacing_identity() {
     Mock::given(method("POST"))
         .and(path("/api/v1/obo/files"))
         .and(header("x-briefcase-app-secret", root_key))
-        .and(header("x-app-id", "tos>notes"))
+        .and(header("x-app-id", "notes"))
         .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
         .mount(&server)
         .await;
@@ -585,7 +594,7 @@ async fn a_testing_key_selects_the_plane_without_replacing_identity() {
     client.list_entries(&ListEntries::default()).await.unwrap();
     client
         .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "tos>notes",
+            "notes",
             "proof",
             b"body".to_vec(),
         ))
@@ -646,7 +655,7 @@ async fn production_environment_management_fails_locally_with_a_test_key() {
     let pairing = TestingEnvironmentIamPairing::new(
         environment_id,
         IamEnvironmentKey::new("c2345678901234567890123456789012").unwrap(),
-        ApplicationId::new("tos>briefcase").unwrap(),
+        ApplicationId::new("briefcase").unwrap(),
         IamApplicationSecret::new(format!("ask_{}", "b".repeat(43))).unwrap(),
     );
     let key = IdempotencyKey::new("management-attempt-0001").unwrap();
@@ -741,7 +750,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
         .and(path("/api/v1/auth/slt"))
         .and(header("x-briefcase-app-secret", root_key))
         .and(header("idempotency-key", "login-attempt-0001"))
-        .and(body_json(json!({"slt": "worker:tos"})))
+        .and(body_json(json!({"slt": "si:worker"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
         .mount(&server)
         .await;
@@ -767,7 +776,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
     let too_short = IdempotencyKey::new("short-00").unwrap();
     assert!(
         client
-            .login_with_slt_with_key("worker:tos", &too_short)
+            .login_with_slt_with_key("si:worker", &too_short)
             .await
             .is_err()
     );
@@ -783,7 +792,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
 
     let login_key = IdempotencyKey::new("login-attempt-0001").unwrap();
     let login = client
-        .login_with_slt_with_key("worker:tos", &login_key)
+        .login_with_slt_with_key("si:worker", &login_key)
         .await
         .unwrap();
     let refresh_key = IdempotencyKey::new("refresh-attempt-0001").unwrap();
@@ -791,7 +800,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
         .refresh_session_with_key(&login.refresh_token, &refresh_key)
         .await
         .unwrap();
-    assert_eq!(client.update_status(), UpdateStatus::NotChecked);
+    assert_eq!(client.update_status(), UpdateStatus::Disabled);
 
     let requests = server.received_requests().await.unwrap_or_default();
     for request in requests {
@@ -857,14 +866,14 @@ async fn noncanonical_obo_application_ids_fail_before_a_request() {
     .unwrap();
     let error = client
         .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "notes",
+            "tos>notes",
             "proof",
             b"body".to_vec(),
         ))
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("canonical"));
+    assert!(error.to_string().contains("bare lowercase handle"));
     assert!(
         server
             .received_requests()
@@ -930,7 +939,7 @@ async fn the_complete_environment_lifecycle_matches_the_server_contract() {
         .and(body_json(json!({
             "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f899",
             "iam_environment_key": "c2345678901234567890123456789012",
-            "iam_app_id": "tos>briefcase",
+            "iam_app_id": "briefcase",
             "iam_app_secret": format!("ask_{}", "b".repeat(43)),
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(environment_document(None)))
@@ -993,7 +1002,7 @@ async fn the_complete_environment_lifecycle_matches_the_server_contract() {
             &TestingEnvironmentIamPairing::new(
                 "01a067ce-7f19-7790-820a-0be6b3d4f899".parse().unwrap(),
                 IamEnvironmentKey::new("c2345678901234567890123456789012").unwrap(),
-                ApplicationId::new("tos>briefcase").unwrap(),
+                ApplicationId::new("briefcase").unwrap(),
                 IamApplicationSecret::new(format!("ask_{}", "b".repeat(43))).unwrap(),
             ),
             &IdempotencyKey::new("pair-iam-attempt-0001").unwrap(),
@@ -1084,7 +1093,7 @@ async fn discovery_and_login_inspection_work_without_an_organization() {
             "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "app_id": "tos>briefcase",
+            "app_id": "briefcase",
             "test_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f800",
             "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f802"
         })))
@@ -1114,7 +1123,7 @@ async fn discovery_and_login_inspection_work_without_an_organization() {
     let client = Client::new_unchecked(config).unwrap();
     assert_eq!(
         client.iam_info().await.unwrap().app_id.as_str(),
-        "tos>briefcase"
+        "briefcase"
     );
     assert!(!client.login_status().await.unwrap().authenticated);
     for request in server.received_requests().await.unwrap() {
@@ -1145,6 +1154,7 @@ async fn v1_invitation_paging_and_public_ranges_keep_authority_separate() {
         principal: Recipient::Tag("engineering".into()),
         access: vec![AccessRight::Read, AccessRight::Update],
         inherit: true,
+        expires_in_minutes: None,
     };
     Mock::given(method("POST")).and(path(format!("/api/v1/entries/{id}/invitations")))
         .and(header("authorization","Bearer private-bearer")).and(header("idempotency-key","v1-invitation"))
@@ -1227,11 +1237,12 @@ async fn critical_link_manifest_is_exact_and_never_retries_consumed_proofs() {
         operation_id: uuid::Uuid::new_v4(),
         entry_id: uuid::Uuid::new_v4(),
         enabled: true,
+        expires_in_minutes: None,
     };
     let manifest = DelegatedManifest::new(&intent).unwrap();
     Mock::given(method("POST"))
         .and(path("/api/v1/obo/link-access"))
-        .and(header("x-app-id", "tos>notes"))
+        .and(header("x-app-id", "notes"))
         .and(header("x-iam-obo-access-proof", "critical-proof"))
         .and(body_json(serde_json::to_value(&intent).unwrap()))
         .respond_with(ResponseTemplate::new(503).set_body_json(
@@ -1243,7 +1254,7 @@ async fn critical_link_manifest_is_exact_and_never_retries_consumed_proofs() {
     assert!(
         client
             .set_link_access_on_behalf_of(
-                &ApplicationId::new("tos>notes").unwrap(),
+                &ApplicationId::new("notes").unwrap(),
                 OboProof::new("critical-proof").unwrap(),
                 &manifest
             )
@@ -1297,7 +1308,7 @@ async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
     Mock::given(method("GET"))
         .and(path("/api/v1/iam"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"app_id":"tos>briefcase","testing":false,"test_environment_id":null}),
+            json!({"app_id":"briefcase","testing":false,"test_environment_id":null}),
         ))
         .expect(2)
         .mount(&server)
@@ -1329,4 +1340,125 @@ async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
     assert_eq!(requests[1].headers["x-briefcase-telemetry"], "on");
     assert_eq!(requests[2].headers["x-briefcase-telemetry"], "off");
     assert_eq!(requests[2].headers["x-briefcase-source"], "sdk");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
+    use briefcase_client::{ExpiryChange, Invite, Recipient};
+    let server = MockServer::start().await;
+    let id = uuid::Uuid::new_v4();
+    let grant = uuid::Uuid::new_v4();
+    let client = Client::new_unchecked(
+        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+            .unwrap()
+            .with_token("private-bearer")
+            .with_auto_update(false),
+    )
+    .unwrap();
+    let invitation = json!({"id":grant,"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
+        "inherit":true,"expires_at":"2026-09-25T10:00:00Z"});
+
+    // An expiring invitation carries its lifetime; the listing reports its end.
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/entries/{id}/invitations")))
+        .and(body_json(
+            json!({"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
+            "inherit":true,"expires_in_minutes":90}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(invitation.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let created = client
+        .invite(
+            id,
+            &Invite {
+                principal: Recipient::Carbon("c:alex".into()),
+                access: vec![AccessRight::Read],
+                inherit: true,
+                expires_in_minutes: Some(90),
+            },
+            &IdempotencyKey::new("expiring-invitation").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.expires_at.as_deref(), Some("2026-09-25T10:00:00Z"));
+
+    // Changing a share sends exactly one field.
+    for (change, body) in [
+        (ExpiryChange::ExpireIn(15), json!({"expires_in_minutes":15})),
+        (ExpiryChange::Permanent, json!({"permanent":true})),
+    ] {
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/entries/{id}/invitations/{grant}")))
+            .and(header("idempotency-key", "expiring-change"))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(invitation.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .change_expiring_share(
+                id,
+                grant,
+                change,
+                &IdempotencyKey::new("expiring-change").unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/entries/{id}/link-access")))
+        .and(body_json(json!({"enabled":true,"expires_in_minutes":60})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"can_manage":true,
+            "enabled":true,"effective":true,"inherited_from":null,"url":null,
+            "expires_at":"2026-09-25T11:00:00Z"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let link = client
+        .set_expiring_link_access(id, 60, &IdempotencyKey::new("expiring-link").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(link.expires_at.as_deref(), Some("2026-09-25T11:00:00Z"));
+
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/entries/{id}/self-destruct")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client.make_permanent(id).await.unwrap();
+
+    // The upload form carries the self-destruct lifetime beside the file.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/uploads"))
+        .and(body_string_contains("name=\"self_destruct_minutes\""))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id":id,"org_id":"tos","type":"file","visibility":"full","name":"note.txt",
+            "path":"private/c:alex/note.txt","parent_id":null,"root_type":"private","tag":null,
+            "content_type":"text/plain","size":2,"render":"code",
+            "permanent_url":"https://briefcase.teamofsilicons.com/org/tos/private/c:alex/note.txt/",
+            "content_url":null,"download_url":null,"owner":null,"origin_app_id":null,
+            "effective_access":["read"],"created_at":null,"updated_at":null,"deleted_at":null,
+            "self_destruct_at":"2026-09-25T12:00:00Z"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let entry = client
+        .upload(
+            &Upload::bytes(
+                Destination::Path("private/c:alex".into()),
+                "note.txt",
+                b"hi".to_vec(),
+            )
+            .self_destructing(30),
+        )
+        .await
+        .unwrap();
+    assert!(entry.self_destruct_at.is_some());
 }

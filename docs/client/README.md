@@ -1,10 +1,10 @@
 # Official Rust client
 
-`briefcase-client` **1.1.0** speaks Briefcase API contract 1.1.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
+`briefcase-client` **2.0.0** speaks Briefcase API contract 2.0.0. It is the shared implementation used by the CLI and browser gateway. Full reference: [docs.briefcase.teamofsilicons.com](https://docs.briefcase.teamofsilicons.com/).
 
 ```toml
 [dependencies]
-briefcase-client = "1.1.0"
+briefcase-client = "2.0.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 ```
@@ -31,13 +31,15 @@ client.download(file.id).await?.write_to_file("report-copy.pdf").await?;
 
 For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Login may be unscoped; select one of the returned authorized organizations with `with_organization`. The package owns no session or API cache. Applications own persistence and token rotation.
 
-`EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing. `IamEnvironmentKey` is the distinct 32-character IAM root credential used for dependency provisioning/pairing only. Both redact Debug output. See [Testing environments](../testing-environments.md).
+`EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing and redacts Debug output. Shared lifecycle management uses `honeycomb::manage_environment(&arguments)`, which invokes the official Honeycomb CLI with its own session and retry state. The library stores no Honeycomb credentials. Legacy direct management methods receive `testing_environment_managed_by_honeycomb`; use Honeycomb rather than an IAM root pairing. See [Testing environments](../testing-environments.md).
 
 ## Listing and content
 
 `list_entries` and `bin` return `EntryPage`; continue from `next_cursor` until null. `entry_at` resolves a path, `entry` an ID, `create_folder` accepts `NewFolder`, and `update_entry` / `delete_entry` mutate only authorized entries. Traversal entries contain safe navigation fields rather than hidden metadata.
 
 `upload` accepts a local file or bytes, a destination and optional name/content type. The backend chooses single or multipart S3 storage. Reusing a name updates the same file and retains every version. Keep an explicit `IdempotencyKey` for reliable upload retries.
+
+`Upload::self_destructing(minutes)` (1 to 43,200) makes a new file delete itself permanently that long after the upload finishes; it never enters the bin, and deleting it by hand earlier is also permanent. An existing name is refused with `self_destruct_requires_new_file`, and later versions do not change the timer. `Entry::self_destruct_at` reports the deadline. `make_permanent(id)` stops the timer; only the creator and organization admins and owners may call it (others receive a forbidden error), and a file without a running timer returns `not_self_destructing`.
 
 `read_content` accepts an optional `ByteRange`; `download` also accepts folders and streams tar.zst. Consume `ContentStream::chunk` or `write_to_file` to keep memory bounded. `bytes` deliberately collects the entire response and is appropriate only for known small payloads. Treat any streaming failure as an incomplete download.
 
@@ -52,15 +54,19 @@ let request = Invite {
     principal: Recipient::Tag("engineering".into()),
     access: vec![AccessRight::Read, AccessRight::Update],
     inherit: true,
+    expires_in_minutes: None,
 };
 let invitation = client.invite(id, &request, &IdempotencyKey::random()).await?;
 let link = client.set_link_access(id, true, &IdempotencyKey::random()).await?;
+let expiring_link = client.set_expiring_link_access(id, 120, &IdempotencyKey::random()).await?;
 let logs = client.logs(id, None).await?;
 # Ok(())
 # }
 ```
 
-Keep caller-owned operation keys instead of generating a new one on each retry. `invitations(id, cursor)` lists explicit member and tag grants; `revoke_invitation` removes either. `link_access` reports explicit and inherited public visibility. Read is always included, write applies to folders only, and delete cannot be granted. Email recipients resolve only through IAM-verified contacts known to Briefcase; see [Sharing](../sharing.md).
+Keep caller-owned operation keys instead of generating a new one on each retry. `invitations(id, cursor)` lists explicit member and tag grants; `revoke_invitation` removes either.
+
+Set `Invite::expires_in_minutes` (1 to 43,200) for an expiring share: read-only, its own grant, and gone the moment its time passes, leaving any other access the recipient holds. `Invitation::expires_at` reports when it ends. `change_expiring_share(id, grant, ExpiryChange::ExpireIn(minutes) | ExpiryChange::Permanent, key)` restarts its clock or keeps it for good; an ended share is not found, and a permanent grant returns `not_an_expiring_share`. `revoke_invitation` ends one early. `set_expiring_link_access(id, minutes, key)` does the same for anyone-with-the-link access (`LinkAccess::expires_at`); `set_link_access(id, true, key)` makes an expiring link permanent and `false` ends it, while a permanent link returns `link_already_permanent`. No notification is sent when an expiring share ends. `link_access` reports explicit and inherited public visibility. Read is always included, write applies to folders only, and delete cannot be granted. Email recipients resolve only through IAM-verified contacts known to Briefcase; see [Sharing](../sharing.md).
 
 `public_entry`, `public_children`, `public_content`, and `public_download` explicitly omit the configured bearer. They serve only entries whose link access is enabled. Public folder lists are paginated and downloads are streamed. An unavailable link is a not-found error.
 
@@ -70,7 +76,7 @@ Keep caller-owned operation keys instead of generating a new one on each retry. 
 
 Use `delegated::DelegatedManifest` to serialize once and obtain the exact method, path, endpoint ID and SHA-256 to bind into an IAM proof. `OboProof` is consumed once. Never retry a proof; acquire a new proof for the same immutable manifest and logical operation ID.
 
-Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
+Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests; `DelegatedInvite.invitation.expires_in_minutes` and `DelegatedLinkAccess.expires_in_minutes` make them expiring shares, bound into the proof like the rest of the body. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
 
 For large or recoverable transfers, reserve private staging, upload with the returned capability, then commit with a fresh proof. A capability cannot publish or download content. See [OBO](../obo.md) and [delegated uploads](../api/delegated-uploads.md).
 
@@ -78,9 +84,9 @@ For large or recoverable transfers, reserve private staging, upload with the ret
 
 Use `Error::is_not_found`, `is_forbidden`, `is_unauthenticated`, `code` and `retry_after` instead of parsing error prose. A contract mismatch is actionable before the first authenticated call. Error diagnostics redact tokens, app secrets, storage credentials and OBO proofs.
 
-The default-on maintenance helper checks crates.io at most hourly and can update a consuming Cargo lockfile. `Config::with_auto_update(false)` or `BRIEFCASE_CLIENT_AUTO_UPDATE=false` disables it. Production services should own dependency upgrades through reviewed builds. Delegated operations and unfinished transfers do not trigger package maintenance before authorization or during streaming.
+The Rust client is a normal project dependency. API calls never query crates.io, run Cargo, or change a consuming project's lockfile. Update dependencies explicitly and rebuild. `Config::with_auto_update` and `Config::with_update_manifest` remain compatibility no-ops, and `update_status()` always returns `Disabled`. Honeycomb manages CLI installation and updates.
 
-Use the [operation map](../api/operations.md), [sandbox example](examples/sandbox.rs), and crate API docs for additional request builders, storage configuration and environment lifecycle methods. All surfaces in this release target v1; development 0.x compatibility is not provided.
+Use the [operation map](../api/operations.md), [sandbox example](examples/sandbox.rs), and crate API docs for additional request builders, storage configuration and testing context methods. All surfaces in this release target v1; development 0.x compatibility is not provided.
 
 ## Reading the answers
 
@@ -133,7 +139,7 @@ let manifest = DelegatedCreateFolder {
 // method(), path(), body_sha256() and empty metadata {}. The SDK sends
 // manifest.body_bytes() unchanged, not a second serialization.
 let folder = client.create_folder_on_behalf_of(
-    &ApplicationId::new("tos>browser")?,
+    &ApplicationId::new("browser")?,
     OboProof::new(fresh_proof)?,
     &manifest,
 ).await?;
@@ -187,7 +193,7 @@ The existing small, immediate raw-body operation remains available:
 use briefcase_client::OnBehalfOfUpload;
 
 let entry = client
-    .create_file_on_behalf_of(&OnBehalfOfUpload::file("tos>app-notes", proof, "./generated.md"))
+    .create_file_on_behalf_of(&OnBehalfOfUpload::file("app-notes", proof, "./generated.md"))
     .await?;
 ```
 
@@ -230,8 +236,9 @@ recorded storage location; subsequent versions use the activated configuration.
 | Create, rename, move, delete | `create_folder`, `update_entry`, `delete_entry` |
 | Bytes | `upload`, `read_content`, `read_content_at`, `download`, `download_to_file` |
 | Versions | `versions`, `versions_page`, `restore_version_with_key` |
-| Invitations | `invitations(id, cursor)`, `invite`, `revoke_invitation`, `effective_access` |
-| Anonymous links | `link_access`, `set_link_access`, `public_entry`, `public_children`, `public_content`, `public_download` |
+| Invitations | `invitations(id, cursor)`, `invite`, `revoke_invitation`, `change_expiring_share`, `effective_access` |
+| Anonymous links | `link_access`, `set_link_access`, `set_expiring_link_access`, `public_entry`, `public_children`, `public_content`, `public_download` |
+| Self destruct | `Upload::self_destructing`, `make_permanent` |
 | Inbox | `notifications`, `mark_notifications_read` |
 | History | `activity`, `logs` |
 | Search | `search` |
@@ -242,7 +249,7 @@ recorded storage location; subsequent versions use the activated configuration.
 | Delegated uploads | `reserve_delegated_upload`, `transfer_delegated_upload`, `commit_delegated_upload`, `delegated_upload_status`, `cancel_delegated_upload` |
 | One-shot delegated upload | `create_file_on_behalf_of` |
 | IAM SLT session | `login_with_slt`, `refresh_session` |
-| Testing environments | `testing_environments`, `create_testing_environment`, lifecycle/key/self methods |
+| Testing environments | `honeycomb::manage_environment` for lifecycle; existing app-secret selection and current-context reads for file access |
 
 ## Public IAM information and live login status
 
@@ -277,8 +284,8 @@ Network, IAM, and test-plane failures remain errors. The caller owns token
 refresh and storage; the Rust package does not read `SILICON_HOME` or persist
 credentials. The stateful CLI handles these responsibilities.
 
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
-or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
+In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `c:alice`)
+or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production
 continues to require a one-time IAM login code.

@@ -1,6 +1,6 @@
 # API version policy
 
-The current source release is **1.1.0** for the service, Rust client, CLI and browser gateway, using API major `v1` and OpenAPI contract 1.1.0. It adds bug reporting and revises sharing/permanent-link operations to preserve public sandbox routing. Release 1.0.0 was the first official Briefcase release; earlier development releases are unsupported.
+The candidate source release is **2.0.0** for the service, Rust client, CLI and browser gateway, using the existing `/api/v1` route namespace. The OpenAPI contract is now 2.1.0: it adds expiring shares and self-destructing files through two new operations (`changeExpiringShare`, `makeEntryPermanent`, both revision 1.0.0) plus optional request fields and additive response fields on existing operations, so no existing operation revision changed. It requires bare application IDs and typed `c:` / `si:` actor IDs. Deploy the matched service and consumers together after the documented identifier migration; legacy file URLs continue resolving through protected path aliases. Release 1.0.0 was the first official Briefcase release; earlier development releases are unsupported.
 
 ## Negotiation
 
@@ -12,10 +12,10 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 | API contract | Backend | Rust client | CLI | Browser gateway | IAM SDK |
 | --- | --- | --- | --- | --- | --- |
-| 1.1.0 / v1 | 1.1.0 | 1.1.0 | 1.1.0 | 1.1.0 | silicon-iam-client 1.8.0 |
+| 2.1.0 / v1 | 2.0.0 | 2.0.0 | 2.0.0 | 2.0.0 | silicon-iam-client 4.0.0 |
 | Development 0.x | Unsupported | Unsupported | Unsupported | Unsupported | Not a release target |
 
-The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference. All initial official operation revisions are 1.0.0. Future observable request, response, and behavior changes must update the affected operation revision and its consumers together. Breaking API-major changes use a new versioned namespace.
+A consumer built against contract 2.0.0 still passes negotiation against 2.1.0: its operations keep their revisions, and the two extra operation IDs are allowed. The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference. All initial official operation revisions are 1.0.0. Future observable request, response, and behavior changes must update the affected operation revision and its consumers together. Breaking API-major changes use a new versioned namespace.
 
 ## Deprecation and sunset
 

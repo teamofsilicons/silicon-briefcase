@@ -52,6 +52,9 @@ pub struct UploadCommand {
     pub idempotency_key: IdempotencyKey,
     /// Canonical request fingerprint.
     pub request_hash: [u8; 32],
+    /// Makes a new file self-destruct this long after the upload finishes.
+    /// Refused when the upload would add a version to an existing file.
+    pub self_destruct: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 /// A body already staged and hashed by the HTTP streaming boundary.
@@ -83,6 +86,9 @@ pub struct SmallUploadCommand {
     pub idempotency_key: IdempotencyKey,
     /// Canonical metadata-and-content request digest.
     pub request_hash: [u8; 32],
+    /// Makes a new file self-destruct this long after the upload finishes.
+    /// Refused when the upload would add a version to an existing file.
+    pub self_destruct: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 /// Multipart initialization command.
@@ -100,6 +106,9 @@ pub struct InitiateMultipartCommand {
     pub idempotency_key: IdempotencyKey,
     /// Canonical request digest.
     pub request_hash: [u8; 32],
+    /// Makes a new file self-destruct this long after the upload finishes.
+    /// Refused when the upload would add a version to an existing file.
+    pub self_destruct: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 /// Multipart completion command.
@@ -756,6 +765,7 @@ where
                         content_type: command.content_type.clone(),
                         idempotency_key: command.idempotency_key.clone(),
                         request_hash: command.request_hash,
+                        self_destruct: command.self_destruct,
                     },
                     staged,
                 )
@@ -790,6 +800,7 @@ where
                     content_type: command.content_type.clone(),
                     idempotency_key: command.idempotency_key.clone(),
                     request_hash: command.request_hash,
+                    self_destruct: command.self_destruct,
                 },
             )
             .await?;

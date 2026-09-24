@@ -67,19 +67,22 @@ fn workflow(command: &str) -> &'static str {
             "Inspect the entry and your effective rights before changing it. Use `briefcase ls` to find a path or identifier, then `briefcase get <target>` to download it."
         }
         "mkdir" | "put" => {
-            "Create a folder with `briefcase mkdir --help`, then upload with `briefcase put --help`. Verify the resulting path with `briefcase stat <target>` and available space with `briefcase usage`."
+            "Create a folder with `briefcase mkdir --help`, then upload with `briefcase put --help`. Verify the resulting path with `briefcase stat <target>` and available space with `briefcase usage`. A new file uploaded with `--self-destruct <DURATION>` is deleted for good when its timer runs out; `briefcase keep <target>` stops the timer."
+        }
+        "keep" => {
+            "Find self-destructing files with `briefcase find is:self-destruct` and check one with `briefcase stat <target>`. A self-destructing file never enters the bin, whether its timer runs out or it is removed by hand, so keep it before either happens."
         }
         "get" | "cat" => {
             "Use `briefcase ls` to find a file. `briefcase cat <target>` streams its bytes to stdout; `briefcase get --help` explains file and folder downloads."
         }
         "mv" | "rm" | "bin" => {
-            "Inspect the target with `briefcase stat <target>` first. Deletions remain recoverable in `briefcase bin`; use `briefcase bin --help` for restoration."
+            "Inspect the target with `briefcase stat <target>` first. Deletions remain recoverable in `briefcase bin`; use `briefcase bin --help` for restoration. A self-destructing file is the exception: removing it is permanent."
         }
         "versions" | "restore" | "history" | "logs" => {
             "Use `briefcase versions <target>` to find a retained version and `briefcase restore --help` to roll back. History and logs explain who changed an entry and when."
         }
-        "link" | "share" | "unshare" | "shares" => {
-            "Inspect current access with `briefcase shares <target>` or `briefcase link <target>`. Grant only the required rights; use `briefcase access --help` to inspect effective permissions."
+        "link" | "share" | "unshare" | "shares" | "expiry" => {
+            "Inspect current access with `briefcase shares <target>` or `briefcase link <target>`. Grant only the required rights; use `briefcase access --help` to inspect effective permissions. For temporary read access, add `--expires-after <DURATION>` (1 minute to 30 days) to `share` or `link`; change a live expiring share with `briefcase expiry`, end it early with `briefcase unshare`, and find entries carrying one with `briefcase find is:expiring`."
         }
         "inbox" => {
             "Read your permission-change notifications with `briefcase inbox`. This is a pulled inbox; no daemon WebSocket or outgoing webhook registration is required."
@@ -94,10 +97,10 @@ fn workflow(command: &str) -> &'static str {
             "Use these commands with an IAM OBO proof for an application acting as a member. The application namespace and the member's current rights both limit access. Read `briefcase docs client` before integrating."
         }
         "config" => {
-            "Use `briefcase config show` to inspect saved settings. `briefcase config set auto-update off` disables this home's automatic updates; `briefcase config home <directory>` selects its state location."
+            "Use `briefcase config show` to inspect saved settings. Independent updates are retired; Honeycomb manages releases. `briefcase config home <directory>` selects its state location."
         }
         "daemon" | "system" | "version" => {
-            "Install persistent hourly updates with `briefcase daemon install`; inspect them with `briefcase daemon status`. `briefcase system update` performs an explicit update now."
+            "Update with `honeycomb update 'briefcase'`. The optional daemon has no updater. Remove a service used only for updates with `briefcase daemon uninstall`."
         }
         "report" => {
             "Include reproduction steps, expected behavior, and actual behavior. An optional --pr links a fix. Reports use the selected organization and test environment."

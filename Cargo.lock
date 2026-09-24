@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-client"
-version = "1.1.2"
+version = "2.1.0"
 dependencies = [
  "futures-core",
  "libc",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-briefcase"
-version = "1.1.1"
+version = "2.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3040,9 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-iam-client"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66ae8c19bfc293cc4c5c1da432efd38bf5509e9772fda5bbf7fc0795a4f288e5"
+version = "4.0.0"
 dependencies = [
  "base64 0.22.1",
  "hex",

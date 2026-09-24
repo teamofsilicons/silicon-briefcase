@@ -18,7 +18,7 @@ name = "briefcase"
 path = "src/main.rs"
 
 [features]
-# Honeycomb owns binary updates for published native packages.
+# Release archives opt in at build time, including when run outside the installer.
 honeycomb-managed = []
 
 [dependencies]

@@ -55,7 +55,7 @@ impl From<briefcase_client::Error> for Failure {
         match value {
             briefcase_client::Error::Api(error) => Self(
                 StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
-                error.message,
+                explain(&error.code).map_or(error.message, str::to_owned),
             ),
             briefcase_client::Error::Configuration(message) => {
                 Self(StatusCode::BAD_REQUEST, message)
@@ -69,6 +69,32 @@ impl From<briefcase_client::Error> for Failure {
 }
 fn bad(message: &str) -> Failure {
     Failure(StatusCode::BAD_REQUEST, message.into())
+}
+// The API answers these with a generic message and a stable code.
+fn explain(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "expiring_share_is_read_only" => {
+            "An expiring share can only let people view and download. Turn off Expiring to grant more access."
+        }
+        "link_already_permanent" => {
+            "Link sharing is already on with no end time. Turn link sharing off first if you want the link to expire."
+        }
+        "not_an_expiring_share" => "This share is permanent, so it has no end time to change.",
+        "self_destruct_requires_new_file" => NEW_FILE_ONLY,
+        "not_self_destructing" => "This file is no longer set to self destruct.",
+        "invalid_self_destruct_minutes" => LIFETIME_RANGE,
+        _ => return None,
+    })
+}
+const NEW_FILE_ONLY: &str = "Self destruct only applies to new files, and a file with this name already exists here. Rename the file or upload it without self destruct.";
+const LIFETIME_RANGE: &str = "Choose a time between 1 minute and 30 days.";
+// Expiring shares and self destruct both last 1 minute to 30 days, in whole minutes.
+fn lifetime(minutes: u32) -> Result<u32> {
+    if (1..=43_200).contains(&minutes) {
+        Ok(minutes)
+    } else {
+        Err(bad(LIFETIME_RANGE))
+    }
 }
 
 #[tokio::main]
@@ -158,7 +184,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/browser/entries/{id}/invitations/{grant}",
-            axum::routing::delete(access::revoke),
+            axum::routing::delete(access::revoke).patch(access::change_expiring),
+        )
+        .route(
+            "/browser/entries/{id}/self-destruct",
+            axum::routing::delete(files::keep),
         )
         .route("/browser/environments/enter", post(session::enter_secret))
         .route(

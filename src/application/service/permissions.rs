@@ -112,6 +112,18 @@ impl MetadataService {
             }
             .into());
         }
+        if command.lifetime.is_some()
+            && command
+                .access
+                .rights()
+                .any(|right| right != crate::domain::permission::AccessRight::Read)
+        {
+            return Err(ValidationError {
+                field: "access",
+                message: "an expiring share only gives read access",
+            }
+            .into());
+        }
         if !self
             .repository
             .is_current_member(context, &command.principal)

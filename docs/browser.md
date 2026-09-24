@@ -145,26 +145,20 @@ recovering an uncertain request. The operation ID is displayed for reference.
 
 ## Test environments
 
-Open **Test environments** in the sidebar and choose **Create**. Enter a name
-and optional description. **IAM test key (optional)** accepts the 32-character
-IAM environment root key to join an existing IAM test world; leave it blank to
-provision a new one. This key is different from the `ask_…` Application secret
-returned after creation. The form masks the key and does not save it in browser
-storage. If a request has an uncertain outcome, retry the same operation with
-its fields unchanged.
+Open **Test environments** in the sidebar. **Manage environments in Honeycomb**
+opens the shared environment console for creation, imports and lifecycle actions.
+To enter an existing environment here, provide its Briefcase **test app secret**
+and **Test SLT or Carbon/Silicon ID**. The sign-in screen also permits direct test
+entry without a production session. IAM validates existing test actors and their
+current file permissions; the app secret does not grant administrator access.
 
-To use an existing paired environment, enter its IAM test Application secret
-and either value in **IAM test SLT or Carbon/Silicon ID** under **Enter with an app secret**.
-In testing, either an IAM-issued test SLT or the ID itself works: for example `alice` or `worker:tos`.
-The environment’s **View as testing environment** dialog accepts both formats too. IAM signs you in as that actor in the paired test world.
-A persistent banner identifies the active test plane, and Exit returns to
-production. The server stores the secret; the tab remembers only the public
-UUID. Limits are 2 GiB per environment and 10 active environments. Rotate
-secrets in IAM and replace the pairing to invalidate old selectors.
+Credentials are masked and retained only for an uncertain retry, then cleared when
+the drawer closes. A persistent banner identifies the environment and signed-in
+actor and provides an exit button. Test and production sessions remain separate;
+exiting restores production or asks you to sign in. The tab stores only the public
+UUID. Limits are 2 GiB per environment and 10 active environments. Use Honeycomb
+for rotation, cleaning, recoverable deletion and restoration.
 See [Testing environments](testing-environments.md).
-
-**Help** in the sidebar and **Documentation** on the sign-in page open
-[Briefcase Docs](https://docs.briefcase.teamofsilicons.com/).
 
 ## Sessions and local operation
 

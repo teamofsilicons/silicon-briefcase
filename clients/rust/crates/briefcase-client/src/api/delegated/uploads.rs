@@ -321,7 +321,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedReserveUpload>,
     ) -> Result<DelegatedUploadReservation> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
@@ -338,7 +338,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedCommitUpload>,
     ) -> Result<DelegatedUploadStatus> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.transfer_timeout()))
+        self.receive_json(request.timeout(self.transfer_timeout()))
             .await
     }
 
@@ -354,7 +354,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedUploadQuery>,
     ) -> Result<DelegatedUploadStatus> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
@@ -371,7 +371,7 @@ impl Client {
         manifest: &DelegatedManifest<DelegatedCancelUpload>,
     ) -> Result<DelegatedUploadStatus> {
         let request = self.delegated_request(application, proof, manifest)?;
-        self.receive_json_without_maintenance(request.timeout(self.request_timeout()))
+        self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
@@ -416,7 +416,7 @@ impl Client {
             .header(CONTENT_TYPE, "application/octet-stream")
             .body(body)
             .timeout(self.transfer_timeout());
-        self.receive_json_without_maintenance(request).await
+        self.receive_json(request).await
     }
 }
 

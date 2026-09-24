@@ -1,4 +1,4 @@
-use crate::{App, Failure, Result, bad, session, staging};
+use crate::{App, Failure, Result, bad, lifetime, session, staging};
 use axum::{
     Json,
     body::Body,
@@ -153,6 +153,26 @@ pub(crate) async fn trash(
         .await?;
     Ok(Json(json!({"deleted":true})))
 }
+/// Keeps a self-destructing file: its timer stops and it is never deleted.
+pub(crate) async fn keep(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>> {
+    match session::client(&app, &headers)
+        .await?
+        .make_permanent(id)
+        .await
+    {
+        Ok(()) => Ok(Json(json!({"kept":true}))),
+        Err(briefcase_client::Error::Api(error)) if error.status == 403 => Err(Failure(
+            StatusCode::FORBIDDEN,
+            "Only the person who uploaded this file, an org admin or an org owner can keep it."
+                .into(),
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
 pub(crate) async fn bin(
     State(app): State<App>,
     headers: HeaderMap,
@@ -244,6 +264,7 @@ pub(crate) struct Grant {
     principal: ActorRef,
     access: Vec<AccessRight>,
     inherit: bool,
+    expires_in_minutes: Option<u32>,
 }
 pub(crate) async fn grant(
     State(app): State<App>,
@@ -260,6 +281,7 @@ pub(crate) async fn grant(
                     principal: q.principal,
                     access: q.access,
                     inherit: q.inherit,
+                    expires_in_minutes: q.expires_in_minutes.map(lifetime).transpose()?,
                 },
             )
             .await?,
@@ -400,6 +422,7 @@ pub(crate) struct UploadQuery {
     name: String,
     content_type: String,
     operation_id: Uuid,
+    self_destruct_minutes: Option<u32>,
 }
 pub(crate) async fn upload(
     State(app): State<App>,
@@ -429,6 +452,7 @@ pub(crate) async fn upload(
     if q.content_type.len() > 255 || q.content_type.parse::<mime::Mime>().is_err() {
         return Err(bad("Invalid content type."));
     }
+    let self_destruct = q.self_destruct_minutes.map(lifetime).transpose()?;
     let (parts, body) = request.into_parts();
     if parts.headers.contains_key(header::CONTENT_ENCODING) {
         return Err(bad("Send unencoded file bytes."));
@@ -458,6 +482,21 @@ pub(crate) async fn upload(
             StatusCode::FORBIDDEN,
             "Choose a writable folder first.".into(),
         ));
+    }
+    // Self destruct is refused for a new version; say so before the transfer
+    // rather than after it. The API still makes the authoritative decision.
+    if self_destruct.is_some() {
+        match client
+            .entry_at(&format!("{}/{name}", destination.path))
+            .await
+        {
+            Ok(existing) if !existing.is_folder() => {
+                return Err(Failure(StatusCode::CONFLICT, crate::NEW_FILE_ONLY.into()));
+            }
+            Ok(_) => {}
+            Err(briefcase_client::Error::Api(error)) if error.status == 404 => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     // Declared bodies reserve their full size up front. Unframed bodies reserve
     // each chunk before writing; both consume the same aggregate byte budget.
@@ -547,10 +586,13 @@ pub(crate) async fn upload(
             "The destination is no longer writable.".into(),
         ));
     }
-    let upload = Upload::file(Destination::Id(destination.id), temporary.path())?
+    let mut upload = Upload::file(Destination::Id(destination.id), temporary.path())?
         .named(name)
         .with_content_type(q.content_type)
         .with_idempotency_key(IdempotencyKey::new(q.operation_id.to_string())?);
+    if let Some(minutes) = self_destruct {
+        upload = upload.self_destructing(minutes);
+    }
     json_value(client.upload(&upload).await?)
 }
 
@@ -583,4 +625,227 @@ pub(crate) fn requested_range(headers: &HeaderMap, size: u64) -> Result<Option<B
         None
     };
     Ok(range)
+}
+
+#[cfg(test)]
+mod self_destruct_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, body_string_contains, method, path, path_regex},
+    };
+
+    async fn upstream() -> (MockServer, App, HeaderMap) {
+        let server = MockServer::start().await;
+        let (app, headers) = session::tests::signed_in(&format!("{}/api/v1/", server.uri())).await;
+        (server, app, headers)
+    }
+    fn entry(kind: &str, path: &str, self_destruct_at: Option<&str>) -> Value {
+        json!({"id":Uuid::new_v4(),"org_id":"tos","type":kind,"visibility":"full",
+            "name":path.rsplit('/').next(),"path":path,"parent_id":null,"root_type":"private",
+            "tag":null,"content_type":null,"size":null,"render":null,
+            "permanent_url":format!("https://briefcase.teamofsilicons.com/org/tos/{path}/"),
+            "content_url":null,"download_url":null,"owner":null,"origin_app_id":null,
+            "effective_access":["read","write","update","delete"],"created_at":null,
+            "updated_at":null,"deleted_at":null,"self_destruct_at":self_destruct_at})
+    }
+    fn upload_request(headers: &HeaderMap, body: &'static str) -> Request {
+        let mut request = Request::builder()
+            .method("POST")
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Body::from(body))
+            .unwrap();
+        request.headers_mut().extend(headers.clone());
+        request
+    }
+    fn query(minutes: Option<u32>) -> UploadQuery {
+        UploadQuery {
+            parent: "private/saket".into(),
+            name: "note.txt".into(),
+            content_type: "text/plain".into(),
+            operation_id: Uuid::new_v4(),
+            self_destruct_minutes: minutes,
+        }
+    }
+
+    #[tokio::test]
+    async fn keeping_a_file_stops_its_timer_and_explains_refusals() {
+        let (server, app, headers) = upstream().await;
+        let (kept, foreign, stopped) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (id, response) in [
+            (kept, ResponseTemplate::new(204)),
+            (
+                foreign,
+                ResponseTemplate::new(403).set_body_json(json!({"error":{
+                    "code":"forbidden","message":"The actor is not authorized for this action."}})),
+            ),
+            (
+                stopped,
+                ResponseTemplate::new(409).set_body_json(json!({"error":{
+                    "code":"not_self_destructing",
+                    "message":"The request conflicts with the current resource state."}})),
+            ),
+        ] {
+            Mock::given(method("DELETE"))
+                .and(path(format!("/api/v1/entries/{id}/self-destruct")))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let result = keep(State(app.clone()), headers.clone(), Path(kept))
+            .await
+            .unwrap_or_else(|failure| panic!("{}", failure.1));
+        assert_eq!(result.0, json!({"kept":true}));
+        let Err(failure) = keep(State(app.clone()), headers.clone(), Path(foreign)).await else {
+            panic!("kept another member's file");
+        };
+        assert_eq!(failure.0, StatusCode::FORBIDDEN);
+        assert!(
+            failure
+                .1
+                .starts_with("Only the person who uploaded this file")
+        );
+        let Err(failure) = keep(State(app), headers, Path(stopped)).await else {
+            panic!("kept a permanent file");
+        };
+        assert_eq!(
+            (failure.0, failure.1.as_str()),
+            (
+                StatusCode::CONFLICT,
+                "This file is no longer set to self destruct."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_self_destructing_upload_sends_its_lifetime_upstream() {
+        let (server, app, headers) = upstream().await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/org/tos/private/saket/?$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entry(
+                "folder",
+                "private/saket",
+                None,
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/org/tos/private/saket/note.txt/?$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error":{
+                "code":"not_found","message":"The requested resource was not found."}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/uploads"))
+            .and(body_string_contains(
+                "name=\"self_destruct_minutes\"\r\n\r\n90\r\n",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(entry(
+                "file",
+                "private/saket/note.txt",
+                Some("2026-09-24T13:30:00Z"),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let uploaded = upload(
+            State(app),
+            Query(query(Some(90))),
+            upload_request(&headers, "hi"),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("{}", failure.1));
+        assert_eq!(uploaded.0["self_destruct_at"], "2026-09-24T13:30:00Z");
+    }
+
+    #[tokio::test]
+    async fn a_self_destructing_upload_over_an_existing_file_is_refused_before_transfer() {
+        let (server, app, headers) = upstream().await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/org/tos/private/saket/?$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entry(
+                "folder",
+                "private/saket",
+                None,
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/org/tos/private/saket/note.txt/?$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entry(
+                "file",
+                "private/saket/note.txt",
+                None,
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/uploads"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let Err(failure) = upload(
+            State(app.clone()),
+            Query(query(Some(90))),
+            upload_request(&headers, "hi"),
+        )
+        .await
+        else {
+            panic!("uploaded a self-destructing version");
+        };
+        assert_eq!(failure.0, StatusCode::CONFLICT);
+        assert!(
+            failure
+                .1
+                .starts_with("Self destruct only applies to new files")
+        );
+        for minutes in [0, 43_201] {
+            let Err(failure) = upload(
+                State(app.clone()),
+                Query(query(Some(minutes))),
+                upload_request(&headers, "hi"),
+            )
+            .await
+            else {
+                panic!("accepted {minutes} minutes");
+            };
+            assert_eq!(failure.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_permission_grant_can_be_a_expiring_share() {
+        let (server, app, headers) = upstream().await;
+        let id = Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/entries/{id}/permissions")))
+            .and(body_json(
+                json!({"principal":{"type":"carbon","id":"c:alex"},
+                "access":["read"],"inherit":false,"expires_in_minutes":30}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "id":Uuid::new_v4(),"principal":{"type":"carbon","id":"c:alex"},
+                "access":["read"],"inherit":false,
+                "granted_by":{"type":"carbon","id":"saket"},
+                "created_at":"2026-09-24T12:00:00Z","expires_at":"2026-09-24T12:30:00Z"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let granted = grant(
+            State(app),
+            headers,
+            Path(id),
+            Json(
+                serde_json::from_value(json!({"principal":{"type":"carbon","id":"c:alex"},
+                    "access":["read"],"inherit":false,"expires_in_minutes":30}))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("{}", failure.1));
+        assert_eq!(granted.0["expires_at"], "2026-09-24T12:30:00Z");
+    }
 }

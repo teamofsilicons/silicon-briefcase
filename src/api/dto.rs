@@ -153,6 +153,10 @@ pub struct EntryDto {
     /// Recoverable deletion timestamp.
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
+    /// When a self-destructing file is permanently deleted; null for a
+    /// permanent file and for every folder.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub self_destruct_at: Option<OffsetDateTime>,
 }
 
 /// Cursor-paginated entry response.
@@ -267,6 +271,9 @@ pub struct PermissionGrantCreateDto {
     /// Whether authority reaches descendants.
     #[serde(default = "default_true")]
     pub inherit: bool,
+    /// Makes this a read-only expiring share that ends after 1 to 43,200 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_minutes: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 /// Explicit permission grant response.
@@ -285,6 +292,9 @@ pub struct PermissionGrantDto {
     /// Creation timestamp.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// When this expiring share ends; null for a permanent grant.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 /// Permission grant collection.
@@ -662,6 +672,10 @@ pub struct LinkAccessDto {
     pub effective: bool,
     /// Nearest shared ancestor, if any.
     pub inherited_from: Option<Uuid>,
+    /// When this entry's own expiring link ends; null for a permanent link or
+    /// when the entry's own setting is off.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
     /// File or folder website URL when effective access is public; otherwise null.
     pub url: Option<Url>,
 }

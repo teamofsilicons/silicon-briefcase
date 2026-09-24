@@ -101,6 +101,7 @@ mod url_tests {
                         enabled,
                         effective,
                         inherited_from,
+                        expires_at: None,
                     },
                     None,
                 )?;
@@ -161,6 +162,7 @@ mod url_tests {
                 enabled: true,
                 effective: true,
                 inherited_from: None,
+                expires_at: None,
             },
             Some(environment),
         )?;
@@ -241,6 +243,7 @@ impl ResponseMapper {
             created_at: Some(entry.created_at),
             updated_at: Some(entry.updated_at),
             deleted_at: entry.deleted_at,
+            self_destruct_at: entry.self_destruct_at,
         })
     }
 
@@ -280,6 +283,7 @@ impl ResponseMapper {
             created_at: None,
             updated_at: None,
             deleted_at: None,
+            self_destruct_at: None,
         })
     }
 
@@ -302,6 +306,7 @@ impl ResponseMapper {
             enabled: access.enabled,
             effective: access.effective,
             inherited_from: access.inherited_from,
+            expires_at: access.expires_at,
             url,
         })
     }
@@ -438,6 +443,7 @@ impl ResponseMapper {
             inherit: grant.inheritance().inherit_flag(),
             granted_by: actor(grant.granted_by()),
             created_at: grant.created_at(),
+            expires_at: grant.expires_at(),
         }
     }
 
