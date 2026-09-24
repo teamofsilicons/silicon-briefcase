@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 2.0.0
+  version: 2.1.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
     access.
 servers:
@@ -482,7 +482,8 @@ paths:
           type: string
           maxLength: 1024
         description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat')
-          is:md"
+          is:md". `is:expiring` matches entries with a live expiring share that gave the caller access or that the caller
+          manages; `is:self-destruct` matches files whose self-destruct timer is running.
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/ContentsLimit'
       responses:
@@ -646,7 +647,14 @@ paths:
         Two organization limits apply: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts
         uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting
         content returns capacity once the bytes are gone. Either limit may be configured per organization. An upload
-        that does not fit is refused before its bytes are stored, and `GET /usage` reports both.'
+        that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
+
+
+        `self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload
+        finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is
+        permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with
+        `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, org admins and
+        owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
       parameters:
       - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -667,6 +675,8 @@ paths:
                   type: string
                   maxLength: 2048
                   description: Destination folder path, as an alternative to parent_id
+                self_destruct_minutes:
+                  $ref: '#/components/schemas/LifetimeMinutes'
                 file:
                   type: string
                   format: binary
@@ -1645,7 +1655,61 @@ paths:
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '204':
-          description: Success
+          description: Success. Ending an expiring share early sends no notification.
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+    patch:
+      operationId: changeExpiringShare
+      summary: Extend, shorten, or make permanent a live expiring share
+      description: 'Send exactly one field. `expires_in_minutes` restarts the share''s clock from now (1 to 43,200
+        minutes), which extends or shortens it. `permanent: true` keeps the access for good; when the recipient
+        already holds a permanent grant on this entry, the expiring share folds into it and the response is that
+        permanent grant. An expired share no longer exists (404); a permanent grant is `not_an_expiring_share` (409).'
+      tags:
+      - Permissions
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/EntryId'
+      - in: path
+        name: grant_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpiringShareChange'
+      responses:
+        '200':
+          description: The grant as it now stands
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /entries/{entry_id}/self-destruct:
+    delete:
+      operationId: makeEntryPermanent
+      summary: Keep a self-destructing file
+      description: Stops the file's self-destruct timer. Only the file's creator, org admins and org owners may;
+        anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing`
+        (409).
+      tags:
+      - Entries
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/EntryId'
+      responses:
+        '204':
+          description: The file is permanent. Repeating the call after success is `not_self_destructing`
+            (409) unless it carries the same optional `Idempotency-Key`, which replays the success.
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -2856,6 +2920,13 @@ components:
           - string
           - 'null'
           format: date-time
+        self_destruct_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When this self-destructing file is permanently deleted; null for a permanent file and for
+            every folder.
     EntryPage:
       type: object
       required:
@@ -2989,6 +3060,8 @@ components:
         inherit:
           type: boolean
           default: true
+        expires_in_minutes:
+          $ref: '#/components/schemas/LifetimeMinutes'
     PermissionGrant:
       allOf:
       - $ref: '#/components/schemas/PermissionGrantCreate'
@@ -2997,6 +3070,7 @@ components:
         - id
         - granted_by
         - created_at
+        - expires_at
         properties:
           id:
             type: string
@@ -3006,6 +3080,12 @@ components:
           created_at:
             type: string
             format: date-time
+          expires_at:
+            type:
+            - string
+            - 'null'
+            format: date-time
+            description: When this expiring share ends; null for a permanent grant.
     ActivityEvent:
       type: object
       required:
@@ -3296,6 +3376,8 @@ components:
         inherit:
           type: boolean
           default: true
+        expires_in_minutes:
+          $ref: '#/components/schemas/LifetimeMinutes'
     Invitation:
       type: object
       additionalProperties: false
@@ -3325,6 +3407,12 @@ components:
         inherit:
           type: boolean
           default: true
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When this expiring share ends; null for a permanent grant. Expired shares are never listed.
     InvitationPage:
       type: object
       additionalProperties: false
@@ -3369,6 +3457,13 @@ components:
           type: boolean
           description: Whether this caller can change the explicit link policy; includes safe public/tag system
             roots for organization administrators.
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When this entry's own expiring link ends; null for a permanent link or when its own setting is
+            off. An expiring link stops working the instant it expires.
     LinkAccessUpdate:
       type: object
       additionalProperties: false
@@ -3377,6 +3472,11 @@ components:
       properties:
         enabled:
           type: boolean
+        expires_in_minutes:
+          $ref: '#/components/schemas/LifetimeMinutes'
+          description: With `enabled` true, makes this an expiring link that ends after this many minutes; sending it
+            again on a live expiring link restarts the clock, and omitting it makes the link permanent. A permanent
+            link that is already on is never shortened (`link_already_permanent`, 409).
     LogEvent:
       type: object
       additionalProperties: false
@@ -3502,6 +3602,25 @@ components:
           format: uuid
         enabled:
           type: boolean
+        expires_in_minutes:
+          $ref: '#/components/schemas/LifetimeMinutes'
+    LifetimeMinutes:
+      type: integer
+      minimum: 1
+      maximum: 43200
+      description: A lifetime from 1 minute to 30 days, in whole minutes. Makes a share a read-only expiring share, or
+        a new file self-destructing.
+    ExpiringShareChange:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        expires_in_minutes:
+          $ref: '#/components/schemas/LifetimeMinutes'
+        permanent:
+          type: boolean
+          const: true
 externalDocs:
   url: https://docs.briefcase.teamofsilicons.com/
   description: Official Briefcase documentation

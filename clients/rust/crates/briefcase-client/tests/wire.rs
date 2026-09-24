@@ -1154,6 +1154,7 @@ async fn v1_invitation_paging_and_public_ranges_keep_authority_separate() {
         principal: Recipient::Tag("engineering".into()),
         access: vec![AccessRight::Read, AccessRight::Update],
         inherit: true,
+        expires_in_minutes: None,
     };
     Mock::given(method("POST")).and(path(format!("/api/v1/entries/{id}/invitations")))
         .and(header("authorization","Bearer private-bearer")).and(header("idempotency-key","v1-invitation"))
@@ -1236,6 +1237,7 @@ async fn critical_link_manifest_is_exact_and_never_retries_consumed_proofs() {
         operation_id: uuid::Uuid::new_v4(),
         entry_id: uuid::Uuid::new_v4(),
         enabled: true,
+        expires_in_minutes: None,
     };
     let manifest = DelegatedManifest::new(&intent).unwrap();
     Mock::given(method("POST"))
@@ -1338,4 +1340,125 @@ async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
     assert_eq!(requests[1].headers["x-briefcase-telemetry"], "on");
     assert_eq!(requests[2].headers["x-briefcase-telemetry"], "off");
     assert_eq!(requests[2].headers["x-briefcase-source"], "sdk");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
+    use briefcase_client::{ExpiryChange, Invite, Recipient};
+    let server = MockServer::start().await;
+    let id = uuid::Uuid::new_v4();
+    let grant = uuid::Uuid::new_v4();
+    let client = Client::new_unchecked(
+        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+            .unwrap()
+            .with_token("private-bearer")
+            .with_auto_update(false),
+    )
+    .unwrap();
+    let invitation = json!({"id":grant,"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
+        "inherit":true,"expires_at":"2026-09-25T10:00:00Z"});
+
+    // An expiring invitation carries its lifetime; the listing reports its end.
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/entries/{id}/invitations")))
+        .and(body_json(
+            json!({"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
+            "inherit":true,"expires_in_minutes":90}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(invitation.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let created = client
+        .invite(
+            id,
+            &Invite {
+                principal: Recipient::Carbon("c:alex".into()),
+                access: vec![AccessRight::Read],
+                inherit: true,
+                expires_in_minutes: Some(90),
+            },
+            &IdempotencyKey::new("expiring-invitation").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.expires_at.as_deref(), Some("2026-09-25T10:00:00Z"));
+
+    // Changing a share sends exactly one field.
+    for (change, body) in [
+        (ExpiryChange::ExpireIn(15), json!({"expires_in_minutes":15})),
+        (ExpiryChange::Permanent, json!({"permanent":true})),
+    ] {
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/entries/{id}/invitations/{grant}")))
+            .and(header("idempotency-key", "expiring-change"))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(invitation.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .change_expiring_share(
+                id,
+                grant,
+                change,
+                &IdempotencyKey::new("expiring-change").unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/entries/{id}/link-access")))
+        .and(body_json(json!({"enabled":true,"expires_in_minutes":60})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"can_manage":true,
+            "enabled":true,"effective":true,"inherited_from":null,"url":null,
+            "expires_at":"2026-09-25T11:00:00Z"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let link = client
+        .set_expiring_link_access(id, 60, &IdempotencyKey::new("expiring-link").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(link.expires_at.as_deref(), Some("2026-09-25T11:00:00Z"));
+
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/entries/{id}/self-destruct")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client.make_permanent(id).await.unwrap();
+
+    // The upload form carries the self-destruct lifetime beside the file.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/uploads"))
+        .and(body_string_contains("name=\"self_destruct_minutes\""))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id":id,"org_id":"tos","type":"file","visibility":"full","name":"note.txt",
+            "path":"private/c:alex/note.txt","parent_id":null,"root_type":"private","tag":null,
+            "content_type":"text/plain","size":2,"render":"code",
+            "permanent_url":"https://briefcase.teamofsilicons.com/org/tos/private/c:alex/note.txt/",
+            "content_url":null,"download_url":null,"owner":null,"origin_app_id":null,
+            "effective_access":["read"],"created_at":null,"updated_at":null,"deleted_at":null,
+            "self_destruct_at":"2026-09-25T12:00:00Z"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let entry = client
+        .upload(
+            &Upload::bytes(
+                Destination::Path("private/c:alex".into()),
+                "note.txt",
+                b"hi".to_vec(),
+            )
+            .self_destructing(30),
+        )
+        .await
+        .unwrap();
+    assert!(entry.self_destruct_at.is_some());
 }

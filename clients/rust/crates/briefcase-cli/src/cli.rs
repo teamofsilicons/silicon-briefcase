@@ -5,7 +5,7 @@ use std::{path::PathBuf, str::FromStr};
 use briefcase_client::{
     AccessRight, ActorRef, ActorType, ApplicationId, Destination, EncryptionMode, RootType,
 };
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
 /// Work with Silicon Briefcase from the command line.
@@ -131,7 +131,27 @@ pub enum Command {
     /// Rename or move an entry.
     Mv(MvArgs),
     /// Move entries to the recoverable bin.
+    #[command(
+        long_about = "Move entries to the recoverable bin, where they stay restorable for 45 days \
+        with `briefcase bin restore <entry-id>`.\n\n\
+        A self-destructing file is the exception: removing it deletes it permanently, at once, \
+        and it never enters the bin. Check with `briefcase stat <target>` (a `self-destructs` line) \
+        before removing, and use `briefcase keep <target>` first if it should survive."
+    )]
     Rm(RmArgs),
+    /// Keep a self-destructing file: stop its timer so it is never deleted.
+    #[command(
+        long_about = "Keep a self-destructing file: stop its timer so it is never deleted.\n\n\
+        A file uploaded with `briefcase put --self-destruct <DURATION>` is deleted permanently \
+        when its timer runs out; it never enters the bin and cannot be restored. `keep` makes it \
+        an ordinary, permanent file again. Only the file's creator and organization admins and \
+        owners may keep it; anyone else is refused (exit code 4).\n\n\
+        Find files whose timer is running with `briefcase find is:self-destruct`, and check one \
+        with `briefcase stat <target>`. Keeping a file that has no running timer is refused with \
+        `not_self_destructing`, which is also what a retry after a lost response sees.\n\n\
+        Example:\n  briefcase keep private/si:cos/notes/draft.md"
+    )]
+    Keep(KeepArgs),
     /// Work with the recoverable bin.
     #[command(subcommand)]
     Bin(BinCommand),
@@ -155,19 +175,85 @@ pub enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
-    /// Read or change anyone-with-link access.
+    /// Read or change anyone-with-link access, permanent or expiring.
+    #[command(
+        long_about = "Read or change anyone-with-link access: anyone holding the link can view and \
+        download the file or folder.\n\n\
+        With no option, prints the entry's link setting as JSON, including `expires_at` when its \
+        own link is an expiring link. `--enabled true` turns on a permanent link, `--enabled false` \
+        turns the link off, and `--expires-after <DURATION>` turns on an expiring link that stops working after \
+        1 minute to 30 days.\n\n\
+        An expiring link is read-only and its expiry is strict: the link stops working the moment the \
+        time passes. While it is live, `--expires-after` again restarts the clock (extend or shorten), \
+        `--enabled true` makes it permanent, and `--enabled false` ends it early. Nobody is \
+        notified when it ends; creating, changing and ending it are recorded in `briefcase logs`. \
+        A permanent link must be turned off before it can become an expiring link \
+        (`link_already_permanent`).\n\n\
+        Examples:\n  briefcase link public/handbook/report.pdf --expires-after 2h\n  \
+        briefcase link public/handbook/report.pdf\n  \
+        briefcase link public/handbook/report.pdf --enabled true"
+    )]
     Link {
         /// File or folder path or ID.
         target: Target,
         /// Set the explicit link policy to true or false; omit to inspect.
+        ///
+        /// `true` turns on a permanent link, and makes a live expiring link permanent.
+        /// `false` turns the link off, and ends an expiring link early.
         #[arg(long)]
         enabled: Option<bool>,
+        /// Turn on a read-only expiring link that stops working after DURATION.
+        ///
+        /// DURATION is whole minutes (`90`) or a number with m, h or d (`90m`,
+        /// `2h`, `7d`, `1d12h`), from 1 minute to 30 days (43200 minutes). On a
+        /// live expiring link it restarts the clock from now.
+        #[arg(long, value_name = "DURATION", conflicts_with = "enabled")]
+        expires_after: Option<Lifetime>,
     },
-    /// Grant a member access to an entry.
+    /// Grant a member, contact or tag access to an entry, permanent or expiring.
+    #[command(
+        long_about = "Grant a member (c:ID, si:ID), a verified email contact (email:ADDRESS) or an \
+        IAM tag (tag:TAG) access to a file or folder. The answer is the new grant as JSON; its \
+        `id` is what `briefcase unshare` and `briefcase expiry` take.\n\n\
+        With `--expires-after <DURATION>` the grant is an expiring share: read-only (view and download), and \
+        gone 1 minute to 30 days after it is created. An expiring share is its own grant. When it ends, \
+        only that access goes; access the recipient holds through another share, a tag, or a \
+        public folder stays. Expiry is strict: access stops the moment the time passes. Before \
+        then, `briefcase expiry` extends, shortens or makes it permanent, and `briefcase unshare` \
+        ends it early. Nobody is notified when it ends; creating, changing and ending it are \
+        recorded in `briefcase logs`. For anyone-with-the-link access, use \
+        `briefcase link <target> --expires-after <DURATION>`.\n\n\
+        Examples:\n  briefcase share private/si:cos/notes c:cos --access read,write --inherit\n  \
+        briefcase share private/si:cos/notes/report.pdf email:alex@example.com --expires-after 2h\n  \
+        briefcase share private/si:cos/notes tag:engineering --inherit --expires-after 7d"
+    )]
     Share(ShareArgs),
-    /// Revoke one grant.
+    /// Revoke one grant, including an expiring share before it ends.
+    #[command(
+        long_about = "Revoke one grant, as `briefcase shares <target>` lists it.\n\n\
+        This also ends an expiring share early. Revoking sends no notification to the recipient. \
+        Only the revoked grant goes: access the recipient holds through another grant, a tag, \
+        an inherited share or a public folder still applies."
+    )]
     Unshare(UnshareArgs),
-    /// List the explicit grants on an entry.
+    /// Extend, shorten, or make permanent a live expiring share.
+    #[command(
+        long_about = "Change a live expiring share, as `briefcase shares <target>` lists it (a grant \
+        with an `expires_at`).\n\n\
+        `--expires-in <DURATION>` restarts the share's clock: it now ends DURATION from now, \
+        which extends or shortens it (1 minute to 30 days). `--permanent` keeps the read access \
+        for good; when the recipient already holds a permanent grant on the entry, the share \
+        folds into it. To end it early, use `briefcase unshare <target> <grant-id>`. For an expiring \
+        link, use `briefcase link <target> --expires-after <DURATION>` or `--enabled true` instead.\n\n\
+        A share that has already ended is gone and reads as not found (exit code 3); create a new \
+        one with `briefcase share <target> <recipient> --expires-after <DURATION>`. A permanent grant has \
+        no timer and is refused with `not_an_expiring_share`. Changes are recorded in \
+        `briefcase logs`; nobody is notified.\n\n\
+        Examples:\n  briefcase expiry private/si:cos/notes \"$GRANT_ID\" --expires-in 3d\n  \
+        briefcase expiry private/si:cos/notes \"$GRANT_ID\" --permanent"
+    )]
+    Expiry(ExpiryArgs),
+    /// List the explicit grants on an entry; expiring shares carry `expires_at`.
     Shares {
         /// File/folder UUID or path.
         target: Target,
@@ -281,6 +367,11 @@ pub struct LsArgs {
 #[derive(Args, Debug)]
 pub struct FindArgs {
     /// Filter expression, such as `is:md location:'public' after:01-01-2026`.
+    ///
+    /// Beyond file kinds and extensions, `is:expiring` matches files and folders
+    /// with an active expiring share (one that gives you access, or one you can
+    /// manage), and `is:self-destruct` matches files whose self-destruct timer
+    /// is still running.
     pub filter: String,
 
     /// Folder to filter inside; everything you can reach when omitted.
@@ -358,6 +449,18 @@ pub struct PutArgs {
     /// Media type to record; guessed from the extension when omitted.
     #[arg(long, value_name = "TYPE")]
     pub content_type: Option<String>,
+
+    /// Delete each new file permanently DURATION after its upload finishes.
+    ///
+    /// DURATION is whole minutes (`90`) or a number with m, h or d (`90m`,
+    /// `2h`, `7d`, `1d12h`), from 1 minute to 30 days (43200 minutes). Only a
+    /// new file can self-destruct: a name that already exists in the folder is
+    /// refused (`self_destruct_requires_new_file`) instead of becoming a new
+    /// version. When the timer runs out the file is deleted for good and never
+    /// enters the bin; removing it by hand earlier is also permanent. Later
+    /// versions do not change the timer. `briefcase keep <target>` stops it.
+    #[arg(long, value_name = "DURATION")]
+    pub self_destruct: Option<Lifetime>,
 }
 
 /// Arguments for `get`.
@@ -384,7 +487,15 @@ pub struct MvArgs {
 /// Arguments for `rm`.
 #[derive(Args, Debug)]
 pub struct RmArgs {
-    /// Entries to move to the bin.
+    /// Entries to move to the bin; a self-destructing file is deleted for good.
+    #[arg(required = true)]
+    pub targets: Vec<Target>,
+}
+
+/// Arguments for `keep`.
+#[derive(Args, Debug)]
+pub struct KeepArgs {
+    /// Self-destructing files to keep.
     #[arg(required = true)]
     pub targets: Vec<Target>,
 }
@@ -437,6 +548,14 @@ pub struct ShareArgs {
     /// Extend the grant to everything inside a folder.
     #[arg(long)]
     pub inherit: bool,
+
+    /// Make this a read-only expiring share that ends after DURATION.
+    ///
+    /// DURATION is whole minutes (`90`) or a number with m, h or d (`90m`,
+    /// `2h`, `7d`, `1d12h`), from 1 minute to 30 days (43200 minutes). An expiring
+    /// share conveys read only, so `--access` must be omitted or `read`.
+    #[arg(long, value_name = "DURATION")]
+    pub expires_after: Option<Lifetime>,
 }
 
 /// Arguments for `unshare`.
@@ -447,6 +566,28 @@ pub struct UnshareArgs {
 
     /// Grant identifier, as `briefcase shares` shows it.
     pub grant_id: Uuid,
+}
+
+/// Arguments for `expiring`.
+#[derive(Args, Debug)]
+#[command(group(ArgGroup::new("change").required(true).args(["expires_in", "permanent"])))]
+pub struct ExpiryArgs {
+    /// Entry the expiring share is on.
+    pub target: Target,
+
+    /// Grant identifier of the expiring share, as `briefcase shares` shows it.
+    pub grant_id: Uuid,
+
+    /// End the share DURATION from now instead, extending or shortening it.
+    ///
+    /// DURATION is whole minutes (`90`) or a number with m, h or d (`90m`,
+    /// `2h`, `7d`, `1d12h`), from 1 minute to 30 days (43200 minutes).
+    #[arg(long, value_name = "DURATION")]
+    pub expires_in: Option<Lifetime>,
+
+    /// Keep the read access for good; the share stops being an expiring share.
+    #[arg(long)]
+    pub permanent: bool,
 }
 
 /// Arguments for `access`.
@@ -564,8 +705,14 @@ pub enum DelegatedOperation {
     /// Move one entry to the recoverable bin using a stable operation UUID.
     EntryTrash,
     /// Invite a member using a critical IAM-approved proof.
+    ///
+    /// Add `"expires_in_minutes"` (1 to 43200) inside `invitation` to make a
+    /// read-only expiring share.
     Invite,
     /// Change anonymous read access using a critical IAM-approved proof.
+    ///
+    /// Add `"expires_in_minutes"` (1 to 43200) with `"enabled": true` to turn
+    /// on an expiring link.
     LinkAccess,
     /// Reserve an exact private upload and save its capability in a new private file.
     UploadReserve,
@@ -923,9 +1070,111 @@ impl FromStr for Invitation {
     }
 }
 
+/// Longest lifetime an expiring share, expiring link or self-destruct timer may have:
+/// 30 days, in minutes.
+pub const MAXIMUM_LIFETIME_MINUTES: u32 = 43_200;
+
+/// How to write a lifetime, repeated in every refusal so the fix is at hand.
+const LIFETIME_FORMS: &str = "write whole minutes (`90`) or a number with m, h or d \
+     (`90m`, `2h`, `7d`, `1d12h`), from 1 minute to 30 days (43200 minutes)";
+
+/// How long an expiring share, expiring link or self-destructing file lasts, in whole
+/// minutes.
+///
+/// Written as plain minutes (`90`) or with units (`90m`, `2h`, `7d`, `1d12h`).
+/// The range is checked here, so an impossible lifetime never reaches the
+/// server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Lifetime(pub u32);
+
+impl FromStr for Lifetime {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let text = value.trim().to_ascii_lowercase();
+        if text.is_empty() {
+            return Err(format!("a lifetime is required; {LIFETIME_FORMS}"));
+        }
+        // Components saturate rather than overflow: anything that large is
+        // refused as too long below, which is the truthful answer.
+        let mut total = 0_u64;
+        if text.bytes().all(|byte| byte.is_ascii_digit()) {
+            total = text.parse().unwrap_or(u64::MAX);
+        } else {
+            let mut digits = String::new();
+            let mut used = String::new();
+            for character in text.chars() {
+                let factor = match character {
+                    '0'..='9' => {
+                        digits.push(character);
+                        continue;
+                    }
+                    ' ' => continue,
+                    'd' => 24 * 60,
+                    'h' => 60,
+                    'm' => 1,
+                    's' => {
+                        return Err(format!(
+                            "`{value}` uses seconds, but lifetimes are whole minutes; {LIFETIME_FORMS}"
+                        ));
+                    }
+                    'w' => {
+                        return Err(format!(
+                            "`{value}` uses weeks; write days instead, such as `14d`; {LIFETIME_FORMS}"
+                        ));
+                    }
+                    other => {
+                        return Err(format!(
+                            "`{other}` in `{value}` is not a unit; {LIFETIME_FORMS}"
+                        ));
+                    }
+                };
+                if digits.is_empty() {
+                    return Err(format!(
+                        "`{character}` in `{value}` has no number before it; {LIFETIME_FORMS}"
+                    ));
+                }
+                if used.contains(character) {
+                    return Err(format!(
+                        "`{value}` uses `{character}` twice; {LIFETIME_FORMS}"
+                    ));
+                }
+                used.push(character);
+                let amount: u64 = digits.parse().unwrap_or(u64::MAX);
+                total = total.saturating_add(amount.saturating_mul(factor));
+                digits.clear();
+            }
+            if !digits.is_empty() {
+                return Err(format!(
+                    "`{digits}` at the end of `{value}` has no unit; {LIFETIME_FORMS}"
+                ));
+            }
+        }
+        if total == 0 {
+            return Err(format!(
+                "`{value}` is zero; the shortest lifetime is 1 minute. {LIFETIME_FORMS}"
+            ));
+        }
+        u32::try_from(total)
+            .ok()
+            .filter(|minutes| *minutes <= MAXIMUM_LIFETIME_MINUTES)
+            .map(Self)
+            .ok_or_else(|| {
+                let length = if total == u64::MAX {
+                    String::new()
+                } else {
+                    format!(" is {total} minutes, which")
+                };
+                format!(
+                    "`{value}`{length} is longer than the 30-day maximum (43200 minutes); {LIFETIME_FORMS}"
+                )
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Invitation, Principal, Rights, Target};
+    use super::{Cli, Invitation, Lifetime, Principal, Rights, Target};
     use clap::{CommandFactory as _, Parser as _};
     use uuid::Uuid;
 
@@ -1073,6 +1322,221 @@ mod tests {
         };
         assert_eq!(cursor.as_deref(), Some("next-bin-page"));
         assert!(all);
+    }
+
+    #[test]
+    fn lifetimes_read_as_minutes_or_with_units() {
+        for (written, minutes) in [
+            ("1", 1),
+            ("90", 90),
+            ("90m", 90),
+            ("2h", 120),
+            ("7d", 10_080),
+            ("30d", 43_200),
+            ("43200", 43_200),
+            ("1d12h", 2_160),
+            ("1d 12h 30m", 2_190),
+            ("2H", 120),
+            (" 45m ", 45),
+            ("0d1m", 1),
+            ("29d23h60m", 43_200),
+        ] {
+            assert_eq!(
+                written.parse::<Lifetime>(),
+                Ok(Lifetime(minutes)),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifetimes_outside_one_minute_to_thirty_days_are_refused_with_the_range() {
+        for written in [
+            "0",
+            "0m",
+            "0d0h",
+            "43201",
+            "30d1m",
+            "31d",
+            "721h",
+            "99999999999999999999",
+        ] {
+            let error = written.parse::<Lifetime>().unwrap_err();
+            assert!(error.contains("1 minute"), "{written}: {error}");
+            assert!(error.contains("43200 minutes"), "{written}: {error}");
+        }
+        let error = "45d".parse::<Lifetime>().unwrap_err();
+        assert!(error.contains("64800 minutes"), "{error}");
+        assert!(error.contains("30-day maximum"), "{error}");
+    }
+
+    #[test]
+    fn malformed_lifetimes_say_what_is_wrong_and_show_examples() {
+        for (written, reason) in [
+            ("", "required"),
+            ("30s", "seconds"),
+            ("2w", "weeks"),
+            ("2x", "not a unit"),
+            ("h", "no number"),
+            ("1h30", "no unit"),
+            ("1h1h", "twice"),
+            ("-5m", "not a unit"),
+            ("1.5h", "not a unit"),
+        ] {
+            let error = written.parse::<Lifetime>().unwrap_err();
+            assert!(error.contains(reason), "{written}: {error}");
+            assert!(error.contains("`1d12h`"), "{written}: {error}");
+        }
+    }
+
+    #[test]
+    fn expiring_and_self_destruct_options_parse_into_minutes() {
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "share",
+            "private/cos:tos/notes",
+            "email:alex@example.com",
+            "--expires-after",
+            "2h",
+        ])
+        .unwrap();
+        let super::Command::Share(args) = cli.command else {
+            panic!("expected share");
+        };
+        assert_eq!(args.expires_after, Some(Lifetime(120)));
+        assert_eq!(
+            args.access,
+            Rights(vec![briefcase_client::AccessRight::Read])
+        );
+
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "link",
+            "public/report.pdf",
+            "--expires-after",
+            "7d",
+        ])
+        .unwrap();
+        let super::Command::Link {
+            expires_after,
+            enabled,
+            ..
+        } = cli.command
+        else {
+            panic!("expected link");
+        };
+        assert_eq!((expires_after, enabled), (Some(Lifetime(10_080)), None));
+
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "put",
+            "draft.md",
+            "private/cos:tos",
+            "--self-destruct",
+            "90",
+        ])
+        .unwrap();
+        let super::Command::Put(args) = cli.command else {
+            panic!("expected put");
+        };
+        assert_eq!(args.self_destruct, Some(Lifetime(90)));
+
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "keep",
+            "private/cos:tos/a.md",
+            "private/cos:tos/b.md",
+        ])
+        .unwrap();
+        let super::Command::Keep(args) = cli.command else {
+            panic!("expected keep");
+        };
+        assert_eq!(args.targets.len(), 2);
+        assert!(Cli::try_parse_from(["briefcase", "keep"]).is_err());
+
+        // A lifetime is checked while parsing, before any network call.
+        let error = Cli::try_parse_from([
+            "briefcase",
+            "put",
+            "a.md",
+            "public",
+            "--self-destruct",
+            "31d",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn a_link_is_either_permanent_or_expiring_never_both() {
+        let error = Cli::try_parse_from([
+            "briefcase",
+            "link",
+            "public/report.pdf",
+            "--enabled",
+            "true",
+            "--expires-after",
+            "2h",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn changing_a_expiring_share_takes_exactly_one_new_lifetime() {
+        let grant = Uuid::from_u128(5).to_string();
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "expiry",
+            "private/cos:tos/notes",
+            &grant,
+            "--expires-in",
+            "3d",
+        ])
+        .unwrap();
+        let super::Command::Expiry(args) = cli.command else {
+            panic!("expected expiry");
+        };
+        assert_eq!(args.grant_id, Uuid::from_u128(5));
+        assert_eq!(
+            (args.expires_in, args.permanent),
+            (Some(Lifetime(4_320)), false)
+        );
+
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "expiry",
+            "private/cos:tos/notes",
+            &grant,
+            "--permanent",
+        ])
+        .unwrap();
+        let super::Command::Expiry(args) = cli.command else {
+            panic!("expected expiry");
+        };
+        assert_eq!((args.expires_in, args.permanent), (None, true));
+
+        let neither = Cli::try_parse_from(["briefcase", "expiry", "private/cos:tos/notes", &grant])
+            .err()
+            .unwrap();
+        assert_eq!(
+            neither.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let both = Cli::try_parse_from([
+            "briefcase",
+            "expiry",
+            "private/cos:tos/notes",
+            &grant,
+            "--expires-in",
+            "1h",
+            "--permanent",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

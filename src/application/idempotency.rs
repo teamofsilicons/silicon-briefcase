@@ -98,9 +98,37 @@ pub fn upload_fingerprint(
     digest.finalize().into()
 }
 
+/// Binds a self-destruct lifetime into an upload fingerprint.
+///
+/// Without one the fingerprint is unchanged, so ordinary uploads keep their
+/// identity; with one, retrying the same key with a different lifetime is a
+/// different request.
+#[must_use]
+pub fn with_self_destruct(fingerprint: [u8; 32], minutes: Option<u32>) -> [u8; 32] {
+    let Some(minutes) = minutes else {
+        return fingerprint;
+    };
+    let mut digest = Sha256::new();
+    digest.update(fingerprint);
+    digest.update(b"\0self_destruct_minutes\0");
+    digest.update(minutes.to_be_bytes());
+    digest.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IdempotencyKey, bytes_fingerprint, upload_fingerprint};
+    use super::{IdempotencyKey, bytes_fingerprint, upload_fingerprint, with_self_destruct};
+
+    #[test]
+    fn self_destruct_changes_only_self_destructing_uploads() {
+        let base = upload_fingerprint("upload", "parent", "a.txt", "text/plain", 1, &[1; 32]);
+        assert_eq!(with_self_destruct(base, None), base);
+        assert_ne!(with_self_destruct(base, Some(5)), base);
+        assert_ne!(
+            with_self_destruct(base, Some(5)),
+            with_self_destruct(base, Some(6))
+        );
+    }
 
     #[test]
     fn keys_enforce_the_contract_length() {

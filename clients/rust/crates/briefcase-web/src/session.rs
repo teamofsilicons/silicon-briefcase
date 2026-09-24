@@ -870,8 +870,24 @@ pub(crate) async fn enter_test(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A production browser session whose file requests reach `upstream`,
+    /// with the request headers that select it.
+    pub(crate) async fn signed_in(upstream: &str) -> (App, HeaderMap) {
+        let mut app = app();
+        app.upstream = upstream.into();
+        let mut session = session(None);
+        session.auth_config = Config::new(upstream, "tos").unwrap();
+        session.config = session.auth_config.clone();
+        let cookie = "c".repeat(64);
+        app.sessions
+            .lock()
+            .await
+            .insert(cookie.clone(), Arc::new(Mutex::new(session)));
+        (app, headers(&cookie, None))
+    }
 
     fn app() -> App {
         App {

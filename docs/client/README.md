@@ -39,6 +39,8 @@ For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and
 
 `upload` accepts a local file or bytes, a destination and optional name/content type. The backend chooses single or multipart S3 storage. Reusing a name updates the same file and retains every version. Keep an explicit `IdempotencyKey` for reliable upload retries.
 
+`Upload::self_destructing(minutes)` (1 to 43,200) makes a new file delete itself permanently that long after the upload finishes; it never enters the bin, and deleting it by hand earlier is also permanent. An existing name is refused with `self_destruct_requires_new_file`, and later versions do not change the timer. `Entry::self_destruct_at` reports the deadline. `make_permanent(id)` stops the timer; only the creator and organization admins and owners may call it (others receive a forbidden error), and a file without a running timer returns `not_self_destructing`.
+
 `read_content` accepts an optional `ByteRange`; `download` also accepts folders and streams tar.zst. Consume `ContentStream::chunk` or `write_to_file` to keep memory bounded. `bytes` deliberately collects the entire response and is appropriate only for known small payloads. Treat any streaming failure as an incomplete download.
 
 `versions` returns the first `FileVersionPage`; use `versions_page(id, cursor)` for older versions. Each version includes SHA-256 and source. `restore_version_with_key` creates a new version with the selected content, rather than rewinding or erasing history.
@@ -52,15 +54,19 @@ let request = Invite {
     principal: Recipient::Tag("engineering".into()),
     access: vec![AccessRight::Read, AccessRight::Update],
     inherit: true,
+    expires_in_minutes: None,
 };
 let invitation = client.invite(id, &request, &IdempotencyKey::random()).await?;
 let link = client.set_link_access(id, true, &IdempotencyKey::random()).await?;
+let expiring_link = client.set_expiring_link_access(id, 120, &IdempotencyKey::random()).await?;
 let logs = client.logs(id, None).await?;
 # Ok(())
 # }
 ```
 
-Keep caller-owned operation keys instead of generating a new one on each retry. `invitations(id, cursor)` lists explicit member and tag grants; `revoke_invitation` removes either. `link_access` reports explicit and inherited public visibility. Read is always included, write applies to folders only, and delete cannot be granted. Email recipients resolve only through IAM-verified contacts known to Briefcase; see [Sharing](../sharing.md).
+Keep caller-owned operation keys instead of generating a new one on each retry. `invitations(id, cursor)` lists explicit member and tag grants; `revoke_invitation` removes either.
+
+Set `Invite::expires_in_minutes` (1 to 43,200) for an expiring share: read-only, its own grant, and gone the moment its time passes, leaving any other access the recipient holds. `Invitation::expires_at` reports when it ends. `change_expiring_share(id, grant, ExpiryChange::ExpireIn(minutes) | ExpiryChange::Permanent, key)` restarts its clock or keeps it for good; an ended share is not found, and a permanent grant returns `not_an_expiring_share`. `revoke_invitation` ends one early. `set_expiring_link_access(id, minutes, key)` does the same for anyone-with-the-link access (`LinkAccess::expires_at`); `set_link_access(id, true, key)` makes an expiring link permanent and `false` ends it, while a permanent link returns `link_already_permanent`. No notification is sent when an expiring share ends. `link_access` reports explicit and inherited public visibility. Read is always included, write applies to folders only, and delete cannot be granted. Email recipients resolve only through IAM-verified contacts known to Briefcase; see [Sharing](../sharing.md).
 
 `public_entry`, `public_children`, `public_content`, and `public_download` explicitly omit the configured bearer. They serve only entries whose link access is enabled. Public folder lists are paginated and downloads are streamed. An unavailable link is a not-found error.
 
@@ -70,7 +76,7 @@ Keep caller-owned operation keys instead of generating a new one on each retry. 
 
 Use `delegated::DelegatedManifest` to serialize once and obtain the exact method, path, endpoint ID and SHA-256 to bind into an IAM proof. `OboProof` is consumed once. Never retry a proof; acquire a new proof for the same immutable manifest and logical operation ID.
 
-Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
+Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests; `DelegatedInvite.invitation.expires_in_minutes` and `DelegatedLinkAccess.expires_in_minutes` make them expiring shares, bound into the proof like the rest of the body. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
 
 For large or recoverable transfers, reserve private staging, upload with the returned capability, then commit with a fresh proof. A capability cannot publish or download content. See [OBO](../obo.md) and [delegated uploads](../api/delegated-uploads.md).
 
@@ -230,8 +236,9 @@ recorded storage location; subsequent versions use the activated configuration.
 | Create, rename, move, delete | `create_folder`, `update_entry`, `delete_entry` |
 | Bytes | `upload`, `read_content`, `read_content_at`, `download`, `download_to_file` |
 | Versions | `versions`, `versions_page`, `restore_version_with_key` |
-| Invitations | `invitations(id, cursor)`, `invite`, `revoke_invitation`, `effective_access` |
-| Anonymous links | `link_access`, `set_link_access`, `public_entry`, `public_children`, `public_content`, `public_download` |
+| Invitations | `invitations(id, cursor)`, `invite`, `revoke_invitation`, `change_expiring_share`, `effective_access` |
+| Anonymous links | `link_access`, `set_link_access`, `set_expiring_link_access`, `public_entry`, `public_children`, `public_content`, `public_download` |
+| Self destruct | `Upload::self_destructing`, `make_permanent` |
 | Inbox | `notifications`, `mark_notifications_read` |
 | History | `activity`, `logs` |
 | Search | `search` |

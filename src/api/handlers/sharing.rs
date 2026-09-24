@@ -30,6 +30,11 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub(crate) struct LinkUpdate {
     pub enabled: bool,
+    /// With `enabled: true`, makes the link an expiring link that ends after 1 to
+    /// 43,200 minutes; setting it again on a live expiring link restarts the
+    /// clock. Omitted, the link is permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_minutes: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 pub(crate) async fn link_access(
@@ -72,7 +77,13 @@ pub(crate) async fn set_link_access(
     let access = state
         .content_adapter
         .metadata_repository()
-        .set_link_access(&context, extract::entry_id(id)?, body.enabled, &metadata)
+        .set_link_access(
+            &context,
+            extract::entry_id(id)?,
+            body.enabled,
+            body.expires_in_minutes,
+            &metadata,
+        )
         .await?;
     Ok(Json(
         state.mapper.link_access(

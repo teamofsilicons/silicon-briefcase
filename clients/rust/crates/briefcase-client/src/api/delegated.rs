@@ -442,6 +442,10 @@ pub struct DelegatedLinkAccess {
     pub entry_id: Uuid,
     /// Desired explicit link setting.
     pub enabled: bool,
+    /// With `enabled`, makes this an expiring link that ends after 1 to 43,200
+    /// minutes. Part of the exact body the IAM proof binds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_minutes: Option<u32>,
 }
 impl sealed::Operation for DelegatedLinkAccess {
     fn validate(&self) -> Result<()> {

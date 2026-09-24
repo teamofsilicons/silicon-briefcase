@@ -233,9 +233,11 @@ contact for invitation mail. IAM does not reveal other members' emails; see
 
 Register `briefcase.invitations.create` (`POST /api/v1/obo/invitations`) and
 `briefcase.link_access.update` (`POST /api/v1/obo/link-access`) as critical,
-user-approved endpoints in Honeycomb with empty metadata schemas. All other existing file
-CRUD endpoints remain noncritical. Every OBO path stays inside the calling
-app's namespace and the represented actor's permissions. See [OBO](obo.md).
+user-approved endpoints in Honeycomb with empty metadata schemas. Both also
+create read-only expiring shares when the body carries `expires_in_minutes`. All
+other existing file CRUD endpoints remain noncritical. Every OBO path stays
+inside the calling app's namespace and the represented actor's permissions.
+See [OBO](obo.md).
 
 Testing callers pass the imported IAM test app secret. Briefcase validates it
 through the official SDK and discovers its environment without manual pairing.

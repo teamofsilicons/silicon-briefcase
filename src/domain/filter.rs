@@ -176,6 +176,11 @@ pub enum FilterPredicate {
     IsRender(RenderKind),
     /// Has the given file extension.
     HasExtension(String),
+    /// Carries a live expiring share that gave the caller access or that the
+    /// caller manages (`is:expiring`).
+    IsExpiring,
+    /// A file whose self-destruct timer is still running (`is:self-destruct`).
+    IsSelfDestruct,
     /// Lives under the given path prefix.
     InLocation(GlobTerm),
     /// The caller holds the given effective access.
@@ -767,6 +772,12 @@ fn is_predicate(key: &str, value: &str) -> Result<FilterPredicate, FilterError> 
         "archive" => return Ok(FilterPredicate::IsRender(RenderKind::Archive)),
         "code" => return Ok(FilterPredicate::IsRender(RenderKind::Code)),
         "unsupported" => return Ok(FilterPredicate::IsRender(RenderKind::Unsupported)),
+        // Lifetime values are matched before the extension fall-through, so
+        // `is:expiring` never means a `.expiring` file.
+        "expiring" => return Ok(FilterPredicate::IsExpiring),
+        "self-destruct" | "self_destruct" | "selfdestruct" => {
+            return Ok(FilterPredicate::IsSelfDestruct);
+        }
         _ => {}
     }
     let extension_is_plausible = !value.is_empty()
@@ -849,6 +860,21 @@ mod tests {
                 FilterExpression::Predicate(FilterPredicate::IsKind(EntryKind::Folder)),
             ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lifetime_values_win_over_the_extension_fall_through() -> Result<(), FilterError> {
+        for (text, expected) in [
+            ("is:expiring", FilterPredicate::IsExpiring),
+            ("is:self-destruct", FilterPredicate::IsSelfDestruct),
+            ("is:self_destruct", FilterPredicate::IsSelfDestruct),
+        ] {
+            assert_eq!(
+                FilterQuery::parse(text)?.expression,
+                Some(FilterExpression::Predicate(expected))
+            );
+        }
         Ok(())
     }
 

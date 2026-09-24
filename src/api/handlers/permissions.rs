@@ -113,6 +113,7 @@ pub(crate) async fn grant_permission(
         principal: actor(body.principal)?,
         access: granted_access(&body.access)?,
         inherits_to_descendants: body.inherit,
+        lifetime: body.expires_in_minutes,
     };
     let context = extract::with_directory_recipients(
         &state,

@@ -902,3 +902,137 @@
   height: 70vh;
   background: white;
 }
+/* Expiring shares and self-destructing files. */
+.lifetime-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  background: var(--accent);
+  color: var(--primary);
+}
+.file-name .lifetime-badge,
+.detail-record .lifetime-badge {
+  display: flex;
+}
+.lifetime-badge[data-kind='self-destruct'] {
+  background: #f8e8d4;
+  color: #8a4510;
+}
+.dark .lifetime-badge[data-kind='self-destruct'] {
+  background: #3d2c1c;
+  color: #f0c28f;
+}
+.lifetime-fields {
+  margin-top: 16px;
+}
+.lifetime-fields label:not(.lifetime-toggle) {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+.lifetime-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-weight: 400;
+}
+.duration-fields {
+  display: flex;
+  gap: 8px;
+}
+.duration-fields input {
+  flex: 1;
+  min-width: 0;
+}
+.duration-fields [data-slot='select-trigger'] {
+  min-height: 46px;
+  width: 120px;
+  border-radius: 6px;
+}
+.duration-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.duration-presets button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 3px 10px;
+}
+.duration-presets button[aria-pressed='true'] {
+  border-color: var(--primary);
+  background: var(--accent);
+  color: var(--primary);
+}
+.record-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.lifetime-change-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.self-destruct-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 14px 16px;
+  border: 1px solid #ecd2b3;
+  border-radius: 8px;
+  background: #fdf6ee;
+  font-size: 14px;
+}
+.self-destruct-callout > div {
+  flex: 1;
+  min-width: 0;
+}
+.self-destruct-callout .lifetime-badge {
+  margin-top: 0;
+}
+.self-destruct-callout p {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.dark .self-destruct-callout {
+  border-color: #5a4028;
+  background: #2a2119;
+}
+.toolbar .upload-group > button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.toolbar .upload-group > button:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid color-mix(in srgb, #fff 35%, transparent);
+  width: 36px;
+}
+@media (max-width: 520px) {
+  .detail-record {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .self-destruct-callout {
+    flex-wrap: wrap;
+  }
+}

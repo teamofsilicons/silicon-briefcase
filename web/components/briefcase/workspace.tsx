@@ -24,6 +24,8 @@ import {
   RefreshCw,
   Link as LinkIcon,
   X,
+  ChevronDown,
+  Hourglass,
 } from 'lucide-react';
 import {
   SidebarProvider,
@@ -79,6 +81,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
+import { ButtonGroup } from '@/components/ui/button-group';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -106,6 +109,15 @@ import { richPreview } from '@/lib/rich-preview';
 import Notifications from './notifications';
 import OrganizationSettings from './organization-settings';
 import TestingEnvironments from './testing-environments';
+import {
+  DEFAULT_DURATION,
+  DurationPicker,
+  Lifetime,
+  absoluteTime,
+  durationMinutes,
+  spokenDuration,
+  type Duration,
+} from './lifetime';
 import { useVisibleFilesTool } from '@/lib/use-visible-files-tool';
 
 type Scope = 'files' | 'recent' | 'bin' | 'search';
@@ -117,6 +129,8 @@ type Editor = {
   parent?: string;
   rootType?: 'public' | 'private' | 'tag';
   tag?: string;
+  /** An expiring share lasts this long, then only its own access ends. */
+  expiring?: Duration;
 };
 type Usage = {
   storage: { used_bytes: number; limit_bytes: number; remaining_bytes: number };
@@ -144,6 +158,17 @@ type Grant = {
   principal: { type: string; id: string };
   access: string[];
   inherit: boolean;
+  /** When an expiring share ends; absent for a permanent share. */
+  expires_at?: string | null;
+};
+type LinkAccess = {
+  can_manage: boolean;
+  enabled: boolean;
+  effective: boolean;
+  inherited_from: string | null;
+  url: string | null;
+  /** When this entry's own expiring link stops working. */
+  expires_at?: string | null;
 };
 
 function invalidateRequestGeneration(counter: { current: number }) {
@@ -181,18 +206,22 @@ export default function Workspace({
     [rights, setRights] = useState<string[]>(['read']);
   const [versionCursor, setVersionCursor] = useState<string | null>(null);
   const [logCursor, setLogCursor] = useState<string | null>(null);
-  const [linkAccess, setLinkAccess] = useState<{
-    can_manage: boolean;
-    enabled: boolean;
-    effective: boolean;
-    inherited_from: string | null;
-    url: string | null;
-  } | null>(null);
+  const [linkAccess, setLinkAccess] = useState<LinkAccess | null>(null);
   const linkIntent = useRef<{
     id: string;
-    enabled: boolean;
+    action: string;
     operation: string;
   } | null>(null);
+  // A chosen expiring time for the link: before it is on, or while changing it.
+  const [linkExpiring, setLinkExpiring] = useState<Duration | null>(null),
+    [grantChange, setGrantChange] = useState<{
+      id: string;
+      duration: Duration;
+    } | null>(null),
+    [selfDestructUpload, setSelfDestructUpload] = useState<{
+      file: File | null;
+      duration: Duration;
+    } | null>(null);
   const [versions, setVersions] = useState<Version[]>([]),
     [grants, setGrants] = useState<Grant[]>([]),
     [grantCursor, setGrantCursor] = useState<string | null>(null),
@@ -228,6 +257,7 @@ export default function Workspace({
       file: File;
       parent: string;
       operation: string;
+      selfDestruct?: number;
     } | null>(null),
     generation = useRef(0);
   const fail = useCallback(
@@ -242,6 +272,16 @@ export default function Workspace({
     },
     [onSignOut],
   );
+  // Actions inside the details sheet report there, beside what they changed.
+  function detailFail(e: unknown) {
+    if (e instanceof ApiError && e.status === 401) {
+      onSignOut();
+      return;
+    }
+    setDetailError(
+      e instanceof Error ? e.message : 'The request could not be completed.',
+    );
+  }
   const resolveLocation = useCallback(async () => {
     const ticket = ++routeGeneration.current;
     generation.current++;
@@ -454,6 +494,9 @@ export default function Workspace({
         });
       }
       if (editor.kind === 'share') {
+        const expiring = editor.expiring ? durationMinutes(editor.expiring) : undefined;
+        if (expiring === null)
+          throw new Error('Choose a time between 1 minute and 30 days.');
         const [type, ...name] = editor.value.split(':');
         if (
           !['c', 'si', 'email', 'tag'].includes(type) ||
@@ -464,7 +507,9 @@ export default function Workspace({
           );
         await api('/entries/' + editor.entry!.id + '/invitations', 'POST', {
           principal: { type: type === 'c' ? 'carbon' : type === 'si' ? 'silicon' : type, id: type === 'c' || type === 'si' ? editor.value : name.join(':') },
-          access: rights,
+          // An expiring share only ever lets people view and download.
+          access: expiring ? ['read'] : rights,
+          expires_in_minutes: expiring,
           operation_id: editor.operation,
           inherit: editor.entry!.type === 'folder',
         });
@@ -490,7 +535,11 @@ export default function Workspace({
       await api('/entries/' + confirm.id, 'DELETE');
       setConfirm(null);
       setSelected(null);
-      await refreshed('Moved to the bin. Recoverable for 45 days.');
+      await refreshed(
+        confirm.self_destruct_at
+          ? 'Deleted ' + confirm.name + ' permanently.'
+          : 'Moved to the bin. Recoverable for 45 days.',
+      );
     } catch (e) {
       fail(e);
     } finally {
@@ -520,12 +569,13 @@ export default function Workspace({
       setWorking(false);
     }
   }
-  async function upload(file?: File) {
+  async function upload(file?: File, selfDestruct?: number) {
     if (file)
       uploadIntent.current = {
         file,
         parent: path,
         operation: crypto.randomUUID(),
+        selfDestruct,
       };
     const intent = uploadIntent.current;
     if (!intent) return;
@@ -538,6 +588,8 @@ export default function Workspace({
       content_type: intent.file.type || 'application/octet-stream',
       operation_id: intent.operation,
     });
+    if (intent.selfDestruct)
+      p.set('self_destruct_minutes', String(intent.selfDestruct));
     const xhr = new XMLHttpRequest();
     xhr.open('POST', browserUrl('/browser/upload?' + p));
     xhr.setRequestHeader('X-Briefcase-Browser', '1');
@@ -574,9 +626,137 @@ export default function Workspace({
       }
       setUploadProgress(null);
       uploadIntent.current = null;
-      void refreshed('Uploaded ' + intent.file.name + '.');
+      void refreshed(
+        'Uploaded ' +
+          intent.file.name +
+          (result.self_destruct_at
+            ? '. It will be deleted for good on ' +
+              absoluteTime(result.self_destruct_at)
+            : '') +
+          '.',
+      );
     };
     xhr.send(intent.file);
+  }
+  async function changeLink(
+    entry: Entry,
+    change: { enabled: boolean; minutes?: number },
+  ) {
+    const action = !change.enabled
+      ? 'off'
+      : change.minutes
+        ? 'expiring:' + change.minutes
+        : 'on';
+    if (
+      !linkIntent.current ||
+      linkIntent.current.id !== entry.id ||
+      linkIntent.current.action !== action
+    )
+      linkIntent.current = {
+        id: entry.id,
+        action,
+        operation: crypto.randomUUID(),
+      };
+    setWorking(true);
+    setDetailError('');
+    try {
+      const result = await api<LinkAccess>(
+        '/entries/' + entry.id + '/link-access',
+        'PUT',
+        {
+          enabled: change.enabled,
+          expires_in_minutes: change.minutes,
+          operation_id: linkIntent.current.operation,
+        },
+      );
+      setLinkAccess(result);
+      setLinkExpiring(null);
+      linkIntent.current = null;
+    } catch (e) {
+      detailFail(e);
+    } finally {
+      setWorking(false);
+    }
+  }
+  async function refreshLink(entry: Entry) {
+    try {
+      setLinkAccess(
+        await api<LinkAccess>('/entries/' + entry.id + '/link-access'),
+      );
+    } catch (e) {
+      detailFail(e);
+    }
+  }
+  async function changeExpiring(
+    entry: Entry,
+    grant: Grant,
+    change: { minutes: number } | { permanent: true },
+  ) {
+    setWorking(true);
+    setDetailError('');
+    try {
+      const result = await api<Grant>(
+        '/entries/' + entry.id + '/invitations/' + grant.id,
+        'PATCH',
+        {
+          ...('minutes' in change
+            ? { expires_in_minutes: change.minutes }
+            : { permanent: true }),
+          operation_id: crypto.randomUUID(),
+        },
+      );
+      // Made permanent, a share can fold into the recipient's existing grant.
+      setGrants((value) => {
+        const next = value.map((g) => (g.id === grant.id ? result : g));
+        return next.filter(
+          (g, i) => next.findIndex((other) => other.id === g.id) === i,
+        );
+      });
+      setGrantChange(null);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404)
+        setGrants((value) => value.filter((g) => g.id !== grant.id));
+      detailFail(e);
+    } finally {
+      setWorking(false);
+    }
+  }
+  async function keepFile(entry: Entry) {
+    setWorking(true);
+    setDetailError('');
+    try {
+      await api('/entries/' + entry.id + '/self-destruct', 'DELETE');
+      const kept = { ...entry, self_destruct_at: null };
+      setSelected(kept);
+      setItems((value) =>
+        value.map((item) => (item.id === entry.id ? kept : item)),
+      );
+      setNotice('Kept ' + entry.name + '. It will no longer self destruct.');
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Its timer already stopped: show the file as it is now.
+        const current = await api<Entry>('/entries/' + entry.id).catch(
+          () => null,
+        );
+        if (current) {
+          setSelected(current);
+          setItems((value) =>
+            value.map((item) => (item.id === entry.id ? current : item)),
+          );
+        }
+      }
+      detailFail(e);
+    } finally {
+      setWorking(false);
+    }
+  }
+  // The file is already gone upstream; drop it rather than offer dead actions.
+  function selfDestructed(entry: Entry) {
+    setItems((value) => value.filter((item) => item.id !== entry.id));
+    if (selected?.id === entry.id) {
+      closeDetails();
+      setNotice(entry.name + ' self-destructed and was deleted for good.');
+    }
   }
   useEffect(() => {
     let current = true;
@@ -588,6 +768,8 @@ export default function Workspace({
     setVersionCursor(null);
     setLogCursor(null);
     setLinkAccess(null);
+    setLinkExpiring(null);
+    setGrantChange(null);
     setGrants([]);
     setGrantCursor(null);
     setActivity([]);
@@ -607,13 +789,9 @@ export default function Workspace({
             setVersionCursor(v.next_cursor);
           }
         } else if (tab === 'access') {
-          const link = await api<{
-            can_manage: boolean;
-            enabled: boolean;
-            effective: boolean;
-            inherited_from: string | null;
-            url: string | null;
-          }>('/entries/' + selected.id + '/link-access');
+          const link = await api<LinkAccess>(
+            '/entries/' + selected.id + '/link-access',
+          );
           if (current) setLinkAccess(link);
           if (selected.effective_access.includes('manage_permissions')) {
             const g = await api<{ items: Grant[]; next_cursor: string | null }>(
@@ -688,6 +866,13 @@ export default function Workspace({
     !!path &&
     path !== 'private' &&
     !!parent?.effective_access.includes('write');
+  // Self destruct is refused for a new version of a file already listed here.
+  const selfDestructName = selfDestructUpload?.file?.name.trim();
+  const selfDestructClash =
+    !!selfDestructName &&
+    items.some(
+      (item) => item.type === 'file' && item.name === selfDestructName,
+    );
   const contentUrl = selected
     ? browserUrl('/browser/entries/' + selected.id + '/content')
     : '';
@@ -956,12 +1141,40 @@ export default function Workspace({
               >
                 <Plus size={16} /> New folder
               </Button>
-              <Button
-                disabled={!canUpload || uploadProgress !== null}
-                onClick={() => fileInput.current?.click()}
-              >
-                <Upload size={16} /> Upload file
-              </Button>
+              <ButtonGroup className="upload-group">
+                <Button
+                  disabled={!canUpload || uploadProgress !== null}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  <Upload size={16} /> Upload file
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        size="icon"
+                        disabled={!canUpload || uploadProgress !== null}
+                        aria-label="More upload options"
+                      />
+                    }
+                  >
+                    <ChevronDown size={16} />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onClick={() => {
+                        setError('');
+                        setSelfDestructUpload({
+                          file: null,
+                          duration: DEFAULT_DURATION,
+                        });
+                      }}
+                    >
+                      <Hourglass size={15} /> Self-destructing upload…
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </ButtonGroup>
               <input
                 ref={fileInput}
                 type="file"
@@ -1068,6 +1281,13 @@ export default function Workspace({
                         {entry.visibility === 'traversal' && (
                           <small>Only shared contents are visible</small>
                         )}
+                        {entry.self_destruct_at && scope !== 'bin' && (
+                          <Lifetime
+                            kind="self-destruct"
+                            at={entry.self_destruct_at}
+                            onElapsed={() => selfDestructed(entry)}
+                          />
+                        )}
                       </span>
                     </button>
                   </TableCell>
@@ -1151,7 +1371,9 @@ export default function Workspace({
                                 variant="destructive"
                                 onClick={() => setConfirm(entry)}
                               >
-                                Move to bin
+                                {entry.self_destruct_at
+                                  ? 'Delete permanently'
+                                  : 'Move to bin'}
                               </DropdownMenuItem>
                             )}
                           </>
@@ -1343,8 +1565,11 @@ export default function Workspace({
                 ).map((right) => (
                   <label key={right}>
                     <Checkbox
-                      checked={rights.includes(right)}
-                      disabled={working || right === 'read'}
+                      checked={
+                        right === 'read' ||
+                        (!editor.expiring && rights.includes(right))
+                      }
+                      disabled={working || right === 'read' || !!editor.expiring}
                       onCheckedChange={(checked) =>
                         setRights((v) =>
                           checked
@@ -1358,6 +1583,54 @@ export default function Workspace({
                 ))}
               </div>
             )}
+            {editor?.kind === 'share' && (
+              <div className="lifetime-fields">
+                <label className="lifetime-toggle" htmlFor="share-expiring-toggle">
+                  <Checkbox
+                    id="share-expiring-toggle"
+                    checked={!!editor.expiring}
+                    disabled={working}
+                    onCheckedChange={(checked) =>
+                      setEditor((v) =>
+                        v
+                          ? {
+                              ...v,
+                              expiring: checked ? DEFAULT_DURATION : undefined,
+                            }
+                          : null,
+                      )
+                    }
+                  />
+                  Expires after
+                </label>
+                {editor.expiring ? (
+                  <>
+                    <DurationPicker
+                      id="share-expiring"
+                      value={editor.expiring}
+                      disabled={working}
+                      onChange={(expiring) =>
+                        setEditor((v) => (v ? { ...v, expiring } : null))
+                      }
+                    />
+                    <p className="field-note">
+                      View and download only. This access ends by itself{' '}
+                      {(() => {
+                        const minutes = durationMinutes(editor.expiring);
+                        return minutes
+                          ? spokenDuration(minutes) + ' from now'
+                          : 'at the time you choose';
+                      })()}
+                      , and no one is notified. Other access they have stays.
+                    </p>
+                  </>
+                ) : (
+                  <p className="field-note">
+                    Off: the share lasts until you revoke it.
+                  </p>
+                )}
+              </div>
+            )}
             {error && (
               <p className="error-box" role="alert">
                 {error}
@@ -1366,11 +1639,85 @@ export default function Workspace({
             <Button
               type="submit"
               className="primary-action"
-              disabled={working || (editor?.rootType === 'tag' && !editor.tag)}
+              disabled={
+                working ||
+                (editor?.rootType === 'tag' && !editor.tag) ||
+                (!!editor?.expiring && durationMinutes(editor.expiring) === null)
+              }
             >
               {working ? 'Saving…' : 'Save'}
             </Button>
           </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!selfDestructUpload}
+        onOpenChange={(open) => {
+          if (!open) setSelfDestructUpload(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Self-destructing upload</DialogTitle>
+            <DialogDescription>
+              Briefcase deletes the file for good when its time runs out. It
+              never goes to the bin.
+            </DialogDescription>
+          </DialogHeader>
+          {selfDestructUpload && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const minutes = durationMinutes(selfDestructUpload.duration);
+                if (!selfDestructUpload.file || !minutes) return;
+                setSelfDestructUpload(null);
+                void upload(selfDestructUpload.file, minutes);
+              }}
+            >
+              <label htmlFor="self-destruct-file">File</label>
+              <Input
+                id="self-destruct-file"
+                type="file"
+                required
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  setSelfDestructUpload((v) => (v ? { ...v, file } : null));
+                }}
+              />
+              <label htmlFor="self-destruct-duration">Delete it after</label>
+              <DurationPicker
+                id="self-destruct-duration"
+                value={selfDestructUpload.duration}
+                onChange={(duration) =>
+                  setSelfDestructUpload((v) => (v ? { ...v, duration } : null))
+                }
+              />
+              <p className="field-note">
+                The timer starts when the upload finishes. Only new files can
+                self destruct, and uploading a new version later won’t change
+                the timer.
+              </p>
+              {selfDestructClash && (
+                <p className="error-box" role="alert">
+                  A file named {selfDestructUpload.file?.name} already exists
+                  here. Self destruct only applies to new files: rename the file
+                  or upload it without self destruct.
+                </p>
+              )}
+              <Button
+                type="submit"
+                className="primary-action"
+                disabled={
+                  !selfDestructUpload.file ||
+                  durationMinutes(selfDestructUpload.duration) === null ||
+                  selfDestructClash
+                }
+              >
+                Upload
+                <Upload size={16} />
+              </Button>
+            </form>
+          )}
         </DialogContent>
       </Dialog>
       <AlertDialog
@@ -1382,11 +1729,14 @@ export default function Workspace({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Move “{confirm?.name}” to the bin?
+              {confirm?.self_destruct_at
+                ? `Delete “${confirm.name}” permanently?`
+                : `Move “${confirm?.name}” to the bin?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              It will disappear from your files. You can recover it for 45 days.
-              A folder’s contents move with it.
+              {confirm?.self_destruct_at
+                ? 'This file is set to self destruct, so deleting it is permanent. It won’t go to the bin and can’t be recovered.'
+                : 'It will disappear from your files. You can recover it for 45 days. A folder’s contents move with it.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {error && (
@@ -1401,7 +1751,13 @@ export default function Workspace({
               disabled={working}
               onClick={() => void remove()}
             >
-              {working ? 'Moving…' : 'Move to bin'}
+              {confirm?.self_destruct_at
+                ? working
+                  ? 'Deleting…'
+                  : 'Delete permanently'
+                : working
+                  ? 'Moving…'
+                  : 'Move to bin'}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1456,6 +1812,30 @@ export default function Workspace({
                   </Button>
                 )}
               </div>
+              {selected.self_destruct_at && scope !== 'bin' && (
+                <div className="self-destruct-callout">
+                  <div>
+                    <Lifetime
+                      kind="self-destruct"
+                      at={selected.self_destruct_at}
+                      onElapsed={() => selfDestructed(selected)}
+                    />
+                    <p>
+                      Briefcase deletes this file for good on{' '}
+                      {absoluteTime(selected.self_destruct_at)}. It won’t go to
+                      the bin. Its uploader, org admins and org owners can keep
+                      it.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    disabled={working}
+                    onClick={() => void keepFile(selected)}
+                  >
+                    Keep file
+                  </Button>
+                </div>
+              )}
               <Tabs value={tab} onValueChange={setTab}>
                 <TabsList>
                   <TabsTrigger value="preview">Preview</TabsTrigger>
@@ -1647,6 +2027,13 @@ export default function Workspace({
                             ? 'Can view and download'
                             : 'Requires an authorized account'}
                         </p>
+                        {linkAccess.enabled && linkAccess.expires_at && (
+                          <Lifetime
+                            kind="expiring"
+                            at={linkAccess.expires_at}
+                            onElapsed={() => void refreshLink(selected)}
+                          />
+                        )}
                         {linkAccess.effective && linkAccess.url && (
                           <div className="mt-3 flex min-w-0 flex-col items-start gap-2">
                             <a
@@ -1680,46 +2067,138 @@ export default function Workspace({
                             Change the parent to remove inherited access.
                           </p>
                         )}
+                        {linkAccess.can_manage && !linkAccess.enabled && (
+                          <div className="lifetime-fields">
+                            <label
+                              className="lifetime-toggle"
+                              htmlFor="link-expiring-toggle"
+                            >
+                              <Checkbox
+                                id="link-expiring-toggle"
+                                checked={!!linkExpiring}
+                                disabled={working}
+                                onCheckedChange={(checked) =>
+                                  setLinkExpiring(checked ? DEFAULT_DURATION : null)
+                                }
+                              />
+                              Expires after
+                            </label>
+                            {linkExpiring && (
+                              <>
+                                <DurationPicker
+                                  id="link-expiring"
+                                  value={linkExpiring}
+                                  disabled={working}
+                                  onChange={setLinkExpiring}
+                                />
+                                <p className="field-note">
+                                  The link stops working by itself after this
+                                  long.
+                                </p>
+                              </>
+                            )}
+                          </div>
+                        )}
+                        {linkAccess.can_manage &&
+                          linkAccess.enabled &&
+                          linkAccess.expires_at &&
+                          linkExpiring && (
+                            <form
+                              className="lifetime-fields"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                const minutes = durationMinutes(linkExpiring);
+                                if (minutes)
+                                  void changeLink(selected, {
+                                    enabled: true,
+                                    minutes,
+                                  });
+                              }}
+                            >
+                              <label htmlFor="link-expiring-change">
+                                End the link this long from now
+                              </label>
+                              <DurationPicker
+                                id="link-expiring-change"
+                                value={linkExpiring}
+                                disabled={working}
+                                onChange={setLinkExpiring}
+                              />
+                              <div className="lifetime-change-actions">
+                                <Button
+                                  type="submit"
+                                  variant="outline"
+                                  disabled={
+                                    working ||
+                                    durationMinutes(linkExpiring) === null
+                                  }
+                                >
+                                  Set time
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  disabled={working}
+                                  onClick={() => setLinkExpiring(null)}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </form>
+                          )}
                       </div>
                       {linkAccess.can_manage && (
-                        <Button
-                          variant="outline"
-                          disabled={working}
-                          onClick={async () => {
-                            const enabled = !linkAccess.enabled;
-                            if (
-                              !linkIntent.current ||
-                              linkIntent.current.id !== selected.id ||
-                              linkIntent.current.enabled !== enabled
-                            )
-                              linkIntent.current = {
-                                id: selected.id,
-                                enabled,
-                                operation: crypto.randomUUID(),
-                              };
-                            setWorking(true);
-                            try {
-                              const result = await api<typeof linkAccess>(
-                                '/entries/' + selected.id + '/link-access',
-                                'PUT',
-                                {
-                                  enabled,
-                                  operation_id: linkIntent.current.operation,
-                                },
-                              );
-                              setLinkAccess(result);
-                              linkIntent.current = null;
-                            } catch (e) {
-                              fail(e);
-                            } finally {
-                              setWorking(false);
+                        <div className="record-actions">
+                          {linkAccess.enabled && linkAccess.expires_at && (
+                            <>
+                              <Button
+                                variant="outline"
+                                disabled={working}
+                                onClick={() => setLinkExpiring(DEFAULT_DURATION)}
+                              >
+                                Change time
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={working}
+                                onClick={() =>
+                                  void changeLink(selected, { enabled: true })
+                                }
+                              >
+                                Make permanent
+                              </Button>
+                            </>
+                          )}
+                          <Button
+                            variant="outline"
+                            disabled={
+                              working ||
+                              (!linkAccess.enabled &&
+                                !!linkExpiring &&
+                                durationMinutes(linkExpiring) === null)
                             }
-                          }}
-                        >
-                          {linkAccess.enabled
-                            ? 'Disable link sharing'
-                            : 'Enable link sharing'}
-                        </Button>
+                            onClick={() =>
+                              void changeLink(
+                                selected,
+                                linkAccess.enabled
+                                  ? { enabled: false }
+                                  : {
+                                      enabled: true,
+                                      minutes: linkExpiring
+                                        ? (durationMinutes(linkExpiring) ??
+                                          undefined)
+                                        : undefined,
+                                    },
+                              )
+                            }
+                          >
+                            {linkAccess.enabled
+                              ? 'Disable link sharing'
+                              : linkExpiring
+                                ? 'Enable expiring link'
+                                : 'Enable link sharing'}
+                          </Button>
+                        </div>
                       )}
                     </div>
                   )}
@@ -1744,32 +2223,119 @@ export default function Workspace({
                           {grant.principal.type}:{grant.principal.id}
                         </strong>
                         <p>{grant.access.join(', ')}</p>
+                        {grant.expires_at && (
+                          <Lifetime
+                            kind="expiring"
+                            at={grant.expires_at}
+                            onElapsed={() =>
+                              setGrants((value) =>
+                                value.filter((g) => g.id !== grant.id),
+                              )
+                            }
+                          />
+                        )}
+                        {grantChange?.id === grant.id && (
+                          <form
+                            className="lifetime-fields"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              const minutes = durationMinutes(
+                                grantChange.duration,
+                              );
+                              if (minutes)
+                                void changeExpiring(selected, grant, { minutes });
+                            }}
+                          >
+                            <label htmlFor={'expiring-' + grant.id}>
+                              End this share this long from now
+                            </label>
+                            <DurationPicker
+                              id={'expiring-' + grant.id}
+                              value={grantChange.duration}
+                              disabled={working}
+                              onChange={(duration) =>
+                                setGrantChange({ id: grant.id, duration })
+                              }
+                            />
+                            <div className="lifetime-change-actions">
+                              <Button
+                                type="submit"
+                                variant="outline"
+                                disabled={
+                                  working ||
+                                  durationMinutes(grantChange.duration) === null
+                                }
+                              >
+                                Set time
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                disabled={working}
+                                onClick={() => setGrantChange(null)}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          </form>
+                        )}
                       </div>
                       {selected.effective_access.includes(
                         'manage_permissions',
                       ) && (
-                        <Button
-                          variant="outline"
-                          onClick={async () => {
-                            try {
-                              await api(
-                                '/entries/' +
-                                  selected.id +
-                                  '/invitations/' +
-                                  grant.id,
-                                'DELETE',
-                                { operation_id: crypto.randomUUID() },
-                              );
-                              setGrants((v) =>
-                                v.filter((g) => g.id !== grant.id),
-                              );
-                            } catch (e) {
-                              fail(e);
-                            }
-                          }}
-                        >
-                          Revoke
-                        </Button>
+                        <div className="record-actions">
+                          {grant.expires_at && (
+                            <>
+                              <Button
+                                variant="outline"
+                                disabled={working}
+                                onClick={() =>
+                                  setGrantChange({
+                                    id: grant.id,
+                                    duration: DEFAULT_DURATION,
+                                  })
+                                }
+                              >
+                                Change time
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={working}
+                                onClick={() =>
+                                  void changeExpiring(selected, grant, {
+                                    permanent: true,
+                                  })
+                                }
+                              >
+                                Make permanent
+                              </Button>
+                            </>
+                          )}
+                          <Button
+                            variant="outline"
+                            disabled={working}
+                            onClick={async () => {
+                              setDetailError('');
+                              try {
+                                await api(
+                                  '/entries/' +
+                                    selected.id +
+                                    '/invitations/' +
+                                    grant.id,
+                                  'DELETE',
+                                  { operation_id: crypto.randomUUID() },
+                                );
+                                setGrants((v) =>
+                                  v.filter((g) => g.id !== grant.id),
+                                );
+                              } catch (e) {
+                                detailFail(e);
+                              }
+                            }}
+                          >
+                            Revoke
+                          </Button>
+                        </div>
                       )}
                     </div>
                   ))}

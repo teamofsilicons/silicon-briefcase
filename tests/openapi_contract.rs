@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 60] = [
+const EXPECTED_OPERATIONS: [&str; 62] = [
     "submitReport",
     "submitTelemetry",
     "cancelDelegatedUpload",
@@ -59,6 +59,8 @@ const EXPECTED_OPERATIONS: [&str; 60] = [
     "listInvitations",
     "createInvitation",
     "revokeInvitation",
+    "changeExpiringShare",
+    "makeEntryPermanent",
     "readLinkAccess",
     "setLinkAccess",
     "listEntryLogs",

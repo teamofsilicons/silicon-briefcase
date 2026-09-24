@@ -246,6 +246,9 @@ obtained cannot be redirected somewhere else.
   files.
 - **Quota is the member's.** The Team's storage and daily upload allowances
   apply exactly as they do to that member's own uploads.
+- **No self destruct.** Neither this endpoint nor the delegated upload
+  protocol can set a self-destruct timer yet, so an app cannot create a
+  self-destructing file. Only a member's own `POST /uploads` can.
 
 This is not a recoverable operation: after an uncertain response, a fresh proof
 is a *new* attempt, not an idempotent retry. Read back the destination folder
@@ -274,6 +277,26 @@ the entire operation is bound into the exact JSON body SHA-256.
 ```json
 {"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true}
 ```
+
+Either can be an [expiring share](sharing.md#expiring-shares) that ends by itself: add
+`expires_in_minutes` (1 to 43,200) inside `invitation`, or beside `enabled: true`
+for an expiring link. An expiring share is read-only, so `access` must be `["read"]`.
+The field is part of the exact body bound into the proof digest; add it before
+you hash, never after.
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","invitation":{"principal":{"type":"carbon","id":"alex:tos"},"access":["read"],"inherit":true,"expires_in_minutes":1440}}
+```
+
+```json
+{"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true,"expires_in_minutes":60}
+```
+
+Both endpoints stay critical whether or not the share is an expiring share. The
+link endpoint follows the normal [expiring link rules](sharing.md#expiring-links):
+resending minutes restarts a live expiring link's clock, and `enabled: false` ends
+it. Changing or revoking an expiring invitation has no OBO endpoint; the member does
+that directly.
 
 Use `delegated::DelegatedInvite` and `delegated::DelegatedLinkAccess` in Rust,
 or `briefcase app request invite --body manifest.json --describe` and

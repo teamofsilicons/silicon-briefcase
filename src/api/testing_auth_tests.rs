@@ -508,6 +508,7 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
             &context,
             public_root.id(),
             true,
+            None,
             &crate::application::service::MutationMetadata::new(None, [1; 32]),
         )
         .await?;

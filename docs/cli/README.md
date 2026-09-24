@@ -233,11 +233,16 @@ briefcase stat private/si:cos/notes/report.pdf # one entry in full
 briefcase find "is:md location:'public' after:01-01-2026"
 briefcase find "permissions:delete" --all
 briefcase find "is:md" --cursor "$NEXT"
+briefcase find "is:expiring"                         # entries with an active expiring share
+briefcase find "is:self-destruct"                # files whose timer is running
 briefcase search "quarterly revenue"
 ```
 
 `find` takes the service's filter language; `search` looks inside filenames and
-extracted document text and says which one matched. Without `--all`, `ls` and
+extracted document text and says which one matched. `is:expiring` matches files and
+folders with an active expiring share, either one that gives you your access or one
+you can manage; `is:self-destruct` matches files whose self-destruct timer is
+still running. Without `--all`, `ls` and
 `find` return one page and preserve the service's opaque `next_cursor`: human
 output prints a continuation hint, while JSON contains `items` and
 `next_cursor`. Pass that value back unchanged with `--cursor`. `--all` follows
@@ -268,7 +273,8 @@ briefcase rm private/si:cos/notes/quarterly/draft.md                # to the bin
 
 `mkdir`, every individual file in `put`, `mv`, and version `restore` also
 persist an intent fingerprint and idempotency key before sending. Upload
-fingerprints include the source file's SHA-256 digest. Path-addressed rename,
+fingerprints include the source file's SHA-256 digest and any `--self-destruct`
+lifetime. Path-addressed rename,
 move, and restore retain the resolved entry UUID; nested folder creation,
 uploads, and moves also retain the resolved destination-folder UUID. Rerunning
 after a lost success response therefore replays the original request without
@@ -295,6 +301,40 @@ briefcase bin restore "$ENTRY_ID"
 `bin list` uses the same cursor, JSON page, and exhaustive `--all` behavior as
 `ls` and `find`.
 
+### Self-destructing files
+
+```bash
+briefcase put scratch.md private/si:cos/notes --self-destruct 2h
+briefcase stat private/si:cos/notes/scratch.md      # self-destructs … UTC (in 2h)
+briefcase find "is:self-destruct"
+briefcase keep private/si:cos/notes/scratch.md      # stop the timer
+```
+
+`put --self-destruct <DURATION>` makes each new file delete itself permanently
+1 minute to 30 days after its upload finishes. DURATION is whole minutes (`90`)
+or a number with `m`, `h` or `d` (`90m`, `2h`, `7d`, `1d12h`); anything outside
+1 to 43,200 minutes is refused before a request is sent.
+
+- Only a new file can self-destruct. A name that already exists in the folder is
+  refused with `self_destruct_requires_new_file` rather than becoming a new
+  version; upload under another `--name` instead.
+- When the timer runs out the file is deleted for good. It never enters the bin
+  and cannot be restored, and its space is returned at once.
+- `briefcase rm` on a self-destructing file is also permanent, and says so.
+- Uploading a new version later does not change the timer.
+- `briefcase keep <target>...` stops the timer and makes the file permanent.
+  Only the file's creator and organization admins and owners may keep it;
+  anyone else is refused (exit code `4`). Keeping a file whose timer is not
+  running is refused with `not_self_destructing`, which is also what a retry
+  after a lost response sees. `--json` prints `[{"entry_id", "path"}]` for the
+  kept files.
+
+`stat` shows a `self-destructs` line with the UTC deadline and how far away it
+is; `ls` and `find` add a `SELF-DESTRUCTS` column whenever a listed file has a
+running timer. The JSON entry carries `self_destruct_at` (RFC 3339, `null` for a
+permanent file). Setting the timer, keeping the file and its deletion are all
+recorded in `briefcase logs`; no warning is sent before deletion.
+
 `bin restore` saves its operation key before sending. If the response is lost,
 rerun the exact command with the same profile and environment to recover that
 restore. The pending operation is cleared after success; restoring a later
@@ -314,6 +354,48 @@ Members use their complete public ID — `c:cos`, `si:atlas` — and rights
 are a comma-separated set of `read`, `write`, `update`. Delete cannot be granted. They are
 independent: `write` adds files to a folder, `update` changes a file that is
 already there, and neither conveys `delete`.
+
+### Expiring shares
+
+```bash
+briefcase share private/si:cos/notes/report.pdf email:alex@example.com --expires-after 2h
+briefcase share private/si:cos/notes tag:engineering --inherit --expires-after 7d
+briefcase shares private/si:cos/notes             # expiring grants carry expires_at
+briefcase expiry private/si:cos/notes "$GRANT_ID" --expires-in 3d   # extend or shorten
+briefcase expiry private/si:cos/notes "$GRANT_ID" --permanent       # keep for good
+briefcase unshare private/si:cos/notes "$GRANT_ID"                # end it early
+briefcase link private/si:cos/notes/report.pdf --expires-after 30m         # expiring link
+```
+
+Any share can be an expiring share: a member, an email contact, a tag, or
+anyone with the link. It lasts 1 minute to 30 days, written as whole minutes
+(`90`) or with `m`, `h` or `d` (`90m`, `2h`, `7d`, `1d12h`); the CLI refuses
+anything outside 1 to 43,200 minutes before sending, and says why.
+
+- An expiring share is read-only (view and download). `--expires-after` with `--access`
+  other than `read` is refused locally.
+- It is its own grant. When it ends only that access goes; access the recipient
+  holds through another share, a tag or a public folder stays.
+- Expiry is strict: access stops the moment the time passes.
+- `briefcase expiry <target> <grant-id> --expires-in <DURATION>` restarts the clock
+  from now; `--permanent` keeps the access for good (folding into a permanent
+  grant the recipient already holds). Exactly one of the two is required. A share
+  that has ended is gone and reads as not found (exit code `3`); a permanent
+  grant is refused with `not_an_expiring_share`.
+- `briefcase unshare` ends an expiring share early, like any grant.
+- Nobody is notified when an expiring share ends or is revoked. Creating, changing and
+  ending it are recorded in `briefcase logs`.
+
+For a link, `link --expires-after <DURATION>` turns on an expiring link, and repeating it on a
+live expiring link restarts the clock. `link --enabled true` makes an expiring link
+permanent; `link --enabled false` ends it. A permanent link must be turned off
+before it can become an expiring link (`link_already_permanent`).
+
+`share`, `shares`, `expiring` and `link` print the service's JSON on standard output
+even without `--json`; expiring grants and links carry `expires_at` (RFC 3339,
+absent or `null` when permanent). Without `--json`, the CLI also writes a line
+to standard error saying when each expiring share or link ends, in UTC and relative
+to now, so scripts that parse standard output are unaffected.
 
 Read and clear sharing notifications:
 
@@ -389,8 +471,11 @@ Unknown JSON fields are rejected. See the [API request schemas](../obo.md#json-c
 for the body fields.
 
 The available operations are `folder-create`, `entries-list`, `file-read`,
-`entry-trash`, `upload-reserve`, `upload-commit`, `upload-status`, and
-`upload-cancel`. Each request uses fresh IAM authorization; no proof is cached
+`entry-trash`, `invite`, `link-access`, `upload-reserve`, `upload-commit`,
+`upload-status`, and `upload-cancel`. `invite` and `link-access` accept an
+optional `expires_in_minutes` (1 to 43,200) — inside `invitation` for `invite`,
+and beside `"enabled": true` for `link-access` — to create a read-only expiring
+share or expiring link. It is part of the exact body the proof binds. Each request uses fresh IAM authorization; no proof is cached
 or retried automatically. Keep a mutation's `operation_id` and body unchanged
 when obtaining a fresh proof for a retry. A file read requires `--output`
 before any proof or request is sent. Its destination appears only after the
@@ -547,7 +632,7 @@ preferences and `BRIEFCASE_AUTO_UPDATE` cannot activate the retired updater.
 The Rust package never schedules dependency maintenance after requests or streams;
 update its Cargo dependency explicitly and rebuild.
 
-Invitation, revocation, and link-setting commands save their exact operation identity and entry ID before sending. Repeating an interrupted command reuses that intent; it cannot silently target a new file that moved into the old path. `briefcase shares TARGET --cursor CURSOR --json` retrieves further invitation pages (100 per page).
+Invitation, revocation, expiring-change, and link-setting commands save their exact operation identity and entry ID before sending. Repeating an interrupted command reuses that intent; it cannot silently target a new file that moved into the old path. `briefcase shares TARGET --cursor CURSOR --json` retrieves further invitation pages (100 per page).
 
 
 ## Report a bug or contribute a fix

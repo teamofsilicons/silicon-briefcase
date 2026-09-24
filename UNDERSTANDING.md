@@ -275,6 +275,30 @@ I should be able to invite other silicons or carbons or specific email to view m
 
 For each invited carbon or silicon also send them a mail that you have been invited to this file/folder. We use postmark to send the emails. You would send the email via `briefcase@teamofsilicons.com`. For the emails you send ensure to send it to the email they are registered in the org with and not the main personal email until both match. 
 
+# Expires after
+
+For each file or folder during sharing i can set it to expire after a set time (an expiring share), this wont be enabled by default but can be set as an expiring share, in which i can set a time between 1 min and 1 month (30 days), in steps of 1 minute. Any kind of share can be an expiring share: inviting carbons/silicons, tags, emails, or anyone with the link can view. An expiring share only ever gives Read access (view/download).
+
+And i could list down the people or the type of share that i wanna do and that share would be valid for the set time and after that time the access for those set of people (and only that set of people invited in that run) will be revoked. An expiring share is its own grant: if someone also has access from another invite, a tag, or a public folder, that access stays after the expiring share expires.
+
+Expiry is strict: the moment the time passes the share must stop working, checked on every request, not left to a cleanup that runs later.
+
+Before it expires it should be possible to extend it, shorten it, make it permanent, or revoke it early.
+
+No email or notification is sent when an expiring share expires. Creating, changing and expiring an expiring share are all maintained in the logs. Apps can also create expiring shares through the OBO endpoints (invite, and anyone with the link can view).
+
+# Self Destruct
+
+While uploading a file i can set a file to be self destruct (1 min to 1 month (30 days), in steps of 1 minute) and then after that much time the file will get auto deleted for good (permanently). It doesn't go to the bin, and its space returns to the total available space immediately. The timer starts when the upload finishes.
+
+Self destruct can only be set while uploading, it's not possible to turn it on for an already existing file. Uploading a new version of the file doesn't change the timer.
+
+If the file is deleted by hand before the timer runs out, it is also permanently deleted and doesn't go to the bin.
+
+During that time period there should be an option to be able to make the file permanent. Only the creator, org_admins and org_owners can make it permanent.
+
+Setting self destruct, making the file permanent and the deletion are all maintained in the file and folder logs. No warning is sent before the file gets deleted.
+
 
 # Filter
 
@@ -299,6 +323,8 @@ There can be any possible PnC for the filters, i should be able to combine multi
 FIltering should only happen with the files i have access to.
 
 is: takes three vocabularies at once. Entry kind — is:file, is:folder (is:directory aliased). Renderer category — is:image, video, document, spreadsheet, presentation, audio, archive, code, unsupported, i.e. the nine buckets from §Files supported. Anything else alphanumeric and ≤16 chars falls through to a file extension, leading dot stripped (src/domain/filter.rs:727). So is:document is any file that opens in the document renderer — pdf, docx, md; is:md is literally .md.
+
+is: also takes two lifetime values: is:expiring matches files and folders with an active expiring share, either one that gives me my access or one i can manage; is:self-destruct matches files whose self destruct timer is still running. These are checked before the extension fall-through, so is:expiring never means an .expiring extension.
 
 has: is content-only, matched against extracted document text.
 

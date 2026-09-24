@@ -243,7 +243,7 @@ Returns the hundred most recently changed visible entries per page, newest first
 
 The filter language combines freely. Terms are ANDed; `or` introduces an alternative; `not` or a leading `-` negates; parentheses group. Supported keys:
 
-`last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest` order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@{carbon:id}` matches the creator; `to:@{silicon:id}` matches an explicit share; `for:@{id}` matches what that member can reach; `contains:'term'` matches names and extracted content, with `*` as a wildcard; `has:'term'` matches extracted content only; `name:'term'` matches names only; `location:'private/cos:tos'` matches a path prefix; `is:` takes `file`, `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported`), or an extension such as `md`; `permissions:` takes `read`, `write`, `update`, `delete`, or `manage_permissions` and matches the caller's effective access. A bare word is shorthand for `contains:`.
+`last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest` order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@{carbon:id}` matches the creator; `to:@{silicon:id}` matches an explicit share; `for:@{id}` matches what that member can reach; `contains:'term'` matches names and extracted content, with `*` as a wildcard; `has:'term'` matches extracted content only; `name:'term'` matches names only; `location:'private/cos:tos'` matches a path prefix; `is:` takes `file`, `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported`), `expiring` (a live expiring share that gave the caller access or that the caller manages), `self-destruct` (a file whose self-destruct timer is running; also `self_destruct`, `selfdestruct`), or an extension such as `md`, with `expiring` and `self-destruct` matched before the extension fallback; `permissions:` takes `read`, `write`, `update`, `delete`, or `manage_permissions` and matches the caller's effective access. A bare word is shorthand for `contains:`.
 
 Filtering only ever returns entries the caller can already see.
 
@@ -254,7 +254,7 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 | `X-Org-ID` | header | yes | string |
 | `parent_id` | query | no | Omit for the organization root |
 | `path` | query | no | Parent folder addressed by path instead of identifier |
-| `filter` | query | no | Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md" |
+| `filter` | query | no | Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md". `is:expiring` matches entries with a live expiring share that gave the caller access or that the caller manages; `is:self-destruct` matches files whose self-destruct timer is running. |
 | `cursor` | query | no | string |
 | `limit` | query | no | integer |
 
@@ -295,6 +295,8 @@ Request: `application/json` (required).
 
 `GET /entries/{entry_id}` · `getEntry`
 
+`self_destruct_at` is when a self-destructing file is permanently deleted, and `null` for a permanent file and for every folder.
+
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Parameter | Location | Required | Meaning |
@@ -334,6 +336,8 @@ Request: `application/json` (required).
 ## moveEntryToBin
 
 `DELETE /entries/{entry_id}` · `moveEntryToBin`
+
+A self-destructing file is deleted permanently instead of entering the bin. Deleting a folder bins the folder and its ordinary files as usual, but deletes the self-destructing files inside it permanently; restoring the folder does not bring them back.
 
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
@@ -399,6 +403,8 @@ Uploading a name that an active file already carries is how a file is updated: t
 
 Two organization limits apply: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting content returns capacity once the bytes are gone. Either limit may be configured per organization. An upload that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
 
+`self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with `self_destruct_requires_new_file` (409) before its bytes are stored, and a later version never changes the timer. An invalid value is `invalid_self_destruct_minutes` (422). The creator and organization admins and owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.
+
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Parameter | Location | Required | Meaning |
@@ -412,6 +418,7 @@ Request: `multipart/form-data` (required).
 | --- | --- | --- | --- |
 | `parent_id` | string (uuid) | no | Destination folder identifier |
 | `path` | string | no | Destination folder path, as an alternative to parent_id |
+| `self_destruct_minutes` | integer (1–43200) | no | New files only: permanently delete the file this many minutes after the upload finishes |
 | `file` | string (binary) | yes |  |
 
 | Response | Meaning | Body |
@@ -442,6 +449,8 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 `POST /entries/{entry_id}/permissions` · `grantPermission`
 
+With `expires_in_minutes` the grant is a read-only expiring share, separate from any permanent grant the member holds; `write` or `update` alongside it is `expiring_share_is_read_only` (422). The returned grant's `expires_at` is when it ends, or `null` for a permanent grant; expired grants are not listed.
+
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Parameter | Location | Required | Meaning |
@@ -456,6 +465,7 @@ Request: `application/json` (required).
 | `principal` | ActorRef | yes |  |
 | `access` | array of string: read, write, update | yes |  |
 | `inherit` | boolean | no |  Default: True. |
+| `expires_in_minutes` | integer (1–43200) | no | Makes this a read-only expiring share that ends after this many minutes |
 
 | Response | Meaning | Body |
 | --- | --- | --- |
@@ -996,6 +1006,8 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 `POST /entries/{entry_id}/invitations` · `createInvitation`
 
+With `expires_in_minutes` the invitation is a read-only expiring share: its own grant, separate from any permanent one, that stops working the instant its `expires_at` passes. `write` or `update` alongside it is `expiring_share_is_read_only` (422). The usual notification and email are sent on creation; nothing is sent when it expires.
+
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Parameter | Location | Required | Meaning |
@@ -1011,6 +1023,7 @@ Request: `application/json` (required).
 | `principal` | InvitationRecipient | yes |  |
 | `access` | array of string: read, write, update | no |  Default: ['read']. |
 | `inherit` | boolean | no |  Default: True. |
+| `expires_in_minutes` | integer (1–43200) | no | Makes this a read-only expiring share that ends after this many minutes |
 
 | Response | Meaning | Body |
 | --- | --- | --- |
@@ -1032,7 +1045,52 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Response | Meaning | Body |
 | --- | --- | --- |
-| 204 | Success | empty |
+| 204 | Success. Ending an expiring share early sends no notification. | empty |
+| default | Error | `application/json` Error |
+
+## Extend, shorten, or make permanent a live expiring share
+
+`PATCH /entries/{entry_id}/invitations/{grant_id}` · `changeExpiringShare`
+
+Send exactly one field. `expires_in_minutes` restarts the share's clock from now (1 to 43,200 minutes), which extends or shortens it. `permanent: true` keeps the access for good; when the recipient already holds a permanent grant on this entry, the expiring share folds into it and the response is that permanent grant. Both fields or neither is `expires_in_minutes_or_permanent` (422). An expired share no longer exists (404); a permanent grant is `not_an_expiring_share` (409). Requires manage-permissions authority on the entry.
+
+Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+
+| Parameter | Location | Required | Meaning |
+| --- | --- | --- | --- |
+| `X-Org-ID` | header | yes | string |
+| `entry_id` | path | yes | string (uuid) |
+| `grant_id` | path | yes | string (uuid) |
+| `Idempotency-Key` | header | yes | string |
+
+Request: `application/json` (required).
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `expires_in_minutes` | integer (1–43200) | no | New lifetime, counted from now |
+| `permanent` | boolean: true | no | Make the share permanent |
+
+| Response | Meaning | Body |
+| --- | --- | --- |
+| 200 | The grant as it now stands | `application/json` Invitation |
+| default | Error | `application/json` Error |
+
+## Keep a self-destructing file
+
+`DELETE /entries/{entry_id}/self-destruct` · `makeEntryPermanent`
+
+Stops the file's self-destruct timer. Only the file's creator and organization admins and owners may; anyone else who can see the file gets 403, and a caller who cannot see it gets 404. A file whose timer is not running is `not_self_destructing` (409).
+
+Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+
+| Parameter | Location | Required | Meaning |
+| --- | --- | --- | --- |
+| `X-Org-ID` | header | yes | string |
+| `entry_id` | path | yes | string (uuid) |
+
+| Response | Meaning | Body |
+| --- | --- | --- |
+| 204 | The file is permanent. Repeating the call after success is `not_self_destructing` (409) unless it carries the same optional `Idempotency-Key`, which replays the success. | empty |
 | default | Error | `application/json` Error |
 
 ## Read explicit and inherited anonymous access
@@ -1055,6 +1113,8 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 `PUT /entries/{entry_id}/link-access` · `setLinkAccess`
 
+With `enabled` true, `expires_in_minutes` makes this an expiring link that ends after that many minutes; sending it again on a live expiring link restarts the clock, and omitting it makes the link permanent. A permanent link that is already on is never shortened (`link_already_permanent`, 409). `expires_in_minutes` with `enabled` false is `expiring_link_requires_enabled` (422). The response's `expires_at` is when this entry's own expiring link ends, or `null`.
+
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 | Parameter | Location | Required | Meaning |
@@ -1068,6 +1128,7 @@ Request: `application/json` (required).
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | boolean | yes |  |
+| `expires_in_minutes` | integer (1–43200) | no | With `enabled` true, an expiring link that ends after this many minutes |
 
 | Response | Meaning | Body |
 | --- | --- | --- |
@@ -1077,6 +1138,8 @@ Request: `application/json` (required).
 ## Read 365 days of file/folder logs, newest first
 
 `GET /entries/{entry_id}/logs` · `listEntryLogs`
+
+Expiring-share and self-destruct actions, including the worker's expiry and deletion events, are listed in [Sharing and audit logs](../sharing.md#logs-and-versions).
 
 Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
@@ -1130,7 +1193,7 @@ Request: `application/json` (required).
 | --- | --- | --- | --- |
 | `operation_id` | string (uuid) | yes |  |
 | `entry_id` | string (uuid) | yes |  |
-| `invitation` | InvitationCreate | yes |  |
+| `invitation` | InvitationCreate | yes | Includes the optional expiring `expires_in_minutes` |
 
 | Response | Meaning | Body |
 | --- | --- | --- |
@@ -1156,6 +1219,7 @@ Request: `application/json` (required).
 | `operation_id` | string (uuid) | yes |  |
 | `entry_id` | string (uuid) | yes |  |
 | `enabled` | boolean | yes |  |
+| `expires_in_minutes` | integer (1–43200) | no | With `enabled` true, an expiring link that ends after this many minutes |
 
 | Response | Meaning | Body |
 | --- | --- | --- |

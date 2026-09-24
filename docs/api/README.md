@@ -8,7 +8,7 @@
 > data-plane selection. The protected [participant contract](../honeycomb-integration.md)
 > is a separate service integration.
 
-Official contract **2.0.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 59 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
+Official contract **2.1.0**, served below `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the [OpenAPI document](../../openapi.yaml) for complete request and response schemas and the [operation inventory](operations.md) for all 62 contracted operations. The [HTTP reference](reference.md) lists every method, authority, parameter, request field, and response. Human-facing links use `https://briefcase.teamofsilicons.com/org/{org_id}/{path}`.
 
 ## Authentication and negotiation
 
@@ -72,6 +72,8 @@ is:file not is:archive permissions:update
 | --- | --- |
 | `is:file`, `is:folder`, `is:directory` | Entry kind |
 | `is:image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported` | Renderer category |
+| `is:expiring` | Entries with a live [expiring share](../sharing.md#expiring-shares) that gave the caller access, on the entry or on a folder above it, or that the caller manages: shared it, owns the entry, or is an organization admin or owner |
+| `is:self-destruct` (`is:self_destruct`, `is:selfdestruct`) | Files whose [self-destruct](#self-destructing-files) timer is still running |
 | `is:md`, `is:pdf` | Exact extension fallback, up to 16 alphanumeric characters |
 | `has:term` | Extracted document content |
 | `contains:term` | Filename or extracted content |
@@ -79,7 +81,7 @@ is:file not is:archive permissions:update
 | `location:private/*` | Anchored path prefix and wildcard |
 | `permissions:read`, `write`, `update`, `delete`, `manage_permissions` | The caller's effective capability |
 
-Boolean expressions support implicit AND, `or`, `not`, leading `-`, and parentheses. `last:`, `first:` and `sort:` are top-level modifiers. Maximum expression length is 1,024 bytes, with 32 predicates and a take limit of 100. Date filters accept `between:DD-MM-YYYY=DD-MM-YYYY` (inclusive), `after:DD-MM-YYYY`, and `before:DD-MM-YYYY`. `from:@{ID}` selects creators, `to:@{ID}` explicit recipients, and `for:@{ID}` accessible-to members. `first:N` and `last:N` select chronological windows; `sort:oldest` / `sort:newest` choose ordering. Unsupported syntax returns validation errors.
+`is:expiring` and `is:self-destruct` are matched before the extension fallback, so `is:expiring` never means a `.expiring` file. Boolean expressions support implicit AND, `or`, `not`, leading `-`, and parentheses. `last:`, `first:` and `sort:` are top-level modifiers. Maximum expression length is 1,024 bytes, with 32 predicates and a take limit of 100. Date filters accept `between:DD-MM-YYYY=DD-MM-YYYY` (inclusive), `after:DD-MM-YYYY`, and `before:DD-MM-YYYY`. `from:@{ID}` selects creators, `to:@{ID}` explicit recipients, and `for:@{ID}` accessible-to members. `first:N` and `last:N` select chronological windows; `sort:oldest` / `sort:newest` choose ordering. Unsupported syntax returns validation errors.
 
 `GET /search?q=…` returns at most 20 relevant visible files from names and extracted document text. Extraction is asynchronous; a new file's name is immediately available while extracted content may arrive later.
 
@@ -98,13 +100,27 @@ The server stages and hashes incoming bytes, validates storage constraints, and 
 
 File delivery supports one byte range for seeking, returns 206 or 416 where appropriate, and stays on the Briefcase origin. Folder archives reject Range. Content is served with safe content disposition, no-store, nosniff, and a sandbox policy; provider URLs and storage credentials never reach clients. The web UI renders supported formats in its sandboxed preview pipeline and offers download for unsupported formats. Folder downloads stay compressed; opening an archive does not execute its contents.
 
+## Self-destructing files
+
+Add the multipart field `self_destruct_minutes` to `POST /uploads`, a whole number from 1 to 43,200 (one minute to 30 days), and the new file deletes itself for good that long after the upload finishes. Use it for scratch output, handoffs and anything that must not outlive a task. Nothing warns before the deletion.
+
+- **New files only.** The timer can only be chosen when the upload creates a file. Naming an existing file, which would publish a new version, is refused with 409 `self_destruct_requires_new_file` before any bytes are stored. There is no way to add a timer to an existing file, and a later version never starts, moves or clears one.
+- **Validation.** A value outside 1–43,200 or not a whole number is 422 `invalid_self_destruct_minutes`. Retrying an `Idempotency-Key` with a different lifetime is a different request and conflicts like any changed retry.
+- **Reported on the entry.** `Entry` responses carry `self_destruct_at`, the RFC 3339 deletion time, or `null` for permanent files and all folders.
+- **Permanent deletion, no bin.** When the time comes, the worker deletes the file within about one poll interval (default 500 ms). It never enters the bin and cannot be restored. Its storage is released when object cleanup purges it on the worker's maintenance cycle (default every 60 s).
+- **Deleting by hand is also permanent.** `DELETE /entries/{entry_id}` on a self-destructing file removes it for good. Deleting a folder still moves the folder and its ordinary files to the 45-day bin, but the self-destructing files inside are deleted permanently, and restoring the folder does not bring them back. The folder's `entry.subtree_deleted.v1` log metadata counts them in `self_destructing_files_deleted_permanently`.
+- **Keep the file.** `DELETE /entries/{entry_id}/self-destruct` (`makeEntryPermanent`) stops the timer and returns 204. Only the file's creator and organization admins and owners may: anyone else who can see the file gets 403, and a caller who cannot see it gets 404. A file whose timer is not running, because it is already permanent or already gone, returns 409 `not_self_destructing`.
+
+`is:self-destruct` lists the files whose timer is running. The log actions are listed in [Sharing and audit logs](../sharing.md#logs-and-versions). The OBO file-create and delegated-upload endpoints cannot set a timer yet: an app cannot create a self-destructing file.
+
 ## Invitations, links and logs
 
-See [Sharing and audit logs](../sharing.md) for complete behavior, Postmark setup, email-directory limitations and examples.
+See [Sharing and audit logs](../sharing.md) for complete behavior, Postmark setup, email-directory limitations and examples. Any share can be a read-only [expiring share](../sharing.md#expiring-shares) that ends after `expires_in_minutes`.
 
 - `GET/POST /entries/{id}/invitations`: member ID, verified email or dynamic IAM tag.
 - `DELETE /entries/{id}/invitations/{grant_id}`: revoke a grant.
-- `GET/PUT /entries/{id}/link-access`: inspect or set anonymous read/download access.
+- `PATCH /entries/{id}/invitations/{grant_id}`: extend, shorten, or make permanent a live expiring share.
+- `GET/PUT /entries/{id}/link-access`: inspect or set anonymous read/download access, permanently or as an expiring link.
 - `GET /public/{org}/{path}`: anonymous metadata, folder listing, inline file, or download.
 - `GET /entries/{id}/logs`: preceding 365 days, paginated, including descendant folder changes.
 - `GET /entries/{id}/activity`: latest 100 events.
@@ -117,7 +133,7 @@ The notification inbox returns the latest 20 notifications and an unread count. 
 
 `GET /entries/{id}/versions` returns up to 100 immutable versions and `next_cursor`. Every version reports its monotonic number, SHA-256, byte length, creator, timestamp and source. `POST /entries/{id}/versions/{version_id}/restore` copies that content into a new current version. It requires update authority, an idempotency key and quota capacity.
 
-`GET /bin` is paginated. Files and folders remain recoverable for **45 days**. `POST /bin/{id}/restore` restores a deletion-batch root and its retained subtree atomically, rechecking current authority and destination constraints. The worker deletes provider objects only after the recovery window and durable cleanup checks; old active versions are never pruned by count.
+`GET /bin` is paginated. Files and folders remain recoverable for **45 days**. [Self-destructing files](#self-destructing-files) never enter the bin. `POST /bin/{id}/restore` restores a deletion-batch root and its retained subtree atomically, rechecking current authority and destination constraints. The worker deletes provider objects only after the recovery window and durable cleanup checks; old active versions are never pruned by count.
 
 Default per-organization limits are **100 GiB uploaded per UTC day** and **1 PiB total storage**. They are configurable per organization in PostgreSQL. `GET /usage` reports actual consumed and allowed bytes, including retained versions. Reservations and concurrent uploads count toward quota before publication. The daily window resets at midnight UTC.
 

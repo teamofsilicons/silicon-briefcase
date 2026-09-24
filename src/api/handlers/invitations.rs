@@ -6,6 +6,7 @@ use super::super::{
     mapping::{ResponseMapper, metadata_error},
     state::AppState,
 };
+use crate::domain::lifetime::LifetimeMinutes;
 use crate::{
     application::{context::ExecutionContext, service::GrantPermissionCommand},
     domain::{
@@ -22,7 +23,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use uuid::Uuid;
+
+fn rfc3339(instant: OffsetDateTime) -> String {
+    instant
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +48,9 @@ pub(crate) struct InvitationRequest {
     pub access: Vec<AccessRight>,
     #[serde(default = "inherit")]
     pub inherit: bool,
+    /// Makes this a read-only expiring share that ends after 1 to 43,200 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_minutes: Option<LifetimeMinutes>,
 }
 fn read_only() -> Vec<AccessRight> {
     vec![AccessRight::Read]
@@ -81,6 +92,11 @@ pub(super) async fn perform(
     if body.access.contains(&AccessRight::Delete) {
         return Err(AppError::validation("delete_cannot_be_shared"));
     }
+    if body.expires_in_minutes.is_some()
+        && body.access.iter().any(|right| *right != AccessRight::Read)
+    {
+        return Err(AppError::validation("expiring_share_is_read_only"));
+    }
     let entry_id = extract::entry_id(id)?;
     let access = GrantedAccess::new(body.access);
     let repo = state.content_adapter.metadata_repository();
@@ -104,18 +120,19 @@ pub(super) async fn perform(
                 .ok_or(AppError::NotFound)?;
             context = context.with_directory_members(members);
         }
-        let grant_id = repo
+        let (grant_id, expires_at) = repo
             .invite_tag(
                 &context,
                 entry_id,
                 &body.principal.id,
                 access,
                 body.inherit,
+                body.expires_in_minutes,
                 metadata,
             )
             .await?;
         return Ok(
-            json!({"id":grant_id,"principal":body.principal,"access":access.rights().collect::<Vec<_>>(),"inherit":body.inherit}),
+            json!({"id":grant_id,"principal":body.principal,"access":access.rights().collect::<Vec<_>>(),"inherit":body.inherit,"expires_at":expires_at.map(rfc3339)}),
         );
     }
     let principal = match body.principal.kind.as_str() {
@@ -149,6 +166,7 @@ pub(super) async fn perform(
                 principal,
                 access,
                 inherits_to_descendants: body.inherit,
+                lifetime: body.expires_in_minutes,
             },
             metadata,
         )
@@ -212,6 +230,58 @@ pub(crate) async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Changes one live expiring share. Exactly one field: a new lifetime counted
+/// from now (extends or shortens it), or `permanent: true`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpiringShareChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_minutes: Option<LifetimeMinutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permanent: Option<bool>,
+}
+
+impl ExpiringShareChange {
+    /// The new lifetime, or `None` to make the share permanent.
+    pub(crate) fn lifetime(&self) -> Result<Option<LifetimeMinutes>, AppError> {
+        match (self.expires_in_minutes, self.permanent) {
+            (Some(lifetime), None) => Ok(Some(lifetime)),
+            (None, Some(true)) => Ok(None),
+            _ => Err(AppError::validation("expires_in_minutes_or_permanent")),
+        }
+    }
+}
+
+pub(crate) async fn change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, grant)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ExpiringShareChange>,
+) -> Result<Json<Value>, AppError> {
+    let lifetime = body.lifetime()?;
+    let context = extract::authenticate(
+        &state,
+        &headers,
+        IamAction::GrantPermission,
+        &id.to_string(),
+    )
+    .await?;
+    let metadata = extract::mutation(
+        &headers,
+        "change_expiring_share",
+        &format!("{id}/{grant}"),
+        &body,
+        true,
+    )?;
+    Ok(Json(
+        state
+            .content_adapter
+            .metadata_repository()
+            .change_expiring_share(&context, extract::entry_id(id)?, grant, lifetime, &metadata)
+            .await?,
+    ))
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DelegatedInvite {
@@ -259,6 +329,8 @@ struct DelegatedLink {
     operation_id: Uuid,
     entry_id: Uuid,
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_in_minutes: Option<LifetimeMinutes>,
 }
 pub(crate) async fn delegated_link(
     State(state): State<AppState>,
@@ -286,6 +358,7 @@ pub(crate) async fn delegated_link(
             &context,
             extract::entry_id(body.entry_id)?,
             body.enabled,
+            body.expires_in_minutes,
             &metadata,
         )
         .await?;

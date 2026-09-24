@@ -731,6 +731,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 principal: member.authorization().actor().clone(),
                 access: GrantedAccess::new([AccessRight::Update]),
                 inherits_to_descendants: true,
+                lifetime: None,
             },
             &MutationMetadata::new(
                 Some(IdempotencyKey::new("metadata-operation-3".to_owned())?),

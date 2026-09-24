@@ -19,9 +19,10 @@ use crate::{
             UploadCommand,
         },
         context::ExecutionContext,
-        idempotency::upload_fingerprint,
+        idempotency::{upload_fingerprint, with_self_destruct},
         service::{ListVersionsQuery, PageRequest},
     },
+    domain::lifetime::LifetimeMinutes,
     domain::{
         entry::{EntryName, EntryPath},
         ids::EntryId,
@@ -132,13 +133,16 @@ pub(crate) async fn upload(
     .await?;
     let parent_id = destination_folder(&state, &context, &parts.destination).await?;
     let resource = parent_id.to_string();
-    let request_hash = upload_fingerprint(
-        "upload_file",
-        &resource,
-        parts.name.as_str(),
-        &parts.content_type,
-        parts.file.size(),
-        parts.file.sha256(),
+    let request_hash = with_self_destruct(
+        upload_fingerprint(
+            "upload_file",
+            &resource,
+            parts.name.as_str(),
+            &parts.content_type,
+            parts.file.size(),
+            parts.file.sha256(),
+        ),
+        parts.self_destruct.map(LifetimeMinutes::minutes),
     );
     let command = UploadCommand {
         parent_id,
@@ -146,6 +150,7 @@ pub(crate) async fn upload(
         content_type: parts.content_type,
         idempotency_key,
         request_hash,
+        self_destruct: parts.self_destruct,
     };
     let staged = StagedContent {
         path: parts.file.path(),
@@ -284,6 +289,7 @@ struct UploadParts {
     name: EntryName,
     content_type: String,
     file: StagedUpload,
+    self_destruct: Option<LifetimeMinutes>,
 }
 
 /// Resolves the destination folder, whichever way the client addressed it.
@@ -312,6 +318,7 @@ async fn parse_upload(
 ) -> Result<UploadParts, AppError> {
     let mut destination = None;
     let mut file = None;
+    let mut self_destruct = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -366,6 +373,19 @@ async fn parse_upload(
                 .map_err(extract::map_staging_error)?;
                 file = Some((name, content_type, staged));
             }
+            "self_destruct_minutes" => {
+                if self_destruct.is_some() {
+                    return Err(AppError::bad_request("duplicate_self_destruct_minutes"));
+                }
+                let value = read_text_field(field, 16).await?;
+                let minutes = value
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|minutes| LifetimeMinutes::new(minutes).ok())
+                    .ok_or_else(|| AppError::validation("invalid_self_destruct_minutes"))?;
+                self_destruct = Some(minutes);
+            }
             _ => return Err(AppError::bad_request("unknown_multipart_field")),
         }
     }
@@ -377,6 +397,7 @@ async fn parse_upload(
         name,
         content_type,
         file,
+        self_destruct,
     })
 }
 

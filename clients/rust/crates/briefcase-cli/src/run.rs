@@ -6,9 +6,9 @@ use std::{
 };
 
 use briefcase_client::{
-    BucketConfiguration, Client, Config, Destination, Entry, EntryPage, EnvironmentKey,
-    IdempotencyKey, ListEntries, NewFolder, NewGrant, OnBehalfOfUpload, PermissionQuery, Upload,
-    guess_content_type,
+    AccessRight, BucketConfiguration, Client, Config, Destination, Entry, EntryPage,
+    EnvironmentKey, ExpiryChange, IdempotencyKey, ListEntries, NewFolder, NewGrant,
+    OnBehalfOfUpload, PermissionQuery, Upload, guess_content_type,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -17,11 +17,12 @@ use uuid::Uuid;
 
 use crate::{
     cli::{
-        AppCommand, BinCommand, Cli, Command, ConfigCommand, EnvCommand, FindArgs, GetArgs,
-        GlobalArgs, LoginArgs, LsArgs, MkdirArgs, MvArgs, PutArgs, RestoreArgs, RmArgs, SearchArgs,
-        ShareArgs, StorageCommand, SystemCommand, Target, TargetArgs, UnshareArgs,
+        AppCommand, BinCommand, Cli, Command, ConfigCommand, EnvCommand, ExpiryArgs, FindArgs,
+        GetArgs, GlobalArgs, KeepArgs, Lifetime, LoginArgs, LsArgs, MkdirArgs, MvArgs, PutArgs,
+        RestoreArgs, RmArgs, SearchArgs, ShareArgs, StorageCommand, SystemCommand, Target,
+        TargetArgs, UnshareArgs,
     },
-    render::{Output, human_size},
+    render::{Output, deadline, human_size},
     state::{CredentialScope, PendingMutation, Profile, StateDirectory, StoredSession},
 };
 
@@ -37,6 +38,15 @@ pub enum CliError {
     /// Briefcase refused, or could not be reached.
     #[error(transparent)]
     Client(#[from] briefcase_client::Error),
+    /// Briefcase refused, and the CLI knows what that refusal means here.
+    #[error("{source}; {hint}")]
+    Explained {
+        /// The refusal itself, which still decides the exit code.
+        #[source]
+        source: Box<briefcase_client::Error>,
+        /// What it means for this command, and what to do instead.
+        hint: String,
+    },
     /// Checking or installing a crates.io release failed.
     #[error(transparent)]
     Update(#[from] briefcase_client::update::UpdateError),
@@ -71,14 +81,40 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Usage(_) => 2,
-            Self::Client(error) if error.is_not_found() => 3,
-            Self::Client(error) if error.is_forbidden() || error.is_unauthenticated() => 4,
-            _ => 1,
+            _ => match self.refusal() {
+                Some(error) if error.is_not_found() => 3,
+                Some(error) if error.is_forbidden() || error.is_unauthenticated() => 4,
+                _ => 1,
+            },
+        }
+    }
+
+    /// Returns Briefcase's own answer, when the failure is one.
+    fn refusal(&self) -> Option<&briefcase_client::Error> {
+        match self {
+            Self::Client(error) => Some(error),
+            Self::Explained { source, .. } => Some(source),
+            _ => None,
         }
     }
 
     fn usage(message: impl Into<String>) -> Self {
         Self::Usage(message.into())
+    }
+
+    /// Attaches what a refusal means for this command, when `hint` knows,
+    /// keeping the exit code the refusal itself deserves.
+    fn explained(
+        error: briefcase_client::Error,
+        hint: impl FnOnce(&briefcase_client::Error) -> Option<String>,
+    ) -> Self {
+        match hint(&error) {
+            Some(hint) => Self::Explained {
+                source: Box::new(error),
+                hint,
+            },
+            None => Self::Client(error),
+        }
     }
 }
 
@@ -151,6 +187,7 @@ pub async fn run(mut cli: Cli, testing: &mut Option<String>) -> Result<()> {
         Command::Cat(args) => cat(&cli.global, &args, output).await,
         Command::Mv(args) => move_entry(&cli.global, &args, output).await,
         Command::Rm(args) => remove(&cli.global, &args, output).await,
+        Command::Keep(args) => keep(&cli.global, &args, output).await,
         Command::Bin(command) => bin(&cli.global, &command, output).await,
         Command::Versions { target, cursor } => {
             versions(&cli.global, &target, cursor.as_deref(), output).await
@@ -163,9 +200,14 @@ pub async fn run(mut cli: Cli, testing: &mut Option<String>) -> Result<()> {
             output.json(&client.logs(id, cursor.as_deref()).await?);
             Ok(())
         }
-        Command::Link { target, enabled } => link(&cli.global, &target, enabled, output).await,
+        Command::Link {
+            target,
+            enabled,
+            expires_after,
+        } => link(&cli.global, &target, enabled, expires_after, output).await,
         Command::Share(args) => share(&cli.global, &args, output).await,
         Command::Unshare(args) => unshare(&cli.global, &args, output).await,
+        Command::Expiry(args) => change_expiring_share(&cli.global, &args, output).await,
         Command::Shares { target, cursor } => {
             shares(&cli.global, &target, cursor.as_deref(), output).await
         }
@@ -1316,6 +1358,9 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
         if let Some(name) = &args.name {
             upload = upload.named(name.clone());
         }
+        if let Some(Lifetime(minutes)) = args.self_destruct {
+            upload = upload.self_destructing(minutes);
+        }
         let content_type = args
             .content_type
             .clone()
@@ -1334,7 +1379,7 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
             "entry:put:{}:{address}",
             plane_scope(&resolved.profile_name, resolved.environment_id)
         );
-        let fingerprint = request_fingerprint(&serde_json::json!({
+        let mut intent = serde_json::json!({
             "operation": "upload-file",
             "profile": &resolved.profile_name,
             "url": &resolved.url,
@@ -1345,7 +1390,13 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
             "file_name": &upload.file_name,
             "content_type": &upload.content_type,
             "content_sha256": content_sha256,
-        }))?;
+        });
+        // Only present when asked for, so a pending ordinary upload recorded by
+        // an earlier release still replays under the same identity.
+        if let Some(minutes) = upload.self_destruct_minutes {
+            intent["self_destruct_minutes"] = minutes.into();
+        }
+        let fingerprint = request_fingerprint(&intent)?;
         let recovered = durable_pending(&scope, &fingerprint)?;
         let destination_id =
             stable_upload_destination_id(&client, &upload, recovered.as_ref()).await?;
@@ -1355,14 +1406,29 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
                 CliError::usage("the pending upload has no destination identifier")
             })?);
         upload.idempotency_key = Some(IdempotencyKey::new(pending.idempotency_key.clone())?);
-        let entry = client.upload(&upload).await?;
+        let entry = client.upload(&upload).await.map_err(|error| {
+            CliError::explained(error, |error| {
+                (error.code() == Some("self_destruct_requires_new_file")).then(|| {
+                    format!(
+                        "--self-destruct applies only to a new file, and `{}` already exists in that folder; upload under another name with --name, or drop --self-destruct to publish a new version of the existing file",
+                        upload.file_name
+                    )
+                })
+            })
+        })?;
         finish_durable_mutation(&scope, &pending)?;
         if !output.is_json() {
             println!(
-                "{} → {} ({})",
+                "{} → {} ({}){}",
                 source.display(),
                 entry.path,
-                entry.size.map_or_else(|| "-".to_owned(), human_size)
+                entry.size.map_or_else(|| "-".to_owned(), human_size),
+                entry
+                    .self_destruct_at
+                    .map_or_else(String::new, |moment| format!(
+                        ", self-destructs {}",
+                        deadline(moment, time::OffsetDateTime::now_utc())
+                    ))
             );
         }
         stored.push(entry);
@@ -1486,10 +1552,53 @@ async fn remove(global: &GlobalArgs, args: &RmArgs, output: Output) -> Result<()
     for target in &args.targets {
         let entry = resolve_entry(&client, target).await?;
         client.delete_entry(entry.id).await?;
+        if entry.self_destruct_at.is_some() {
+            output.note(&format!(
+                "{} deleted permanently; a self-destructing file never enters the bin ({})",
+                entry.path, entry.id
+            ));
+        } else {
+            output.note(&format!(
+                "{} moved to the bin, recoverable for 45 days ({})",
+                entry.path, entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn keep(global: &GlobalArgs, args: &KeepArgs, output: Output) -> Result<()> {
+    let client = connect(global).await?;
+    let mut kept = Vec::with_capacity(args.targets.len());
+    for target in &args.targets {
+        let entry = resolve_entry(&client, target).await?;
+        // A lost response needs no stored retry identity: stopping a stopped
+        // timer is refused as `not_self_destructing`, never applied twice.
+        client.make_permanent(entry.id).await.map_err(|error| {
+            CliError::explained(error, |error| {
+                if error.is_forbidden() {
+                    Some(format!(
+                        "only the creator of {} and organization admins and owners can keep a self-destructing file",
+                        entry.path
+                    ))
+                } else if error.code() == Some("not_self_destructing") {
+                    Some(format!(
+                        "{} has no running self-destruct timer: it is already permanent, or it was never set to self-destruct",
+                        entry.path
+                    ))
+                } else {
+                    None
+                }
+            })
+        })?;
         output.note(&format!(
-            "{} moved to the bin, recoverable for 45 days ({})",
+            "{} kept; it will no longer self-destruct ({})",
             entry.path, entry.id
         ));
+        kept.push(serde_json::json!({"entry_id": entry.id, "path": entry.path}));
+    }
+    if output.is_json() {
+        output.json(&kept);
     }
     Ok(())
 }
@@ -1637,11 +1746,24 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
         "tag" => briefcase_client::Recipient::Tag(value.into()),
         _ => return Err(CliError::usage("Unknown recipient type")),
     };
-    if args
-        .access
-        .0
-        .contains(&briefcase_client::AccessRight::Delete)
+    if args.expires_after.is_some()
+        && args
+            .access
+            .0
+            .iter()
+            .any(|right| *right != AccessRight::Read)
     {
+        return Err(CliError::usage(format!(
+            "an expiring share is read-only, but --access asked for {}; omit --access (read is the default) or pass --access read",
+            args.access
+                .0
+                .iter()
+                .map(|right| right.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        )));
+    }
+    if args.access.0.contains(&AccessRight::Delete) {
         return Err(CliError::usage(
             "Delete is reserved for creators and organization administrators",
         ));
@@ -1650,6 +1772,7 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
         principal,
         access: args.access.0.clone(),
         inherit: args.inherit,
+        expires_in_minutes: args.expires_after.map(|Lifetime(minutes)| minutes),
     };
     let (client, scope, pending, id) =
         sharing_mutation(global, &args.target, "invite", &grant).await?;
@@ -1661,7 +1784,7 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
         )
         .await?;
     finish_durable_mutation(&scope, &pending)?;
-    output.json(&invitation);
+    output.invitation(&invitation);
     Ok(())
 }
 
@@ -1680,13 +1803,97 @@ async fn unshare(global: &GlobalArgs, args: &UnshareArgs, output: Output) -> Res
     Ok(())
 }
 
+async fn change_expiring_share(
+    global: &GlobalArgs,
+    args: &ExpiryArgs,
+    output: Output,
+) -> Result<()> {
+    let change = match (args.expires_in, args.permanent) {
+        (Some(Lifetime(minutes)), false) => ExpiryChange::ExpireIn(minutes),
+        (None, true) => ExpiryChange::Permanent,
+        _ => {
+            return Err(CliError::usage(
+                "pass exactly one of --expires-in <DURATION> or --permanent",
+            ));
+        }
+    };
+    let (client, scope, pending, id) = sharing_mutation(
+        global,
+        &args.target,
+        "change-expiring-share",
+        &serde_json::json!({"grant_id": args.grant_id, "change": change}),
+    )
+    .await?;
+    let invitation = client
+        .change_expiring_share(
+            id,
+            args.grant_id,
+            change,
+            &IdempotencyKey::new(pending.idempotency_key.clone())?,
+        )
+        .await
+        .map_err(|error| {
+            CliError::explained(error, |error| {
+                if error.is_not_found() {
+                    Some(format!(
+                        "grant {} is not a live share on {}: an expiring share that has ended is gone for good. List live grants with `briefcase shares {}`, or share again with `briefcase share {} <recipient> --expires-after <DURATION>`",
+                        args.grant_id, args.target, args.target, args.target
+                    ))
+                } else if error.code() == Some("not_an_expiring_share") {
+                    Some(format!(
+                        "grant {} is permanent, so it has no timer to change; revoke it with `briefcase unshare {} {}`",
+                        args.grant_id, args.target, args.grant_id
+                    ))
+                } else {
+                    None
+                }
+            })
+        })?;
+    finish_durable_mutation(&scope, &pending)?;
+    output.invitation(&invitation);
+    if invitation.expires_at.is_none() {
+        output.aside(&format!(
+            "share {} is now permanent read access",
+            invitation.id
+        ));
+    }
+    Ok(())
+}
+
 async fn link(
     global: &GlobalArgs,
     target: &Target,
     enabled: Option<bool>,
+    expires_after: Option<Lifetime>,
     output: Output,
 ) -> Result<()> {
-    let value = if let Some(enabled) = enabled {
+    let value = if let Some(Lifetime(minutes)) = expires_after {
+        let (client, scope, pending, id) = sharing_mutation(
+            global,
+            target,
+            "link-access",
+            &serde_json::json!({"enabled": true, "expires_in_minutes": minutes}),
+        )
+        .await?;
+        let value = client
+            .set_expiring_link_access(
+                id,
+                minutes,
+                &IdempotencyKey::new(pending.idempotency_key.clone())?,
+            )
+            .await
+            .map_err(|error| {
+                CliError::explained(error, |error| {
+                    (error.code() == Some("link_already_permanent")).then(|| {
+                        format!(
+                            "{target} already has a permanent link; turn it off with `briefcase link {target} --enabled false`, then run --expires-after again"
+                        )
+                    })
+                })
+            })?;
+        finish_durable_mutation(&scope, &pending)?;
+        value
+    } else if let Some(enabled) = enabled {
         let (client, scope, pending, id) =
             sharing_mutation(global, target, "link-access", &enabled).await?;
         let value = client
@@ -1702,7 +1909,7 @@ async fn link(
         let client = connect(global).await?;
         client.link_access(entry_id(&client, target).await?).await?
     };
-    output.json(&value);
+    output.link(&value);
     Ok(())
 }
 
@@ -1738,7 +1945,7 @@ async fn shares(
     let client = connect(global).await?;
     let id = entry_id(&client, target).await?;
     let grants = client.invitations(id, cursor).await?;
-    output.json(&grants);
+    output.invitations(&grants);
     Ok(())
 }
 
@@ -2129,6 +2336,35 @@ mod tests {
             CliError::Client(briefcase_client::Error::Configuration("x".into())).exit_code(),
             1
         );
+    }
+
+    #[test]
+    fn an_explained_refusal_keeps_the_exit_code_of_the_refusal() {
+        let refusal = |status: u16| {
+            briefcase_client::Error::Api(briefcase_client::ApiError {
+                status,
+                code: "forbidden".to_owned(),
+                message: "Not allowed".to_owned(),
+                request_id: None,
+                retry_after: None,
+                unsatisfied_range_length: None,
+            })
+        };
+        let explained = CliError::explained(refusal(403), |_| Some("ask the creator".to_owned()));
+        assert_eq!(explained.exit_code(), 4);
+        assert_eq!(
+            explained.to_string(),
+            "Not allowed (forbidden); ask the creator"
+        );
+        assert_eq!(
+            CliError::explained(refusal(404), |_| Some("gone".to_owned())).exit_code(),
+            3
+        );
+        // Without a hint the refusal is reported exactly as before.
+        assert!(matches!(
+            CliError::explained(refusal(409), |_| None),
+            CliError::Client(_)
+        ));
     }
 
     #[test]

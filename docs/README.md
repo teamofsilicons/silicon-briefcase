@@ -1,6 +1,6 @@
 # Silicon Briefcase
 
-Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **2.0.0** source release.
+Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **2.0.0** source release and OpenAPI contract **2.1.0**.
 
 ## Install and use
 
@@ -28,8 +28,8 @@ For local CLI development, use `cargo install --path clients/rust/crates/briefca
 | [CLI](cli/README.md) | Manage files and testing environments from a terminal |
 | [Rust client](client/README.md) | Integrate the official typed, streaming client |
 | [HTTP API](api/README.md) and [operation reference](api/reference.md) | Authenticate, use endpoints, and understand errors |
-| [Operation inventory](api/operations.md) | All 59 operation IDs, methods, paths and revisions |
-| [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, mail and audit history |
+| [Operation inventory](api/operations.md) | All 62 operation IDs, methods, paths and revisions |
+| [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, expiring shares, mail and audit history |
 | [OBO applications](obo.md) | Act inside an app namespace with current user permissions |
 | [Delegated uploads](api/delegated-uploads.md) | Reserve, transfer, publish and recover staged uploads |
 | [Testing environments](testing-environments.md) | Manage in Honeycomb and enter with the IAM app secret |
@@ -49,6 +49,6 @@ For local CLI development, use `cargo install --path clients/rust/crates/briefca
 
 IAM owns login, membership, roles and tags. An organization contains public, private, tag, and app folders. File names and paths stay readable; authorization decides what each actor can discover. Public within an organization and anyone-with-link access are distinct settings.
 
-Upload any file type. Reuploading a name publishes the next immutable version on the same file ID. Download folders as streamed tar.zst, restore files from the 45-day bin, and inspect the preceding year of logs. The default limits are 100 GB per UTC day and 1 PB storage per organization; testing planes are limited to 2 GiB and ten active environments.
+Upload any file type. Reuploading a name publishes the next immutable version on the same file ID. Download folders as streamed tar.zst, restore files from the 45-day bin, and inspect the preceding year of logs. Any share can be a read-only expiring share that ends by itself after 1 minute to 30 days, and an upload can make a new file self-destruct: deleted for good, never binned, after the time you choose. The default limits are 100 GB per UTC day and 1 PB storage per organization; testing planes are limited to 2 GiB and ten active environments.
 
 The [OpenAPI document](../openapi.yaml) is the wire reference. [UNDERSTANDING.md](../UNDERSTANDING.md) is the human-maintained product specification. Development 0.x contracts are unsupported by this release.

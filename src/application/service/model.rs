@@ -150,6 +150,9 @@ pub struct EntryView {
     pub updated_at: OffsetDateTime,
     /// Recoverable deletion time.
     pub deleted_at: Option<OffsetDateTime>,
+    /// When this self-destructing file is permanently deleted; `None` for a
+    /// permanent file or any folder.
+    pub self_destruct_at: Option<OffsetDateTime>,
 }
 
 /// Whether a resolved grant is direct or inherited from an ancestor.
@@ -460,6 +463,9 @@ pub struct GrantPermissionCommand {
     pub access: GrantedAccess,
     /// Whether access flows to descendants.
     pub inherits_to_descendants: bool,
+    /// Makes this an expiring share that ends after the lifetime. An expiring share is
+    /// its own read-only grant beside any permanent one.
+    pub lifetime: Option<crate::domain::lifetime::LifetimeMinutes>,
 }
 
 /// Command to revoke one explicit grant.

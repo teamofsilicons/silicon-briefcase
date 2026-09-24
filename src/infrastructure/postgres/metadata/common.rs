@@ -547,6 +547,7 @@ async fn load_relevant_grants(
         revoked_by_type: Option<String>,
         revoked_by_id: Option<String>,
         created_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
         depth: i32,
     }
 
@@ -555,7 +556,8 @@ async fn load_relevant_grants(
         "SELECT access_grant.org_id, access_grant.entry_id, access_grant.grant_id, access_grant.principal_type, \
                 access_grant.principal_id, access_grant.access_mask, access_grant.inherits_to_descendants, \
                 access_grant.granted_by_type, access_grant.granted_by_id, access_grant.revoked_at, \
-                access_grant.revoked_by_type, access_grant.revoked_by_id, access_grant.created_at, path.depth \
+                access_grant.revoked_by_type, access_grant.revoked_by_id, access_grant.created_at, \
+                access_grant.expires_at, path.depth \
            FROM briefcase.entry_closure AS path \
            JOIN briefcase.effective_permission_grants AS access_grant \
              ON access_grant.org_id = path.org_id AND access_grant.entry_id = path.ancestor_id \
@@ -589,6 +591,7 @@ async fn load_relevant_grants(
                 revoked_by_type: row.revoked_by_type,
                 revoked_by_id: row.revoked_by_id,
                 created_at: row.created_at,
+                expires_at: row.expires_at,
             };
             Ok(ResolvedPermissionGrant {
                 grant: permission_grant(&grant_row, execution)?,
@@ -709,6 +712,7 @@ pub(in crate::infrastructure::postgres) fn entry_view(
         created_at: row.created_at,
         updated_at: row.updated_at,
         deleted_at: row.deleted_at,
+        self_destruct_at: row.self_destruct_at,
     })
 }
 
@@ -726,7 +730,8 @@ pub(in crate::infrastructure::postgres) fn permission_grant(
         inheritance: PermissionInheritance::from_inherit_flag(row.inherits_to_descendants),
         granted_by: actor_ref(&row.granted_by_type, &row.granted_by_id)?,
         created_at: row.created_at,
-    }))
+    })
+    .with_expiry(row.expires_at))
 }
 
 /// Converts the database tenant key back to IAM's public organization ID.
@@ -1021,6 +1026,13 @@ pub(in crate::infrastructure::postgres) async fn record_change(
     .await
     .map_err(map_sql)?;
     Ok(())
+}
+
+/// Formats an instant for audit and event payloads.
+pub(in crate::infrastructure::postgres) fn rfc3339(instant: OffsetDateTime) -> String {
+    instant
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 pub(in crate::infrastructure::postgres) fn retention_deadline() -> OffsetDateTime {

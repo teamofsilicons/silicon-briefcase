@@ -157,11 +157,14 @@ impl Client {
             .mime_str(&content_type)
             .map_err(|error| Error::Configuration(format!("invalid content type: {error}")))?;
 
-        let form = match &upload.destination {
+        let mut form = match &upload.destination {
             Destination::Id(id) => Form::new().text("parent_id", id.to_string()),
             Destination::Path(path) => Form::new().text("path", path.clone()),
+        };
+        if let Some(minutes) = upload.self_destruct_minutes {
+            form = form.text("self_destruct_minutes", minutes.to_string());
         }
-        .part("file", part);
+        let form = form.part("file", part);
 
         let request = self
             .request(Method::POST, self.api_url(&["uploads"])?)

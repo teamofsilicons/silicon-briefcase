@@ -1670,3 +1670,418 @@ async fn early_invalidation_refresh_outage_keeps_the_original_family_and_receipt
             .all(|r| r.url.path() != "/api/v1/entries")
     );
 }
+
+const GRANT_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f830";
+
+fn signed_in(server: &MockServer) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    write_state(
+        home.path(),
+        server,
+        &json!({
+            "sessions": {"work": session("2099-01-01T00:00:00Z")},
+            "production_credential_scopes": {"work": scope(server, "tos")},
+        }),
+    );
+    home
+}
+
+fn refusal(status: u16, code: &str, message: &str) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_json(json!({
+        "error": {"code": code, "message": message, "request_id": null}
+    }))
+}
+
+fn arguments(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture exercises every expiring command against the same grant"
+)]
+async fn expiring_shares_and_links_send_whole_minutes_and_say_when_they_end() {
+    let server = authenticated_server().await;
+    let home = signed_in(&server);
+    let invitation = |expires_at: Value| {
+        json!({
+            "id": GRANT_ID,
+            "principal": {"type": "email", "id": "alex@example.com"},
+            "access": ["read"],
+            "inherit": false,
+            "expires_at": expires_at,
+        })
+    };
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/invitations")))
+        .and(body_json(json!({
+            "principal": {"type": "email", "id": "alex@example.com"},
+            "access": ["read"],
+            "inherit": false,
+            "expires_in_minutes": 120,
+        })))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(invitation(json!("2099-01-01T02:00:00Z"))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/link-access")))
+        .and(body_json(
+            json!({"enabled": true, "expires_in_minutes": 10_080}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "can_manage": true, "enabled": true, "effective": true, "inherited_from": null,
+            "url": "https://briefcase.example/org/tos/public/report.pdf",
+            "expires_at": "2099-01-08T00:00:00Z",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!(
+            "/api/v1/entries/{ENTRY_ID}/invitations/{GRANT_ID}"
+        )))
+        .and(body_json(json!({"expires_in_minutes": 4_320})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(invitation(json!("2099-01-04T00:00:00Z"))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!(
+            "/api/v1/entries/{ENTRY_ID}/invitations/{GRANT_ID}"
+        )))
+        .and(body_json(json!({"permanent": true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(invitation(Value::Null)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&[
+            "--no-verify",
+            "share",
+            ENTRY_ID,
+            "email:alex@example.com",
+            "--expires-after",
+            "2h",
+        ]),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Standard output stays the service's JSON; the reminder goes to stderr.
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["expires_at"], "2099-01-01T02:00:00Z");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "expiring share {GRANT_ID} for email:alex@example.com ends 2099-01-01 02:00 UTC (in "
+        )),
+        "{stderr}"
+    );
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&["--no-verify", "link", ENTRY_ID, "--expires-after", "7d"]),
+    )
+    .await;
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["expires_at"], "2099-01-08T00:00:00Z");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("expiring link ends 2099-01-08 00:00 UTC")
+    );
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&[
+            "--no-verify",
+            "--json",
+            "expiry",
+            ENTRY_ID,
+            GRANT_ID,
+            "--expires-in",
+            "3d",
+        ]),
+    )
+    .await;
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["expires_at"], "2099-01-04T00:00:00Z");
+    // JSON asked for, so nothing but the answer is printed anywhere.
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&["--no-verify", "expiry", ENTRY_ID, GRANT_ID, "--permanent"]),
+    )
+    .await;
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("now permanent"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expiring_refusals_explain_themselves_and_keep_their_exit_codes() {
+    let server = authenticated_server().await;
+    let home = signed_in(&server);
+
+    // Refused locally: nothing reaches the server.
+    let output = briefcase(
+        home.path(),
+        &arguments(&[
+            "--no-verify",
+            "share",
+            ENTRY_ID,
+            "c:cos",
+            "--access",
+            "read,write",
+            "--expires-after",
+            "1h",
+        ]),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("read-only") && stderr.contains("read,write"),
+        "{stderr}"
+    );
+    let output = briefcase(
+        home.path(),
+        &arguments(&["--no-verify", "link", ENTRY_ID, "--expires-after", "31d"]),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("43200 minutes"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+
+    Mock::given(method("PATCH"))
+        .and(path(format!(
+            "/api/v1/entries/{ENTRY_ID}/invitations/{GRANT_ID}"
+        )))
+        .respond_with(refusal(404, "not_found", "Not found"))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/link-access")))
+        .respond_with(refusal(
+            409,
+            "link_already_permanent",
+            "The link is already permanent",
+        ))
+        .mount(&server)
+        .await;
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&[
+            "--no-verify",
+            "expiry",
+            ENTRY_ID,
+            GRANT_ID,
+            "--expires-in",
+            "1h",
+        ]),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("(not_found"), "{stderr}");
+    assert!(stderr.contains("gone for good"), "{stderr}");
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&["--no-verify", "link", ENTRY_ID, "--expires-after", "1h"]),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--enabled false"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture follows a self-destructing file from upload to deletion"
+)]
+async fn self_destructing_files_upload_keep_and_delete_for_good() {
+    let server = authenticated_server().await;
+    let home = signed_in(&server);
+    let fresh = home.path().join("fresh.txt");
+    let existing = home.path().join("existing.txt");
+    std::fs::write(&fresh, b"gone soon").unwrap();
+    std::fs::write(&existing, b"gone soon").unwrap();
+    let mut self_destructing = entry_document();
+    self_destructing["self_destruct_at"] = json!("2099-01-01T01:30:00Z");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/uploads"))
+        .and(body_string_contains(
+            "name=\"self_destruct_minutes\"\r\n\r\n90\r\n",
+        ))
+        .and(body_string_contains("fresh.txt"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(self_destructing.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/uploads"))
+        .and(body_string_contains("existing.txt"))
+        .respond_with(refusal(
+            409,
+            "self_destruct_requires_new_file",
+            "Self destruct can only be set on a new file",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(self_destructing))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/self-destruct")))
+        .respond_with(ResponseTemplate::new(204))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/self-destruct")))
+        .respond_with(refusal(403, "forbidden", "Not allowed"))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = briefcase(
+        home.path(),
+        &[
+            "--no-verify".into(),
+            "put".into(),
+            fresh.display().to_string(),
+            DESTINATION_ID.into(),
+            "--self-destruct".into(),
+            "90m".into(),
+        ],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains(", self-destructs 2099-01-01 01:30 UTC (in ")
+    );
+
+    let output = briefcase(
+        home.path(),
+        &[
+            "--no-verify".into(),
+            "put".into(),
+            existing.display().to_string(),
+            DESTINATION_ID.into(),
+            "--self-destruct".into(),
+            "90".into(),
+        ],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("(self_destruct_requires_new_file") && stderr.contains("--name"),
+        "{stderr}"
+    );
+
+    let output = briefcase(
+        home.path(),
+        &arguments(&["--no-verify", "--json", "keep", ENTRY_ID]),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        json!([{"entry_id": ENTRY_ID, "path": entry_document()["path"]}])
+    );
+
+    let output = briefcase(home.path(), &arguments(&["--no-verify", "keep", ENTRY_ID])).await;
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only the creator"));
+
+    let output = briefcase(home.path(), &arguments(&["--no-verify", "rm", ENTRY_ID])).await;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("deleted permanently"), "{stdout}");
+    assert!(!stdout.contains("bin, recoverable"), "{stdout}");
+}
+
+#[test]
+fn help_documents_the_expiring_and_self_destruct_rules() {
+    let help = |args: &[&str]| {
+        let output = clean_cli().env_remove("HOME").args(args).output().unwrap();
+        assert!(output.status.success());
+        // Help wraps to the terminal; compare words, not line breaks.
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let share = help(&["share", "--help"]);
+    for rule in [
+        "--expires-after <DURATION>",
+        "read-only",
+        "its own grant",
+        "strict",
+        "Nobody is notified",
+        "30 days",
+    ] {
+        assert!(share.contains(rule), "share --help lacks {rule}");
+    }
+    let unshare = help(&["unshare", "--help"]);
+    assert!(unshare.contains("expiring share early") && unshare.contains("no notification"));
+    let expiring = help(&["expiry", "--help"]);
+    assert!(expiring.contains("--expires-in <DURATION>") && expiring.contains("--permanent"));
+    let link = help(&["link", "--help"]);
+    assert!(link.contains("--expires-after <DURATION>") && link.contains("link_already_permanent"));
+    let put = help(&["put", "--help"]);
+    for rule in [
+        "--self-destruct <DURATION>",
+        "new file",
+        "never",
+        "briefcase keep",
+    ] {
+        assert!(put.contains(rule), "put --help lacks {rule}");
+    }
+    let keep = help(&["keep", "--help"]);
+    assert!(keep.contains("creator") && keep.contains("admins and owners"));
+    let find = help(&["find", "--help"]);
+    assert!(find.contains("is:expiring") && find.contains("is:self-destruct"));
+    let rm = help(&["rm", "--help"]);
+    assert!(rm.contains("never enters the bin"));
+}

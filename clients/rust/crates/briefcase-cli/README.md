@@ -13,6 +13,8 @@ briefcase login <slt>
 briefcase ls private/si:cos/notes --long
 briefcase put ./report.pdf private/si:cos/notes
 briefcase share private/si:cos/notes/report.pdf c:cos --access read,update
+briefcase share private/si:cos/notes/report.pdf email:alex@example.com --expires-after 2h
+briefcase put ./scratch.md private/si:cos/notes --self-destruct 1d
 briefcase find "is:md location:'public'"
 briefcase usage
 ```
@@ -34,6 +36,13 @@ member's available organizations. Use `briefcase login <slt>` for a direct
 exchange, or omit the token to use the hidden prompt. Configure the state
 parent with `briefcase config home /path/to/existing-directory`; the path must
 already be a directory.
+
+`--expires-after <DURATION>` on `share` or `link` grants read-only access that ends
+strictly after 1 minute to 30 days (`90`, `90m`, `2h`, `7d`, `1d12h`); change a
+live expiring share with `briefcase expiry`, end it early with `briefcase unshare`.
+`put --self-destruct <DURATION>` makes a new file delete itself for good, never
+entering the bin; `briefcase keep` stops the timer. `briefcase docs cli` covers
+the rules.
 
 Paginated `ls`, `find`, and `bin list` commands return `items` plus the opaque
 `next_cursor` in JSON. Continue with `--cursor`, or use `--all` to follow every

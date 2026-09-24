@@ -1248,6 +1248,7 @@ async fn sandbox_entries_and_grants_use_the_public_organization() -> anyhow::Res
                     principal: peer_context.authorization().actor().clone(),
                     access: GrantedAccess::READ_ONLY,
                     inherits_to_descendants: false,
+                    lifetime: None,
                 },
                 &mutation(format!("grant-peer-{suffix}"), b"grant-peer")?,
                 Capability::ManagePermissions,

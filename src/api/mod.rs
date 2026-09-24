@@ -298,7 +298,7 @@ fn sharing_routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/entries/{entry_id}/invitations/{grant_id}",
-            delete(invitations::revoke),
+            delete(invitations::revoke).patch(invitations::change),
         )
         .route(
             "/api/v1/entries/{entry_id}/link-access",
@@ -392,6 +392,10 @@ fn ordinary_routes() -> Router<AppState> {
         .route(
             "/api/v1/entries/{entry_id}/versions",
             get(content::list_versions),
+        )
+        .route(
+            "/api/v1/entries/{entry_id}/self-destruct",
+            delete(entries::make_permanent),
         )
         .route("/api/v1/usage", get(usage::organization_usage))
         .route("/api/v1/bin", get(entries::list_bin))
@@ -501,7 +505,7 @@ pub(crate) mod tests {
         AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
     };
 
-    const CONTRACT: [(&str, &str, &str); 60] = [
+    const CONTRACT: [(&str, &str, &str); 62] = [
         ("/version", "get", "200"),
         ("/iam", "get", "200"),
         ("/auth/status", "get", "200"),
@@ -600,6 +604,8 @@ pub(crate) mod tests {
             "delete",
             "204",
         ),
+        ("/entries/{entry_id}/invitations/{grant_id}", "patch", "200"),
+        ("/entries/{entry_id}/self-destruct", "delete", "204"),
         ("/entries/{entry_id}/link-access", "get", "200"),
         ("/entries/{entry_id}/link-access", "put", "200"),
         ("/entries/{entry_id}/logs", "get", "200"),

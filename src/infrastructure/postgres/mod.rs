@@ -9,6 +9,7 @@ mod reports;
 mod repository;
 pub use reports::ReportReceipt;
 mod roots;
+mod self_destruct;
 pub(crate) mod sharing;
 mod webhook;
 
@@ -603,5 +604,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod lifetime_tests;
 #[cfg(test)]
 mod v1_tests;

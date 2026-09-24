@@ -43,7 +43,7 @@ const fn operation(
 }
 
 /// Every operation this client calls, with the revision it expects.
-pub const OPERATIONS: [OperationRevision; 60] = [
+pub const OPERATIONS: [OperationRevision; 62] = [
     operation(
         "reserveDelegatedUpload",
         "2.0.0",
@@ -272,6 +272,18 @@ pub const OPERATIONS: [OperationRevision; 60] = [
         "1.0.0",
         "DELETE",
         "/entries/{entry_id}/invitations/{grant_id}",
+    ),
+    operation(
+        "changeExpiringShare",
+        "1.0.0",
+        "PATCH",
+        "/entries/{entry_id}/invitations/{grant_id}",
+    ),
+    operation(
+        "makeEntryPermanent",
+        "1.0.0",
+        "DELETE",
+        "/entries/{entry_id}/self-destruct",
     ),
     operation(
         "readLinkAccess",

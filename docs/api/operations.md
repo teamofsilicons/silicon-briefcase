@@ -8,7 +8,7 @@
 > data-plane selection. The protected [participant contract](../honeycomb-integration.md)
 > is a separate service integration.
 
-Contract **2.0.0**, API route namespace **v1**. The 60 operations carry the revisions listed below. Identity-bearing IAM, session, testing, delegated, and log operations use revision **2.0.0** for bare application IDs and typed actor IDs. Unchanged operations retain their previous revisions. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
+Contract **2.1.0**, API route namespace **v1**. The 62 operations carry the revisions listed below. Identity-bearing IAM, session, testing, delegated, and log operations use revision **2.0.0** for bare application IDs and typed actor IDs. Contract 2.1.0 adds expiring shares and self-destructing files: two new operations, `changeExpiringShare` and `makeEntryPermanent`, at revision **1.0.0**. Every other change it makes is an additive optional request field (`expires_in_minutes`, `self_destruct_minutes`) or an additive response field (`expires_at`, `self_destruct_at`), so no existing revision changed and a 2.0.0 consumer's startup check still passes. Unchanged operations retain their previous revisions. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
 
 | Operation | Method and path | Revision |
 | --- | --- | --- |
@@ -65,6 +65,8 @@ Contract **2.0.0**, API route namespace **v1**. The 60 operations carry the revi
 | `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 |
 | `createInvitation` | `POST /entries/{entry_id}/invitations` | 1.0.0 |
 | `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 |
+| `changeExpiringShare` | `PATCH /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 |
+| `makeEntryPermanent` | `DELETE /entries/{entry_id}/self-destruct` | 1.0.0 |
 | `readLinkAccess` | `GET /entries/{entry_id}/link-access` | 1.1.0 |
 | `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.1.0 |
 | `listEntryLogs` | `GET /entries/{entry_id}/logs` | 2.0.0 |
