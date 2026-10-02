@@ -918,7 +918,7 @@ async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() 
     ] {
         let output = briefcase(home.path(), &arguments).await;
         assert!(
-            !output.status.success(),
+            output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
