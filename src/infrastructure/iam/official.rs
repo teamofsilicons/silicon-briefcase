@@ -423,12 +423,13 @@ impl IamClient {
             _ => return Err(IamClientError::Rejected),
         };
         let request = serde_json::json!({"access_token":proof.expose_secret(),"endpoint_id":endpoint_id,"request":{"method":binding.method,"path":binding.path}});
-        let mut response = self
+        let verified_response = self
             .scoped_client(environment)?
             .obo()
-            .verify_token(&request)
+            .verify(&self.convert(request)?)
             .await
             .map_err(|error| sdk_error(error, Operation::Obo))?;
+        let mut response: serde_json::Value = self.convert(verified_response)?;
         if response["active"] != true
             || response["endpoint"]["app_id"].as_str()
                 != Some(self.application_identity(environment).0.as_str())
