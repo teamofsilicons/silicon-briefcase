@@ -613,9 +613,8 @@ fn validate_obo(
         return Err(binding_mismatch("audience"));
     }
     let endpoint = required_wire(wire.endpoint, "endpoint")?;
-    // The proof commits to the registered path. Confirming it against the path
-    // Briefcase actually served keeps one endpoint's proof from being spent on
-    // another.
+    // IAM verifies the receiving endpoint. Match its registered route against
+    // the route Briefcase served, even when the token covers multiple endpoints.
     if endpoint.path != binding.path {
         return Err(binding_mismatch("endpoint.path"));
     }
@@ -633,8 +632,8 @@ fn validate_obo(
     if expected_organization.is_some_and(|expected| expected != &organization_id) {
         return Err(binding_mismatch("org_id"));
     }
-    // IAM consumes the proof as part of a successful verification, so it is
-    // authoritative on expiry; the timestamps are only checked for coherence.
+    // IAM verifies live token authority online; the local compatibility timestamp
+    // records this verification and must precede expiry.
     let expires_at = required_wire(wire.expires_at, "expires_at")?;
     let consumed_at = required_wire(wire.consumed_at, "consumed_at")?;
     if expires_at < consumed_at {
@@ -1740,6 +1739,9 @@ mod tests {
                     .set_body_json(json!({
                         "active": true,
                         "token_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "grant_id": "01990a9d-86f1-7000-8000-000000000005",
+                        "originating_app_id": "silicon-dm",
+                        "chain": [],
                         "issuer_app_id": "silicon-dm",
                         "audience": IAM_APP_ID,
                         "authorization": delegated_snapshot(IAM_APP_ID, false),
@@ -1867,6 +1869,9 @@ mod tests {
                     .set_body_json(json!({
                         "active": true,
                         "token_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "grant_id": "01990a9d-86f1-7000-8000-000000000005",
+                        "originating_app_id": "silicon-dm",
+                        "chain": [],
                         "issuer_app_id": "silicon-dm",
                         "audience": TEST_APP_ID,
                         "authorization": delegated_snapshot(TEST_APP_ID, true),

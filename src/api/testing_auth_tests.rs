@@ -204,7 +204,7 @@ impl Fixture {
             "self.membership.read",
             "self.tags.read"
         ]);
-        json!({"active":true,"token_id":Uuid::new_v4(),"issuer_app_id":ISSUER,"audience":APP,
+        json!({"active":true,"token_id":Uuid::new_v4(),"grant_id":Uuid::new_v4(),"originating_app_id":ISSUER,"chain":[],"issuer_app_id":ISSUER,"audience":APP,
             "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"c:test-carbon"},
             "org_id":self.org,"endpoint":{"app_id":APP,"endpoint_id":ENDPOINT,"path":handlers::delegated::CREATE_FOLDER_PATH},
             "metadata":{},"expires_at":"2099-01-01T00:00:00Z","consumed_at":"2026-09-14T00:00:00Z"})
