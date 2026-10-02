@@ -17,6 +17,11 @@ use crate::error::AppError;
 pub(crate) const CREATE_FILE_PATH: &str = "/api/v1/obo/files";
 
 /// Rejects the retired raw upload without polling its request body.
+#[allow(
+    clippy::unused_async,
+    clippy::unused_async_trait_impl,
+    reason = "Axum handlers must remain async while returning an immediate retirement response"
+)]
 pub(crate) async fn create_file(
     State(_state): State<AppState>,
     _headers: HeaderMap,
