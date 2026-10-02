@@ -352,8 +352,7 @@ async fn imported_world_bearer_rejects_wrong_org_world_audience_and_revoked_auth
 }
 
 #[tokio::test]
-async fn imported_world_delegated_folder_preserves_exact_request_and_tenant_binding()
--> anyhow::Result<()> {
+async fn imported_world_delegated_token_reuse_preserves_tenant_binding() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
         return Ok(());
     };
@@ -374,19 +373,20 @@ async fn imported_world_delegated_folder_preserves_exact_request_and_tenant_bind
     let folder = serde_json::to_value(folder.0)?;
     assert_eq!(folder["org_id"], f.org);
     assert_eq!(folder["name"], "Recordings");
-    // Changing bytes cannot reuse the verified request: fake IAM only accepts
-    // the exact digest, method, path and selected application credential above.
+    // IAM5 grants are reusable for the verified endpoint; each new operation
+    // still executes under the same selected application and tenant authority.
     let changed = Bytes::from(serde_json::to_vec(
         &json!({"operation_id":Uuid::new_v4(),"parent_path":"","name":"Elsewhere"}),
     )?);
-    assert!(
-        test_scope(
-            "changed-request".into(),
-            handlers::delegated::create_folder(State(f.state.clone()), f.headers(true)?, changed)
-        )
-        .await
-        .is_err()
-    );
+    let (status, second) = test_scope(
+        "changed-request".into(),
+        handlers::delegated::create_folder(State(f.state.clone()), f.headers(true)?, changed),
+    )
+    .await?;
+    assert_eq!(status, http::StatusCode::CREATED);
+    let second = serde_json::to_value(second.0)?;
+    assert_eq!(second["org_id"], f.org);
+    assert_eq!(second["name"], "Elsewhere");
     f.cleanup().await?;
     Ok(())
 }
@@ -426,7 +426,7 @@ async fn imported_world_delegation_rejects_unbound_scope_identity_org_and_world(
             "wrong_world" => {
                 proof["authorization"]["testing_environment_id"] = json!(Uuid::new_v4());
             }
-            "wrong_audience" => proof["audience"] = json!("another-app"),
+            "wrong_audience" => proof["endpoint"]["app_id"] = json!("another-app"),
             "wrong_actor" => proof["authorization"]["public_id"] = json!("another-carbon"),
             "no_role" => proof["authorization"]["org_role"] = Value::Null,
             "no_tags" => proof["authorization"]["tags"] = Value::Null,

@@ -450,8 +450,14 @@ impl IamClient {
         );
         // The actor is always disclosed by OBO; optional IAM self-profile scopes do
         // not change which represented account this endpoint is authorized for.
-        response["authorization"]["actor_type"] = response["actor"]["type"].clone();
-        response["authorization"]["public_id"] = response["actor"]["public_id"].clone();
+        // Preserve disclosed identity fields so canonical validation rejects any
+        // disagreement with the represented actor instead of silently replacing it.
+        if response["authorization"]["actor_type"].is_null() {
+            response["authorization"]["actor_type"] = response["actor"]["type"].clone();
+        }
+        if response["authorization"]["public_id"].is_null() {
+            response["authorization"]["public_id"] = response["actor"]["public_id"].clone();
+        }
         response
             .as_object_mut()
             .ok_or_else(|| invalid_response("obo.response"))?
