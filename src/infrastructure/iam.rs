@@ -804,7 +804,7 @@ mod tests {
     const TEST_ENVIRONMENT_KEY: &str = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
     const TEST_ENVIRONMENT_ID: &str = "01990a9d-86f1-7000-8000-000000000010";
     const BEARER_TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OBO_PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const OBO_PROOF: &str = "oba_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const SHORT_LIVED_TOKEN: &str = "oac_ccccccccccccccccccccccccccccccccccccccccccc";
     const REFRESH_TOKEN: &str = "ort_ddddddddddddddddddddddddddddddddddddddddddd";
 
@@ -1057,7 +1057,7 @@ mod tests {
     fn delegated_snapshot(audience: &str, testing: bool) -> serde_json::Value {
         let mut snapshot = authorization_snapshot(audience, testing);
         snapshot["scopes"] = json!([
-            format!("obo:{audience}:briefcase.files.create"),
+            format!("obo:{audience}:briefcase.files.read"),
             "self.identity.read",
             "self.membership.read",
             "self.tags.read"
@@ -1717,20 +1717,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obo_verification_sends_only_the_published_single_use_binding() {
+    async fn obo_verification_sends_the_registered_reusable_endpoint_binding() {
         let server = MockServer::start().await;
         let proof = SecretString::from(OBO_PROOF.to_owned());
         let digest = "a".repeat(64);
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .and(header("authorization", basic_authorization()))
             .and(header("silicon-iam-supported-api-versions", "v1"))
             .and(body_json(json!({
-                "access_proof": OBO_PROOF,
+                "access_token": OBO_PROOF,
+                "endpoint_id": "briefcase.files.read",
                 "request": {
                     "method": "POST",
-                    "path": "/api/v1/obo/files",
-                    "body_sha256": digest,
+                    "path": "/api/v1/obo/files/read",
                 }
             })))
             .respond_with(
@@ -1738,8 +1738,8 @@ mod tests {
                     .insert_header("cache-control", "no-store")
                     .insert_header("pragma", "no-cache")
                     .set_body_json(json!({
-                        "valid": true,
-                        "proof_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "active": true,
+                        "token_id": "01990a9d-86f1-7000-8000-000000000004",
                         "issuer_app_id": "silicon-dm",
                         "audience": IAM_APP_ID,
                         "authorization": delegated_snapshot(IAM_APP_ID, false),
@@ -1750,15 +1750,16 @@ mod tests {
                         },
                         "org_id": "tos",
                         "endpoint": {
-                            "endpoint_id": "briefcase.files.create",
-                            "path": "/api/v1/obo/files"
+                            "app_id": IAM_APP_ID,
+                            "endpoint_id": "briefcase.files.read",
+                            "path": "/api/v1/obo/files/read"
                         },
                         "metadata": { "path": "", "name": "report.pdf" },
                         "expires_at": "2099-01-01T00:00:00Z",
                         "consumed_at": "2026-08-31T12:00:00Z"
                     })),
             )
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
         let client = IamClient::new_without_handshake(&client_settings(&server))
@@ -1771,7 +1772,7 @@ mod tests {
                 Some(&organization()),
                 &OboRequestBinding {
                     method: "POST",
-                    path: "/api/v1/obo/files",
+                    path: "/api/v1/obo/files/read",
                     body_sha256: &digest,
                 },
                 None,
@@ -1780,8 +1781,23 @@ mod tests {
             .unwrap_or_else(|error| panic!("published OBO exchange should verify: {error}"));
 
         assert_eq!(verified.actor.id().as_str(), "c:carbon-a");
-        assert_eq!(verified.endpoint_id, "briefcase.files.create");
+        assert_eq!(verified.endpoint_id, "briefcase.files.read");
         assert_eq!(verified.issuer.as_str(), "silicon-dm");
+        let repeated = client
+            .verify_obo(
+                &proof,
+                &application(),
+                Some(&organization()),
+                &OboRequestBinding {
+                    method: "POST",
+                    path: "/api/v1/obo/files/read",
+                    body_sha256: &"c".repeat(64),
+                },
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("reusable OBO verification: {error}"));
+        assert_eq!(repeated.proof_id, verified.proof_id);
         server.verify().await;
     }
 
@@ -1790,7 +1806,7 @@ mod tests {
         for status in [403, 409, 410, 422, 401, 429, 500] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/api/v1/obo-access/verify"))
+                .and(path("/api/v1/obo-access/token-verifications"))
                 .respond_with(ResponseTemplate::new(status).set_body_json(json!({
                     "error": {"code": "rejected", "message": "Request rejected", "request_id": "fixture"}
                 })))
@@ -1806,7 +1822,7 @@ mod tests {
                     Some(&organization()),
                     &OboRequestBinding {
                         method: "POST",
-                        path: "/api/v1/obo/files",
+                        path: "/api/v1/obo/files/read",
                         body_sha256: &"a".repeat(64),
                     },
                     None,
@@ -1832,16 +1848,16 @@ mod tests {
         let server = MockServer::start().await;
         let digest = "a".repeat(64);
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .and(header("authorization", test_basic_authorization()))
             .and(header("x-testing-environment-key", TEST_ENVIRONMENT_KEY))
             .and(header("silicon-iam-supported-api-versions", "v1"))
             .and(body_json(json!({
-                "access_proof": OBO_PROOF,
+                "access_token": OBO_PROOF,
+                "endpoint_id": "briefcase.files.read",
                 "request": {
                     "method": "POST",
-                    "path": "/api/v1/obo/files",
-                    "body_sha256": digest,
+                    "path": "/api/v1/obo/files/read",
                 }
             })))
             .respond_with(
@@ -1849,8 +1865,8 @@ mod tests {
                     .insert_header("cache-control", "no-store")
                     .insert_header("pragma", "no-cache")
                     .set_body_json(json!({
-                        "valid": true,
-                        "proof_id": "01990a9d-86f1-7000-8000-000000000004",
+                        "active": true,
+                        "token_id": "01990a9d-86f1-7000-8000-000000000004",
                         "issuer_app_id": "silicon-dm",
                         "audience": TEST_APP_ID,
                         "authorization": delegated_snapshot(TEST_APP_ID, true),
@@ -1861,8 +1877,9 @@ mod tests {
                         },
                         "org_id": "tos",
                         "endpoint": {
-                            "endpoint_id": "briefcase.files.create",
-                            "path": "/api/v1/obo/files"
+                            "app_id": TEST_APP_ID,
+                            "endpoint_id": "briefcase.files.read",
+                            "path": "/api/v1/obo/files/read"
                         },
                         "metadata": { "path": "", "name": "report.pdf" },
                         "expires_at": "2099-01-01T00:00:00Z",
@@ -1882,7 +1899,7 @@ mod tests {
                 Some(&organization()),
                 &OboRequestBinding {
                     method: "POST",
-                    path: "/api/v1/obo/files",
+                    path: "/api/v1/obo/files/read",
                     body_sha256: &digest,
                 },
                 Some(&environment_credential()),

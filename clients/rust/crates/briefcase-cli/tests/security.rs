@@ -747,12 +747,18 @@ async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session
     .await;
 
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = server.received_requests().await.unwrap_or_default();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Raw OBO uploads are retired"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() == "/api/version")
+    );
     assert!(
         requests
             .iter()
@@ -912,7 +918,7 @@ async fn durable_path_mutations_replay_with_persisted_ids_and_no_path_lookups() 
     ] {
         let output = briefcase(home.path(), &arguments).await;
         assert!(
-            output.status.success(),
+            !output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

@@ -94,7 +94,7 @@ To end an expiring share early, revoke it like any other grant: `DELETE /entries
 | `enabled: false` | Any | Link ends now |
 | `enabled: false` + `expires_in_minutes` | Any | 422 `expiring_link_requires_enabled` |
 
-Apps can create both kinds of expiring share through the critical OBO endpoints; see [OBO](obo.md#critical-sharing-operations).
+Apps can create both kinds of expiring share through the critical OBO endpoints; see [OBO](obo.md#choose-an-operation).
 
 ## Invitation emails
 

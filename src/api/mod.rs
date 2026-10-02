@@ -457,7 +457,7 @@ fn sensitive_request_headers() -> [HeaderName; 7] {
     [
         header::AUTHORIZATION,
         header::COOKIE,
-        HeaderName::from_static("x-iam-obo-access-proof"),
+        HeaderName::from_static("x-iam-obo-access-token"),
         HeaderName::from_static("x-silicon-iam-signature"),
         HeaderName::from_static("idempotency-key"),
         HeaderName::from_static("x-briefcase-app-secret"),
@@ -563,7 +563,7 @@ pub(crate) mod tests {
         ("/entries/{entry_id}/download", "get", "200"),
         ("/org/{org_id}/{path}", "get", "200"),
         ("/uploads", "post", "201"),
-        ("/obo/files", "post", "201"),
+        ("/obo/files", "post", "410"),
         ("/obo/uploads/reserve", "post", "200"),
         ("/obo/uploads/commit", "post", "200"),
         ("/obo/uploads/status", "post", "200"),
@@ -673,7 +673,7 @@ pub(crate) mod tests {
 
         // The application endpoint likewise keeps the IAM proof and app ID
         // together, with the root key added only for its test-plane form.
-        let obo_security = document["paths"]["/obo/files"]["post"]["security"]
+        let obo_security = document["paths"]["/obo/uploads/reserve"]["post"]["security"]
             .as_sequence()
             .ok_or_else(|| anyhow::anyhow!("OBO security must be a sequence"))?;
         assert_eq!(obo_security.len(), 2);

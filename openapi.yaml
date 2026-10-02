@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 2.1.0
+  version: 3.0.0
   description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
     access.
 servers:
@@ -288,7 +288,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     delete:
       tags:
       - Testing environments
@@ -305,7 +305,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /organizations/{org_id}/testing-environments/{environment_id}/key:
     parameters:
     - $ref: '#/components/parameters/OrgId'
@@ -965,59 +965,21 @@ paths:
       tags:
       - Applications
       operationId: createFileOnBehalfOfMember
-      summary: Create a file for a member on behalf of another application
-      description: 'The compatible one-shot delegated file upload. The request body is the raw file bytes, and everything
-        else — the destination folder path, the file name, and the media type — travels as metadata bound into the
-        IAM OBO proof, so an application cannot redirect a proof it legitimately obtained to another destination.
-
-
-        Register the endpoint in IAM as `briefcase.files.create` at the path `/api/v1/obo/files` with metadata keys
-        `path` (empty selects the application''s own folder under `apps/{app_id}/private/{actor}`), `name`, and
-        `content_type`. Exchange the proof over the SHA-256 digest of the exact bytes, then send those bytes here.
-        Verification consumes the proof exactly once and is never retried.
-
-
-        The represented member''s own permissions still apply: the file is only created where that member may add
-        content, and a name that an active file already carries publishes that file''s next version. Any supported
-        size is accepted; Briefcase picks the storage route internally, and the organization''s daily and total
-        upload allowances apply as usual.'
-      security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - name: X-Org-ID
-        in: header
-        required: false
-        schema:
-          type: string
-        description: Optional; IAM derives the tenant and the header must agree with it
-      requestBody:
-        required: true
-        content:
-          application/octet-stream:
-            schema:
-              type: string
-              format: binary
+      deprecated: true
+      summary: Retired raw delegated upload
+      description: Returns HTTP 410 without reading upload bytes. Use the delegated reserve, capability transfer,
+        and commit operations with a reusable IAM OBO access token.
+      security: []
       responses:
-        '201':
-          description: File created, or a new version published, for the represented member
+        '410':
+          description: Raw OBO uploads are retired; use reserve, transfer, and commit
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Entry'
-        '413':
-          description: The file exceeds the 5 TiB maximum
-        '429':
-          description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it
-            resets at 00:00 UTC
-        '507':
-          description: The organization has no storage capacity left
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/uploads/reserve:
     post:
       tags:
@@ -1025,11 +987,7 @@ paths:
       - Uploads
       operationId: reserveDelegatedUpload
       summary: Reserve private upload storage with current member authority
-      description: Register `briefcase.uploads.reserve` at `/api/v1/obo/uploads/reserve`. The exact destination,
-        logical operation UUID, size and lowercase SHA-256 are immutable. A fresh proof binds POST and the exact
-        JSON digest with empty metadata. A repeated reservation with unchanged intent can return its current state;
-        a capability is issued only when a transfer can start. Store the non-secret operation UUID and manifest
-        for reconciliation, never a parent token or proof. Capabilities do not authorize publication.
+      description: Reserve private storage with an approved reusable OBO access token. The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
       security:
       - oboAccess: []
         appId: []
@@ -1057,7 +1015,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/uploads/commit:
     post:
       tags:
@@ -1065,11 +1023,7 @@ paths:
       - Uploads
       operationId: commitDelegatedUpload
       summary: Publish previously staged bytes with fresh member authority
-      description: Register `briefcase.uploads.commit` at `/api/v1/obo/uploads/commit`. Mint a new proof after transfer,
-        binding this small JSON body and empty metadata. Current IAM identity, membership, originating application,
-        test generation, destination permission and quota are rechecked before atomic publication. The capability
-        cannot commit. A response lost after publication is reconciled by the same logical operation UUID without
-        creating another file version.
+      description: Publish staged bytes using a currently valid OBO access token. Verify live identity, membership, originating app, destination organization, test generation, resource permission and quota before atomic publication. Repeating an unchanged logical operation does not create another file version.
       security:
       - oboAccess: []
         appId: []
@@ -1097,19 +1051,15 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/uploads/status:
     post:
       tags:
       - Applications
       - Uploads
       operationId: getDelegatedUploadStatus
-      summary: Reconcile one logical upload with a fresh IAM proof
-      description: Register `briefcase.uploads.status` at `/api/v1/obo/uploads/status`. Use a fresh proof for the
-        exact JSON body and empty metadata after an uncertain response. This endpoint returns only the represented
-        member and originating application's operation in the selected plane. It does not return a staging capability
-        or read file bytes. A staged result can be committed with another fresh proof; a committed result carries
-        its published entry UUID.
+      summary: Reconcile one logical upload with current OBO authority
+      description: Reconcile an upload with a valid OBO token for the same immutable member, originating app and plane. Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
       security:
       - oboAccess: []
         appId: []
@@ -1137,7 +1087,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/uploads/cancel:
     post:
       tags:
@@ -1145,10 +1095,7 @@ paths:
       - Uploads
       operationId: cancelDelegatedUpload
       summary: Cancel unpublished private staging
-      description: Register `briefcase.uploads.cancel` at `/api/v1/obo/uploads/cancel`. Use a fresh proof for the
-        exact JSON body and empty metadata. Cancellation revokes further staging and publication, with durable provider
-        cleanup. Cleanup may remain pending while a writer lease or ambiguous provider operation is reconciled.
-        Cancellation never deletes a published file; use the separately authorized trash operation for that.
+      description: Cancel unpublished content with a valid OBO token for the same immutable member, originating app and plane. Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
       security:
       - oboAccess: []
         appId: []
@@ -1176,7 +1123,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/uploads/{upload_id}/content:
     put:
       tags:
@@ -1187,7 +1134,7 @@ paths:
       description: Sends only the capability issued by the fresh-authorized reservation, the organization selector
         and the same test root when using a test plane. Do not send an IAM bearer, proof or application credential.
         Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider
-        writes. A successful transfer is private staging only, not file publication. Use a fresh commit proof separately.
+        writes. A successful transfer is private staging only, not file publication. Commit separately with a valid OBO token.
         A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
       security:
       - uploadCapability: []
@@ -1237,13 +1184,7 @@ paths:
       - Applications
       operationId: createFolderOnBehalfOfMember
       summary: Create a child folder for a represented member
-      description: Register `briefcase.folders.create` at `/api/v1/obo/folders/create` with an empty IAM metadata
-        schema. Mint a fresh proof for POST and the SHA-256 of the exact JSON body. No bearer credential accompanies
-        the proof. Every input, including the logical operation UUID, is body-bound; query parameters and Idempotency-Key
-        do not select them. An empty parent_path selects the represented member's private folder for the originating
-        application. Otherwise the path must resolve to an existing folder. Ordinary write permission is required,
-        and the created folder retains its originating application for auditing. Retry an uncertain result with
-        the same operation_id and unchanged input, but a fresh proof. Authorization is checked again before replay.
+      description: Create a child folder using a reusable OBO token. An empty parent_path selects the represented member private app folder. Ordinary write permissions and the app namespace apply. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
       security:
       - oboAccess: []
         appId: []
@@ -1271,18 +1212,14 @@ paths:
           description: Name or logical operation conflicts with existing state
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/entries/list:
     post:
       tags:
       - Applications
       operationId: listEntriesOnBehalfOfMember
       summary: List the represented member's visible entries
-      description: Register `briefcase.entries.list` at `/api/v1/obo/entries/list` with an empty IAM metadata schema.
-        Each page requires a fresh proof bound to POST and the exact JSON body digest. The ordinary entry-list semantics
-        apply, including traversal-only folders, privacy-filtered results, filters and opaque pagination. A parent
-        can be addressed by UUID or path, never both. Omission lists roots, or searches the visible tree when a
-        filter is present. No query parameter changes the request.
+      description: List the ordinary privacy-filtered entry view with a reusable OBO token. Parent UUID and path are mutually exclusive. Each page is verified online and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
       security:
       - oboAccess: []
         appId: []
@@ -1308,19 +1245,14 @@ paths:
           description: Parent is absent or not visible
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/files/read:
     post:
       tags:
       - Applications
       operationId: readFileOnBehalfOfMember
       summary: Stream a file for a represented member
-      description: Register `briefcase.files.read` at `/api/v1/obo/files/read` with an empty IAM metadata schema.
-        Mint a fresh proof for POST and the exact JSON body digest. Ordinary read/download authorization applies.
-        Only the body-bound range and download flag control delivery; an HTTP Range header or query parameter cannot
-        override them. Inline content uses the normal sandbox CSP, nosniff and private no-store response headers.
-        Attachment content is served as application/octet-stream. The proof's authority applies only to this file
-        request and is never cached.
+      description: Read a current file with a reusable OBO token and ordinary resource permissions. Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
       security:
       - oboAccess: []
         appId: []
@@ -1346,20 +1278,14 @@ paths:
           description: The bound byte range is unsatisfiable
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /obo/entries/trash:
     post:
       tags:
       - Applications
       operationId: trashEntryOnBehalfOfMember
       summary: Move an application-created entry to the recoverable bin
-      description: Register `briefcase.entries.trash` at `/api/v1/obo/entries/trash` with an empty IAM metadata
-        schema. Mint a fresh proof for POST and the SHA-256 of the exact JSON body. The represented member must
-        currently have delete authority across the subtree, and the originating application may delete only entries
-        it created. System containers cannot be deleted. Retry an uncertain result with the same operation_id and
-        entry_id but a fresh proof; current authority is rechecked before recognizing the same completed deletion.
-        A successful old key cannot delete an entry that has since been restored. This is recoverable deletion with
-        normal retention, not permanent removal.
+      description: Recoverably remove app-created content with a reusable OBO token. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
       security:
       - oboAccess: []
         appId: []
@@ -1383,7 +1309,7 @@ paths:
           description: Logical operation or current entry state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 3.0.0
   /entries/{entry_id}/versions:
     get:
       tags:
@@ -1861,9 +1787,8 @@ paths:
         testingEnvironmentKey: []
       x-iam-endpoint-id: briefcase.invitations.create
       x-iam-critical: true
-      description: IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and
-        calling application. Require critical user approval in the IAM endpoint catalog.
-      x-operation-version: 2.0.0
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary invitation permissions and logical idempotency.
+      x-operation-version: 3.0.0
   /obo/link-access:
     post:
       operationId: setLinkAccessOnBehalfOfMember
@@ -1895,38 +1820,31 @@ paths:
         testingEnvironmentKey: []
       x-iam-endpoint-id: briefcase.link_access.update
       x-iam-critical: true
-      description: IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and
-        calling application. Require critical user approval in the IAM endpoint catalog.
-      x-operation-version: 2.0.0
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      x-operation-version: 3.0.0
 components:
   securitySchemes:
     uploadCapability:
       type: apiKey
       in: header
       name: X-Briefcase-Upload-Capability
-      description: Narrow private-byte capability issued by an authorized upload reservation
-    bearerAuth:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: http
       scheme: bearer
       bearerFormat: IAM access token
     oboAccess:
       type: apiKey
       in: header
-      name: X-IAM-OBO-Access-Proof
-      description: Short-lived IAM OBO Access proof
-    appId:
+      name: X-IAM-OBO-Access-Token
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: apiKey
       in: header
       name: X-App-ID
-      description: Originating application identifier required together with an OBO Access proof
-    testingEnvironmentKey:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: apiKey
       in: header
       name: X-Briefcase-App-Secret
-      description: 'IAM test Application secret: ask_ followed by 43 URL-safe characters. Selects an already provisioned
-        and registered Briefcase testing environment.'
-  parameters:
-    OrgId:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       name: X-Org-ID
       in: header
       required: true
@@ -1938,8 +1856,7 @@ components:
       required: false
       schema:
         type: string
-      description: Optional; IAM derives the organization and any supplied value must agree
-    OrgIdPath:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       name: org_id
       in: path
       required: true
@@ -1972,7 +1889,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Stable key for recovering the same IAM token exchange
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       schema:
         type: string
         minLength: 16
@@ -1981,14 +1898,14 @@ components:
       name: X-Briefcase-App-Secret
       in: header
       required: false
-      description: Selects a Briefcase test plane; omission selects production
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       schema:
         $ref: '#/components/schemas/TestingEnvironmentKeyValue'
     IfMatch:
       name: If-Match
       in: header
       required: true
-      description: Strong ETag containing the expected resource version
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       schema:
         type: string
         pattern: ^"[1-9][0-9]*"$
@@ -2016,19 +1933,19 @@ components:
     Range:
       name: Range
       in: header
-      description: Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned.
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       schema:
         type: string
         pattern: ^bytes=(\d+-\d*|-\d+)$
   responses:
     Error:
-      description: Error
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     FileContent:
-      description: Complete file bytes
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       headers:
         Content-Disposition:
           schema:
@@ -2053,7 +1970,7 @@ components:
             type: string
             format: binary
     PartialFileContent:
-      description: Requested byte range of the file
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       headers:
         Content-Range:
           schema:
@@ -2179,9 +2096,7 @@ components:
       format: uuid
       not:
         const: 00000000-0000-0000-0000-000000000000
-      description: Stable non-nil logical mutation UUID, reused with unchanged inputs and a fresh proof after an
-        uncertain response
-    DelegatedCreateFolder:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: object
       additionalProperties: false
       required:
@@ -2582,14 +2497,10 @@ components:
     TestingEnvironmentKeyValue:
       type: string
       pattern: ^ask_[A-Za-z0-9_-]{43}$
-      description: IAM testing Application secret selecting the paired Briefcase environment. Never use a production
-        secret.
-    IamTestingEnvironmentKeyValue:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: string
       pattern: ^[A-Za-z0-9]{32}$
-      description: Root key for the separately created IAM testing environment; stored encrypted and sent only to
-        IAM.
-    TestingEnvironmentWithKey:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       allOf:
       - $ref: '#/components/schemas/TestingEnvironment'
       - type: object
@@ -2806,10 +2717,7 @@ components:
       - path
       - permanent_url
       - effective_access
-      description: 'A `traversal` entry is a folder the caller reaches only because something inside it was shared.
-        It can be opened and lists what was shared; its owner, timestamps, and effective access are withheld. The
-        reserved Public, Private, and tag containers carry no `owner`: they are structure IAM reconciliation maintains
-        rather than any member''s property.'
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       properties:
         id:
           type: string
@@ -2963,8 +2871,7 @@ components:
           format: date-time
     AccessRight:
       type: string
-      description: One independent right. `update` never implies `delete`, `write` never implies `update`, and every
-        set implicitly includes `read`.
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       enum:
       - read
       - write
@@ -2978,7 +2885,7 @@ components:
         $ref: '#/components/schemas/AccessRight'
     PermissionInspection:
       type: object
-      description: Names at least one and at most 100 targets in total.
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       properties:
         entry_ids:
           type: array
@@ -3124,7 +3031,7 @@ components:
       - path
       - type
       - permanent_url
-      description: The entry as it was when the notification was created.
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       properties:
         entry_id:
           type: string
@@ -3608,9 +3515,7 @@ components:
       type: integer
       minimum: 1
       maximum: 43200
-      description: A lifetime from 1 minute to 30 days, in whole minutes. Makes a share a read-only expiring share, or
-        a new file self-destructing.
-    ExpiringShareChange:
+      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
       type: object
       additionalProperties: false
       minProperties: 1

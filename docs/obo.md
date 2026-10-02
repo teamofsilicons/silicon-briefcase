@@ -1,394 +1,78 @@
-# Calling Briefcase on behalf of a member
+# On-behalf-of access
 
-This guide is for an Application that wants to create a file in Silicon
-Briefcase **for a Carbon or Silicon it already represents**, without ever
-holding a Briefcase credential of its own. It is self-contained.
+> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
 
-On-behalf-of (OBO) means IAM mints a proof for **one exact request**. Briefcase
-verifies that proof with IAM, consumes it, and then acts as the represented
-member — with that member's current role and tags, never more. There is no
-long-lived delegated key to store, leak, or revoke.
+OBO lets an application act for a carbon or silicon after that person or custodian-approved identity authorizes a feature. Login grants an application session for one account and organization. Request Briefcase OBO consent separately, when the user chooses a feature that reads or stores files. IAM displays the selected endpoints, dependencies and destination account/organization before approval.
 
-- Audience Application: `briefcase`
-- Briefcase API base: `https://backend.briefcase.teamofsilicons.com/api/v1`
-- IAM base: `https://backend.iam.teamofsilicons.com/`
+## Migrate from Briefcase 2.x
 
-`X-Org-ID`, `org_id` and the `{org_id}` URL segment carry the **Team** ID; they
-are wire names from the IAM contract, kept verbatim throughout this guide.
+Upgrade the service and official Rust client/CLI to 3.0.0 together. Delegated operation revisions change to 3.0.0; the API namespace remains `/api/v1`. Ordinary file operations keep their existing revisions. The official client verifies the operation inventory before transmitting credentials and rejects an incompatible service.
+
+Replace `X-IAM-OBO-Access-Proof: obo_...` with `X-IAM-OBO-Access-Token: oba_...`. Old proof headers and token classes are rejected. Stop minting a proof for each body digest. Approved OBO access tokens are reusable within their endpoint graph until expiry or revocation; refresh them through IAM using the OBO refresh token. The SDK's historical `OboProof` type now wraps this access token and can be cloned. It never refreshes or persists OBO tokens itself.
+
+`POST /api/v1/obo/files` is retired with HTTP 410 and code `obo_upload_retired`; the service rejects it before staging bytes. `create_file_on_behalf_of` returns a local configuration error without sending bytes or credentials. Use reserve, transfer and commit for every delegated upload, including small files.
 
 ## Choose an operation
 
-Briefcase supports the following proof-authorized operations. Discover the
-audience's registered endpoints with
-`GET {iam}/api/v1/obo-access/applications/briefcase/endpoints`
-(URL-encode the `>`). Configure the fixed paths below in Honeycomb before issuing proofs. IAM consumes
-the accepted configuration at runtime; test imports pin their own accepted configuration.
+Configure these endpoints in the Briefcase application catalog in Honeycomb. Each uses POST. The IDs below are the public endpoint IDs currently used by Briefcase and its SDK; do not invent a different ID or repoint one to another route. Discover accepted endpoint details from IAM/Honeycomb before requesting consent.
 
-| Endpoint ID | Method and registered path | Metadata schema |
+| Endpoint ID | Route | Purpose |
 | --- | --- | --- |
-| `briefcase.files.create` | `POST /api/v1/obo/files` | `path`, `name`, `content_type` — all required strings |
-| `briefcase.folders.create` | `POST /api/v1/obo/folders/create` | Empty object `{}` |
-| `briefcase.entries.list` | `POST /api/v1/obo/entries/list` | Empty object `{}` |
-| `briefcase.files.read` | `POST /api/v1/obo/files/read` | Empty object `{}` |
-| `briefcase.entries.trash` | `POST /api/v1/obo/entries/trash` | Empty object `{}` |
-| `briefcase.uploads.reserve` | `POST /api/v1/obo/uploads/reserve` | Empty object `{}` |
-| `briefcase.uploads.commit` | `POST /api/v1/obo/uploads/commit` | Empty object `{}` |
-| `briefcase.uploads.status` | `POST /api/v1/obo/uploads/status` | Empty object `{}` |
-| `briefcase.uploads.cancel` | `POST /api/v1/obo/uploads/cancel` | Empty object `{}` |
+| `briefcase.folders.create` | `/api/v1/obo/folders/create` | Create a child folder |
+| `briefcase.entries.list` | `/api/v1/obo/entries/list` | List entries visible to the represented identity |
+| `briefcase.files.read` | `/api/v1/obo/files/read` | Read a current file |
+| `briefcase.entries.trash` | `/api/v1/obo/entries/trash` | Recoverably remove an app-created entry |
+| `briefcase.uploads.reserve` | `/api/v1/obo/uploads/reserve` | Reserve private staging |
+| `briefcase.uploads.commit` | `/api/v1/obo/uploads/commit` | Publish staged content |
+| `briefcase.uploads.status` | `/api/v1/obo/uploads/status` | Reconcile an upload |
+| `briefcase.uploads.cancel` | `/api/v1/obo/uploads/cancel` | Abandon unpublished content |
+| `briefcase.invitations.create` | `/api/v1/obo/invitations` | Invite a recipient; critical |
+| `briefcase.link_access.update` | `/api/v1/obo/link-access` | Change public link access; critical |
 
-- **Large, slow, or recoverable uploads:** use reserve → private transfer →
-  fresh-authorized commit. Retain the logical operation UUID and reconcile an
-  uncertain result with status. See [delegated uploads](api/delegated-uploads.md).
-- **Small, immediate uploads:** the compatible one-shot `files.create` route
-  sends raw file bytes. Its proof must still be valid after the body arrives;
-  the 5 TiB size ceiling does not guarantee a transfer fits the proof lifetime.
-  A fresh proof after an uncertain one-shot result is a new upload attempt.
-- **Folder hierarchy, browsing, download and deletion:** use the JSON controls
-  below with the represented member's current permissions.
+The application obtains user approval for the graph through IAM's OBO authorization flow, exchanges the resulting code using its own application credentials and keeps access/refresh tokens in server-side secret storage. See the [IAM SDK reference](https://docs.iam.teamofsilicons.com/client/) for the authorization, exchange, refresh and revocation contract.
 
-The byte-only `PUT /api/v1/obo/uploads/{upload_id}/content` is not registered in
-IAM. It uses the reservation's private upload capability, not an IAM proof or
-member bearer. It cannot publish a file; only fresh-authorized commit can.
-
-An endpoint missing from the selected audience's live catalog cannot receive a
-proof. Confirm [registration and scope disclosure](iam-integration.md#obo-registration-is-separate)
-before sending either production or sandbox operations.
-
-## Before you start
-
-You need all five of these. Briefcase fails closed on any of them.
-
-1. **Your Application is configured through Honeycomb, registered in IAM and
-   approved for the Briefcase endpoint.**
-   IAM validates the applications and the represented member's selected organization.
-   The member's data organization can differ from an application's owning Team;
-   Briefcase must receive the exact organization authorized by the proof.
-2. **A subject token: the member's IAM access token, issued to *your*
-   Application** (`oat_…`). A token issued to some other Application is refused.
-3. **The exact `obo:briefcase:<endpoint_id>` grant on that subject token.**
-   IAM also checks current consent and application approval for the endpoint.
-   Honeycomb configures the external endpoint scope; the obsolete `obo.issue`
-   grant is not required.
-4. **`self.membership.read` and `self.identity.read` disclosure**,
-   present in the subject token, its current exact consent, the issuer's approved
-   scopes and Briefcase's approved scopes. Briefcase requires the delegated
-   authorization snapshot and fails closed when identity or role is undisclosed.
-   `self.tags.read` is optional: missing disclosure remains unknown, does not
-   replace directory tags, and cannot confer tag-based access. Explicit actor,
-   owner, role and permission-grant authority still applies. A disclosed empty
-   list is distinct from unknown. Its scope set must
-   contain the exact `obo:briefcase:<endpoint_id>` verified by IAM; canonical
-   `org>app` audience syntax is distinct from native IAM scope syntax.
-5. **Your Application's own secret**, used only for HTTP Basic and the HMAC on
-   the IAM exchange. It is never sent to Briefcase.
-
-The member must retain active membership and current consent for the selected
-data organization at verification time. IAM rechecks the parent session,
-membership epoch, endpoint approval and selected testing world for every proof.
-
-## JSON controls and recoverable uploads
-
-All eight JSON operations use `POST`, `Content-Type: application/json`, and an
-empty IAM metadata object. Bind the complete serialized JSON body, not file
-bytes or a subset of its fields. Send `X-App-ID` and
-`X-IAM-OBO-Access-Proof`, never a bearer. A supplied `X-Org-ID` must agree with
-IAM; a sandbox also needs its separate IAM testing app secret.
-
-| Operation | JSON inputs | Result |
-| --- | --- | --- |
-| Folder create | `operation_id`, `parent_path`, `name` | `201` created entry |
-| Entries list | Optional `parent_id` or `path`, `filter`, `cursor`, `limit` | `200` page; limit 1–100 |
-| File read | `entry_id`; optional `range`, `download` | `200` or `206` bytes |
-| Entry trash | `operation_id`, `entry_id` | `204`; recoverable bin deletion |
-| Upload reserve | `operation_id`, `parent_path`, `name`, `content_type`, `size`, `sha256` | `200` status and an idle reservation's private capability |
-| Upload commit | `operation_id`, `upload_id` | `200` status and published entry ID |
-| Upload status | `operation_id` | `200` current state; no capability |
-| Upload cancel | `operation_id` | `200` cancellation or cleanup-pending state |
-
-Mutation `operation_id` values are caller-generated, non-nil UUIDs. Persist
-the UUID and unchanged request before sending. After an uncertain result,
-obtain a fresh proof for the same logical operation; never reuse the consumed
-proof. A successful repeated commit does not publish a second version. A
-repeated trash cannot delete an entry that has since been restored.
-
-An empty creation `parent_path` selects the member's private app folder.
-Otherwise the parent must already exist and be writable. Create a hierarchy
-one folder at a time. Listing and reads retain ordinary permission filtering;
-range, disposition and pagination values are proof-bound JSON, not override
-headers or query parameters. See the [exact JSON API contract](obo.md#json-controls-and-recoverable-uploads).
-
-For uploads, prepare the complete file manifest before requesting a proof:
-
-```bash
-briefcase app prepare-upload --operation-id "$UPLOAD_OPERATION_ID" \
-  --parent-path '' ./recording.webm > manifest.json
-briefcase app request upload-reserve --body manifest.json --describe
-# Ask IAM for a fresh proof using the described endpoint, method and exact body.
-briefcase app request upload-reserve --body manifest.json \
-  --app-id 'your-app' --capability-file upload.capability
-# The hidden prompt accepts the proof; keep the returned upload_id.
-briefcase app transfer "$UPLOAD_ID" ./recording.webm \
-  --capability-file upload.capability
-```
-
-Transfer only stages bytes. Prepare `{"operation_id":"<original UUID>",
-"upload_id":"<returned UUID>"}` in `commit.json`, describe `upload-commit`,
-obtain a new IAM proof, and send `briefcase app request upload-commit --body commit.json
---app-id 'your-app'`. Use `upload-status` with a body containing only the
-original `operation_id` after an uncertain response. The
-[upload guide](api/delegated-uploads.md) specifies states, limits, cancellation
-and cleanup. Keep capability files owner-only; they are credentials.
-
-The official Rust client prepares the exact body and binding through typed
-`DelegatedReserveUpload`, `DelegatedCommitUpload`, `DelegatedUploadQuery` and
-`DelegatedCancelUpload` requests. Use the prepared value for both IAM proof
-issuance and its matching SDK call. The [operation map](api/operations.md)
-lists every SDK method and CLI verb.
-
-## One-shot upload: the shape of the call
-
-For the compatible raw-byte endpoint, use these four steps:
+## Send a delegated request
 
 ```text
-1. Discover   GET  {iam}/api/v1/obo-access/applications/tos%3Ebriefcase/endpoints
-2. Hash       body_sha256 = lowercase hex SHA-256 of the EXACT file bytes
-3. Exchange   POST {iam}/api/v1/obo-access/exchanges          -> access_proof (obo_…)
-4. Call       POST {briefcase}/obo/files  with those exact bytes + the proof
-```
-
-Briefcase then calls IAM's `verify` itself, which consumes the proof, and only
-then writes anything.
-
-### Exchange request
-
-```json
-{
-  "subject_token": "oat_…",
-  "audience": "briefcase",
-  "endpoint_id": "briefcase.files.create",
-  "metadata": {
-    "path": "",
-    "name": "report.pdf",
-    "content_type": "application/pdf"
-  },
-  "request": {
-    "method": "POST",
-    "body_sha256": "…64 lowercase hex chars…"
-  }
-}
-```
-
-Sent with HTTP Basic (your Application credential), an `Idempotency-Key`, and:
-
-```http
-X-OBO-Timestamp: <unix seconds>
-X-OBO-Signature: <lowercase hex HMAC-SHA256 with your app secret over>
-                 {timestamp}.{UPPERCASE_METHOD}.{registered_path}.{body_sha256}.{idempotency_key}
-```
-
-`registered_path` is `/api/v1/obo/files` — the catalog path **including
-`/api/v1`**, exactly as registered. The file never goes to IAM, only its digest.
-The bytes travel straight to Briefcase, and the proof commits to what they will
-be.
-
-### Calling Briefcase
-
-```http
-POST /api/v1/obo/files
+POST /api/v1/obo/folders/create
+Content-Type: application/json
 X-App-ID: your-app
-X-IAM-OBO-Access-Proof: obo_…
-Content-Type: application/octet-stream
+X-IAM-OBO-Access-Token: oba_<access-token>
+X-Org-ID: selected-organization
 
-<the raw file bytes>
+{"operation_id":"66a263a8-2dd7-42ea-aa88-3177f48ca6be","parent_path":"","name":"recordings"}
 ```
 
-| Header | Rule |
-| --- | --- |
-| `X-App-ID` | Your canonical `{org_id}>{handle}`. Must equal IAM's `issuer_app_id`. |
-| `X-IAM-OBO-Access-Proof` | The `access_proof` from the exchange; always starts `obo_`. |
-| `X-Org-ID` | Optional. If sent, it must agree with the Team IAM reports. |
-| `X-Briefcase-App-Secret` | Sandbox only; see [Sandboxes](#sandboxes). |
-| `Authorization` | **Never.** A bearer alongside a proof is `400 ambiguous_authentication`. |
+Do not send an actor bearer alongside OBO credentials. `X-Org-ID` is optional for control requests but must match IAM's selected destination when supplied. Test calls also supply the paired `X-Briefcase-App-Secret`; mismatched or inactive test planes never fall back to production.
 
-Returns `201` with the created entry.
+Briefcase verifies the access token online with its own IAM application credentials for the fixed receiving endpoint and HTTP route. It checks the receiving app, selected endpoint, originating app, represented identity, destination organization and test plane. IAM consent is necessary but does not bypass Briefcase file permissions, app namespaces, storage limits or current membership. Missing identity/role disclosure fails closed. Unknown tags grant no tag-based access.
 
-## Two rules that break integrations
+The token can cover an approved dependency chain. Each receiver verifies its own endpoint with its own credentials; sharing a token across a chain does not permit an unrelated endpoint. An ATA token never becomes OBO authority.
 
-**Exact bytes.** Hash the file once and send that same buffer. Briefcase
-recomputes the digest from what it actually received, and any difference is a
-binding failure.
+## Keep retries safe
 
-**One proof, one request.** A proof is valid for one verification or
-60 seconds, whichever comes first. IAM consumes it exactly once; a retry is
-indistinguishable from a replay and is refused as one. Disable automatic HTTP
-retries. For a JSON mutation, keep its logical operation UUID and inputs but
-mint a fresh proof. The one-shot endpoint has no separate logical retry UUID;
-a fresh proof can create another version, so do not blindly resend it.
+Prepare typed JSON manifests once. Their SHA-256 supports local integrity and logical idempotency; it is not an IAM per-request signature. Retain the same non-nil `operation_id` and unchanged manifest when retrying a mutation after an uncertain response. Every call checks current authority again. A valid token may be reused; an expired token must be refreshed, and a revoked or removed grant requires authorization again. Do not silently retry permission failures.
 
-## One-shot upload in detail
+Listing and reading use `DelegatedListEntries` and `DelegatedReadFile`; create a new manifest when the cursor, range or other input changes. Retain no verified authorization snapshot as a durable permission grant.
 
-Everything that decides where the file lands travels as proof-bound
-**metadata**, not as a header or query parameter, so a proof you legitimately
-obtained cannot be redirected somewhere else.
+## Upload and publish
 
-| Metadata key | Meaning |
-| --- | --- |
-| `path` | Destination folder. Empty selects the member's private Application folder. |
-| `name` | The file name to create. |
-| `content_type` | Media type of the bytes; empty defaults to `application/octet-stream`. |
+1. Hash the regular source file, then prepare `DelegatedReserveUpload` with the logical operation ID, destination, name, media type, size and SHA-256.
+2. Call `reserve_delegated_upload` with a valid OBO access token. The response contains state, upload ID, deadline and (only when available) a narrow upload capability.
+3. Transfer bytes with that capability, organization and test selector. Do not send IAM, app or actor credentials to the byte transfer route.
+4. Prepare `DelegatedCommitUpload` and commit with a currently valid OBO token. Publication rechecks membership, destination rights and quota, even if reserve previously passed.
+5. If a response is lost, check status with `DelegatedUploadQuery` before deciding whether another action is needed. A successful logical commit does not create duplicate file versions.
 
-- **Size ceiling: 5 TiB**, subject to quota and HTTP deadlines. The complete
-  body must arrive before IAM verification and proof expiry. Use the staged
-  protocol for large or slow transfers instead of relying on this ceiling.
-- **Versioning is automatic.** A name an active file already carries publishes
-  that file's next version rather than a duplicate.
-- **The proof identifier is the idempotency key**, so a proof cannot create two
-  files.
-- **Quota is the member's.** The Team's storage and daily upload allowances
-  apply exactly as they do to that member's own uploads.
-- **No self destruct.** Neither this endpoint nor the delegated upload
-  protocol can set a self-destruct timer yet, so an app cannot create a
-  self-destructing file. Only a member's own `POST /uploads` can.
+The transfer capability cannot read or publish. It may outlive a particular OBO access token, but cannot outlive the reservation. See [delegated uploads](api/delegated-uploads.md) for limits, states and cleanup behavior, and the [Rust client guide](client/README.md) for typed calls.
 
-This is not a recoverable operation: after an uncertain response, a fresh proof
-is a *new* attempt, not an idempotent retry. Read back the destination folder
-before re-sending if a duplicate would matter.
+## Migration checklist
 
-## Where files go
-
-Every operation stays inside `apps/<calling-app-id>/`. The default empty
-destination is `apps/<app-id>/private/<represented-member-id>`; a public
-upload names `apps/<app-id>/public`. App folders are materialized on first use.
-Normal private visibility, inherited grants and tag membership still apply.
-An owner subject does not bypass the app namespace boundary. An entry's
-originating-app metadata is attribution rather than a separate ownership rule.
-
-## Critical sharing operations
-
-Register `briefcase.invitations.create` at `POST /api/v1/obo/invitations` and
-`briefcase.link_access.update` at `POST /api/v1/obo/link-access` as **critical**
-endpoints in Honeycomb. IAM enforces their user approval at runtime. Both use empty endpoint metadata;
-the entire operation is bound into the exact JSON body SHA-256.
-
-```json
-{"operation_id":"<uuid>","entry_id":"<uuid>","invitation":{"principal":{"type":"carbon","id":"alex:tos"},"access":["read"],"inherit":true}}
-```
-
-```json
-{"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true}
-```
-
-Either can be an [expiring share](sharing.md#expiring-shares) that ends by itself: add
-`expires_in_minutes` (1 to 43,200) inside `invitation`, or beside `enabled: true`
-for an expiring link. An expiring share is read-only, so `access` must be `["read"]`.
-The field is part of the exact body bound into the proof digest; add it before
-you hash, never after.
-
-```json
-{"operation_id":"<uuid>","entry_id":"<uuid>","invitation":{"principal":{"type":"carbon","id":"alex:tos"},"access":["read"],"inherit":true,"expires_in_minutes":1440}}
-```
-
-```json
-{"operation_id":"<uuid>","entry_id":"<uuid>","enabled":true,"expires_in_minutes":60}
-```
-
-Both endpoints stay critical whether or not the share is an expiring share. The
-link endpoint follows the normal [expiring link rules](sharing.md#expiring-links):
-resending minutes restarts a live expiring link's clock, and `enabled: false` ends
-it. Changing or revoking an expiring invitation has no OBO endpoint; the member does
-that directly.
-
-Use `delegated::DelegatedInvite` and `delegated::DelegatedLinkAccess` in Rust,
-or `briefcase app request invite --body manifest.json --describe` and
-`briefcase app request link-access --body manifest.json --describe` in the CLI.
-Mint a fresh IAM proof from the described binding, then repeat without
-`--describe` and supply `--app-id`. Proofs are one-use, including uncertain
-responses; keep the logical operation UUID and exact bytes for retries.
-
-## Errors
-
-Every error is `{"error": {"code": …, "message": …, "request_id": …}}`.
-
-| Status | Typical code | Meaning and what to do |
-| --- | --- | --- |
-| `400` | `ambiguous_authentication` | You sent `Authorization` with a proof. Send only the proof. |
-| `400` | `invalid_app_id`, `invalid_org_id` | Use the canonical `{org_id}>{handle}` and a valid Team ID. |
-| `401` | `unauthenticated` | Proof missing, malformed, expired, already consumed, or refused by IAM — including altered bytes. **Do not retry** — mint a new proof. |
-| `403` | `forbidden` | A binding failed (issuer ≠ `X-App-ID`, wrong audience, path or Team mismatch, wrong endpoint), authorization was undisclosed, or the member cannot write to the destination. |
-| `404` | `not_found` | The destination folder is missing or invisible to the member — deliberately indistinguishable. Do not retry unchanged. |
-| `413` | — | Body above the accepted size. |
-| `422` | `invalid_obo_metadata`, `invalid_name`, `invalid_path`, `invalid_content_type` | The proof-bound metadata failed validation. Re-read the catalog and compare what you actually bound. |
-| `429` / `507` | — | Rate limited, or the Team's storage allowance is exhausted. |
-| `503` | — | IAM or a dependency is unavailable. This is *not* a refused proof; that is `401`. |
-
-At the IAM exchange, expect `403` (unauthorized organization, inactive membership,
-or missing endpoint authority), `404` (unknown `endpoint_id` or audience), `409` (proof consumed,
-or an idempotency key reused with different input), `410 proof_expired` (more
-than 60 seconds elapsed), and `422` (metadata does not satisfy the schema).
-
-## Sandboxes
-
-A Briefcase testing environment is a full replica paired with one IAM test
-plane. To use OBO there, send the IAM testing app secret for the plane paired with
-the proof's IAM environment:
-
-```http
-X-Briefcase-App-Secret: <ask_ test Application secret>
-```
-
-The test app secret does not replace the proof, and a proof from the wrong plane cannot
-fall back to production. Import the accepted endpoint configuration through
-Honeycomb before testing. Full setup is in the
-[testing-environment guide](testing-environments.md).
-
-## One-shot Rust call
-
-Use the official `briefcase-client` package. It never sends your bearer on this
-call, never retries it, and never stores a session.
-
-```rust
-use briefcase_client::OnBehalfOfUpload;
-
-// `proof` is the access_proof you just exchanged for exactly these bytes.
-let entry = client
-    .create_file_on_behalf_of(
-        &OnBehalfOfUpload::file("your-app", proof, "./report.pdf"),
-    )
-    .await?;
-```
-
-`OnBehalfOfUpload::bytes(app_id, proof, bytes)` takes an in-memory body instead.
-The proof is redacted in debug output and consumed by the call. Keep the source
-file unchanged between hashing and sending, and use a real file — not a symlink,
-pipe or device.
-
-## One-shot CLI call
-
-Useful for trying the flow before you write code:
-
-```bash
-briefcase app upload --app-id 'your-app' ./report.pdf              # hidden proof prompt
-briefcase app upload --app-id 'your-app' --proof-stdin ./report.pdf < proof.txt
-```
-
-The destination, name and media type come from the proof, so the command takes
-no path argument. Pass proofs through the hidden prompt or `--proof-stdin`,
-never `--proof` in a shared shell, where the process list would expose them.
-
-## One-shot checklist
-
-- [ ] Authorized data organization; subject token issued to your Application.
-- [ ] Exact `obo:briefcase:<endpoint_id>`, `self.membership.read`, and `self.identity.read` grants present.
-- [ ] `self.tags.read` disclosed when relying on tag-based access.
-- [ ] Digest taken over the exact bytes you will send.
-- [ ] `/api/v1/obo/files` bound as the path, with its `/api/v1` prefix.
-- [ ] Destination bound as metadata, not as a header or query parameter.
-- [ ] Exchange immediately before the call; no proof cached or reused.
-- [ ] `X-App-ID` + `X-IAM-OBO-Access-Proof` only — no `Authorization`.
-- [ ] Automatic HTTP retries disabled for this route.
-
-## Reference
-
-- [API reference](api/README.md) — every operation, filters, errors, limits
-- [IAM integration](iam-integration.md) — registration, scopes, webhook approval
-- [Rust client](client/README.md) · [CLI](cli/README.md) · [Testing environments](testing-environments.md)
+- [ ] Upgrade to the matching Briefcase 3.0.0 operation contract and IAM 5 SDK.
+- [ ] Request feature-specific OBO consent after login.
+- [ ] Register exact endpoint IDs and dependency relationships.
+- [ ] Use `oba_` tokens and `X-IAM-OBO-Access-Token` with no actor bearer.
+- [ ] Store OBO refresh tokens securely and handle expiry/revocation.
+- [ ] Replace raw one-shot uploads with reserve, transfer and commit.
+- [ ] Preserve mutation IDs and manifests for uncertain outcomes.
+- [ ] Test carbons, silicons, selected organizations and isolated test planes.
+- [ ] Verify denied file access, missing consent, invalid endpoint and wrong token class fail closed.

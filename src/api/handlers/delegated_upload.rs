@@ -206,6 +206,7 @@ pub(crate) async fn transfer(
     if [
         header::AUTHORIZATION.as_str(),
         "x-iam-obo-access-proof",
+        "x-iam-obo-access-token",
         "x-app-id",
     ]
     .iter()

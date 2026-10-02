@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "2.1.0";
+pub const CONTRACT_VERSION: &str = "3.0.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -47,25 +47,25 @@ pub struct OperationVersion {
 pub const OPERATIONS: [OperationVersion; 62] = [
     operation(
         "reserveDelegatedUpload",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/uploads/reserve",
     ),
     operation(
         "commitDelegatedUpload",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/uploads/commit",
     ),
     operation(
         "getDelegatedUploadStatus",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/uploads/status",
     ),
     operation(
         "cancelDelegatedUpload",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/uploads/cancel",
     ),
@@ -175,28 +175,28 @@ pub const OPERATIONS: [OperationVersion; 62] = [
         "/org/{org_id}/{path}",
     ),
     operation("uploadFile", "1.0.0", "POST", "/uploads"),
-    operation("createFileOnBehalfOfMember", "2.0.0", "POST", "/obo/files"),
+    operation("createFileOnBehalfOfMember", "3.0.0", "POST", "/obo/files"),
     operation(
         "createFolderOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/folders/create",
     ),
     operation(
         "listEntriesOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/entries/list",
     ),
     operation(
         "readFileOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/files/read",
     ),
     operation(
         "trashEntryOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/entries/trash",
     ),
@@ -302,13 +302,13 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     operation("readPublicEntry", "1.1.0", "GET", "/public/{org_id}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/invitations",
     ),
     operation(
         "setLinkAccessOnBehalfOfMember",
-        "2.0.0",
+        "3.0.0",
         "POST",
         "/obo/link-access",
     ),

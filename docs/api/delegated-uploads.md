@@ -1,18 +1,19 @@
 # Delegated uploads
 
+> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+
 Applications upload for a represented IAM member in three phases: reserve a
 destination, transfer private bytes, then publish with fresh authority. The
-transfer does not have to finish within the reservation proof's lifetime. It
+transfer does not have to finish within the current OBO access token's lifetime. It
 still has to fit the server's upload deadline and physical capacity.
 
-Use the official `briefcase-client` package. Briefcase verifies control proofs
+Use the official `briefcase-client` package. Briefcase verifies control tokens
 online through the official `silicon-iam-client`; a Browser-bound token is never
 substituted for a Briefcase-bound bearer credential.
 
 ## IAM registration and credentials
 
-Register these endpoints with method `POST` and an empty metadata schema. Mint
-a fresh proof for the exact JSON body SHA-256 on every control call.
+Register these endpoints with method `POST` and request post-login OBO consent for the required graph. Use a reusable IAM OBO access token for each control call; IAM does not sign the JSON digest.
 
 | Endpoint ID | Exact IAM binding path | Input |
 | --- | --- | --- |
@@ -21,9 +22,8 @@ a fresh proof for the exact JSON body SHA-256 on every control call.
 | `briefcase.uploads.status` | `/api/v1/obo/uploads/status` | `operation_id` |
 | `briefcase.uploads.cancel` | `/api/v1/obo/uploads/cancel` | `operation_id` |
 
-Control calls send `X-App-ID` and `X-IAM-OBO-Access-Proof`, with no bearer.
-`X-Org-ID`, when supplied, must agree with IAM. The originating token needs
-delegated-issuance authority; the represented member and Briefcase application's
+Control calls send `X-App-ID` and `X-IAM-OBO-Access-Token`, with no bearer.
+`X-Org-ID`, when supplied, must agree with IAM. The token must cover the approved endpoint graph; the represented member and Briefcase application's
 approved scopes must disclose current roles and membership as described in the
 [IAM guide](../iam-integration.md).
 
@@ -77,7 +77,7 @@ Content-Length: <exact reserved size>
 ```
 
 Use the same `X-Briefcase-App-Secret` throughout a test-plane flow. Do not
-send `Authorization`, `X-App-ID`, `X-IAM-OBO-Access-Proof`, content encoding or
+send `Authorization`, `X-App-ID`, `X-IAM-OBO-Access-Token`, content encoding or
 chunked transfer encoding. The SDK handles framing and the configured plane.
 
 Briefcase verifies the complete length and SHA-256 before provider writes.
@@ -88,20 +88,20 @@ writer lease; an almost-expired reservation is rejected before bytes are accepte
 
 ## Commit and recovery
 
-After transfer, obtain a new proof for a small commit body containing the
+After transfer, use a valid OBO token with a small commit body containing the
 original `operation_id` and returned `upload_id`. Commit rechecks current IAM
 identity, originating application, test generation, destination rights and quota.
 It publishes the existing object and charges quota in one database transaction,
 returning `committed` with the actual `published_entry_id`.
 
 A repeated successful logical commit with fresh authority does not create
-another version. After any uncertain response, use a fresh status proof first.
+another version. After any uncertain response, check status with a valid OBO token first.
 
 | State | Next action |
 | --- | --- |
 | `reserved` | Fresh reserve can issue a capability; then transfer. |
 | `receiving` | Reconcile later; do not start a second writer. |
-| `staged` | Obtain a fresh commit proof. |
+| `staged` | Commit with a currently valid OBO token. |
 | `committed` | Retain the published entry ID; do not re-upload. |
 | `cleanup_pending` | Keep the operation record while cleanup is reconciled. |
 | `cancelled`, `expired` | This operation cannot publish; start a new logical operation for a new attempt. |
@@ -116,16 +116,13 @@ Pending cleanup retains its exact storage descriptor and reservation until the
 provider outcome is known. Test-environment clean revokes staging and preserves
 cleanup work; final purge waits for provider cleanup.
 
-If the IAM parent token or session expires or is revoked, obtain fresh initiator
-authorization. A recording outbox can retain manifests, operation/upload IDs and
-state, but must not reuse an old proof or saved authorization snapshot as a
-durable grant, or take over the CLI's rotating refresh token.
+Refresh an expired OBO token through IAM; a revoked grant requires new authorization. A recording outbox can retain manifests, operation/upload IDs and state, but a saved authorization snapshot never grants later access. Store OBO refresh tokens only in app-owned secret storage; do not take over the CLI session refresh token.
 
 ## Rust and CLI
 
 `DelegatedReserveUpload::file` hashes a file with bounded memory. `prepare()`
 freezes a typed manifest with `method()`, `path()`, `endpoint_id()`,
-`body_sha256()` and `body_bytes()`. Obtain a proof for those exact values and
+`body_sha256()` and `body_bytes()`. Obtain a valid OBO token for the approved endpoints and
 pass that same manifest to `reserve_delegated_upload`.
 
 File-based preparation and transfer require a regular, non-symlink source.
@@ -134,8 +131,7 @@ transfer. Special files such as pipes and devices are not upload sources.
 
 Then use `transfer_delegated_upload`, followed by a separately prepared
 `DelegatedCommitUpload` and `commit_delegated_upload`. `DelegatedUploadQuery`
-and `DelegatedCancelUpload` prepare status and cancellation. Proof/capability
-types redact debug output and are consumed by calls. No delegated SDK call
+and `DelegatedCancelUpload` prepare status and cancellation. Token/capability types redact debug output. `OboProof` is cloneable and reusable while valid; upload capabilities remain narrow transfer credentials. No delegated SDK call
 automatically retries, persists a session or runs package maintenance.
 
 The CLI provides `app prepare-upload`, `app request ... --describe`, upload
