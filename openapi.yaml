@@ -288,7 +288,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 1.0.0
     delete:
       tags:
       - Testing environments
@@ -305,7 +305,7 @@ paths:
                 $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 1.0.0
   /organizations/{org_id}/testing-environments/{environment_id}/key:
     parameters:
     - $ref: '#/components/parameters/OrgId'
