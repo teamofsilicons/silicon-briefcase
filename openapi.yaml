@@ -1828,7 +1828,8 @@ components:
       type: apiKey
       in: header
       name: X-Briefcase-Upload-Capability
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Narrow private-byte capability issued by an authorized upload reservation
+    bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: IAM access token
@@ -1836,15 +1837,20 @@ components:
       type: apiKey
       in: header
       name: X-IAM-OBO-Access-Token
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Reusable IAM OBO access token (oba_), verified online for the receiving endpoint
+    appId:
       type: apiKey
       in: header
       name: X-App-ID
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Originating application identifier required together with an OBO access token
+    testingEnvironmentKey:
       type: apiKey
       in: header
       name: X-Briefcase-App-Secret
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: 'IAM test Application secret: ask_ followed by 43 URL-safe characters. Selects an already provisioned
+        and registered Briefcase testing environment.'
+  parameters:
+    OrgId:
       name: X-Org-ID
       in: header
       required: true
@@ -1856,7 +1862,8 @@ components:
       required: false
       schema:
         type: string
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Optional; IAM derives the organization and any supplied value must agree
+    OrgIdPath:
       name: org_id
       in: path
       required: true
@@ -1889,7 +1896,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Stable key for recovering the same IAM token exchange
       schema:
         type: string
         minLength: 16
@@ -1898,14 +1905,14 @@ components:
       name: X-Briefcase-App-Secret
       in: header
       required: false
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Selects a Briefcase test plane; omission selects production
       schema:
         $ref: '#/components/schemas/TestingEnvironmentKeyValue'
     IfMatch:
       name: If-Match
       in: header
       required: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Strong ETag containing the expected resource version
       schema:
         type: string
         pattern: ^"[1-9][0-9]*"$
@@ -1933,19 +1940,19 @@ components:
     Range:
       name: Range
       in: header
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned.
       schema:
         type: string
         pattern: ^bytes=(\d+-\d*|-\d+)$
   responses:
     Error:
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Error
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     FileContent:
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Complete file bytes
       headers:
         Content-Disposition:
           schema:
@@ -1970,7 +1977,7 @@ components:
             type: string
             format: binary
     PartialFileContent:
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Requested byte range of the file
       headers:
         Content-Range:
           schema:
@@ -2096,7 +2103,9 @@ components:
       format: uuid
       not:
         const: 00000000-0000-0000-0000-000000000000
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Stable non-nil logical mutation UUID, reused with unchanged inputs and a valid OBO token after an
+        uncertain response
+    DelegatedCreateFolder:
       type: object
       additionalProperties: false
       required:
@@ -2497,10 +2506,14 @@ components:
     TestingEnvironmentKeyValue:
       type: string
       pattern: ^ask_[A-Za-z0-9_-]{43}$
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: IAM testing Application secret selecting the paired Briefcase environment. Never use a production
+        secret.
+    IamTestingEnvironmentKeyValue:
       type: string
       pattern: ^[A-Za-z0-9]{32}$
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Root key for the separately created IAM testing environment; stored encrypted and sent only to
+        IAM.
+    TestingEnvironmentWithKey:
       allOf:
       - $ref: '#/components/schemas/TestingEnvironment'
       - type: object
@@ -2717,7 +2730,10 @@ components:
       - path
       - permanent_url
       - effective_access
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: 'A `traversal` entry is a folder the caller reaches only because something inside it was shared.
+        It can be opened and lists what was shared; its owner, timestamps, and effective access are withheld. The
+        reserved Public, Private, and tag containers carry no `owner`: they are structure IAM reconciliation maintains
+        rather than any member''s property.'
       properties:
         id:
           type: string
@@ -2871,7 +2887,8 @@ components:
           format: date-time
     AccessRight:
       type: string
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: One independent right. `update` never implies `delete`, `write` never implies `update`, and every
+        set implicitly includes `read`.
       enum:
       - read
       - write
@@ -2885,7 +2902,7 @@ components:
         $ref: '#/components/schemas/AccessRight'
     PermissionInspection:
       type: object
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: Names at least one and at most 100 targets in total.
       properties:
         entry_ids:
           type: array
@@ -3031,7 +3048,7 @@ components:
       - path
       - type
       - permanent_url
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: The entry as it was when the notification was created.
       properties:
         entry_id:
           type: string
@@ -3515,7 +3532,9 @@ components:
       type: integer
       minimum: 1
       maximum: 43200
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      description: A lifetime from 1 minute to 30 days, in whole minutes. Makes a share a read-only expiring share, or
+        a new file self-destructing.
+    ExpiringShareChange:
       type: object
       additionalProperties: false
       minProperties: 1
