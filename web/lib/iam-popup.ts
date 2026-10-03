@@ -1,4 +1,21 @@
 export type IdentityKind = 'carbon' | 'silicon';
+export class PopupBlockedError extends Error {
+  constructor() {
+    super('The sign-in popup was blocked. Continue in this tab instead.');
+    this.name = 'PopupBlockedError';
+  }
+}
+
+export async function continueIamInThisTab(
+  start: () => string | Promise<string>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) throw new Error('Sign-in cancelled.');
+  const url = await start();
+  if (signal?.aborted) throw new Error('Sign-in cancelled.');
+  window.location.assign(url);
+}
+
 const messageType = 'silicon:iam-login-complete';
 const validContext = (value: unknown): value is string =>
   typeof value === 'string' &&
@@ -38,17 +55,17 @@ export function openIamPopup(
     crypto.getRandomValues(new Uint8Array(32)),
     (value) => value.toString(16).padStart(2, '0'),
   ).join('');
-  const popup = window.open(
-    'about:blank',
-    'iam-' + nonce,
-    'popup,width=520,height=760',
-  );
-  if (!popup)
-    return Promise.reject(
-      new Error(
-        'Allow popups for this site, then choose your account type again.',
-      ),
+  let popup: Window | null;
+  try {
+    popup = window.open(
+      'about:blank',
+      'iam-' + nonce,
+      'popup,width=520,height=760',
     );
+  } catch {
+    return Promise.reject(new PopupBlockedError());
+  }
+  if (!popup) return Promise.reject(new PopupBlockedError());
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error, context?: string) => {

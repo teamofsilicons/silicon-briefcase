@@ -29,11 +29,13 @@ import { readFileLocation } from '@/lib/file-location';
 import {
   completeIamPopup,
   openIamPopup,
+  continueIamInThisTab,
   type IdentityKind,
 } from '@/lib/iam-popup';
 export default function Home() {
   const loginController = useRef<AbortController | null>(null);
   useEffect(() => () => loginController.current?.abort(), []);
+  const [fullPagePending, setFullPagePending] = useState(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const [session, setSession] = useState<
@@ -122,21 +124,26 @@ export default function Home() {
       })
       .finally(() => setChecking(false));
   }, []);
-  async function login(kind: IdentityKind) {
+  async function login(kind: IdentityKind, fullPage = false) {
     if (testingEnvironment()) {
       returnToProduction();
       return;
     }
-    if (loginController.current) return;
+    if (loginController.current) {
+      if (!fullPage) return;
+      loginController.current.abort();
+    }
     const controller = new AbortController();
     loginController.current = controller;
     const generation = browserContextGeneration();
     setBusy(true);
     setError('');
+    setFullPagePending(fullPage);
     try {
-      const completed = await openIamPopup(async (nonce) => {
+      const start = async (nonce?: string) => {
         const r = await fetch('/browser/login/start', {
           method: 'POST',
+          signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
             'X-Briefcase-Browser': '1',
@@ -144,7 +151,7 @@ export default function Home() {
           body: JSON.stringify({
             return_to: returnTo,
             identity_kind: kind,
-            popup_nonce: nonce,
+            ...(nonce ? { popup_nonce: nonce } : {}),
           }),
         });
         const value = (await r.json()) as {
@@ -155,8 +162,16 @@ export default function Home() {
           throw new Error(
             value.error?.message || 'Sign-in could not be completed.',
           );
+        if (browserContextGeneration() !== generation) {
+          throw new Error('The workspace changed. Please start sign-in again.');
+        }
         return value.redirect_url;
-      }, controller.signal);
+      };
+      if (fullPage) {
+        await continueIamInThisTab(() => start(), controller.signal);
+        return;
+      }
+      const completed = await openIamPopup(start, controller.signal);
       if (
         controller.signal.aborted ||
         browserContextGeneration() !== generation
@@ -184,12 +199,16 @@ export default function Home() {
         : returnTo;
       window.location.assign(destination);
     } catch (e) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
+      }
     } finally {
       if (loginController.current === controller)
         loginController.current = null;
-      if (!controller.signal.aborted) setBusy(false);
+      if (!controller.signal.aborted) {
+        setBusy(false);
+        setFullPagePending(false);
+      }
     }
   }
   async function selectOrganization(selected: string) {
@@ -419,6 +438,25 @@ export default function Home() {
               </div>
             </>
           )}
+          <div className="session-note">
+            <p>Or sign in in this tab</p>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={fullPagePending}
+              onClick={() => void login('carbon', true)}
+            >
+              Continue as Carbon in this tab
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={fullPagePending}
+              onClick={() => void login('silicon', true)}
+            >
+              Continue as Silicon in this tab
+            </Button>
+          </div>
           {!testingEnvironment() && <TestSignIn />}
           <TelemetryPreference />
           <div className="session-note identity-note">
