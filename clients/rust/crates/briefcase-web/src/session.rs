@@ -43,6 +43,8 @@ struct SavedSession {
     organizations: Vec<String>,
     testing: bool,
     rejected: bool,
+    #[serde(default)]
+    login_pending: bool,
     test_environment: Option<TestSelection>,
     test_sessions: std::collections::HashMap<Uuid, String>,
 }
@@ -72,6 +74,7 @@ impl Session {
                     organizations: self.organizations.clone(),
                     testing: self.testing,
                     rejected: self.rejected,
+                    login_pending: self.login_pending,
                     test_environment: self.test_environment.clone(),
                     test_sessions: self.test_sessions.clone(),
                 },
@@ -135,6 +138,7 @@ pub(crate) fn restore(
                 organizations: saved.organizations,
                 testing: saved.testing,
                 rejected: saved.rejected,
+                login_pending: saved.login_pending,
                 test_environment: saved.test_environment,
                 test_sessions: saved.test_sessions,
             })),
@@ -145,6 +149,18 @@ pub(crate) fn restore(
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct LoginFlow {
+    #[serde(default)]
+    activation_version: u8,
+    #[serde(default)]
+    attempt_nonce: String,
+    #[serde(default)]
+    previous_context: Option<Uuid>,
+    #[serde(default)]
+    candidate_id: Option<String>,
+    #[serde(default)]
+    cancelled: bool,
+    #[serde(default)]
+    activated: bool,
     #[serde(default)]
     browser_group: Option<Uuid>,
     return_to: String,
@@ -159,6 +175,9 @@ pub(crate) struct LoginFlow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Start {
+    #[serde(default)]
+    retired_attempt_nonces: Vec<String>,
+    attempt_nonce: Option<String>,
     return_to: Option<String>,
     identity_kind: Option<ActorType>,
     popup_nonce: Option<String>,
@@ -168,6 +187,16 @@ pub(crate) async fn start(
     headers: HeaderMap,
     Json(input): Json<Start>,
 ) -> Result<Response> {
+    if selected_environment(&headers)?.is_some() {
+        return Err(bad("Return to production before signing in."));
+    }
+    if input
+        .attempt_nonce
+        .as_deref()
+        .is_some_and(|value| !valid_nonce(value))
+    {
+        return Err(bad("Invalid sign-in attempt."));
+    }
     if input.popup_nonce.as_deref().is_some_and(|nonce| {
         input.identity_kind.is_none()
             || nonce.len() != 64
@@ -191,8 +220,41 @@ pub(crate) async fn start(
     }
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let browser_group = browser_group(&app, &headers).await;
+    let previous_context = current_context(&app, &headers).await?;
+    let attempt_nonce = input
+        .attempt_nonce
+        .clone()
+        .or_else(|| input.popup_nonce.clone())
+        .unwrap_or_else(|| nonce.clone());
     let mut flows = app.logins.lock().await;
     flows.retain(|_, flow| flow.deadline > SystemTime::now());
+    if flows.contains_key(&format!("cancel-{attempt_nonce}")) {
+        return Err(login_changed());
+    }
+    if input.retired_attempt_nonces.len() > 32
+        || input
+            .retired_attempt_nonces
+            .iter()
+            .any(|retired| !valid_nonce(retired) || retired == &attempt_nonce)
+    {
+        return Err(bad("Invalid retired sign-in attempts."));
+    }
+    if flows.len() + input.retired_attempt_nonces.len() >= 256 {
+        return Err(Failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sign-in attempts. Try again shortly.".into(),
+        ));
+    }
+    // A replacement start carries the tab's cancellation intent atomically.
+    // It does not wait for, or trust the arrival order of, a separate cancel.
+    for retired in input.retired_attempt_nonces {
+        for flow in flows.values_mut() {
+            if flow.attempt_nonce == retired {
+                flow.cancelled = true;
+            }
+        }
+        flows.insert(format!("cancel-{retired}"), cancellation_marker(retired));
+    }
     if flows.len() >= 256 {
         return Err(Failure(
             StatusCode::TOO_MANY_REQUESTS,
@@ -218,6 +280,12 @@ pub(crate) async fn start(
     flows.insert(
         nonce.clone(),
         LoginFlow {
+            activation_version: 1,
+            attempt_nonce: attempt_nonce.clone(),
+            previous_context,
+            candidate_id: None,
+            cancelled: false,
+            activated: false,
             browser_group,
             return_to,
             deadline: SystemTime::now() + Duration::from_secs(600),
@@ -233,7 +301,7 @@ pub(crate) async fn start(
             .map_err(|_| storage_failure())?;
     }
     let cookie = HeaderValue::from_str(&format!(
-        "{}-login={nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{}",
+        "{}-login-{attempt_nonce}={nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{}",
         app.cookie,
         if app.secure { "; Secure" } else { "" }
     ))
@@ -280,30 +348,26 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
     if nonce.len() != 64 || input.slt.len() > 256 {
         return Err(unauthenticated());
     }
-    let expected = format!("{}-login", app.cookie);
-    let cookies: Vec<_> = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|v| v.trim().split_once('='))
-        .filter(|(k, _)| *k == expected)
-        .collect();
-    if cookies.len() != 1 || cookies[0].1 != nonce {
-        return Err(unauthenticated());
-    }
     let flows = app.logins.lock().await;
     let flow = flows
         .get(nonce)
-        .filter(|f| f.deadline > SystemTime::now())
+        .filter(|f| f.deadline > SystemTime::now() && !f.cancelled && f.activation_version == 1)
         .ok_or_else(unauthenticated)?;
+    if identifier_named(
+        &format!("{}-login-{}", app.cookie, flow.attempt_nonce),
+        headers,
+    )
+    .as_deref()
+        != Some(nonce)
+    {
+        return Err(unauthenticated());
+    }
     let input = Login {
         org: None,
         slt: input.slt,
         test_key: None,
         operation_id: flow.operation_id,
     };
-    let return_to = flow.return_to.clone();
     let browser_group = flow.browser_group;
     let expected_kind = flow.identity_kind;
     let popup_nonce = flow.popup_nonce.clone();
@@ -318,6 +382,7 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
         crate::telemetry::enabled(&headers),
         browser_group,
         expected_kind,
+        true,
     )
     .await;
     let (id, value) = match established {
@@ -340,38 +405,229 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
             return Err(error);
         }
     };
-    let mut response = (
-        [(header::SET_COOKIE, cookie(app, &id, SESSION_SECONDS)?)],
-        Json(value.clone()),
-    )
-        .into_response();
-    response.headers_mut().insert(
-        header::LOCATION,
-        if let Some(nonce) = popup_nonce.as_deref() {
-            popup_completion(
-                nonce,
-                true,
-                value
-                    .get("context_id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| Uuid::parse_str(id).ok()),
-            )?
-        } else {
-            HeaderValue::from_str(&return_to).map_err(|_| bad("Invalid return path"))?
-        },
-    );
-    // Retain the bounded flow until expiry so a lost callback response can use
-    // the same IAM exchange identity and recover the existing browser session.
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&format!(
-            "{}-login=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
-            app.cookie,
-            if app.secure { "; Secure" } else { "" }
-        ))
-        .map_err(|_| bad("Invalid login cookie"))?,
-    );
+    // IAM completion is a candidate only. Never select an account from a
+    // callback response: it can arrive after its opener cancels or switches.
+    let mut flows = app.logins.lock().await;
+    let flow = flows
+        .get_mut(nonce)
+        .filter(|f| !f.cancelled && f.deadline > SystemTime::now())
+        .ok_or_else(login_changed)?;
+    if flow.candidate_id.as_ref().is_some_and(|saved| saved != &id) {
+        return Err(login_changed());
+    }
+    flow.candidate_id = Some(id);
+    save_flows(app, &flows)?;
+    let context = value
+        .get("context_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(unauthenticated)?;
+    let location = if let Some(popup_nonce) = popup_nonce.as_deref() {
+        popup_completion(popup_nonce, true, Some(context))?
+    } else {
+        HeaderValue::from_str(&format!("/?iam_activate={nonce}&context={context}"))
+            .map_err(|_| bad("Invalid sign-in completion"))?
+    };
+    // Keep the bounded login cookie/receipt for an exact lost-response retry.
+    // In particular, an old callback must not clear a newer login's cookie.
+    let response = ([(header::LOCATION, location)], ()).into_response();
     Ok(response)
+}
+
+fn valid_nonce(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn login_changed() -> Failure {
+    Failure(
+        StatusCode::CONFLICT,
+        "The sign-in or workspace changed. Start sign-in again.".into(),
+    )
+}
+fn save_flows(app: &App, flows: &std::collections::HashMap<String, LoginFlow>) -> Result<()> {
+    if let Some(storage) = &app.session_storage {
+        storage
+            .write("logins", flows)
+            .map_err(|_| storage_failure())?;
+    }
+    Ok(())
+}
+async fn current_context(app: &App, headers: &HeaderMap) -> Result<Option<Uuid>> {
+    let selectors: Vec<_> = headers.get_all("x-briefcase-context").iter().collect();
+    if selectors.len() == 1 && selectors[0] == "anonymous" {
+        return Ok(None);
+    }
+    if selectors.is_empty() && identifier(app, headers).is_none() {
+        return Ok(None);
+    }
+    let session = lookup(app, headers).await?;
+    Ok(Some(session.lock().await.context_id))
+}
+
+async fn invalidate_logins(app: &App, headers: &HeaderMap) -> Result<()> {
+    let group = browser_group(app, headers).await;
+    let mut flows = app.logins.lock().await;
+    for flow in flows.values_mut() {
+        if group.is_some() && flow.browser_group == group {
+            flow.cancelled = true;
+        }
+    }
+    save_flows(app, &flows)
+}
+fn cancellation_marker(attempt_nonce: String) -> LoginFlow {
+    LoginFlow {
+        activation_version: 0,
+        attempt_nonce,
+        previous_context: None,
+        candidate_id: None,
+        cancelled: true,
+        activated: false,
+        browser_group: None,
+        return_to: "/".into(),
+        deadline: SystemTime::now() + Duration::from_secs(600),
+        operation_id: Uuid::nil(),
+        telemetry: false,
+        identity_kind: None,
+        popup_nonce: None,
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelLogin {
+    attempt_nonce: String,
+}
+pub(crate) async fn cancel_login(
+    State(app): State<App>,
+    Json(input): Json<CancelLogin>,
+) -> Result<Response> {
+    if !valid_nonce(&input.attempt_nonce) {
+        return Err(bad("Invalid sign-in attempt."));
+    }
+    let mut flows = app.logins.lock().await;
+    flows.retain(|_, f| f.deadline > SystemTime::now());
+    for flow in flows.values_mut() {
+        if flow.attempt_nonce == input.attempt_nonce {
+            flow.cancelled = true;
+        }
+    }
+    let tombstone = format!("cancel-{}", input.attempt_nonce);
+    if flows.len() >= 256 && !flows.contains_key(&tombstone) {
+        return Err(Failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sign-in attempts. Retry cancellation shortly.".into(),
+        ));
+    }
+    flows.insert(tombstone, cancellation_marker(input.attempt_nonce.clone()));
+    save_flows(&app, &flows)?;
+    let clear = HeaderValue::from_str(&format!(
+        "{}-login-{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        app.cookie,
+        input.attempt_nonce,
+        if app.secure { "; Secure" } else { "" }
+    ))
+    .map_err(|_| bad("Invalid login cookie"))?;
+    Ok((
+        [(header::SET_COOKIE, clear)],
+        Json(json!({"cancelled":true})),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActivateLogin {
+    context_id: Uuid,
+    state: Option<String>,
+    attempt_nonce: Option<String>,
+}
+pub(crate) async fn activate_login(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<ActivateLogin>,
+) -> Result<Response> {
+    if selected_environment(&headers)?.is_some() {
+        return Err(login_changed());
+    }
+    let current = current_context(&app, &headers).await?;
+    let mut flows = app.logins.lock().await;
+    let nonce = if let Some(state) = &input.state {
+        state.clone()
+    } else {
+        flows
+            .iter()
+            .find(|(_, flow)| {
+                input.attempt_nonce.as_ref() == Some(&flow.attempt_nonce)
+                    && flow.activation_version == 1
+            })
+            .map(|(state, _)| state.clone())
+            .ok_or_else(login_changed)?
+    };
+    let flow = flows
+        .get_mut(&nonce)
+        .filter(|f| f.activation_version == 1 && !f.cancelled && f.deadline > SystemTime::now())
+        .ok_or_else(login_changed)?;
+    if identifier_named(
+        &format!("{}-login-{}", app.cookie, flow.attempt_nonce),
+        &headers,
+    )
+    .as_deref()
+        != Some(nonce.as_str())
+    {
+        return Err(login_changed());
+    }
+    let bound = match (&flow.popup_nonce, &input.attempt_nonce, &input.state) {
+        (Some(_), Some(attempt), None) => attempt == &flow.attempt_nonce,
+        (None, None, Some(state)) => state == &nonce,
+        _ => false,
+    };
+    if !bound
+        || (current != flow.previous_context
+            && !(flow.activated && current == Some(input.context_id)))
+    {
+        return Err(login_changed());
+    }
+    let id = flow
+        .candidate_id
+        .as_ref()
+        .ok_or_else(login_changed)?
+        .clone();
+    let session = app
+        .sessions
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(login_changed)?;
+    let mut selected = session.lock().await;
+    if selected.context_id != input.context_id
+        || selected.testing
+        || selected.rejected
+        || selected.deadline <= SystemTime::now()
+        || flow
+            .identity_kind
+            .is_some_and(|kind| kind != selected.tokens.actor.actor_type)
+        || flow
+            .browser_group
+            .is_some_and(|group| group != selected.browser_group)
+    {
+        return Err(login_changed());
+    }
+    if selected.login_pending {
+        selected.deadline = SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS));
+    }
+    selected.login_pending = false;
+    selected.save()?;
+    flow.activated = true;
+    let mut value = view(&selected);
+    value["return_to"] = json!(flow.return_to);
+    save_flows(&app, &flows)?;
+    Ok((
+        [(header::SET_COOKIE, cookie(&app, &id, SESSION_SECONDS)?)],
+        Json(value),
+    )
+        .into_response())
 }
 
 pub(crate) struct Session {
@@ -390,6 +646,7 @@ pub(crate) struct Session {
     organizations: Vec<String>,
     testing: bool,
     rejected: bool,
+    login_pending: bool,
     test_environment: Option<TestSelection>,
     test_sessions: std::collections::HashMap<Uuid, String>,
 }
@@ -471,6 +728,7 @@ async fn context_view(app: &App, current: &Arc<Mutex<Session>>) -> Value {
         if session.browser_group == group
             && session.testing == testing
             && !session.rejected
+            && !session.login_pending
             && session.deadline > SystemTime::now()
             && session
                 .test_environment
@@ -530,7 +788,11 @@ async fn production_session(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<
         .cloned()
         .ok_or_else(unauthenticated)?;
     let parent = session.lock().await;
-    if parent.deadline <= SystemTime::now() || parent.rejected || parent.testing {
+    if parent.deadline <= SystemTime::now()
+        || parent.rejected
+        || parent.testing
+        || parent.login_pending
+    {
         return Err(unauthenticated());
     }
     drop(parent);
@@ -580,7 +842,7 @@ async fn standalone_test(
     Ok(session)
 }
 
-async fn lookup(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
+async fn lookup_cookie(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
     let Some(environment) = selected_environment(headers)? else {
         return production_session(app, headers).await;
     };
@@ -611,6 +873,67 @@ async fn lookup(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
     standalone_test(app, headers, environment).await
 }
 
+// A tab's public selector is authoritative only inside the authenticated
+// browser group and exact world. Shared cookies prove group access; delayed
+// Set-Cookie responses cannot silently retarget an already-open tab.
+async fn lookup(app: &App, headers: &HeaderMap) -> Result<Arc<Mutex<Session>>> {
+    let selectors: Vec<_> = headers.get_all("x-briefcase-context").iter().collect();
+    let target = match selectors.as_slice() {
+        [] => None, // One-time bootstrap for older signed-in browsers.
+        [value] if *value == "anonymous" => return Err(unauthenticated()),
+        [value] => Some(
+            value
+                .to_str()
+                .ok()
+                .and_then(|v| Uuid::parse_str(v).ok())
+                .filter(|id| !id.is_nil())
+                .ok_or_else(login_changed)?,
+        ),
+        _ => return Err(login_changed()),
+    };
+    let credential = lookup_cookie(app, headers).await?;
+    let Some(target) = target else {
+        return Ok(credential);
+    };
+    let (group, testing, world) = {
+        let current = credential.lock().await;
+        (
+            current.browser_group,
+            current.testing,
+            current
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation)),
+        )
+    };
+    let candidates: Vec<_> = app.sessions.lock().await.values().cloned().collect();
+    for candidate in candidates {
+        let selected = candidate.lock().await;
+        if selected.context_id == target
+            && selected.browser_group == group
+            && (selected.rejected || selected.deadline <= SystemTime::now())
+        {
+            return Err(unauthenticated());
+        }
+        if selected.context_id == target
+            && selected.browser_group == group
+            && selected.testing == testing
+            && !selected.login_pending
+            && !selected.rejected
+            && selected.deadline > SystemTime::now()
+            && selected
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation))
+                == world
+        {
+            drop(selected);
+            return Ok(candidate);
+        }
+    }
+    Err(login_changed())
+}
+
 fn unauthenticated() -> Failure {
     Failure(
         StatusCode::UNAUTHORIZED,
@@ -623,7 +946,7 @@ async fn establish(
     telemetry: bool,
     expected_kind: Option<ActorType>,
 ) -> Result<(String, Value)> {
-    establish_in_group(app, input, telemetry, None, expected_kind).await
+    establish_in_group(app, input, telemetry, None, expected_kind, false).await
 }
 async fn establish_in_group(
     app: &App,
@@ -631,6 +954,7 @@ async fn establish_in_group(
     telemetry: bool,
     group: Option<Uuid>,
     expected_kind: Option<ActorType>,
+    login_pending: bool,
 ) -> Result<(String, Value)> {
     if input.operation_id.is_nil()
         || input
@@ -733,7 +1057,12 @@ async fn establish_in_group(
         context_id: Uuid::new_v4(),
         auth_config,
         expires: SystemTime::now() + Duration::from_secs(tokens.expires_in.min(86400)),
-        deadline: SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS)),
+        deadline: SystemTime::now()
+            + Duration::from_secs(if login_pending {
+                600
+            } else {
+                u64::from(SESSION_SECONDS)
+            }),
         config,
         tokens,
         refresh_key: IdempotencyKey::random(),
@@ -747,6 +1076,7 @@ async fn establish_in_group(
         organizations,
         testing,
         rejected: false,
+        login_pending,
         test_environment: None,
         test_sessions: Default::default(),
     };
@@ -780,6 +1110,7 @@ pub(crate) async fn select(
             current.org.clone(),
         )
     };
+    invalidate_logins(&app, &headers).await?;
     let target = input
         .context_id
         .or_else(|| (input.org == current_org).then_some(current_id))
@@ -804,7 +1135,7 @@ pub(crate) async fn select(
         {
             continue;
         }
-        if session.rejected || session.deadline <= SystemTime::now() {
+        if session.rejected || session.login_pending || session.deadline <= SystemTime::now() {
             return Err(unauthenticated());
         }
         refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
@@ -928,6 +1259,13 @@ async fn authenticated_client(app: &App, headers: &HeaderMap) -> Result<Client> 
     )?)
 }
 pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
+    if headers.get_all("x-briefcase-context").iter().count() == 1
+        && headers
+            .get("x-briefcase-context")
+            .is_some_and(|value| value == "anonymous")
+    {
+        return Ok(Json(json!({"authenticated":false})));
+    }
     if identifier(&app, &headers).is_none()
         && identifier_named(&format!("{}-testing", app.cookie), &headers).is_none()
     {
@@ -957,6 +1295,7 @@ pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result
                 .map(|e| (e.id, e.version, e.key_generation)),
         )
     };
+    invalidate_logins(&app, &headers).await?;
     let all: Vec<_> = app
         .sessions
         .lock()
@@ -975,6 +1314,7 @@ pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result
         if value.browser_group == group
             && value.testing == testing
             && !value.rejected
+            && !value.login_pending
             && value.deadline > SystemTime::now()
             && value
                 .test_environment
@@ -1045,6 +1385,7 @@ pub(crate) async fn enter_test(
     }
     let parent = production_session(&app, &headers).await?;
     let management = client(&app, &headers).await?;
+    invalidate_logins(&app, &headers).await?;
     let environment = management.testing_environment(id).await?;
     if environment.status != briefcase_client::TestingEnvironmentStatus::Active
         || environment.org_id != management.organization()
@@ -1186,7 +1527,7 @@ pub(crate) mod tests {
                 "org_id":"tos","organizations":["tos"]
             })).unwrap(), expires: SystemTime::now()+Duration::from_secs(3600),deadline:SystemTime::now()+Duration::from_secs(3600),
             refresh_key:IdempotencyKey::random(), refresh_started_at:None, durable:None, durable_dirty:false, org:Some("tos".into()),organizations:vec!["tos".into()],
-            testing:test.is_some(),rejected:false,test_environment:environment,test_sessions:Default::default(),
+            testing:test.is_some(),rejected:false,login_pending:false,test_environment:environment,test_sessions:Default::default(),
         }
     }
 
@@ -1265,9 +1606,10 @@ pub(crate) mod tests {
         );
         assert_eq!(first.lock().await.org.as_deref(), Some("tos"));
         let mut next = headers(&second_id, None);
+        // A late selector cookie from another tab cannot retarget this tab.
         assert_eq!(
-            client(&app, &next).await.err().unwrap().0,
-            StatusCode::CONFLICT
+            client(&app, &next).await.ok().unwrap().organization(),
+            "tos"
         );
         next.insert(
             "x-briefcase-context",
@@ -1295,6 +1637,8 @@ pub(crate) mod tests {
             State(app.clone()),
             HeaderMap::new(),
             Json(Start {
+                retired_attempt_nonces: vec![],
+                attempt_nonce: None,
                 return_to: None,
                 identity_kind: Some(ActorType::Carbon),
                 popup_nonce: Some("b".repeat(64)),
@@ -1311,7 +1655,8 @@ pub(crate) mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("briefcase_dev-login={nonce}")).unwrap(),
+            HeaderValue::from_str(&format!("briefcase_dev-login-{}={nonce}", "b".repeat(64)))
+                .unwrap(),
         );
         for _ in 0..2 {
             let response = callback(
@@ -1352,6 +1697,8 @@ pub(crate) mod tests {
             State(app.clone()),
             headers(&first_id, None),
             Json(Start {
+                retired_attempt_nonces: vec![],
+                attempt_nonce: None,
                 return_to: None,
                 identity_kind: Some(ActorType::Silicon),
                 popup_nonce: Some("a".repeat(64)),
@@ -1367,6 +1714,437 @@ pub(crate) mod tests {
         assert_eq!(flow.identity_kind, Some(ActorType::Silicon));
         assert_eq!(flow.popup_nonce.as_deref(), Some("a".repeat(64).as_str()));
         assert_ne!(flow.operation_id, Uuid::nil());
+    }
+
+    async fn candidate_fixture(popup: bool) -> (App, HeaderMap, String, String, Uuid) {
+        let app = app();
+        let owner = session(None);
+        let group = owner.browser_group;
+        let old_id = "a".repeat(64);
+        app.sessions
+            .lock()
+            .await
+            .insert(old_id.clone(), Arc::new(Mutex::new(owner)));
+        let nonce = "b".repeat(64);
+        start(
+            State(app.clone()),
+            headers(&old_id, None),
+            Json(Start {
+                retired_attempt_nonces: vec![],
+                attempt_nonce: Some(nonce.clone()),
+                identity_kind: Some(ActorType::Carbon),
+                popup_nonce: popup.then(|| nonce.clone()),
+                return_to: None,
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        let (state, operation_id) = {
+            let flows = app.logins.lock().await;
+            let (state, flow) = flows.iter().next().unwrap();
+            (state.clone(), flow.operation_id)
+        };
+        let input = Login {
+            org: None,
+            slt: "oac_fixture".into(),
+            test_key: None,
+            operation_id,
+        };
+        let mut hash = Sha256::new();
+        hash.update(app.login_salt.as_bytes());
+        hash.update(serde_json::to_vec(&input).unwrap());
+        let id = format!("{:x}", hash.finalize());
+        let mut candidate = session(None);
+        candidate.browser_group = group;
+        candidate.context_id = Uuid::from_u128(2);
+        candidate.login_pending = true;
+        app.sessions
+            .lock()
+            .await
+            .insert(id, Arc::new(Mutex::new(candidate)));
+        let mut h = headers(&old_id, None);
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "briefcase_dev={old_id}; briefcase_dev-login-{nonce}={state}"
+            ))
+            .unwrap(),
+        );
+        (app, h, state, nonce, Uuid::from_u128(2))
+    }
+
+    #[tokio::test]
+    async fn cancellation_quarantines_callback_candidate_and_never_selects_it_on_logout() {
+        let (app, h, state, nonce, context) = candidate_fixture(true).await;
+        let response = finish_callback(
+            &app,
+            &h,
+            Callback {
+                state: state.clone(),
+                slt: "oac_fixture".into(),
+            },
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        cancel_login(
+            State(app.clone()),
+            Json(CancelLogin {
+                attempt_nonce: nonce.clone(),
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(
+            activate_login(
+                State(app.clone()),
+                h.clone(),
+                Json(ActivateLogin {
+                    context_id: context,
+                    state: None,
+                    attempt_nonce: Some(nonce)
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            finish_callback(
+                &app,
+                &h,
+                Callback {
+                    state,
+                    slt: "oac_fixture".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        let response = logout(State(app), h).await.ok().unwrap();
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value, json!({"authenticated": false}));
+    }
+
+    #[tokio::test]
+    async fn a_new_attempt_survives_an_old_callback_and_old_cancellation() {
+        let (app, h, state, old_nonce, context) = candidate_fixture(true).await;
+        start(
+            State(app.clone()),
+            h.clone(),
+            Json(Start {
+                retired_attempt_nonces: vec![old_nonce.clone()],
+                attempt_nonce: Some("c".repeat(64)),
+                identity_kind: Some(ActorType::Silicon),
+                popup_nonce: Some("d".repeat(64)),
+                return_to: None,
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        let new_state = app
+            .logins
+            .lock()
+            .await
+            .iter()
+            .find(|(_, f)| f.attempt_nonce == "c".repeat(64))
+            .unwrap()
+            .0
+            .clone();
+        assert!(
+            finish_callback(
+                &app,
+                &h,
+                Callback {
+                    state,
+                    slt: "oac_fixture".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        let mut newer = h.clone();
+        newer.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "briefcase_dev={}; briefcase_dev-login={new_state}",
+                "a".repeat(64)
+            ))
+            .unwrap(),
+        );
+        cancel_login(
+            State(app.clone()),
+            Json(CancelLogin {
+                attempt_nonce: old_nonce.clone(),
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(!app.logins.lock().await[&new_state].cancelled);
+        assert!(
+            activate_login(
+                State(app),
+                h,
+                Json(ActivateLogin {
+                    context_id: context,
+                    state: None,
+                    attempt_nonce: Some(old_nonce)
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_start_retires_delayed_predecessor_before_cancel_arrives() {
+        let app = app();
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        start(
+            State(app.clone()),
+            HeaderMap::new(),
+            Json(Start {
+                retired_attempt_nonces: vec![a.clone()],
+                attempt_nonce: Some(b.clone()),
+                identity_kind: Some(ActorType::Silicon),
+                popup_nonce: None,
+                return_to: None,
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(
+            start(
+                State(app.clone()),
+                HeaderMap::new(),
+                Json(Start {
+                    retired_attempt_nonces: vec![],
+                    attempt_nonce: Some(a.clone()),
+                    identity_kind: Some(ActorType::Carbon),
+                    popup_nonce: Some(a.clone()),
+                    return_to: None,
+                })
+            )
+            .await
+            .is_err()
+        );
+        cancel_login(State(app.clone()), Json(CancelLogin { attempt_nonce: a }))
+            .await
+            .ok()
+            .unwrap();
+        assert!(
+            app.logins
+                .lock()
+                .await
+                .values()
+                .any(|flow| flow.attempt_nonce == b
+                    && !flow.cancelled
+                    && flow.identity_kind == Some(ActorType::Silicon))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_start_is_durable_and_does_not_block_a_new_nonce() {
+        let mut app = app();
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        app.session_storage = Some(storage.clone());
+        let nonce = "b".repeat(64);
+        cancel_login(
+            State(app.clone()),
+            Json(CancelLogin {
+                attempt_nonce: nonce.clone(),
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        app.logins = Arc::new(Mutex::new(storage.read("logins").unwrap().unwrap()));
+        let old = Start {
+            retired_attempt_nonces: vec![],
+            attempt_nonce: Some(nonce.clone()),
+            identity_kind: Some(ActorType::Carbon),
+            popup_nonce: Some(nonce),
+            return_to: None,
+        };
+        assert_eq!(
+            start(State(app.clone()), HeaderMap::new(), Json(old))
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::CONFLICT
+        );
+        let new = Start {
+            retired_attempt_nonces: vec![],
+            attempt_nonce: Some("c".repeat(64)),
+            identity_kind: Some(ActorType::Silicon),
+            popup_nonce: None,
+            return_to: None,
+        };
+        let response = start(State(app), HeaderMap::new(), Json(new))
+            .await
+            .ok()
+            .unwrap();
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("briefcase_dev-login-{}=", "c".repeat(64)))
+        );
+    }
+
+    #[tokio::test]
+    async fn public_selectors_stay_inside_authenticated_groups_and_exact_world() {
+        let app = app();
+        let first = session(None);
+        let group = first.browser_group;
+        let mut second = session(None);
+        second.browser_group = group;
+        second.context_id = Uuid::from_u128(2);
+        let mut outsider = session(None);
+        outsider.context_id = Uuid::from_u128(3);
+        let environment = Uuid::new_v4();
+        let mut test = session(Some(environment));
+        test.browser_group = group;
+        test.context_id = Uuid::from_u128(4);
+        app.sessions.lock().await.extend([
+            ("a".repeat(64), Arc::new(Mutex::new(first))),
+            ("b".repeat(64), Arc::new(Mutex::new(second))),
+            ("c".repeat(64), Arc::new(Mutex::new(outsider))),
+            ("d".repeat(64), Arc::new(Mutex::new(test))),
+        ]);
+        // Simulate late activation cookie B arriving after tab A's selection.
+        let mut h = headers(&"b".repeat(64), None);
+        assert_eq!(
+            lookup(&app, &h).await.ok().unwrap().lock().await.context_id,
+            Uuid::from_u128(1)
+        );
+        for context in [3, 4, 999] {
+            h.insert(
+                "x-briefcase-context",
+                HeaderValue::from_str(&Uuid::from_u128(context).to_string()).unwrap(),
+            );
+            assert!(lookup(&app, &h).await.is_err());
+        }
+        h.insert("x-briefcase-context", HeaderValue::from_static("anonymous"));
+        assert_eq!(
+            status(State(app.clone()), h.clone()).await.ok().unwrap().0,
+            json!({"authenticated":false})
+        );
+        assert!(lookup(&app, &h).await.is_err());
+        h.remove(header::COOKIE);
+        h.insert(
+            "x-briefcase-context",
+            HeaderValue::from_str(&Uuid::from_u128(1).to_string()).unwrap(),
+        );
+        assert!(lookup(&app, &h).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn expired_tab_selection_can_be_cleared_to_anonymous_without_adopting_a_sibling() {
+        let app = app();
+        let mut old = session(None);
+        let group = old.browser_group;
+        old.deadline = SystemTime::UNIX_EPOCH;
+        let mut sibling = session(None);
+        sibling.browser_group = group;
+        sibling.context_id = Uuid::from_u128(2);
+        app.sessions.lock().await.extend([
+            ("a".repeat(64), Arc::new(Mutex::new(old))),
+            ("b".repeat(64), Arc::new(Mutex::new(sibling))),
+        ]);
+        let mut h = headers(&"b".repeat(64), None);
+        assert_eq!(
+            status(State(app.clone()), h.clone()).await.err().unwrap().0,
+            StatusCode::UNAUTHORIZED
+        );
+        h.insert("x-briefcase-context", HeaderValue::from_static("anonymous"));
+        assert_eq!(
+            status(State(app.clone()), h.clone()).await.ok().unwrap().0,
+            json!({"authenticated":false})
+        );
+        start(
+            State(app.clone()),
+            h,
+            Json(Start {
+                retired_attempt_nonces: vec![],
+                attempt_nonce: Some("c".repeat(64)),
+                return_to: None,
+                identity_kind: Some(ActorType::Carbon),
+                popup_nonce: None,
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(
+            app.logins
+                .lock()
+                .await
+                .values()
+                .all(|flow| flow.previous_context.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_login_quarantine_and_activation_receipts_survive_restart() {
+        let (mut app, h, state, nonce, context) = candidate_fixture(true).await;
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        app.session_storage = Some(storage.clone());
+        for (id, session) in app.sessions.lock().await.iter() {
+            let mut session = session.lock().await;
+            session.durable = Some((storage.clone(), id.clone()));
+            session.save().ok().unwrap();
+        }
+        finish_callback(
+            &app,
+            &h,
+            Callback {
+                state,
+                slt: "oac_fixture".into(),
+            },
+        )
+        .await
+        .ok()
+        .unwrap();
+        app.sessions = Arc::new(Mutex::new(restore(&storage).unwrap()));
+        app.logins = Arc::new(Mutex::new(storage.read("logins").unwrap().unwrap()));
+        let selected = lookup(&app, &h).await.ok().unwrap();
+        assert_eq!(
+            context_view(&app, &selected).await["contexts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for _ in 0..2 {
+            activate_login(
+                State(app.clone()),
+                h.clone(),
+                Json(ActivateLogin {
+                    context_id: context,
+                    state: None,
+                    attempt_nonce: Some(nonce.clone()),
+                }),
+            )
+            .await
+            .ok()
+            .unwrap();
+        }
+        assert_eq!(app.sessions.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -1385,6 +2163,8 @@ pub(crate) mod tests {
                 State(app.clone()),
                 headers(&first_id, None),
                 Json(Start {
+                    retired_attempt_nonces: vec![],
+                    attempt_nonce: None,
                     return_to: Some(destination.into()),
                     identity_kind: Some(kind),
                     popup_nonce: None,
@@ -1426,6 +2206,8 @@ pub(crate) mod tests {
             let id = format!("{:x}", hash.finalize());
             let mut completed = session(None);
             completed.browser_group = group;
+            completed.context_id = Uuid::from_u128(2);
+            completed.login_pending = true;
             completed.tokens.actor.actor_type = kind;
             completed.tokens.actor.public_id = if kind == ActorType::Carbon {
                 "c:person"
@@ -1440,7 +2222,14 @@ pub(crate) mod tests {
             let mut request_headers = HeaderMap::new();
             request_headers.insert(
                 header::COOKIE,
-                HeaderValue::from_str(&format!("briefcase_dev-login={nonce}")).unwrap(),
+                HeaderValue::from_str(&format!(
+                    "briefcase_dev={first_id}; briefcase_dev-login-{nonce}={nonce}"
+                ))
+                .unwrap(),
+            );
+            request_headers.insert(
+                "x-briefcase-context",
+                HeaderValue::from_str(&Uuid::from_u128(1).to_string()).unwrap(),
             );
             assert!(
                 finish_callback(
@@ -1456,22 +2245,63 @@ pub(crate) mod tests {
             );
             let response = callback(
                 State(app.clone()),
-                request_headers,
+                request_headers.clone(),
                 Ok(axum::extract::Query(Callback {
                     slt: "oac_fixture".into(),
-                    state: nonce,
+                    state: nonce.clone(),
                 })),
             )
             .await;
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
-            assert_eq!(response.headers()[header::LOCATION], destination);
             assert!(
-                response
-                    .headers()
-                    .get_all(header::SET_COOKIE)
-                    .iter()
-                    .any(|value| value.to_str().unwrap().contains(&id))
+                response.headers()[header::LOCATION]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("/?iam_activate=")
             );
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert_eq!(
+                status(State(app.clone()), request_headers.clone())
+                    .await
+                    .ok()
+                    .unwrap()
+                    .0["context_id"],
+                Uuid::from_u128(1).to_string()
+            );
+            let first_session = app.sessions.lock().await[&first_id].clone();
+            assert_eq!(
+                context_view(&app, &first_session).await["contexts"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            for _ in 0..2 {
+                let response = activate_login(
+                    State(app.clone()),
+                    request_headers.clone(),
+                    Json(ActivateLogin {
+                        context_id: Uuid::from_u128(2),
+                        state: Some(nonce.clone()),
+                        attempt_nonce: None,
+                    }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.1));
+                assert!(
+                    response.headers()[header::SET_COOKIE]
+                        .to_str()
+                        .unwrap()
+                        .contains(&id)
+                );
+                let value: Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), 8192)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(value["return_to"], destination);
+            }
             assert_eq!(
                 app.sessions.lock().await[&first_id]
                     .lock()
@@ -1592,6 +2422,8 @@ pub(crate) mod tests {
                 State(app.clone()),
                 HeaderMap::new(),
                 Json(Start {
+                    retired_attempt_nonces: vec![],
+                    attempt_nonce: None,
                     identity_kind: Some(ActorType::Silicon),
                     popup_nonce: Some("a".repeat(64)),
                     return_to: Some("/".into()),
@@ -2099,6 +2931,7 @@ pub(crate) async fn enter_secret(
     if let Some(parent) = &parent {
         guard_context(&*parent.lock().await, &headers)?;
     }
+    invalidate_logins(&app, &headers).await?;
     let config = Config::for_sign_in(&app.upstream)?
         .with_environment(EnvironmentKey::new(input.app_secret.clone())?)
         .with_auto_update(false)
@@ -2119,6 +2952,7 @@ pub(crate) async fn enter_secret(
         crate::telemetry::enabled(&headers),
         group,
         None,
+        false,
     )
     .await?;
     let child = app

@@ -158,6 +158,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/browser/public", get(public::read))
         .route("/browser/telemetry", post(telemetry::submit))
         .route("/browser/login/start", post(session::start))
+        .route("/browser/login/activate", post(session::activate_login))
+        .route("/browser/login/cancel", post(session::cancel_login))
         .route("/browser/notifications", get(access::inbox))
         .route("/browser/notifications/read", post(access::mark_read))
         .route("/auth/callback", get(session::callback))
@@ -274,9 +276,10 @@ fn extract_environment_selector(request: &mut Request) -> Result<()> {
             continue;
         }
         if selectors.len() != 1
-            || uuid::Uuid::parse_str(&selectors[0].1)
-                .ok()
-                .is_none_or(|id| id.is_nil())
+            || (!(query_key == "account_context" && selectors[0].1 == "anonymous")
+                && uuid::Uuid::parse_str(&selectors[0].1)
+                    .ok()
+                    .is_none_or(|id| id.is_nil()))
             || request.headers().get_all(header_name).iter().count() > 1
             || request
                 .headers()

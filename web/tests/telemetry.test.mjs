@@ -5,7 +5,7 @@ import { safeBrowserEvent, startTelemetry, setTelemetryEnabled, trackRequest } f
 const pause = () => new Promise(resolve => setTimeout(resolve, 1150));
 const storage = () => { const values = new Map(); return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) }; };
 
-test('sanitizer discards all content and keeps bounded diagnostics', () => {
+void test('sanitizer discards all content and keeps bounded diagnostics', () => {
   const environment = crypto.randomUUID();
   const raw = { id: crypto.randomUUID(), type: 'network', data: { url: 'https://host/private/secret.txt?slt_private', status: 503, duration_ms: 42, message: 'private text', percent: 120 }, metadata: { token: 'slt_private' } };
   const event = safeBrowserEvent(raw, environment);
@@ -19,7 +19,7 @@ test('sanitizer discards all content and keeps bounded diagnostics', () => {
   assert.equal(safeBrowserEvent({type: 'slt_private', data: {duration_ms: Infinity}}, null).operation, 'web_unknown');
 });
 
-test('official browser analytics and UI events use one sanitized relay; opt-out clears queued work', async () => {
+void test('official browser analytics and UI events use one sanitized relay; opt-out clears queued work', async () => {
   const calls = [];
   globalThis.localStorage = storage();
   globalThis.sessionStorage = storage();

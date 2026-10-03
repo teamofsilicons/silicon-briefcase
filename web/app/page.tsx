@@ -30,11 +30,39 @@ import {
   completeIamPopup,
   openIamPopup,
   continueIamInThisTab,
+  safeLoginReturn,
+  savedLoginAttempt,
+  retiredLoginAttempts,
+  retireLoginAttempt,
+  beginLoginAttempt,
+  bindLoginAttempt,
+  completeLoginAttempt,
+  isCurrentLoginState,
   type IdentityKind,
 } from '@/lib/iam-popup';
 export default function Home() {
   const loginController = useRef<AbortController | null>(null);
-  useEffect(() => () => loginController.current?.abort(), []);
+  const loginAttempt = useRef<{
+    nonce: string;
+    started: Promise<unknown>;
+  } | null>(null);
+  const cancelAttempt = useCallback(async () => {
+    loginController.current?.abort();
+    const attempt = loginAttempt.current;
+    loginAttempt.current = null;
+    if (attempt) {
+      // The durable nonce tombstone also cancels a start that has not arrived.
+      // Late responses have separate cookies and cannot erase a successor.
+      retireLoginAttempt(attempt.nonce);
+      await api('/login/cancel', 'POST', { attempt_nonce: attempt.nonce });
+    }
+  }, []);
+  useEffect(
+    () => () => {
+      void cancelAttempt().catch(() => {});
+    },
+    [cancelAttempt],
+  );
   const [fullPagePending, setFullPagePending] = useState(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
@@ -61,6 +89,73 @@ export default function Home() {
   }, []);
   useEffect(() => {
     if (completeIamPopup()) return;
+    const completion = new URLSearchParams(location.search);
+    if (completion.has('iam_activate')) {
+      const state = completion.get('iam_activate'),
+        context = completion.get('context');
+      history.replaceState(null, '', location.pathname);
+      if (
+        !/^[a-f0-9]{64}$/.test(state || '') ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+          context || '',
+        ) ||
+        !isCurrentLoginState(state)
+      ) {
+        // eslint-disable-next-line react/react-compiler -- Validate callback parameters once after hydration.
+        setError('Invalid sign-in completion. Start sign-in again.');
+        setChecking(false);
+        return;
+      }
+      sessionStorage.setItem(
+        'briefcase-login-return',
+        JSON.stringify({ state, context_id: context }),
+      );
+    }
+    const retained = sessionStorage.getItem('briefcase-login-return');
+    if (retained) {
+      let active = true;
+      void (async () => {
+        try {
+          const receipt = JSON.parse(retained);
+          const attempt = savedLoginAttempt();
+          if (!attempt || attempt.state !== receipt.state)
+            throw new Error(
+              'This sign-in was superseded. Start sign-in again.',
+            );
+          const current = await api<BrowserSession & { return_to: string }>(
+            '/login/activate',
+            'POST',
+            receipt,
+          );
+          if (!active) return;
+          if (
+            !current.authenticated ||
+            current.context_id !== receipt.context_id ||
+            current.actor.type !== attempt.kind ||
+            savedLoginAttempt()?.nonce !== attempt.nonce
+          )
+            throw new Error(
+              'The selected account could not be verified. Start sign-in again.',
+            );
+          const destination = safeLoginReturn(current.return_to);
+          setAccountContext(current.context_id);
+          sessionStorage.removeItem('briefcase-login-return');
+          completeLoginAttempt(attempt.nonce);
+          window.location.assign(destination);
+        } catch (error) {
+          if (!active) return;
+          setError(
+            error instanceof Error
+              ? error.message
+              : 'Sign-in could not be completed.',
+          );
+          setChecking(false);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }
     const selectors = new URLSearchParams(location.search).getAll(
       'test_environment',
     );
@@ -120,7 +215,11 @@ export default function Home() {
         setSession(value.authenticated ? value : null);
       })
       .catch((e) => {
-        if (e.status !== 401) setError(e.message);
+        if (e.status === 401) {
+          setAccountContext(null);
+          setWorkspaceOrganization(null);
+          setSession(null);
+        } else setError(e.message);
       })
       .finally(() => setChecking(false));
   }, []);
@@ -129,10 +228,9 @@ export default function Home() {
       returnToProduction();
       return;
     }
-    if (loginController.current) {
-      if (!fullPage) return;
-      loginController.current.abort();
-    }
+    if (loginController.current && !fullPage) return;
+    const previous = cancelAttempt();
+    void previous.catch(() => {});
     const controller = new AbortController();
     loginController.current = controller;
     const generation = browserContextGeneration();
@@ -140,35 +238,36 @@ export default function Home() {
     setError('');
     setFullPagePending(fullPage);
     try {
+      let boundAttempt = '';
       const start = async (nonce?: string) => {
-        const r = await fetch('/browser/login/start', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Briefcase-Browser': '1',
-          },
-          body: JSON.stringify({
-            return_to: returnTo,
-            identity_kind: kind,
-            ...(nonce ? { popup_nonce: nonce } : {}),
-          }),
+        if (controller.signal.aborted) throw new Error('Sign-in cancelled.');
+        boundAttempt =
+          nonce ||
+          Array.from(crypto.getRandomValues(new Uint8Array(32)), (value) =>
+            value.toString(16).padStart(2, '0'),
+          ).join('');
+        sessionStorage.removeItem('briefcase-login-return');
+        beginLoginAttempt(boundAttempt, kind);
+        const started = api<{ redirect_url: string }>('/login/start', 'POST', {
+          return_to: returnTo,
+          identity_kind: kind,
+          attempt_nonce: boundAttempt,
+          retired_attempt_nonces: retiredLoginAttempts(),
+          ...(nonce ? { popup_nonce: nonce } : {}),
         });
-        const value = (await r.json()) as {
-          error?: { message?: string };
-          redirect_url: string;
-        };
-        if (!r.ok)
-          throw new Error(
-            value.error?.message || 'Sign-in could not be completed.',
-          );
-        if (browserContextGeneration() !== generation) {
+        loginAttempt.current = { nonce: boundAttempt, started };
+        const value = await started;
+        if (
+          controller.signal.aborted ||
+          browserContextGeneration() !== generation
+        )
           throw new Error('The workspace changed. Please start sign-in again.');
-        }
+        bindLoginAttempt(boundAttempt, value.redirect_url);
         return value.redirect_url;
       };
       if (fullPage) {
         await continueIamInThisTab(() => start(), controller.signal);
+        if (loginController.current === controller) loginAttempt.current = null; // Full-page handoff owns the bounded server receipt.
         return;
       }
       const completed = await openIamPopup(start, controller.signal);
@@ -177,12 +276,12 @@ export default function Home() {
         browserContextGeneration() !== generation
       )
         return;
-      // The popup changed the shared cookie. Fence old requests before reading
-      // the new server context, and do not leave the previous account visible.
-      setAccountContext(null);
-      setWorkspaceOrganization(null);
-      setSession(null);
-      const current = await api<BrowserSession | AccountSession>('/session');
+      // Only the initiating tab adopts the candidate. Its public selector
+      // stays authoritative when another tab's cookies arrive late.
+      const current = await api<BrowserSession>('/login/activate', 'POST', {
+        context_id: completed,
+        attempt_nonce: boundAttempt,
+      });
       if (
         !current.authenticated ||
         current.actor.type !== kind ||
@@ -192,6 +291,8 @@ export default function Home() {
           'The selected account could not be verified. Please sign in again.',
         );
       if (controller.signal.aborted) return;
+      loginAttempt.current = null;
+      completeLoginAttempt(boundAttempt);
       setAccountContext(current.context_id);
       setWorkspaceOrganization(current.org);
       const destination = session
@@ -199,13 +300,16 @@ export default function Home() {
         : returnTo;
       window.location.assign(destination);
     } catch (e) {
-      if (!controller.signal.aborted) {
+      const cancelled = controller.signal.aborted;
+      if (loginController.current === controller)
+        void cancelAttempt().catch(() => {});
+      if (!cancelled) {
         setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
       }
     } finally {
       if (loginController.current === controller)
         loginController.current = null;
-      if (!controller.signal.aborted) {
+      if (!loginController.current) {
         setBusy(false);
         setFullPagePending(false);
       }
@@ -439,6 +543,22 @@ export default function Home() {
             </>
           )}
           <div className="session-note">
+            {busy && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  void cancelAttempt().catch((error) =>
+                    setError(error.message),
+                  );
+                  loginController.current = null;
+                  setBusy(false);
+                  setFullPagePending(false);
+                }}
+              >
+                Cancel sign-in
+              </Button>
+            )}
             <p>Or sign in in this tab</p>
             <Button
               type="button"
