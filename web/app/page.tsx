@@ -15,6 +15,7 @@ import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link'
 import {
   api,
   setWorkspaceOrganization,
+  setAccountContext,
   testingEnvironment,
   returnToProduction,
   type AccountSession,
@@ -42,6 +43,8 @@ export default function Home() {
     setSession(null);
     setChoosingOrganization(false);
     setWorkspaceOrganization(null);
+    setAccountContext(null);
+    window.location.reload();
   }, []);
   useEffect(() => {
     const selectors = new URLSearchParams(location.search).getAll(
@@ -77,21 +80,28 @@ export default function Home() {
     }
     api<BrowserSession | AccountSession>('/session')
       .then(async (value) => {
+        setAccountContext(value.authenticated ? value.context_id : null);
         const target = readFileLocation();
         // A deep link selects a workspace only after IAM has supplied the
         // user's grants. It never contributes consent or scopes login.
         if (value.authenticated && target && value.org !== target.org) {
-          if (value.organizations.includes(target.org)) {
+          if (
+            value.contexts?.filter((context) => context.org === target.org)
+              .length === 1
+          ) {
             value = await api<BrowserSession>('/session', 'PATCH', {
-              org: target.org,
+              context_id: value.contexts.find(
+                (context) => context.org === target.org,
+              )?.context_id,
             });
           } else {
             setChoosingOrganization(true);
             setError(
-              'This workspace was not granted to Briefcase. Continue with IAM to review your organisation selection.',
+              'Sign in to this organization with IAM, then open the file.',
             );
           }
         }
+        setAccountContext(value.authenticated ? value.context_id : null);
         setWorkspaceOrganization(value.authenticated ? value.org : null);
         setSession(value.authenticated ? value : null);
       })
@@ -137,8 +147,9 @@ export default function Home() {
     setError('');
     try {
       const next = await api<BrowserSession>('/session', 'PATCH', {
-        org: selected,
+        context_id: selected,
       });
+      setAccountContext(next.context_id);
       setWorkspaceOrganization(next.org);
       history.replaceState(
         null,
@@ -167,7 +178,7 @@ export default function Home() {
   if (session?.org != null && !choosingOrganization)
     return (
       <Workspace
-        key={session.org}
+        key={session.context_id}
         session={{ ...session, org: session.org }}
         onSignOut={signOut}
         onChooseOrganization={() => setChoosingOrganization(true)}
@@ -234,21 +245,21 @@ export default function Home() {
             <KeyRound size={18} /> MEMBER ACCESS
           </div>
           <h2 id="signin-title">
-            {session ? 'Your organisations' : 'Sign in with IAM'}
+            {session ? 'Your accounts' : 'Sign in with IAM'}
           </h2>
           {session ? (
             <>
               <p>Signed in as {session.actor.public_id}.</p>
-              <p>Open a workspace you authorised in IAM.</p>
+              <p>Each account has its own organization and files.</p>
               <div className="organization-list">
-                {session.organizations.map((organization) => (
+                {(session.contexts ?? []).map((context) => (
                   <Button
                     className="primary-action"
-                    key={organization}
+                    key={context.context_id}
                     disabled={busy}
-                    onClick={() => selectOrganization(organization)}
+                    onClick={() => selectOrganization(context.context_id)}
                   >
-                    {organization}
+                    {context.actor.public_id} · {context.org}
                     <ArrowRight size={18} />
                   </Button>
                 ))}
@@ -266,7 +277,7 @@ export default function Home() {
                   disabled={busy}
                   type="submit"
                 >
-                  {busy ? 'Continuing…' : 'Review organisation access in IAM'}
+                  {busy ? 'Continuing…' : 'Add an account or organization'}
                   <ArrowRight size={18} />
                 </Button>
               </form>

@@ -2200,6 +2200,10 @@ components:
       required:
       - slt
       properties:
+        org_id:
+          type: string
+          pattern: ^[a-z0-9_-]{3,50}$
+          description: Selected organization. Required for a testing actor with more than one membership; must match an issued login code.
         slt:
           type: string
           description: IAM-issued login code for the selected plane, or the existing Carbon/Silicon public ID when a test app secret is supplied.
@@ -2331,14 +2335,13 @@ components:
         actor:
           $ref: '#/components/schemas/ApplicationSessionActor'
         org_id:
-          type:
-          - string
-          - 'null'
+          type: string
           pattern: ^[a-z0-9_-]{3,50}$
         organizations:
           type: array
-          description: Organizations currently reachable by this IAM session. Unscoped logins may contain more than
-            one; scoped logins contain the selected organization.
+          minItems: 1
+          maxItems: 1
+          description: The single organization selected for this account session.
           items:
             type: string
             pattern: ^[a-z0-9_-]{3,50}$

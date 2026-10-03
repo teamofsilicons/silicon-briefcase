@@ -368,10 +368,10 @@ impl Config {
 
     /// Configures an organisation-free account sign-in.
     ///
-    /// This client can exchange and refresh unscoped IAM sessions and read
+    /// This client can discover the organization selected by an IAM login and read
     /// service status, public IAM information, and login inspection.
     /// Organisation API calls are rejected locally. Create a
-    /// separate scoped configuration after choosing an authorised workspace.
+    /// separate scoped configuration for the organization returned by IAM.
     ///
     /// # Errors
     ///
@@ -383,7 +383,7 @@ impl Config {
     /// Selects an organization on an existing configuration while preserving
     /// its deployment, testing environment, credential, and timeouts.
     ///
-    /// This is the safe way to switch workspaces after an unscoped IAM login;
+    /// Use the organization returned by the IAM login;
     /// it does not mint or replace the bearer credential.
     ///
     /// # Errors

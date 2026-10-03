@@ -138,7 +138,7 @@ fn tokens_document() -> serde_json::Value {
             "type": "carbon",
             "public_id": "cos:tester"
         },
-        "org_id": "tos"
+        "org_id": "tos", "organizations": ["tos"]
     })
 }
 
@@ -747,7 +747,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
         .and(path("/api/v1/auth/slt"))
         .and(header("x-briefcase-app-secret", root_key))
         .and(header("idempotency-key", "login-attempt-0001"))
-        .and(body_json(json!({"slt": "si:worker"})))
+        .and(body_json(json!({"slt": "si:worker", "org_id": "tos"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
         .mount(&server)
         .await;
@@ -807,7 +807,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
 }
 
 #[tokio::test]
-async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions() {
+async fn slt_exchange_rejects_unscoped_and_cross_organization_sessions() {
     for returned_organization in [None, Some("other")] {
         let server = MockServer::start().await;
         let mut response = tokens_document();
@@ -822,7 +822,7 @@ async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions()
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/slt"))
             .and(header("idempotency-key", "login-org-check-0001"))
-            .and(body_json(json!({"slt": "slt-once"})))
+            .and(body_json(json!({"slt": "slt-once", "org_id": "tos"})))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .expect(1)
             .mount(&server)
@@ -842,9 +842,10 @@ async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions()
             assert!(error.to_string().contains("organization other"));
             assert!(error.to_string().contains("configured for tos"));
         } else {
-            let session = result.unwrap();
-            assert!(session.org_id.is_none());
-            assert!(session.organizations.is_empty());
+            assert!(matches!(
+                result.unwrap_err(),
+                briefcase_client::Error::Protocol(_)
+            ));
         }
         let requests = server.received_requests().await.unwrap_or_default();
         assert_eq!(requests.len(), 1);

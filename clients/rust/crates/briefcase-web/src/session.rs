@@ -27,6 +27,10 @@ fn storage_failure() -> Failure {
 
 #[derive(Deserialize, Serialize)]
 struct SavedSession {
+    #[serde(default)]
+    browser_group: Uuid,
+    #[serde(default)]
+    context_id: Uuid,
     api: String,
     auth_org: String,
     environment: Option<EnvironmentKey>,
@@ -54,6 +58,8 @@ impl Session {
             .write(
                 id,
                 &SavedSession {
+                    browser_group: self.browser_group,
+                    context_id: self.context_id,
                     api: self.auth_config.api_base().to_string(),
                     auth_org: self.auth_config.organization().to_owned(),
                     environment: self.auth_config.environment().cloned(),
@@ -86,7 +92,18 @@ pub(crate) fn restore(
         let Some(saved): Option<SavedSession> = storage.read(&id)? else {
             continue;
         };
-        if saved.rejected || saved.deadline <= SystemTime::now() {
+        if saved.rejected
+            || saved.deadline <= SystemTime::now()
+            || saved.browser_group.is_nil()
+            || saved.context_id.is_nil()
+            || saved.org.is_none()
+            || saved.org != saved.tokens.org_id
+            || saved
+                .org
+                .as_ref()
+                .is_none_or(|org| saved.tokens.organizations.as_slice() != [org.as_str()])
+            || saved.testing != saved.environment.is_some()
+        {
             continue;
         }
         let mut auth_config = Config::for_sign_in(&saved.api)?.with_auto_update(false);
@@ -103,6 +120,8 @@ pub(crate) fn restore(
         sessions.insert(
             id.clone(),
             Arc::new(Mutex::new(Session {
+                browser_group: saved.browser_group,
+                context_id: saved.context_id,
                 auth_config,
                 config,
                 tokens: saved.tokens,
@@ -126,6 +145,8 @@ pub(crate) fn restore(
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct LoginFlow {
+    #[serde(default)]
+    browser_group: Option<Uuid>,
     return_to: String,
     deadline: SystemTime,
     operation_id: Uuid,
@@ -154,6 +175,7 @@ pub(crate) async fn start(
         return Err(bad("Invalid return path"));
     }
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let browser_group = browser_group(&app, &headers).await;
     let mut flows = app.logins.lock().await;
     flows.retain(|_, flow| flow.deadline > SystemTime::now());
     if flows.len() >= 256 {
@@ -174,6 +196,7 @@ pub(crate) async fn start(
     flows.insert(
         nonce.clone(),
         LoginFlow {
+            browser_group,
             return_to,
             deadline: SystemTime::now() + Duration::from_secs(600),
             operation_id: Uuid::new_v4(),
@@ -256,12 +279,24 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
         operation_id: flow.operation_id,
     };
     let return_to = flow.return_to.clone();
+    let browser_group = flow.browser_group;
     let mut headers = headers.clone();
     if !flow.telemetry {
         headers.insert("x-briefcase-telemetry", HeaderValue::from_static("off"));
     }
     drop(flows);
-    let mut response = login(State(app.clone()), headers.clone(), Json(input)).await?;
+    let (id, value) = establish_in_group(
+        app,
+        input,
+        crate::telemetry::enabled(&headers),
+        browser_group,
+    )
+    .await?;
+    let mut response = (
+        [(header::SET_COOKIE, cookie(app, &id, SESSION_SECONDS)?)],
+        Json(value),
+    )
+        .into_response();
     response.headers_mut().insert(
         header::LOCATION,
         HeaderValue::from_str(&return_to).map_err(|_| bad("Invalid return path"))?,
@@ -281,6 +316,8 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
 }
 
 pub(crate) struct Session {
+    browser_group: Uuid,
+    context_id: Uuid,
     auth_config: Config,
     config: Config,
     tokens: SessionTokens,
@@ -309,11 +346,79 @@ pub(crate) struct Login {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SelectOrganization {
-    org: String,
+    org: Option<String>,
+    context_id: Option<Uuid>,
 }
 
 fn view(session: &Session) -> Value {
-    json!({"authenticated":true,"org":session.org,"organizations":session.organizations,"actor":session.tokens.actor,"testing":session.testing,"test_environment":session.test_environment.as_ref().map(|e| json!({"id":e.id,"name":e.name}))})
+    json!({"authenticated":true,"context_id":session.context_id,"org":session.org,"organizations":session.organizations,"actor":session.tokens.actor,"testing":session.testing,"test_environment":session.test_environment.as_ref().map(|e| json!({"id":e.id,"name":e.name}))})
+}
+// Public context IDs are consistency guards, never session credentials. Only
+// sessions linked by a server-held browser group can be listed or selected.
+async fn browser_group(app: &App, headers: &HeaderMap) -> Option<Uuid> {
+    let session = if let Ok(session) = production_session(app, headers).await {
+        session
+    } else {
+        let id = identifier_named(&format!("{}-testing", app.cookie), headers)?;
+        app.sessions.lock().await.get(&id).cloned()?
+    };
+    let session = session.lock().await;
+    (!session.rejected && session.deadline > SystemTime::now()).then_some(session.browser_group)
+}
+fn guard_context(session: &Session, headers: &HeaderMap) -> Result<()> {
+    let values: Vec<_> = headers.get_all("x-briefcase-context").iter().collect();
+    if values.len() != 1
+        || values[0]
+            .to_str()
+            .ok()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            != Some(session.context_id)
+    {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            "The account or organization changed. Reload before continuing.".into(),
+        ));
+    }
+    Ok(())
+}
+async fn context_view(app: &App, current: &Arc<Mutex<Session>>) -> Value {
+    let (mut value, group, testing, environment) = {
+        let current = current.lock().await;
+        (
+            view(&current),
+            current.browser_group,
+            current.testing,
+            current
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation)),
+        )
+    };
+    let all: Vec<_> = app.sessions.lock().await.values().cloned().collect();
+    let mut contexts = Vec::new();
+    for session in all {
+        let session = session.lock().await;
+        if session.browser_group == group
+            && session.testing == testing
+            && !session.rejected
+            && session.deadline > SystemTime::now()
+            && session
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation))
+                == environment
+        {
+            contexts.push(json!({"context_id":session.context_id,"org":session.org,"actor":session.tokens.actor}));
+        }
+    }
+    contexts.sort_by_key(|value| {
+        (
+            value["org"].to_string(),
+            value["actor"]["public_id"].to_string(),
+        )
+    });
+    value["contexts"] = json!(contexts);
+    value
 }
 fn cookie(app: &App, id: &str, age: u32) -> Result<HeaderValue> {
     HeaderValue::from_str(&format!(
@@ -442,32 +547,15 @@ fn unauthenticated() -> Failure {
         "Sign in to Briefcase to continue.".into(),
     )
 }
-pub(crate) async fn login(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Json(input): Json<Login>,
-) -> Result<Response> {
-    if let Some(app_secret) = input.test_key {
-        return enter_secret(
-            State(app),
-            headers,
-            Json(EnterSecret {
-                app_secret,
-                slt: input.slt,
-                org: input.org,
-                operation_id: input.operation_id,
-            }),
-        )
-        .await;
-    }
-    let (id, value) = establish(&app, input, crate::telemetry::enabled(&headers)).await?;
-    Ok((
-        [(header::SET_COOKIE, cookie(&app, &id, SESSION_SECONDS)?)],
-        Json(value),
-    )
-        .into_response())
-}
 async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, Value)> {
+    establish_in_group(app, input, telemetry, None).await
+}
+async fn establish_in_group(
+    app: &App,
+    input: Login,
+    telemetry: bool,
+    group: Option<Uuid>,
+) -> Result<(String, Value)> {
     if input.operation_id.is_nil()
         || input
             .org
@@ -545,21 +633,22 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
             return Err(error.into());
         }
     };
-    // Only live IAM consent snapshots confer workspace authority. A legacy
-    // token's org_id must never restore a revoked or migrated grant.
-    let organizations = tokens.organizations.clone();
-    let session_org = input
-        .org
+    let session_org = tokens
+        .org_id
         .clone()
-        .filter(|org| organizations.contains(org))
-        .or_else(|| (organizations.len() == 1).then(|| organizations[0].clone()));
+        .filter(|org| !org.is_empty())
+        .ok_or_else(unauthenticated)?;
+    if tokens.organizations.as_slice() != [session_org.as_str()]
+        || input.org.as_ref().is_some_and(|org| org != &session_org)
+    {
+        return Err(unauthenticated());
+    }
+    let organizations = vec![session_org.clone()];
+    let config = config.with_organization(&session_org)?;
     let auth_config = config.clone();
-    let config = session_org
-        .as_deref()
-        .map(|org| config.clone().with_organization(org))
-        .transpose()?
-        .unwrap_or_else(|| config.clone());
     let mut session = Session {
+        browser_group: group.unwrap_or_else(Uuid::new_v4),
+        context_id: Uuid::new_v4(),
         auth_config,
         expires: SystemTime::now() + Duration::from_secs(tokens.expires_in.min(86400)),
         deadline: SystemTime::now() + Duration::from_secs(u64::from(SESSION_SECONDS)),
@@ -572,7 +661,7 @@ async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, 
             .clone()
             .map(|storage| (storage, id.clone())),
         durable_dirty: false,
-        org: session_org,
+        org: Some(session_org),
         organizations,
         testing,
         rejected: false,
@@ -592,27 +681,74 @@ pub(crate) async fn select(
     State(app): State<App>,
     headers: HeaderMap,
     body: std::result::Result<Json<SelectOrganization>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<Value>> {
-    let Json(input) = body.map_err(|_| bad("Invalid workspace selection."))?;
-    if input.org.is_empty() || input.org.len() > 128 || input.org.trim() != input.org {
-        return Err(bad("Invalid workspace selection."));
+) -> Result<Response> {
+    let Json(input) = body.map_err(|_| bad("Invalid account selection."))?;
+    let current = lookup(&app, &headers).await?;
+    let (group, testing, environment, current_id, current_org) = {
+        let current = current.lock().await;
+        guard_context(&current, &headers)?;
+        (
+            current.browser_group,
+            current.testing,
+            current
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation)),
+            current.context_id,
+            current.org.clone(),
+        )
+    };
+    let target = input
+        .context_id
+        .or_else(|| (input.org == current_org).then_some(current_id))
+        .ok_or_else(|| bad("Sign in to the selected organization first."))?;
+    let all: Vec<_> = app
+        .sessions
+        .lock()
+        .await
+        .iter()
+        .map(|(id, value)| (id.clone(), value.clone()))
+        .collect();
+    for (id, saved) in all {
+        let mut session = saved.lock().await;
+        if session.context_id != target
+            || session.browser_group != group
+            || session.testing != testing
+            || session
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation))
+                != environment
+        {
+            continue;
+        }
+        if session.rejected || session.deadline <= SystemTime::now() {
+            return Err(unauthenticated());
+        }
+        refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
+        drop(session);
+        if let Some((environment, _, _)) = environment
+            && let Ok(parent) = production_session(&app, &headers).await
+        {
+            let mut parent = parent.lock().await;
+            parent.test_sessions.insert(environment, id.clone());
+            parent.save()?;
+        }
+        let selected_cookie = if testing {
+            testing_cookie(&app, &id, SESSION_SECONDS)?
+        } else {
+            cookie(&app, &id, SESSION_SECONDS)?
+        };
+        return Ok((
+            [(header::SET_COOKIE, selected_cookie)],
+            Json(context_view(&app, &saved).await),
+        )
+            .into_response());
     }
-    let session = lookup(&app, &headers).await?;
-    let mut session = session.lock().await;
-    if session.deadline <= SystemTime::now() || session.rejected {
-        return Err(unauthenticated());
-    }
-    refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
-    if !session.organizations.iter().any(|org| org == &input.org) {
-        return Err(Failure(
-            StatusCode::FORBIDDEN,
-            "That workspace is not available in this IAM session.".into(),
-        ));
-    }
-    session.config = session.auth_config.clone().with_organization(&input.org)?;
-    session.org = Some(input.org);
-    session.save()?;
-    Ok(Json(view(&session)))
+    Err(Failure(
+        StatusCode::FORBIDDEN,
+        "That account is not saved in this browser.".into(),
+    ))
 }
 
 pub(crate) async fn client(app: &App, headers: &HeaderMap) -> Result<Client> {
@@ -663,16 +799,10 @@ async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()>
         match result {
             Ok(tokens) => {
                 session.expires = started_at + Duration::from_secs(tokens.expires_in.min(86400));
-                session.organizations = tokens.organizations.clone();
-                if session
-                    .org
-                    .as_ref()
-                    .is_some_and(|org| !session.organizations.iter().any(|item| item == org))
-                {
-                    session.org = None;
-                    session.config = session.auth_config.clone();
-                } else if let Some(org) = session.org.as_deref() {
-                    session.config = session.auth_config.clone().with_organization(org)?;
+                if tokens.org_id != session.org || tokens.actor != session.tokens.actor {
+                    session.rejected = true;
+                    session.save()?;
+                    return Err(unauthenticated());
                 }
                 session.tokens = tokens;
                 session.refresh_key = IdempotencyKey::random();
@@ -680,7 +810,9 @@ async fn refresh_if_needed(session: &mut Session, telemetry: bool) -> Result<()>
                 session.save()?;
             }
             Err(error) => {
-                if error.is_unauthenticated() {
+                if error.is_unauthenticated()
+                    || matches!(error, briefcase_client::Error::Protocol(_))
+                {
                     session.rejected = true;
                     session.save()?;
                 }
@@ -702,6 +834,7 @@ async fn authenticated_client(app: &App, headers: &HeaderMap) -> Result<Client> 
     if session.deadline <= SystemTime::now() || session.rejected {
         return Err(unauthenticated());
     }
+    guard_context(&session, headers)?;
     refresh_if_needed(&mut session, crate::telemetry::enabled(headers)).await?;
     Ok(Client::new_unchecked(
         session
@@ -724,37 +857,80 @@ pub(crate) async fn status(State(app): State<App>, headers: HeaderMap) -> Result
         return Err(unauthenticated());
     }
     refresh_if_needed(&mut session, crate::telemetry::enabled(&headers)).await?;
-    Ok(Json(view(&session)))
+    drop(session);
+    let session = lookup(&app, &headers).await?;
+    Ok(Json(context_view(&app, &session).await))
 }
 pub(crate) async fn logout(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
-    if let Some(environment) = selected_environment(&headers)? {
-        if let Ok(parent) = production_session(&app, &headers).await {
-            let mut parent = parent.lock().await;
-            if let Some(id) = parent.test_sessions.get(&environment).cloned() {
-                reject(&app, &id).await?;
-                parent.test_sessions.remove(&environment);
-                parent.save()?;
-                return Ok(Json(json!({"authenticated":false})).into_response());
-            }
-        }
-        standalone_test(&app, &headers, environment).await?;
-        if let Some(id) = identifier_named(&format!("{}-testing", app.cookie), &headers) {
-            reject(&app, &id).await?;
-        }
-        return Ok((
-            [(header::SET_COOKIE, testing_cookie(&app, "", 0)?)],
-            Json(json!({"authenticated":false})),
+    let selected = lookup(&app, &headers).await?;
+    let (group, testing, environment) = {
+        let selected = selected.lock().await;
+        guard_context(&selected, &headers)?;
+        (
+            selected.browser_group,
+            selected.testing,
+            selected
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation)),
         )
-            .into_response());
+    };
+    let all: Vec<_> = app
+        .sessions
+        .lock()
+        .await
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    let mut replacement = None;
+    for (id, session) in all {
+        let value = session.lock().await;
+        if Arc::ptr_eq(&session, &selected) {
+            drop(value);
+            reject(&app, &id).await?;
+            continue;
+        }
+        if value.browser_group == group
+            && value.testing == testing
+            && !value.rejected
+            && value.deadline > SystemTime::now()
+            && value
+                .test_environment
+                .as_ref()
+                .map(|e| (e.id, e.version, e.key_generation))
+                == environment
+        {
+            replacement = Some((id, session.clone()));
+        }
     }
-    if let Some(id) = identifier(&app, &headers) {
-        reject(&app, &id).await?;
+    if let Some((environment, _, _)) = environment
+        && let Ok(parent) = production_session(&app, &headers).await
+    {
+        let mut parent = parent.lock().await;
+        if let Some((id, _)) = &replacement {
+            parent.test_sessions.insert(environment, id.clone());
+        } else {
+            parent.test_sessions.remove(&environment);
+        }
+        parent.save()?;
     }
-    Ok((
-        [(header::SET_COOKIE, cookie(&app, "", 0)?)],
-        Json(json!({"authenticated":false})),
-    )
-        .into_response())
+    let id = replacement.as_ref().map_or("", |(id, _)| id.as_str());
+    let age = if replacement.is_some() {
+        SESSION_SECONDS
+    } else {
+        0
+    };
+    let selected_cookie = if testing {
+        testing_cookie(&app, id, age)?
+    } else {
+        cookie(&app, id, age)?
+    };
+    let value = if let Some((_, session)) = replacement {
+        context_view(&app, &session).await
+    } else {
+        json!({"authenticated":false})
+    };
+    Ok(([(header::SET_COOKIE, selected_cookie)], Json(value)).into_response())
 }
 
 async fn reject(app: &App, id: &str) -> Result<()> {
@@ -856,6 +1032,7 @@ pub(crate) async fn enter_test(
     if child.org.as_deref() != Some(environment.org_id.as_str()) {
         return Err(bad("The test account has no access to this organization."));
     }
+    child.browser_group = parent.browser_group;
     child.deadline = child.deadline.min(parent.deadline);
     child.test_environment = Some(TestSelection {
         id: environment.id,
@@ -919,14 +1096,174 @@ pub(crate) mod tests {
             "version":1,"created_at":"2026-09-11T00:00:00Z","updated_at":"2026-09-11T00:00:00Z"
         })).unwrap());
         Session {
+            browser_group: Uuid::new_v4(), context_id: Uuid::from_u128(1),
             auth_config: config.clone(), config, tokens: serde_json::from_value(json!({
                 "access_token":"test-token","refresh_token":"test-refresh","token_type":"Bearer","expires_in":3600,
-                "scope":"profile","actor":{"principal_id":Uuid::new_v4(),"type":"carbon","public_id":"saket"},
+                "scope":"profile","actor":{"principal_id":Uuid::from_u128(3),"type":"carbon","public_id":"saket"},
                 "org_id":"tos","organizations":["tos"]
             })).unwrap(), expires: SystemTime::now()+Duration::from_secs(3600),deadline:SystemTime::now()+Duration::from_secs(3600),
             refresh_key:IdempotencyKey::random(), refresh_started_at:None, durable:None, durable_dirty:false, org:Some("tos".into()),organizations:vec!["tos".into()],
             testing:test.is_some(),rejected:false,test_environment:environment,test_sessions:Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn account_switching_never_retargets_a_bearer_or_exposes_another_browser() {
+        let app = app();
+        let first_id = "a".repeat(64);
+        let second_id = "b".repeat(64);
+        let first = session(None);
+        let group = first.browser_group;
+        let mut second = session(None);
+        second.browser_group = group;
+        second.context_id = Uuid::from_u128(2);
+        second.tokens.actor.public_id = "si:agent".into();
+        second.org = Some("other".into());
+        second.tokens.org_id = second.org.clone();
+        second.organizations = vec!["other".into()];
+        second.tokens.organizations = second.organizations.clone();
+        second.config = second.config.with_organization("other").unwrap();
+        second.auth_config = second.config.clone();
+        let outsider = session(None);
+        let outsider_context = Uuid::new_v4();
+        let mut outsider = outsider;
+        outsider.context_id = outsider_context;
+        let first = Arc::new(Mutex::new(first));
+        let second = Arc::new(Mutex::new(second));
+        app.sessions.lock().await.extend([
+            (first_id.clone(), first.clone()),
+            (second_id.clone(), second.clone()),
+            ("d".repeat(64), Arc::new(Mutex::new(outsider))),
+        ]);
+        let value = context_view(&app, &first).await;
+        assert_eq!(value["contexts"].as_array().unwrap().len(), 2);
+        assert!(!value.to_string().contains(&second_id));
+        let original = headers(&first_id, None);
+        assert!(
+            select(
+                State(app.clone()),
+                original.clone(),
+                Ok(Json(SelectOrganization {
+                    org: Some("other".into()),
+                    context_id: None
+                }))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            select(
+                State(app.clone()),
+                original.clone(),
+                Ok(Json(SelectOrganization {
+                    org: None,
+                    context_id: Some(outsider_context)
+                }))
+            )
+            .await
+            .is_err()
+        );
+        let response = select(
+            State(app.clone()),
+            original,
+            Ok(Json(SelectOrganization {
+                org: None,
+                context_id: Some(Uuid::from_u128(2)),
+            })),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains(&second_id)
+        );
+        assert_eq!(first.lock().await.org.as_deref(), Some("tos"));
+        let mut next = headers(&second_id, None);
+        assert_eq!(
+            client(&app, &next).await.err().unwrap().0,
+            StatusCode::CONFLICT
+        );
+        next.insert(
+            "x-briefcase-context",
+            HeaderValue::from_str(&Uuid::from_u128(2).to_string()).unwrap(),
+        );
+        assert_eq!(
+            client(&app, &next).await.ok().unwrap().organization(),
+            "other"
+        );
+        let response = logout(State(app.clone()), next).await.ok().unwrap();
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains(&first_id)
+        );
+        assert!(!first.lock().await.rejected);
+        assert!(second.lock().await.rejected);
+    }
+
+    #[tokio::test]
+    async fn callback_flow_retains_the_original_browser_group() {
+        let app = app();
+        let first_id = "a".repeat(64);
+        let saved = session(None);
+        let group = saved.browser_group;
+        app.sessions
+            .lock()
+            .await
+            .insert(first_id.clone(), Arc::new(Mutex::new(saved)));
+        start(
+            State(app.clone()),
+            headers(&first_id, None),
+            Json(Start { return_to: None }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        let flows = app.logins.lock().await;
+        let (nonce, flow) = flows.iter().next().unwrap();
+        assert_eq!(nonce.len(), 64);
+        assert_eq!(flow.browser_group, Some(group));
+        assert_ne!(flow.operation_id, Uuid::nil());
+    }
+
+    #[tokio::test]
+    async fn restart_discards_legacy_unscoped_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();
+        let mut saved = session(None);
+        saved.durable = Some((storage.clone(), "a".repeat(64)));
+        saved.org = None;
+        saved.tokens.org_id = None;
+        saved.save().ok().unwrap();
+        assert!(restore(&storage).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refreshing_cannot_change_the_actor_in_an_existing_context() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let mut saved = session(None);
+        saved.auth_config = Config::new(&format!("{}/api/v1/", server.uri()), "tos").unwrap();
+        saved.expires = SystemTime::UNIX_EPOCH;
+        let previous = saved.tokens.refresh_token.clone();
+        let mut changed = saved.tokens.clone();
+        changed.actor.public_id = "si:intruder".into();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(changed))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(refresh_if_needed(&mut saved, false).await.is_err());
+        assert!(saved.rejected);
+        assert_eq!(saved.tokens.refresh_token, previous);
     }
 
     #[tokio::test]
@@ -1220,6 +1557,10 @@ pub(crate) mod tests {
             "x-briefcase-environment",
             HeaderValue::from_str(&environment.to_string()).unwrap(),
         );
+        headers.insert(
+            "x-briefcase-context",
+            HeaderValue::from_str(&test.lock().await.context_id.to_string()).unwrap(),
+        );
         assert!(logout(State(app.clone()), headers.clone()).await.is_ok());
         assert!(lookup(&app, &headers).await.is_err());
         assert!(!app.sessions.lock().await.contains_key(&token));
@@ -1308,6 +1649,10 @@ pub(crate) mod tests {
     fn headers(cookie: &str, environment: Option<Uuid>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
+            "x-briefcase-context",
+            HeaderValue::from_static("00000000-0000-0000-0000-000000000001"),
+        );
+        headers.insert(
             header::COOKIE,
             HeaderValue::from_str(&format!("briefcase_dev={cookie}")).unwrap(),
         );
@@ -1387,7 +1732,12 @@ pub(crate) mod tests {
             .await
             .ok()
             .unwrap();
-        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .starts_with("briefcase_dev-testing=;")
+        );
         assert!(lookup(&app, &headers(&owner, None)).await.is_ok());
         assert!(lookup(&app, &headers(&owner, Some(id))).await.is_err());
         app.sessions
@@ -1449,6 +1799,9 @@ pub(crate) async fn enter_secret(
         ));
     }
     let parent = production_session(&app, &headers).await.ok();
+    if let Some(parent) = &parent {
+        guard_context(&*parent.lock().await, &headers)?;
+    }
     let config = Config::for_sign_in(&app.upstream)?
         .with_environment(EnvironmentKey::new(input.app_secret.clone())?)
         .with_auto_update(false)
@@ -1457,7 +1810,8 @@ pub(crate) async fn enter_secret(
     let current = Client::new_unchecked(config)?
         .current_testing_environment()
         .await?;
-    let (child_id, _) = establish(
+    let group = browser_group(&app, &headers).await;
+    let (child_id, _) = establish_in_group(
         &app,
         Login {
             org: input.org,
@@ -1466,6 +1820,7 @@ pub(crate) async fn enter_secret(
             operation_id: input.operation_id,
         },
         crate::telemetry::enabled(&headers),
+        group,
     )
     .await?;
     let child = app
@@ -1488,6 +1843,11 @@ pub(crate) async fn enter_secret(
     if let Some(parent) = parent {
         let mut parent = parent.lock().await;
         if !parent.rejected && parent.deadline > SystemTime::now() {
+            if let Some(child) = app.sessions.lock().await.get(&child_id).cloned() {
+                let mut child = child.lock().await;
+                child.browser_group = parent.browser_group;
+                child.save()?;
+            }
             parent.test_sessions.insert(current.id, child_id.clone());
             parent.save()?;
         }

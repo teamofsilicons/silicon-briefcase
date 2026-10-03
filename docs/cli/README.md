@@ -28,15 +28,12 @@ briefcase login <slt>
 # Or run `briefcase login` and paste only the SLT at the hidden prompt.
 ```
 
-The positional form exchanges the supplied SLT directly. To use the hidden
-prompt instead, run `briefcase login` with no token. A normal production login
-is always unscoped: IAM prompts you to select the organizations Briefcase may
-access, and Briefcase keeps that one token family for the selected set.
-For noninteractive IAM use, explicitly supply `--grant-org tos,my-team` or
-`--all-orgs` to IAM (the latter grants only memberships shown now).
-Briefcase's `--org` selects a workspace, never consent or a scoped login.
-When several granted organizations are available, commands that
-touch files ask you to choose with `--org`; no second IAM login is required.
+The positional form exchanges the supplied SLT directly; omit it for a hidden
+prompt. IAM 5 selects one account and organization per login. Use a separate
+named profile for each combination, for example `briefcase login <slt> --save-as
+alice-tos`, then `briefcase --profile alice-tos ls`. Use `--org` to verify the
+selected organization, not to move a saved session into a different one.
+Testing actor login forwards the selected organization's ID to IAM.
 
 The CLI connects to the hosted Briefcase service automatically. You do not
 need to find or enter a backend URL for normal use.
@@ -51,9 +48,9 @@ The deployment and current workspace preference are saved in
 `{home_dir}/.briefcase/config.json`.
 Briefcase exchanges the SLT for an access/refresh pair and stores the rotating
 session in `{home_dir}/.briefcase/credentials.json` with owner-only permissions. It
-preserves unscoped sessions and the IAM-selected organization list. A workspace
-preference cannot add grants. If IAM returns no active grants, revisit IAM to
-select organizations and sign in again; do not reuse cached access. It
+keeps each profile bound to its account and organization. Legacy unscoped
+credentials require a new login. Refresh cannot replace the saved actor or
+organization. It
 refreshes one minute before expiry and persists the new refresh token before
 sending the requested command. It records a refresh idempotency key before the
 network call, so an uncertain outcome reuses the exact token/key pair. A
@@ -79,14 +76,11 @@ or the process stops, rerun the exact command with the same SLT; the CLI reuses
 the key and recovers the original server response. Raw SLTs and IAM secrets are
 never written into the retry record.
 
-Stored credentials remain bound to their canonical deployment origin. A scoped
-session also stays bound to its organization; an unscoped production session can
-select another currently reachable organization with `--org`. A test root
-always retains its owning organization, even with an unscoped IAM session.
-An incompatible `--url` or scoped/root `--org` override therefore fails before
-forwarding a stored credential. An explicit `--token` authorizes its own
-production destination override; it never authorizes forwarding a stored test
-root.
+Stored credentials remain bound to their canonical deployment origin and the
+single selected organization. A conflicting `--url` or `--org` fails before a
+stored credential is sent. Testing roots also retain their own tenant boundary.
+An explicit `--token` selects caller-owned credentials; it cannot authorize
+forwarding an unrelated saved test root.
 
 Save a named hosted profile, or explicitly select a local deployment:
 

@@ -6,7 +6,7 @@ download, and share organization files.
 ```bash
 cargo install briefcase-cli
 briefcase daemon install
-# Ask IAM for an unscoped SLT; choose the organization grants in IAM:
+# Ask IAM for an SLT for one account and organization:
 iam login --app-id 'briefcase'
 briefcase login <slt>
 
@@ -49,9 +49,9 @@ Paginated `ls`, `find`, and `bin list` commands return `items` plus the opaque
 page without a silent entry cap.
 
 State replacement is atomic and cross-process locked. Stored credentials are
-bound to their canonical deployment origin. Login is unscoped; `--org` selects
-each workspace operation without granting access. Legacy scoped credentials and
-test roots retain their original tenant boundary. One-time login,
+bound to their canonical deployment origin, account, and organization. Use
+separate profiles for additional accounts; `--org` cannot retarget a saved token.
+Old unscoped credentials require sign-in. Testing roots keep their tenant boundary. One-time login,
 refresh, testing-environment mutations, folder creation, upload, move, and
 version restore persist their idempotency identity before the request and
 retain it after an uncertain result, so rerunning the exact command recovers

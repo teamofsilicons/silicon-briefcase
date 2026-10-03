@@ -229,6 +229,21 @@ impl IamClient {
         idempotency_key: &str,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<IamApplicationTokens, IamClientError> {
+        self.exchange_short_lived_token_in_organization(slt, idempotency_key, environment, None)
+            .await
+    }
+
+    /// Exchanges a testing actor in one explicit organization, or an issued login code.
+    ///
+    /// # Errors
+    /// Rejects a mismatched organization or invalid IAM response.
+    pub async fn exchange_short_lived_token_in_organization(
+        &self,
+        slt: &SecretString,
+        idempotency_key: &str,
+        environment: Option<&IamEnvironmentCredential>,
+        organization: Option<&str>,
+    ) -> Result<IamApplicationTokens, IamClientError> {
         let expected_actor = if valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
             None
         } else if environment.is_some() {
@@ -238,19 +253,36 @@ impl IamClient {
         };
         let client = self.scoped_client(environment)?;
         let mutation = mutation(idempotency_key)?;
-        let tokens = client
-            .oauth()
-            .login(
-                self.application_identity(environment).0.as_str(),
-                slt.expose_secret(),
-                &mutation,
-            )
-            .await
-            .map_err(|error| sdk_error(error, Operation::Token))?;
+        let tokens = if let (Some(_), Some(org)) = (&expected_actor, organization) {
+            client
+                .oauth()
+                .login_testing_actor(
+                    self.application_identity(environment).0.as_str(),
+                    slt.expose_secret(),
+                    org,
+                    &mutation,
+                )
+                .await
+        } else {
+            client
+                .oauth()
+                .login(
+                    self.application_identity(environment).0.as_str(),
+                    slt.expose_secret(),
+                    &mutation,
+                )
+                .await
+        }
+        .map_err(|error| sdk_error(error, Operation::Token))?;
         let tokens = validate_application_tokens(
             self.convert(self.prepare(tokens, environment).await?)?,
             None,
         )?;
+        if organization.is_some_and(|org| {
+            tokens.organization_id.as_ref().map(OrganizationId::as_str) != Some(org)
+        }) {
+            return Err(binding_mismatch("login.organization"));
+        }
         if expected_actor
             .as_ref()
             .is_some_and(|actor| actor != tokens.actor())
@@ -272,36 +304,10 @@ impl IamClient {
         access_token: &SecretString,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<Vec<OrganizationId>, IamClientError> {
-        if !valid_fixed_iam_secret(access_token.expose_secret(), "oat_") {
-            return Err(IamClientError::Rejected);
-        }
-        let authorizations = self
-            .scoped_client(environment)?
-            .oauth()
-            .authorizations(access_token.expose_secret())
-            .await
-            .map_err(|error| sdk_error(error, Operation::Service))?
-            .ok_or(IamClientError::Rejected)?;
-        let expected_audience = self.application_identity(environment).0.as_str();
-        let expected_environment = environment.and_then(|value| value.environment_id);
-        let mut organizations = Vec::with_capacity(authorizations.len());
-        for authorization in authorizations {
-            if authorization.audience.as_str() != expected_audience
-                || authorization.testing_environment_id != expected_environment
-                || !is_canonical_iam_organization_id(authorization.org_id.as_str())
-                || authorization.membership_version < 1
-                || authorization.authorization_epoch < 1
-            {
-                return Err(invalid_response("authorization.organization"));
-            }
-            organizations.push(
-                OrganizationId::new(authorization.org_id)
-                    .map_err(|_| invalid_response("authorization.org_id"))?,
-            );
-        }
-        organizations.sort();
-        organizations.dedup();
-        Ok(organizations)
+        Ok(self
+            .inspect_session(access_token, environment)
+            .await?
+            .organizations)
     }
 
     /// Rotates a refresh token without retrying or retaining session state.
@@ -557,7 +563,13 @@ pub(super) fn session_identity(
     audience: &ApplicationId,
     environment: Option<&IamEnvironmentCredential>,
 ) -> Result<IamSessionIdentity, IamClientError> {
-    if !response.active {
+    if !response.active
+        || response.scope.as_deref().is_some_and(|scope| {
+            scope
+                .split_whitespace()
+                .any(|scope| scope.starts_with("obo:"))
+        })
+    {
         return Err(IamClientError::Rejected);
     }
     if response.client_id.as_deref() != Some(audience.as_str())
@@ -584,7 +596,6 @@ pub(super) fn session_identity(
         (Some(snapshot), None) if response.org_id.as_deref() == Some(snapshot.org_id.as_str()) => {
             vec![snapshot]
         }
-        (None, Some(snapshots)) if response.org_id.is_none() => snapshots,
         _ => return Err(invalid_response("session.authorizations")),
     };
     let mut identity = IamSessionIdentity {

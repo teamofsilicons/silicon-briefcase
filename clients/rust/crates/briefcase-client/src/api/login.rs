@@ -12,6 +12,8 @@ use crate::{
 #[derive(Serialize)]
 struct SltExchange<'a> {
     slt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -82,8 +84,15 @@ impl Client {
         slt: &str,
         idempotency_key: &IdempotencyKey,
     ) -> Result<SessionTokens> {
-        self.session_exchange("slt", json_body(&SltExchange { slt })?, idempotency_key)
-            .await
+        self.session_exchange(
+            "slt",
+            json_body(&SltExchange {
+                slt,
+                org_id: (!self.organization().is_empty()).then_some(self.organization()),
+            })?,
+            idempotency_key,
+        )
+        .await
     }
 
     /// Rotates a refresh token and returns the next access/refresh pair.
@@ -151,15 +160,25 @@ impl Client {
             .timeout(self.request_timeout());
         let tokens: SessionTokens = self.receive_json(request).await?;
         require_session_organization(tokens.org_id.as_deref(), self.organization())?;
+        if tokens.organizations.as_slice() != [tokens.org_id.as_deref().unwrap_or_default()]
+            || tokens
+                .scope
+                .split_whitespace()
+                .any(|scope| scope.starts_with("obo:"))
+        {
+            return Err(Error::Protocol(
+                "IAM returned a session with inconsistent organization or scopes".to_owned(),
+            ));
+        }
         Ok(tokens)
     }
 }
 
 fn require_session_organization(actual: Option<&str>, expected: &str) -> Result<()> {
     match actual {
-        // Login and refresh are unscoped. The configured organization selects
-        // subsequent file operations; it does not narrow IAM consent.
-        None => Ok(()),
+        None | Some("") => Err(Error::Protocol(
+            "IAM 5 requires one organization per session; sign in again".to_owned(),
+        )),
         Some(actual) if expected.is_empty() || actual == expected => Ok(()),
         Some(actual) => Err(Error::Protocol(format!(
             "Briefcase returned a session for organization {actual}, but this client is configured for {expected}"
@@ -175,7 +194,7 @@ mod tests {
     fn session_organization_must_exactly_match_the_client() {
         assert!(require_session_organization(Some("tos"), "tos").is_ok());
 
-        assert!(require_session_organization(None, "tos").is_ok());
+        assert!(require_session_organization(None, "tos").is_err());
         assert!(require_session_organization(Some("tos"), "").is_ok());
 
         let mismatched = require_session_organization(Some("other"), "tos").unwrap_err();

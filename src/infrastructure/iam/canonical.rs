@@ -329,6 +329,7 @@ pub(super) struct LocalAuthorization {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LocalIntrospection {
+    pub scope: Option<String>,
     pub active: bool,
     pub public_id: Option<String>,
     pub principal_id: Option<Uuid>,

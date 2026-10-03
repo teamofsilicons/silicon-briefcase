@@ -45,14 +45,11 @@ mid-request.
 with clear-text HTTP limited to `localhost` and loopback IPs for local tests.
 The version response header and body must select the same API major.
 
-IAM login uses `Client::login_with_slt`. For the default all-organizations flow,
-create the anonymous client with `Config::for_sign_in(base_url)`. It accepts an
-unscoped session, and `SessionTokens::organizations` contains the IAM handles
-currently reachable by that token. After the caller chooses one, build a file
-client with `Config::for_sign_in(base_url)?.with_organization(handle)?` and
-attach the same access token. This switches request context without minting a
-new login. A `Config::new(base_url, org)` login remains available when the
-caller deliberately wants IAM to bind the token to one organization. The IAM
+IAM login uses `Client::login_with_slt`. `Config::for_sign_in(base_url)` can
+exchange a code before the caller knows its organization. Every returned IAM 5
+session has exactly one `org_id`; `organizations` contains only that ID. Build
+a file client for the same organization, and store additional accounts in
+separate clients and credential contexts. The IAM
 Application secret stays on the Briefcase backend. Testing environments use a
 typed IAM app-secret `EnvironmentKey` in `Config::with_environment`,
 independently of the bearer credential. Production-only management methods

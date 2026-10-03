@@ -485,7 +485,12 @@ fn validate_application_tokens(
     if !valid_fixed_iam_secret(&wire.refresh_token, "ort_") {
         return Err(invalid_response("refresh_token"));
     }
-    if !valid_scope_set(&wire.scope) {
+    if !valid_scope_set(&wire.scope)
+        || wire
+            .scope
+            .split_whitespace()
+            .any(|scope| scope.starts_with("obo:"))
+    {
         return Err(invalid_response("scope"));
     }
     if wire.actor.principal_id.is_nil() {
@@ -499,8 +504,7 @@ fn validate_application_tokens(
     )?;
     let actor_id =
         ActorId::new(wire.actor.public_id).map_err(|_| invalid_response("actor.public_id"))?;
-    let organization_id = wire
-        .org_id
+    let organization_id = Some(wire.org_id.ok_or_else(|| invalid_response("org_id"))?)
         .map(|value| {
             if !is_canonical_iam_organization_id(&value) {
                 return Err(invalid_response("org_id"));
@@ -848,7 +852,7 @@ mod tests {
             "active": true, "principal_id": PRINCIPAL_ID, "actor_type": "carbon",
             "client_id": IAM_APP_ID, "audience": IAM_APP_ID,
             "expires_at": 4_070_908_800_i64,
-            "authorizations": [authorization_snapshot(IAM_APP_ID, false)],
+            "org_id": "tos", "authorization": authorization_snapshot(IAM_APP_ID, false),
         })
     }
 
@@ -880,32 +884,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_identity_accepts_both_actor_types_and_empty_grants() -> anyhow::Result<()> {
+    async fn login_identity_accepts_both_actor_types_and_rejects_empty_grants() -> anyhow::Result<()>
+    {
         let server = MockServer::start().await;
         let client = IamClient::new_without_handshake(&client_settings(&server))?;
         for (kind, public_id) in [("carbon", "c:carbon-a"), ("silicon", "si:agent")] {
             let mut body = login_inspection_response();
             body["actor_type"] = json!(kind);
             body["public_id"] = json!(public_id);
-            body["authorizations"][0]["actor_type"] = json!(kind);
-            body["authorizations"][0]["public_id"] = json!(public_id);
-            body["authorizations"][0]["membership_id"] = json!(format!("{public_id}[tos]"));
+            body["authorization"]["actor_type"] = json!(kind);
+            body["authorization"]["public_id"] = json!(public_id);
+            body["authorization"]["membership_id"] = json!(format!("{public_id}[tos]"));
             let identity = super::official::session_identity(
                 serde_json::from_value(client.prepare(body.clone(), None).await?)?,
                 &audience(),
                 None,
             )?;
             assert_eq!(serde_json::to_value(identity.actor_kind)?, json!(kind));
-            let key = identity.principal_id;
-            body["authorizations"] = json!([]);
-            let identity = super::official::session_identity(
-                serde_json::from_value(client.prepare(body, None).await?)?,
-                &audience(),
-                None,
-            )?;
-            assert!(identity.organizations.is_empty());
-            assert_eq!(identity.public_id.as_deref(), Some(public_id));
-            assert_eq!(identity.principal_id, key);
+            body["authorization"] = serde_json::Value::Null;
+            if let Ok(prepared) = client.prepare(body, None).await {
+                assert!(
+                    super::official::session_identity(
+                        serde_json::from_value(prepared)?,
+                        &audience(),
+                        None
+                    )
+                    .is_err()
+                );
+            }
         }
         Ok(())
     }
@@ -922,7 +928,7 @@ mod tests {
             ("client_id", json!("other>app")),
             ("public_id", json!("other")),
             ("actor_type", json!("unknown")),
-            ("authorizations", serde_json::Value::Null),
+            ("authorization", serde_json::Value::Null),
         ] {
             let mut body = login_inspection_response();
             body[field] = value;
@@ -936,7 +942,7 @@ mod tests {
             ("membership_version", json!(0)),
         ] {
             let mut body = login_inspection_response();
-            body["authorizations"][0][field] = value;
+            body["authorization"][field] = value;
             cases.push(body);
         }
         for body in cases {
@@ -953,8 +959,8 @@ mod tests {
         }
         let environment = environment_credential();
         let mut body = login_inspection_response();
-        body["authorizations"][0]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
-        body["authorizations"][0]["audience"] = json!(TEST_APP_ID);
+        body["authorization"]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
+        body["authorization"]["audience"] = json!(TEST_APP_ID);
         body["client_id"] = json!(TEST_APP_ID);
         body["audience"] = json!(TEST_APP_ID);
         let prepared = client.prepare(body, Some(&environment)).await?;
@@ -989,20 +995,20 @@ mod tests {
         canonical["public_id"] = json!("other-carbon");
         assert!(client.prepare(canonical, None).await.is_err());
         let mut undisclosed = legacy.clone();
-        undisclosed["authorizations"] = json!([]);
+        undisclosed["authorization"] = serde_json::Value::Null;
         assert!(client.prepare(undisclosed, None).await.is_err());
         let environment = environment_credential();
         let mut testing = legacy;
         testing["client_id"] = json!(TEST_APP_ID);
         testing["audience"] = json!(TEST_APP_ID);
-        testing["authorizations"][0]["audience"] = json!(TEST_APP_ID);
-        testing["authorizations"][0]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
+        testing["authorization"]["audience"] = json!(TEST_APP_ID);
+        testing["authorization"]["testing_environment_id"] = json!(TEST_ENVIRONMENT_ID);
         assert!(client.prepare(testing.clone(), None).await.is_err());
         let testing = client.prepare(testing, Some(&environment)).await?;
         assert_ne!(testing["principal_id"], production["principal_id"]);
         assert_ne!(
-            testing["authorizations"][0]["membership_id"],
-            production["authorizations"][0]["membership_id"]
+            testing["authorization"]["membership_id"],
+            production["authorization"]["membership_id"]
         );
         Ok(())
     }
