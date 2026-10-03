@@ -262,6 +262,7 @@ pub(crate) async fn callback(
         Err(_) => Err(unauthenticated()),
     };
     match result {
+        Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => response,
         Ok(mut response) => {
             *response.status_mut() = StatusCode::SEE_OTHER;
             *response.body_mut() = axum::body::Body::empty();
@@ -322,6 +323,13 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
     let (id, value) = match established {
         Ok(value) => value,
         Err(error) => {
+            if error.0.is_server_error() || error.0 == StatusCode::TOO_MANY_REQUESTS {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
+                    r#"<!doctype html><title>Retry Briefcase sign-in</title><p>Briefcase could not verify your account yet. Retry here to continue the same sign-in.</p><button id="retry-signin" type="button">Retry sign-in</button><script src="/iam-popup-retry.js"></script>"#,
+                ).into_response());
+            }
             if let Some(nonce) = popup_nonce.as_deref() {
                 return Ok((
                     [(header::LOCATION, popup_completion(nonce, false, None)?)],
@@ -1278,6 +1286,56 @@ pub(crate) mod tests {
         );
         assert!(!first.lock().await.rejected);
         assert!(second.lock().await.rejected);
+    }
+
+    #[tokio::test]
+    async fn temporary_callback_failure_retains_flow_for_the_same_exchange_retry() {
+        let app = app();
+        start(
+            State(app.clone()),
+            HeaderMap::new(),
+            Json(Start {
+                return_to: None,
+                identity_kind: Some(ActorType::Carbon),
+                popup_nonce: Some("b".repeat(64)),
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        let (nonce, operation) = {
+            let flows = app.logins.lock().await;
+            let (nonce, flow) = flows.iter().next().unwrap();
+            (nonce.clone(), flow.operation_id)
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("briefcase_dev-login={nonce}")).unwrap(),
+        );
+        for _ in 0..2 {
+            let response = callback(
+                State(app.clone()),
+                headers.clone(),
+                Ok(axum::extract::Query(Callback {
+                    slt: "oac_fixture".into(),
+                    state: nonce.clone(),
+                })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!response.headers().contains_key(header::LOCATION));
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("Retry sign-in")
+            );
+            assert_eq!(app.logins.lock().await[&nonce].operation_id, operation);
+        }
     }
 
     #[tokio::test]
