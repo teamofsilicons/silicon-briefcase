@@ -1,6 +1,6 @@
 'use client';
 import { TelemetryPreference } from '@/components/briefcase/telemetry';
-import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ArrowRight,
   BriefcaseBusiness,
@@ -21,6 +21,7 @@ import {
   type BrowserSession,
 } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
+import { completeIamPopup, openIamPopup, type IdentityKind } from '@/lib/iam-popup';
 export default function Home() {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
@@ -44,6 +45,7 @@ export default function Home() {
     setWorkspaceOrganization(null);
   }, []);
   useEffect(() => {
+    if (completeIamPopup()) return;
     const selectors = new URLSearchParams(location.search).getAll(
       'test_environment',
     );
@@ -100,8 +102,7 @@ export default function Home() {
       })
       .finally(() => setChecking(false));
   }, []);
-  async function login(event: SubmitEvent) {
-    event.preventDefault();
+  async function login(kind: IdentityKind) {
     if (testingEnvironment()) {
       returnToProduction();
       return;
@@ -109,13 +110,14 @@ export default function Home() {
     setBusy(true);
     setError('');
     try {
+      await openIamPopup(async nonce => {
       const r = await fetch('/browser/login/start', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Briefcase-Browser': '1',
         },
-        body: JSON.stringify({ return_to: returnTo }),
+        body: JSON.stringify({ return_to: returnTo, identity_kind: kind, popup_nonce: nonce }),
       });
       const value = (await r.json()) as {
         error?: { message?: string };
@@ -125,7 +127,11 @@ export default function Home() {
         throw new Error(
           value.error?.message || 'Sign-in could not be completed.',
         );
-      window.location.assign(value.redirect_url);
+      return value.redirect_url;
+      });
+      const current = await api<BrowserSession | AccountSession>('/session');
+      if (!current.authenticated || current.actor.type !== kind) throw new Error('The selected account could not be verified. Please sign in again.');
+      window.location.assign(returnTo);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
     } finally {
@@ -260,16 +266,9 @@ export default function Home() {
                 </output>
               )}
               <IamOrganizationsLink />
-              <form onSubmit={login}>
-                <Button
-                  className="primary-action"
-                  disabled={busy}
-                  type="submit"
-                >
-                  {busy ? 'Continuing…' : 'Review organisation access in IAM'}
-                  <ArrowRight size={18} />
-                </Button>
-              </form>
+              <Button className="primary-action" disabled={busy} onClick={() => void login(session.actor.type)}>
+                {busy ? 'Continuing…' : 'Review organisation access in IAM'} <ArrowRight size={18} />
+              </Button>
               {error && (
                 <p className="error-box" role="alert">
                   {error}
@@ -302,25 +301,11 @@ export default function Home() {
                 Continue to Silicon IAM to verify your identity. You’ll return
                 here automatically.
               </p>
-              <form onSubmit={login}>
-                {error && (
-                  <p className="error-box" role="alert">
-                    {error}
-                  </p>
-                )}
-                <Button
-                  className="primary-action"
-                  type="submit"
-                  disabled={busy}
-                >
-                  {testingEnvironment()
-                    ? 'Return to production to sign in'
-                    : busy
-                      ? 'Continuing to IAM…'
-                      : 'Continue with IAM'}
-                  <ArrowRight size={18} />
-                </Button>
-              </form>
+              <div className="space-y-3">
+                {error && <p className="error-box" role="alert">{error}</p>}
+                <Button className="primary-action" disabled={busy} onClick={() => void login('carbon')}>Continue as Carbon <ArrowRight size={18} /></Button>
+                <Button className="primary-action" disabled={busy} onClick={() => void login('silicon')}>Continue as Silicon <ArrowRight size={18} /></Button>
+              </div>
             </>
           )}
           {!testingEnvironment() && <TestSignIn />}

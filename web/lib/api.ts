@@ -3,7 +3,7 @@ export type BrowserSession = {
   authenticated: boolean;
   org: string;
   organizations: string[];
-  actor: { type: string; public_id: string };
+  actor: { type: 'carbon' | 'silicon'; public_id: string };
   testing: boolean;
   test_environment?: { id: string; name: string } | null;
 };
