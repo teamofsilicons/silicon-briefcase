@@ -1370,6 +1370,119 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn full_page_callback_keeps_the_chosen_kind_browser_group_and_return_path() {
+        for kind in [ActorType::Carbon, ActorType::Silicon] {
+            let app = app();
+            let first_id = "a".repeat(64);
+            let first = session(None);
+            let group = first.browser_group;
+            app.sessions
+                .lock()
+                .await
+                .insert(first_id.clone(), Arc::new(Mutex::new(first)));
+            let destination = "/org/tos/file/example";
+            let redirect = start(
+                State(app.clone()),
+                headers(&first_id, None),
+                Json(Start {
+                    return_to: Some(destination.into()),
+                    identity_kind: Some(kind),
+                    popup_nonce: None,
+                }),
+            )
+            .await
+            .ok()
+            .unwrap();
+            let redirect: Value = serde_json::from_slice(
+                &axum::body::to_bytes(redirect.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let url = url::Url::parse(redirect["redirect_url"].as_str().unwrap()).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(k, v)| k == "identity_kind" && v == kind.as_str())
+            );
+            assert!(!url.query_pairs().any(|(k, _)| k == "display"));
+            let (nonce, operation_id) = {
+                let flows = app.logins.lock().await;
+                let (nonce, flow) = flows.iter().next().unwrap();
+                assert_eq!(flow.browser_group, Some(group));
+                assert_eq!(flow.identity_kind, Some(kind));
+                assert_eq!(flow.return_to, destination);
+                (nonce.clone(), flow.operation_id)
+            };
+            // Recover an already-completed exchange without another IAM call.
+            let input = Login {
+                org: None,
+                slt: "oac_fixture".into(),
+                test_key: None,
+                operation_id,
+            };
+            let mut hash = Sha256::new();
+            hash.update(app.login_salt.as_bytes());
+            hash.update(serde_json::to_vec(&input).unwrap());
+            let id = format!("{:x}", hash.finalize());
+            let mut completed = session(None);
+            completed.browser_group = group;
+            completed.tokens.actor.actor_type = kind;
+            completed.tokens.actor.public_id = if kind == ActorType::Carbon {
+                "c:person"
+            } else {
+                "si:worker"
+            }
+            .into();
+            app.sessions
+                .lock()
+                .await
+                .insert(id.clone(), Arc::new(Mutex::new(completed)));
+            let mut request_headers = HeaderMap::new();
+            request_headers.insert(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("briefcase_dev-login={nonce}")).unwrap(),
+            );
+            assert!(
+                finish_callback(
+                    &app,
+                    &request_headers,
+                    Callback {
+                        slt: "oac_fixture".into(),
+                        state: "f".repeat(64)
+                    }
+                )
+                .await
+                .is_err()
+            );
+            let response = callback(
+                State(app.clone()),
+                request_headers,
+                Ok(axum::extract::Query(Callback {
+                    slt: "oac_fixture".into(),
+                    state: nonce,
+                })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(response.headers()[header::LOCATION], destination);
+            assert!(
+                response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value.to_str().unwrap().contains(&id))
+            );
+            assert_eq!(
+                app.sessions.lock().await[&first_id]
+                    .lock()
+                    .await
+                    .browser_group,
+                group
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn restart_discards_legacy_unscoped_credentials() {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::session_store::Storage::open(root.path(), "api", "origin").unwrap();

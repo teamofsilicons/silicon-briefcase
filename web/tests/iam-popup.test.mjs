@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openIamPopup, completeIamPopup } from '../lib/iam-popup.ts';
+import {
+  openIamPopup,
+  completeIamPopup,
+  PopupBlockedError,
+  continueIamInThisTab,
+} from '../lib/iam-popup.ts';
 
 function browser(t) {
   const oldWindow = globalThis.window,
@@ -68,7 +73,7 @@ test('blocked popups fail clearly and completion never sends callback credential
   b.window.open = () => null;
   await assert.rejects(
     openIamPopup(() => '/start'),
-    /Allow popups/,
+    PopupBlockedError,
   );
   let message, origin;
   b.window.opener = {
@@ -103,4 +108,50 @@ test('aborting a popup closes it and ignores its late reply', async (t) => {
     openIamPopup(() => '/start', controller.signal),
     /cancelled/,
   );
+});
+
+test('blocked popup permits an explicit full-page start and cancelled starts never navigate', async (t) => {
+  const b = browser(t);
+  let assigned,
+    starts = 0;
+  b.window.open = () => null;
+  b.window.location.assign = (url) => {
+    assigned = url;
+  };
+  await assert.rejects(
+    openIamPopup(() => {
+      starts++;
+      return '/start';
+    }),
+    PopupBlockedError,
+  );
+  assert.equal(starts, 0);
+  b.window.open = () => {
+    throw new Error('popups disabled');
+  };
+  await assert.rejects(
+    openIamPopup(() => '/start'),
+    PopupBlockedError,
+  );
+  assert.equal(assigned, undefined);
+  await continueIamInThisTab(() => {
+    starts++;
+    return 'https://iam.example/login?identity_kind=silicon';
+  });
+  assert.equal(starts, 1);
+  assert.equal(assigned, 'https://iam.example/login?identity_kind=silicon');
+  const controller = new AbortController();
+  assigned = undefined;
+  let resolve;
+  const pending = continueIamInThisTab(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+    controller.signal,
+  );
+  controller.abort();
+  resolve('/must-not-navigate');
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(assigned, undefined);
 });
