@@ -46,7 +46,9 @@ export class ApiError extends Error {
 // credential: the gateway and IAM still authorize every file request.
 let workspaceOrganization: string | null = null;
 let accountContext: string | null = null;
+let contextEpoch = 0;
 export function setAccountContext(context: string | null) {
+  if (accountContext !== context) contextEpoch += 1;
   accountContext = context;
 }
 export function setWorkspaceOrganization(org: string | null) {
@@ -58,10 +60,12 @@ export function testingEnvironment(): string | null {
     : sessionStorage.getItem('briefcase-test-environment');
 }
 export function enterTestingEnvironment(id: string) {
+  contextEpoch += 1;
   sessionStorage.setItem('briefcase-test-environment', id);
   window.location.assign('/');
 }
 export function returnToProduction() {
+  contextEpoch += 1;
   sessionStorage.removeItem('briefcase-test-environment');
   window.location.assign('/');
 }
@@ -78,6 +82,7 @@ export async function api<T>(
   body?: unknown,
 ): Promise<T> {
   const context = accountContext;
+  const epoch = contextEpoch;
   const environment = testingEnvironment();
   const options: RequestInit = {
     method,
@@ -101,7 +106,11 @@ export async function api<T>(
   const started = performance.now();
   const response = await fetch(browserUrl('/browser' + path), options);
   trackRequest(method, response.status, performance.now() - started);
-  if (accountContext !== context || testingEnvironment() !== environment)
+  if (
+    contextEpoch !== epoch ||
+    accountContext !== context ||
+    testingEnvironment() !== environment
+  )
     throw new ApiError(
       'The account changed while this request was running.',
       409,
@@ -109,6 +118,15 @@ export async function api<T>(
   const value = (await response.json().catch(() => null)) as {
     error?: { message?: string };
   } | null;
+  if (
+    contextEpoch !== epoch ||
+    accountContext !== context ||
+    testingEnvironment() !== environment
+  )
+    throw new ApiError(
+      'The account changed while this response was arriving.',
+      409,
+    );
   if (!response.ok)
     throw new ApiError(
       value?.error?.message || 'Briefcase could not complete this request.',

@@ -39,3 +39,20 @@ test('same-context responses are accepted and switching never replays a mutation
   assert.deepEqual(await api.api('/entries', 'POST', { name: 'draft' }), { id: 'saved' });
   assert.equal(calls, 1);
 });
+
+test('a delayed JSON body is fenced even after switching away and back', async () => {
+  api.setAccountContext('account-body');
+  let finishBody;
+  let startedBody;
+  const bodyStarted = new Promise(resolve => { startedBody = resolve; });
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    json() { startedBody(); return new Promise(resolve => { finishBody = resolve; }); },
+  });
+  const pending = api.api('/entries');
+  await bodyStarted;
+  api.setAccountContext('different-account');
+  api.setAccountContext('account-body');
+  finishBody({ items: [{ id: 'old-result' }] });
+  await assert.rejects(pending, error => error.status === 409);
+});
