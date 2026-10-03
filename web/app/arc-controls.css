@@ -1,0 +1,193 @@
+/* UIArc free Button CSS adaptation. Copyright (c) 2026 Elia Kuratli, MIT.
+   Pinned source and license: UIARC.md and licenses/uiarc-MIT.txt. */
+:root {
+  --arc-surface: #fff;
+  --arc-muted: #f3f4f2;
+  --arc-ink: #202521;
+  --arc-secondary: #616861;
+  --arc-line: #dfe3df;
+  --arc-focus: #1f5fb8;
+  --arc-radius: 12px;
+  --arc-fast: 150ms;
+  --arc-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+[data-uiarc-button] {
+  position: relative;
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--arc-line);
+  border-radius: var(--arc-radius);
+  padding: 0 16px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--arc-fast) var(--arc-ease),
+    background var(--arc-fast) var(--arc-ease),
+    border-color var(--arc-fast) var(--arc-ease),
+    box-shadow var(--arc-fast) var(--arc-ease);
+}
+[data-uiarc-button]:focus-visible {
+  outline: 2px solid var(--arc-focus);
+  outline-offset: 3px;
+}
+[data-uiarc-button]:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+[data-uiarc-button][aria-busy='true'] {
+  cursor: progress;
+}
+[data-uiarc-button]:is(
+  [aria-haspopup]:not([aria-haspopup='false']),
+  [data-state],
+  [role='combobox']
+) {
+  transform: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-uiarc-button]:hover:not(:disabled) {
+    box-shadow: 0 1px 3px #18241c0d;
+  }
+}
+[data-uiarc-button]:active:not(:disabled) {
+  opacity: 0.84;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-uiarc-button] {
+    transition: none;
+  }
+}
+/* UIArc Input: stable geometry, contracting focus halo and explicit invalid state. */
+[data-uiarc-input] {
+  border: 1px solid var(--arc-line);
+  border-radius: var(--arc-radius);
+  background: var(--arc-surface);
+  box-shadow: 0 0 0 6px transparent;
+  transition:
+    border-color var(--arc-fast) var(--arc-ease),
+    box-shadow 200ms var(--arc-ease);
+}
+[data-uiarc-input]:focus-visible {
+  border-color: var(--arc-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arc-focus) 16%, transparent);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+[data-uiarc-input][aria-invalid='true'] {
+  border-color: #ae3d3a;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-uiarc-input] {
+    transition: none;
+  }
+}
+/* UIArc Segmented Control: compact scrolling rail, quiet raised selection. */
+.worktable .view-switch {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  gap: 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 4px;
+  border: 1px solid var(--arc-line);
+  border-radius: 12px;
+  background: var(--arc-muted);
+  scrollbar-width: none;
+}
+.worktable .view-switch::-webkit-scrollbar {
+  display: none;
+}
+.worktable .view-switch > button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0 13px;
+  background: transparent;
+  color: var(--arc-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    color var(--arc-fast) var(--arc-ease),
+    background var(--arc-fast) var(--arc-ease);
+}
+.worktable
+  .view-switch
+  > button:is(
+    [aria-selected='true'],
+    [aria-checked='true'],
+    [aria-pressed='true']
+  ) {
+  color: var(--arc-ink);
+  background: var(--arc-surface);
+  border-color: var(--arc-line);
+  box-shadow: 0 1px 3px #18241c0d;
+}
+.worktable .view-switch > button:focus-visible {
+  outline: 2px solid var(--arc-focus);
+  outline-offset: -2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .worktable .view-switch > button {
+    transition: none;
+  }
+}
+
+:root {
+  --arc-radius: 999px;
+  --arc-muted: var(--secondary);
+  --arc-ink: var(--foreground);
+  --arc-secondary: var(--muted);
+  --arc-focus: var(--primary);
+  --arc-line: var(--border);
+}
+[data-uiarc-input] {
+  --arc-radius: 12px;
+}
+.worktable .view-switch {
+  border-radius: 999px;
+}
+.worktable .view-switch > button {
+  border-radius: 999px;
+  padding: 0;
+  min-width: 36px;
+}
+.organization-choice {
+  min-height: 60px;
+  width: 100%;
+  justify-content: flex-start;
+}
+.organization-choice > span:nth-child(2) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: left;
+  flex: 1;
+}
+@media (max-width: 640px) {
+  [data-uiarc-button] {
+    min-height: 44px;
+  }
+  .worktable .view-switch > button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+/* Keep the mobile file metadata clear when the worktable is taller than the viewport. */
+@media (max-width: 760px) {
+  .worktable-footer {
+    position: static;
+  }
+}

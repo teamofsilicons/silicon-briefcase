@@ -4,8 +4,11 @@ import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import {
   ArrowRight,
   BriefcaseBusiness,
+  Folder,
   KeyRound,
+  LockKeyhole,
   ShieldCheck,
+  Users,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
@@ -166,7 +169,12 @@ export default function Home() {
       setBusy(false);
     }
   }
-  if (!checking && !publicDismissed && returnTo.startsWith('/org/'))
+  if (
+    !checking &&
+    !publicDismissed &&
+    returnTo.startsWith('/org/') &&
+    readFileLocation(returnTo)?.path
+  )
     return <PublicEntryView authenticated={!!session} onSignIn={openPrivate} />;
   if (checking)
     return (
@@ -199,53 +207,60 @@ export default function Home() {
         {/* Full-page navigation resets a deep-link sign-in attempt. */}
         {/* eslint-disable-next-line next/no-html-link-for-pages */}
         <a className="brand" href="/">
-          {/* eslint-disable-next-line next/no-img-element -- Local shared Silicon brand asset. */}
-          <img src="/brand/mark.svg" alt="" width={28} height={28} />
-          <strong>silicon</strong>
-          <span>BRIEFCASE</span>
+          <BriefcaseBusiness aria-hidden="true" />
+          <strong>briefcase</strong>
         </a>
-        <a href="https://docs.briefcase.teamofsilicons.com/">
-          Documentation <ArrowRight size={15} />
+        <a
+          className="entry-docs"
+          href="https://docs.briefcase.teamofsilicons.com/"
+        >
+          Help &amp; guides <ArrowRight size={14} aria-hidden="true" />
         </a>
       </header>
       <main className="signin-grid">
         <section className="signin-intro">
           <div className="eyebrow">
-            {session ? 'YOUR ACCOUNT' : 'YOUR FILES'}
+            {session ? 'Welcome back' : 'Your files, thoughtfully organised'}
           </div>
           <h1>
-            Open your <br />
-            Briefcase<span className="blue">.</span>
+            A place for
+            <br />
+            your work<span className="blue">.</span>
           </h1>
           <p>
-            Sign in as yourself. Your files, shared folders, and organisation
-            spaces will be waiting.
+            Keep your files close and your team in the loop. A calm workspace
+            for everything you’re working on.
           </p>
           <dl className="principles">
             <div>
-              <dt>01 / Public</dt>
-              <dd>Shared across your organisation.</dd>
+              <dt>
+                <Folder size={22} aria-hidden="true" />
+                Public files
+              </dt>
+              <dd>Open to your organisation.</dd>
             </div>
             <div>
-              <dt>02 / Private</dt>
-              <dd>Your files, with access you control.</dd>
+              <dt>
+                <LockKeyhole size={22} aria-hidden="true" />
+                Private files
+              </dt>
+              <dd>Private files. Your permissions.</dd>
             </div>
             <div>
-              <dt>03 / Tags</dt>
-              <dd>Spaces for the teams you belong to.</dd>
+              <dt>
+                <Users size={22} aria-hidden="true" />
+                Team spaces
+              </dt>
+              <dd>Shared spaces for your teams.</dd>
             </div>
           </dl>
-          <div className="identity-note">
-            <ShieldCheck size={19} />
-            <span>Identity by Silicon IAM. Permissions by Briefcase.</span>
-          </div>
         </section>
         <section className="signin-panel" aria-labelledby="signin-title">
           <div className="panel-kicker">
-            <KeyRound size={18} /> MEMBER ACCESS
+            <KeyRound size={15} aria-hidden="true" /> Your workspace awaits
           </div>
           <h2 id="signin-title">
-            {session ? 'Your accounts' : 'Sign in with IAM'}
+            {session ? 'Where shall we work?' : 'Make yourself at home.'}
           </h2>
           {session ? (
             <>
@@ -254,13 +269,19 @@ export default function Home() {
               <div className="organization-list">
                 {(session.contexts ?? []).map((context) => (
                   <Button
-                    className="primary-action"
+                    className="organization-choice"
+                    variant="outline"
                     key={context.context_id}
                     disabled={busy}
                     onClick={() => selectOrganization(context.context_id)}
                   >
-                    {context.actor.public_id} · {context.org}
-                    <ArrowRight size={18} />
+                    <span className="organization-initial" aria-hidden="true">
+                      {context.org.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span>
+                      {context.actor.public_id} · {context.org}
+                    </span>
+                    <ArrowRight size={16} aria-hidden="true" />
                   </Button>
                 ))}
               </div>
@@ -273,7 +294,8 @@ export default function Home() {
               <IamOrganizationsLink />
               <form onSubmit={login}>
                 <Button
-                  className="primary-action"
+                  className="secondary-action"
+                  variant="outline"
                   disabled={busy}
                   type="submit"
                 >
@@ -287,7 +309,8 @@ export default function Home() {
                 </p>
               )}
               <Button
-                className="primary-action"
+                className="quiet-action"
+                variant="ghost"
                 disabled={busy}
                 onClick={async () => {
                   setBusy(true);
@@ -310,8 +333,8 @@ export default function Home() {
           ) : (
             <>
               <p>
-                Continue to Silicon IAM to verify your identity. You’ll return
-                here automatically.
+                Sign in with your Silicon account to open your files and shared
+                spaces. We’ll bring you right back here.
               </p>
               <form onSubmit={login}>
                 {error && (
@@ -328,7 +351,7 @@ export default function Home() {
                     ? 'Return to production to sign in'
                     : busy
                       ? 'Continuing to IAM…'
-                      : 'Continue with IAM'}
+                      : 'Continue with Silicon IAM'}
                   <ArrowRight size={18} />
                 </Button>
               </form>
@@ -336,15 +359,20 @@ export default function Home() {
           )}
           {!testingEnvironment() && <TestSignIn />}
           <TelemetryPreference />
-          <p className="session-note">
-            Your session stays on the server. Tokens aren’t saved in browser
-            storage.
-          </p>
+          <div className="session-note identity-note">
+            <ShieldCheck size={15} aria-hidden="true" />
+            <span>
+              Your identity stays with Silicon IAM. You control who can access
+              your files.
+            </span>
+          </div>
         </section>
       </main>
       <footer className="entry-footer">
-        <span>TEAM OF SILICONS</span>
-        <span>Files for Carbons & Silicons</span>
+        <span>A little space. A lot of possibility.</span>
+        <a href="https://docs.briefcase.teamofsilicons.com/">
+          Made for Carbons &amp; Silicons
+        </a>
       </footer>
     </div>
   );

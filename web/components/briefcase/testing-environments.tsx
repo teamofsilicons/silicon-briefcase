@@ -20,9 +20,11 @@ import {
 export default function TestingEnvironments({
   session,
   onUnauthorized,
+  disabled = false,
 }: {
   session: BrowserSession;
   onUnauthorized: () => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [appSecret, setAppSecret] = useState('');
@@ -62,6 +64,7 @@ export default function TestingEnvironments({
     <>
       <Button
         variant="ghost"
+        disabled={disabled}
         className="organization-settings-trigger"
         onClick={() => setOpen(true)}
       >
