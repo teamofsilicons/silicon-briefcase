@@ -115,7 +115,7 @@ branches, and `retry_after` carries the delay a spent allowance names.
 
 ## Delegated request examples
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 Use a valid IAM OBO access token for the approved endpoint graph. The historical `OboProof` name remains for source compatibility; it now wraps a reusable token, is cloneable and redacts debug output.
 

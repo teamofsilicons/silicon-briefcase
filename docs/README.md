@@ -52,3 +52,7 @@ IAM owns login, membership, roles and tags. An organization contains public, pri
 Upload any file type. Reuploading a name publishes the next immutable version on the same file ID. Download folders as streamed tar.zst, restore files from the 45-day bin, and inspect the preceding year of logs. Any share can be a read-only expiring share that ends by itself after 1 minute to 30 days, and an upload can make a new file self-destruct: deleted for good, never binned, after the time you choose. The default limits are 100 GB per UTC day and 1 PB storage per organization; testing planes are limited to 2 GiB and ten active environments.
 
 The [OpenAPI document](../openapi.yaml) is the wire reference. [UNDERSTANDING.md](../UNDERSTANDING.md) is the human-maintained product specification. Development 0.x contracts are unsupported by this release.
+
+## Integration guide
+
+Read [Build a file workflow that respects the user's workspace](build-with-iam5.md) before connecting login, feature approval and delegated uploads.

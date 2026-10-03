@@ -1,6 +1,6 @@
 # Delegated uploads
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 Applications upload for a represented IAM member in three phases: reserve a
 destination, transfer private bytes, then publish with fresh authority. The
