@@ -164,7 +164,7 @@ delivered, or successfully replayed a webhook.
 
 ## OBO registration and consent
 
-> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
+> **Live integration baseline — October 3, 2026:** Briefcase contract 3.0.0 and IAM 5.0.0 are deployed, together with the Briefcase 3.0.1 account picker and Carbon/Silicon popup interface. Check `/api/version` for the backend contract; native client releases have their own package version.
 
 Briefcase 3.0.0 verifies reusable `oba_` access tokens online through IAM 5.0.0. Request OBO consent after login, exchange and refresh the OBO tokens through the initiating app, and send `X-App-ID` plus `X-IAM-OBO-Access-Token` to supported delegated routes. The legacy one-shot raw upload is retired. See the [OBO migration guide](obo.md) for endpoint registration, code migration and release gates.
 

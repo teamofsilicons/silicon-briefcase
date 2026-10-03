@@ -2,7 +2,7 @@
 
 Briefcase should feel like a useful part of your app: the report arrives where the user expects, an interrupted upload can resume, and storage access is requested when it is needed.
 
-**Available now:** Briefcase 3.0.0, its published Rust SDK, and IAM 5 reusable OBO verification. **Being prepared separately:** Briefcase's new account picker and Carbon/Silicon popup interface. The integration pattern below is guidance for your app, not a claim that every consuming app already shows that interface.
+**Available now:** Briefcase contract 3.0.0, the published Rust SDK and CLI 3.0.1, IAM 5 reusable OBO verification, and Briefcase's account picker and Carbon/Silicon popup interface. The integration pattern below is guidance for your app; each consuming application still needs its own implementation and end-to-end verification.
 
 ## Make the account choice explicit
 

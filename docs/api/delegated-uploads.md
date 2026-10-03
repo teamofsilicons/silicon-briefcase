@@ -1,6 +1,6 @@
 # Delegated uploads
 
-> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
+> **Live integration baseline — October 3, 2026:** Briefcase contract 3.0.0 and IAM 5.0.0 are deployed, together with the Briefcase 3.0.1 account picker and Carbon/Silicon popup interface. Check `/api/version` for the backend contract; native client releases have their own package version.
 
 Applications upload for a represented IAM member in three phases: reserve a
 destination, transfer private bytes, then publish with fresh authority. The
