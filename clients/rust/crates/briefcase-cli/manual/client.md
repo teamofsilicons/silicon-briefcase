@@ -29,7 +29,7 @@ client.download(file.id).await?.write_to_file("report-copy.pdf").await?;
 
 `connect` negotiates before sending credentials. `new_unchecked` is available when the caller has already verified the deployment. Configuration accepts only the canonical `/api/v1/` path, HTTPS except on loopback, and no embedded credentials/query/fragment. Redirects are refused so credentials and mutation bodies cannot move to another origin.
 
-For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Login may be unscoped; select one of the returned authorized organizations with `with_organization`. The package owns no session or API cache. Applications own persistence and token rotation.
+For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Every IAM 5 token belongs to exactly one account and organization. Configure `with_organization` for that returned `org_id`; changing it cannot retarget the bearer. Keep additional accounts in separate clients and credential stores. The package owns no session or API cache. Applications own persistence and token rotation.
 
 `EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing and redacts Debug output. Shared lifecycle management uses `honeycomb::manage_environment(&arguments)`, which invokes the official Honeycomb CLI with its own session and retry state. The library stores no Honeycomb credentials. Legacy direct management methods receive `testing_environment_managed_by_honeycomb`; use Honeycomb rather than an IAM root pairing. See [Testing environments](../testing-environments.md).
 
@@ -115,7 +115,7 @@ branches, and `retry_after` carries the delay a spent allowance names.
 
 ## Delegated request examples
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 Use a valid IAM OBO access token for the approved endpoint graph. The historical `OboProof` name remains for source compatibility; it now wraps a reusable token, is cloneable and redacts debug output.
 
