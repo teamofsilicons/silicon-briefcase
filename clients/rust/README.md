@@ -32,7 +32,7 @@ println!("{}", entry.permanent_url);
 ```
 
 ```bash
-# Ask IAM for an unscoped SLT for the canonical Application first.
+# Ask IAM for an SLT for the canonical Application and selected organization.
 iam login --app-id 'briefcase'
 briefcase login <slt>
 briefcase --org tos put ./report.pdf private/cos:tos/notes
@@ -46,19 +46,16 @@ URL, then `https://backend.briefcase.teamofsilicons.com/api/v1/`.
 
 The CLI stores the resulting rotating access/refresh session and renews it
 before expiry. It never asks for an IAM password, OTP, or Application secret.
-Login is always unscoped and returns only the active organization grants chosen
-by the user in IAM. `--org` selects a workspace without narrowing login or adding
-consent. Review access in IAM to authorise another organization.
+IAM 5 login returns exactly one selected organization. Keep each account and
+organization in a separate saved profile; `--org` must agree with the saved
+session. Log in separately to add another organization. Ordinary login does
+not approve a feature or create reusable OBO grants.
 Both crates also support disposable IAM-coupled test planes; see the guides for
 the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
 
-The package advances the consuming Cargo project's lockfile through best-effort
-background maintenance after ordinary operations, at most hourly per project
-in the process; streams defer it until they end. The CLI's persistent daemon
-checks hourly even while the CLI is idle and installs a newer `briefcase-cli`
-for the next invocation. Run `briefcase daemon install` to enable the login
-service. Both behaviors have documented configuration and environment opt-outs;
-loaded code changes only on the next build or invocation.
+The Rust package does not update dependencies or mutate the consuming project.
+Honeycomb owns CLI installation and updates. Legacy daemon commands provide
+migration guidance; they do not install an independent updater.
 
 ## The contract check
 
@@ -89,7 +86,7 @@ headers carry, and how a refusal reads.
 
 ## Publishing
 
-Client, CLI and gateway 2.0.0 target API v1 and contract 2.0.0. Publish the
+Client, CLI and gateway 3.0.1 target API v1 and contract 3.0.0. Publish the
 client before the CLI after deploying the backend contract. They share one contract and include app namespaces, immutable versions, streamed folder
 downloads, invitations, public links, 365-day logs and IAM-secret testing.
 Link-access responses include the shareable file or folder `url`; the browser displays it with a copy action.

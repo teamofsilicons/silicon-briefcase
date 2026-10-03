@@ -14,7 +14,7 @@ reports `Disabled`. Honeycomb manages CLI installation and updates.
 
 ```toml
 [dependencies]
-briefcase-client = "2.0.0"
+briefcase-client = "3.0.1"
 ```
 
 ```rust
