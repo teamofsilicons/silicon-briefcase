@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use briefcase_client::{Client, Config, EnvironmentKey, IdempotencyKey, SessionTokens};
+use briefcase_client::{ActorType, Client, Config, EnvironmentKey, IdempotencyKey, SessionTokens};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -151,17 +151,32 @@ pub(crate) struct LoginFlow {
     deadline: SystemTime,
     operation_id: Uuid,
     telemetry: bool,
+    #[serde(default)]
+    identity_kind: Option<ActorType>,
+    #[serde(default)]
+    popup_nonce: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Start {
     return_to: Option<String>,
+    identity_kind: Option<ActorType>,
+    popup_nonce: Option<String>,
 }
 pub(crate) async fn start(
     State(app): State<App>,
     headers: HeaderMap,
     Json(input): Json<Start>,
 ) -> Result<Response> {
+    if input.popup_nonce.as_deref().is_some_and(|nonce| {
+        input.identity_kind.is_none()
+            || nonce.len() != 64
+            || !nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(bad("Choose Carbon or Silicon to sign in."));
+    }
     let return_to = input.return_to.unwrap_or_else(|| "/".into());
     let target = url::Url::parse(&format!("{}{return_to}", app.origin))
         .map_err(|_| bad("Invalid return path"))?;
@@ -193,6 +208,13 @@ pub(crate) async fn start(
     url.query_pairs_mut()
         .append_pair("app_id", "briefcase")
         .append_pair("redirect_uri", &callback);
+    if let Some(kind) = input.identity_kind {
+        url.query_pairs_mut()
+            .append_pair("identity_kind", kind.as_str());
+    }
+    if input.popup_nonce.is_some() {
+        url.query_pairs_mut().append_pair("display", "popup");
+    }
     flows.insert(
         nonce.clone(),
         LoginFlow {
@@ -201,6 +223,8 @@ pub(crate) async fn start(
             deadline: SystemTime::now() + Duration::from_secs(600),
             operation_id: Uuid::new_v4(),
             telemetry: crate::telemetry::enabled(&headers),
+            identity_kind: input.identity_kind,
+            popup_nonce: input.popup_nonce,
         },
     );
     if let Some(storage) = &app.session_storage {
@@ -280,26 +304,53 @@ async fn finish_callback(app: &App, headers: &HeaderMap, input: Callback) -> Res
     };
     let return_to = flow.return_to.clone();
     let browser_group = flow.browser_group;
+    let expected_kind = flow.identity_kind;
+    let popup_nonce = flow.popup_nonce.clone();
     let mut headers = headers.clone();
     if !flow.telemetry {
         headers.insert("x-briefcase-telemetry", HeaderValue::from_static("off"));
     }
     drop(flows);
-    let (id, value) = establish_in_group(
+    let established = establish_in_group(
         app,
         input,
         crate::telemetry::enabled(&headers),
         browser_group,
+        expected_kind,
     )
-    .await?;
+    .await;
+    let (id, value) = match established {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(nonce) = popup_nonce.as_deref() {
+                return Ok((
+                    [(header::LOCATION, popup_completion(nonce, false, None)?)],
+                    (),
+                )
+                    .into_response());
+            }
+            return Err(error);
+        }
+    };
     let mut response = (
         [(header::SET_COOKIE, cookie(app, &id, SESSION_SECONDS)?)],
-        Json(value),
+        Json(value.clone()),
     )
         .into_response();
     response.headers_mut().insert(
         header::LOCATION,
-        HeaderValue::from_str(&return_to).map_err(|_| bad("Invalid return path"))?,
+        if let Some(nonce) = popup_nonce.as_deref() {
+            popup_completion(
+                nonce,
+                true,
+                value
+                    .get("context_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok()),
+            )?
+        } else {
+            HeaderValue::from_str(&return_to).map_err(|_| bad("Invalid return path"))?
+        },
     );
     // Retain the bounded flow until expiry so a lost callback response can use
     // the same IAM exchange identity and recover the existing browser session.
@@ -333,6 +384,17 @@ pub(crate) struct Session {
     rejected: bool,
     test_environment: Option<TestSelection>,
     test_sessions: std::collections::HashMap<Uuid, String>,
+}
+fn popup_completion(nonce: &str, success: bool, context: Option<Uuid>) -> Result<HeaderValue> {
+    if success && context.is_none() {
+        return Err(bad("The completed account context is unavailable."));
+    }
+    HeaderValue::from_str(&format!(
+        "/?iam_popup=complete&nonce={nonce}&result={}&context={}",
+        if success { "ok" } else { "error" },
+        context.map(|value| value.to_string()).unwrap_or_default()
+    ))
+    .map_err(|_| bad("Invalid completion nonce"))
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -547,14 +609,20 @@ fn unauthenticated() -> Failure {
         "Sign in to Briefcase to continue.".into(),
     )
 }
-async fn establish(app: &App, input: Login, telemetry: bool) -> Result<(String, Value)> {
-    establish_in_group(app, input, telemetry, None).await
+async fn establish(
+    app: &App,
+    input: Login,
+    telemetry: bool,
+    expected_kind: Option<ActorType>,
+) -> Result<(String, Value)> {
+    establish_in_group(app, input, telemetry, None, expected_kind).await
 }
 async fn establish_in_group(
     app: &App,
     input: Login,
     telemetry: bool,
     group: Option<Uuid>,
+    expected_kind: Option<ActorType>,
 ) -> Result<(String, Value)> {
     if input.operation_id.is_nil()
         || input
@@ -591,6 +659,9 @@ async fn establish_in_group(
     };
     if let Some(previous) = previous {
         let mut previous = previous.lock().await;
+        if expected_kind.is_some_and(|kind| previous.tokens.actor.actor_type != kind) {
+            return Err(unauthenticated());
+        }
         if previous.durable_dirty {
             previous.save()?;
         }
@@ -633,6 +704,9 @@ async fn establish_in_group(
             return Err(error.into());
         }
     };
+    if expected_kind.is_some_and(|kind| tokens.actor.actor_type != kind) {
+        return Err(unauthenticated());
+    }
     let session_org = tokens
         .org_id
         .clone()
@@ -1015,6 +1089,7 @@ pub(crate) async fn enter_test(
             operation_id: input.operation_id,
         },
         crate::telemetry::enabled(&headers),
+        None,
     )
     .await?;
     let child = app
@@ -1218,7 +1293,11 @@ pub(crate) mod tests {
         start(
             State(app.clone()),
             headers(&first_id, None),
-            Json(Start { return_to: None }),
+            Json(Start {
+                return_to: None,
+                identity_kind: Some(ActorType::Silicon),
+                popup_nonce: Some("a".repeat(64)),
+            }),
         )
         .await
         .ok()
@@ -1227,6 +1306,8 @@ pub(crate) mod tests {
         let (nonce, flow) = flows.iter().next().unwrap();
         assert_eq!(nonce.len(), 64);
         assert_eq!(flow.browser_group, Some(group));
+        assert_eq!(flow.identity_kind, Some(ActorType::Silicon));
+        assert_eq!(flow.popup_nonce.as_deref(), Some("a".repeat(64).as_str()));
         assert_ne!(flow.operation_id, Uuid::nil());
     }
 
@@ -1340,6 +1421,8 @@ pub(crate) mod tests {
                 State(app.clone()),
                 HeaderMap::new(),
                 Json(Start {
+                    identity_kind: Some(ActorType::Silicon),
+                    popup_nonce: Some("a".repeat(64)),
                     return_to: Some("/".into()),
                 }),
             )
@@ -1355,6 +1438,11 @@ pub(crate) mod tests {
         let logins: std::collections::HashMap<String, LoginFlow> =
             storage.read("logins").unwrap().unwrap();
         assert_eq!(logins[&nonce].operation_id, operation);
+        assert_eq!(logins[&nonce].identity_kind, Some(ActorType::Silicon));
+        assert_eq!(
+            logins[&nonce].popup_nonce.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
         assert!(logins[&nonce].deadline > SystemTime::now());
     }
 
@@ -1382,6 +1470,44 @@ pub(crate) mod tests {
         assert!(saved.lock().await.rejected);
     }
 
+    #[test]
+    fn successful_popup_completion_requires_the_exact_created_context() {
+        let context = Uuid::from_u128(1);
+        assert!(popup_completion("nonce", true, None).is_err());
+        let location = popup_completion("nonce", true, Some(context)).ok().unwrap();
+        assert!(
+            location
+                .to_str()
+                .unwrap()
+                .contains(&format!("context={context}"))
+        );
+        assert!(popup_completion("nonce", false, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn selected_kind_cannot_recover_a_session_for_another_kind() {
+        let app = app();
+        let input = Login {
+            org: None,
+            slt: "exchanged".into(),
+            test_key: None,
+            operation_id: Uuid::new_v4(),
+        };
+        let mut hash = Sha256::new();
+        hash.update(app.login_salt.as_bytes());
+        hash.update(serde_json::to_vec(&input).unwrap());
+        let id = format!("{:x}", hash.finalize());
+        app.sessions
+            .lock()
+            .await
+            .insert(id, Arc::new(Mutex::new(session(None))));
+        let error = establish(&app, input, false, Some(ActorType::Silicon))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn an_old_login_retry_cannot_replace_a_durable_logout() {
         let root = tempfile::tempdir().unwrap();
@@ -1402,7 +1528,7 @@ pub(crate) mod tests {
         saved.rejected = true;
         saved.durable = Some((storage, id));
         saved.save().ok().unwrap();
-        let failure = establish(&app, input, false).await.err().unwrap();
+        let failure = establish(&app, input, false, None).await.err().unwrap();
         assert_eq!(failure.0, StatusCode::UNAUTHORIZED);
         assert!(app.sessions.lock().await.is_empty());
     }
@@ -1821,6 +1947,7 @@ pub(crate) async fn enter_secret(
         },
         crate::telemetry::enabled(&headers),
         group,
+        None,
     )
     .await?;
     let child = app

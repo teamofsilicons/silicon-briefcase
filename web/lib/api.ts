@@ -9,7 +9,7 @@ export type BrowserSession = {
   }[];
   org: string;
   organizations: string[];
-  actor: { type: string; public_id: string };
+  actor: { type: 'carbon' | 'silicon'; public_id: string };
   testing: boolean;
   test_environment?: { id: string; name: string } | null;
 };
@@ -47,6 +47,7 @@ export class ApiError extends Error {
 let workspaceOrganization: string | null = null;
 let accountContext: string | null = null;
 let contextEpoch = 0;
+export const browserContextGeneration = () => contextEpoch;
 export function setAccountContext(context: string | null) {
   if (accountContext !== context) contextEpoch += 1;
   accountContext = context;

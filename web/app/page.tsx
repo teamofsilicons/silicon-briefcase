@@ -1,6 +1,6 @@
 'use client';
 import { TelemetryPreference } from '@/components/briefcase/telemetry';
-import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
   BriefcaseBusiness,
@@ -19,13 +19,21 @@ import {
   api,
   setWorkspaceOrganization,
   setAccountContext,
+  browserContextGeneration,
   testingEnvironment,
   returnToProduction,
   type AccountSession,
   type BrowserSession,
 } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
+import {
+  completeIamPopup,
+  openIamPopup,
+  type IdentityKind,
+} from '@/lib/iam-popup';
 export default function Home() {
+  const loginController = useRef<AbortController | null>(null);
+  useEffect(() => () => loginController.current?.abort(), []);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const [session, setSession] = useState<
@@ -50,6 +58,7 @@ export default function Home() {
     window.location.reload();
   }, []);
   useEffect(() => {
+    if (completeIamPopup()) return;
     const selectors = new URLSearchParams(location.search).getAll(
       'test_environment',
     );
@@ -113,36 +122,74 @@ export default function Home() {
       })
       .finally(() => setChecking(false));
   }, []);
-  async function login(event: SubmitEvent) {
-    event.preventDefault();
+  async function login(kind: IdentityKind) {
     if (testingEnvironment()) {
       returnToProduction();
       return;
     }
+    if (loginController.current) return;
+    const controller = new AbortController();
+    loginController.current = controller;
+    const generation = browserContextGeneration();
     setBusy(true);
     setError('');
     try {
-      const r = await fetch('/browser/login/start', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Briefcase-Browser': '1',
-        },
-        body: JSON.stringify({ return_to: returnTo }),
-      });
-      const value = (await r.json()) as {
-        error?: { message?: string };
-        redirect_url: string;
-      };
-      if (!r.ok)
+      const completed = await openIamPopup(async (nonce) => {
+        const r = await fetch('/browser/login/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Briefcase-Browser': '1',
+          },
+          body: JSON.stringify({
+            return_to: returnTo,
+            identity_kind: kind,
+            popup_nonce: nonce,
+          }),
+        });
+        const value = (await r.json()) as {
+          error?: { message?: string };
+          redirect_url: string;
+        };
+        if (!r.ok)
+          throw new Error(
+            value.error?.message || 'Sign-in could not be completed.',
+          );
+        return value.redirect_url;
+      }, controller.signal);
+      if (
+        controller.signal.aborted ||
+        browserContextGeneration() !== generation
+      )
+        return;
+      // The popup changed the shared cookie. Fence old requests before reading
+      // the new server context, and do not leave the previous account visible.
+      setAccountContext(null);
+      setWorkspaceOrganization(null);
+      setSession(null);
+      const current = await api<BrowserSession | AccountSession>('/session');
+      if (
+        !current.authenticated ||
+        current.actor.type !== kind ||
+        current.context_id !== completed
+      )
         throw new Error(
-          value.error?.message || 'Sign-in could not be completed.',
+          'The selected account could not be verified. Please sign in again.',
         );
-      window.location.assign(value.redirect_url);
+      if (controller.signal.aborted) return;
+      setAccountContext(current.context_id);
+      setWorkspaceOrganization(current.org);
+      const destination = session
+        ? '/org/' + encodeURIComponent(current.org || '') + '/'
+        : returnTo;
+      window.location.assign(destination);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
+      if (!controller.signal.aborted)
+        setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
     } finally {
-      setBusy(false);
+      if (loginController.current === controller)
+        loginController.current = null;
+      if (!controller.signal.aborted) setBusy(false);
     }
   }
   async function selectOrganization(selected: string) {
@@ -292,17 +339,27 @@ export default function Home() {
                 </output>
               )}
               <IamOrganizationsLink />
-              <form onSubmit={login}>
+              <p className="session-note">
+                Add another account or organization
+              </p>
+              <div className="space-y-3">
                 <Button
                   className="secondary-action"
                   variant="outline"
                   disabled={busy}
-                  type="submit"
+                  onClick={() => void login('carbon')}
                 >
-                  {busy ? 'Continuing…' : 'Add an account or organization'}
-                  <ArrowRight size={18} />
+                  Continue as Carbon <ArrowRight size={18} />
                 </Button>
-              </form>
+                <Button
+                  className="secondary-action"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void login('silicon')}
+                >
+                  Continue as Silicon <ArrowRight size={18} />
+                </Button>
+              </div>
               {error && (
                 <p className="error-box" role="alert">
                   {error}
@@ -336,7 +393,7 @@ export default function Home() {
                 Sign in with your Silicon account to open your files and shared
                 spaces. We’ll bring you right back here.
               </p>
-              <form onSubmit={login}>
+              <div className="space-y-3">
                 {error && (
                   <p className="error-box" role="alert">
                     {error}
@@ -344,17 +401,22 @@ export default function Home() {
                 )}
                 <Button
                   className="primary-action"
-                  type="submit"
                   disabled={busy}
+                  onClick={() => void login('carbon')}
                 >
-                  {testingEnvironment()
-                    ? 'Return to production to sign in'
-                    : busy
-                      ? 'Continuing to IAM…'
-                      : 'Continue with Silicon IAM'}
+                  {busy ? 'Opening IAM…' : 'Continue as Carbon'}{' '}
                   <ArrowRight size={18} />
                 </Button>
-              </form>
+                <Button
+                  className="secondary-action"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void login('silicon')}
+                >
+                  {busy ? 'Opening IAM…' : 'Continue as Silicon'}{' '}
+                  <ArrowRight size={18} />
+                </Button>
+              </div>
             </>
           )}
           {!testingEnvironment() && <TestSignIn />}
