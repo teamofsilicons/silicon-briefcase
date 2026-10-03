@@ -412,13 +412,16 @@ fn ensure_stored_scope(
                 "stored credentials for profile {profile} have no destination binding; sign in again before using them"
             ))
         })?;
-    let verified_unscoped = environment.is_none()
-        && bound.organization.is_empty()
-        && credentials
-            .session(profile, None)
-            .is_some_and(|session| session.org_id.is_none());
+    if credentials
+        .session(profile, environment)
+        .is_some_and(|session| session.org_id.as_deref() != Some(effective.organization.as_str()))
+    {
+        return Err(CliError::usage(
+            "This saved session needs an IAM 5 sign-in for the selected organization; refusing to send its credentials. Use a separate profile for each account and organization.",
+        ));
+    }
     if bound.deployment_origin != effective.deployment_origin
-        || (!verified_unscoped && bound.organization != effective.organization)
+        || bound.organization != effective.organization
     {
         return Err(CliError::usage(format!(
             "stored credentials for profile {profile} are bound to {} organization {}; refusing to send them to {} organization {}",
@@ -524,6 +527,18 @@ async fn probe_stored_access(global: &GlobalArgs, resolved: &mut ResolvedSession
     }
 }
 
+fn ensure_refresh_identity(
+    stored: &StoredSession,
+    refreshed: &briefcase_client::SessionTokens,
+) -> Result<()> {
+    if refreshed.org_id != stored.org_id || refreshed.actor != stored.actor {
+        return Err(CliError::usage(
+            "IAM refresh changed the account or organization; sign in again.",
+        ));
+    }
+    Ok(())
+}
+
 async fn connect_with_scope(
     global: &GlobalArgs,
     require_org: bool,
@@ -591,6 +606,7 @@ async fn connect_with_scope(
             let refreshed = refresh_client
                 .refresh_session_with_key(&stored.refresh_token, &refresh_key)
                 .await?;
+            ensure_refresh_identity(&stored, &refreshed)?;
             let mut saved = StoredSession::from_tokens(&refreshed);
             saved.expires_at = started_at
                 + time::Duration::seconds(i64::try_from(refreshed.expires_in).unwrap_or(i64::MAX));
@@ -730,6 +746,9 @@ async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<
                 .ok_or_else(|| CliError::usage("test login requires an organization"))?,
         )?;
         login_config = login_config.with_environment(environment);
+    }
+    if let Some(scope) = &login_scope {
+        login_config = login_config.with_organization(&scope.organization)?;
     }
     let client = if global.no_verify {
         Client::new_unchecked(login_config)?

@@ -10,9 +10,9 @@ sharing, and notifications.
 
 1. Select **Continue with IAM**. No organisation ID is required.
 2. Briefcase redirects to `https://auth.iam.teamofsilicons.com/login`, passing
-   `app_id=briefcase` and a server-generated `redirect_uri`. An existing
-   organisation file link supplies `org_id` automatically; ordinary sign-in
-   remains unscoped.
+   `app_id=briefcase` and a server-generated `redirect_uri`. The
+   organization is selected in IAM; existing file links retain their destination
+   without changing the session scope.
    Production uses `https://briefcase.teamofsilicons.com/auth/callback`;
    local development uses the same path on the configured local origin.
    The callback URL includes a random, short-lived `state` query value matched

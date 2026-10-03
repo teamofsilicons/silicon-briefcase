@@ -723,14 +723,14 @@ pub struct SessionTokens {
     pub actor: SessionActor,
     /// Organization selected for this session.
     pub org_id: Option<String>,
-    /// Active organizations explicitly selected by the user in IAM.
+    /// The single organization selected for this IAM 5 account session.
     /// Empty means reauthorisation is needed, never access to all memberships.
     #[serde(default)]
     pub organizations: Vec<String>,
 }
 
 /// IAM actor represented by a Briefcase Application session.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionActor {
     /// Stable IAM principal UUID.
     pub principal_id: Uuid,
@@ -835,7 +835,7 @@ pub struct LoginStatus {
     pub authenticated: bool,
     /// The authenticated Carbon or Silicon, absent when unauthenticated.
     pub actor: Option<LoginActor>,
-    /// Currently granted organizations with active memberships.
+    /// The one organization in the currently active IAM 5 session.
     pub organizations: Vec<String>,
     /// Access-token expiry as a Unix timestamp, absent when unauthenticated.
     pub expires_at: Option<i64>,

@@ -229,6 +229,21 @@ impl IamClient {
         idempotency_key: &str,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<IamApplicationTokens, IamClientError> {
+        self.exchange_short_lived_token_in_organization(slt, idempotency_key, environment, None)
+            .await
+    }
+
+    /// Exchanges a testing actor in one explicit organization, or an issued login code.
+    ///
+    /// # Errors
+    /// Rejects a mismatched organization or invalid IAM response.
+    pub async fn exchange_short_lived_token_in_organization(
+        &self,
+        slt: &SecretString,
+        idempotency_key: &str,
+        environment: Option<&IamEnvironmentCredential>,
+        organization: Option<&str>,
+    ) -> Result<IamApplicationTokens, IamClientError> {
         let expected_actor = if valid_fixed_iam_secret(slt.expose_secret(), "oac_") {
             None
         } else if environment.is_some() {
@@ -238,19 +253,36 @@ impl IamClient {
         };
         let client = self.scoped_client(environment)?;
         let mutation = mutation(idempotency_key)?;
-        let tokens = client
-            .oauth()
-            .login(
-                self.application_identity(environment).0.as_str(),
-                slt.expose_secret(),
-                &mutation,
-            )
-            .await
-            .map_err(|error| sdk_error(error, Operation::Token))?;
+        let tokens = if let (Some(_), Some(org)) = (&expected_actor, organization) {
+            client
+                .oauth()
+                .login_testing_actor(
+                    self.application_identity(environment).0.as_str(),
+                    slt.expose_secret(),
+                    org,
+                    &mutation,
+                )
+                .await
+        } else {
+            client
+                .oauth()
+                .login(
+                    self.application_identity(environment).0.as_str(),
+                    slt.expose_secret(),
+                    &mutation,
+                )
+                .await
+        }
+        .map_err(|error| sdk_error(error, Operation::Token))?;
         let tokens = validate_application_tokens(
             self.convert(self.prepare(tokens, environment).await?)?,
             None,
         )?;
+        if organization.is_some_and(|org| {
+            tokens.organization_id.as_ref().map(OrganizationId::as_str) != Some(org)
+        }) {
+            return Err(binding_mismatch("login.organization"));
+        }
         if expected_actor
             .as_ref()
             .is_some_and(|actor| actor != tokens.actor())
@@ -272,36 +304,10 @@ impl IamClient {
         access_token: &SecretString,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<Vec<OrganizationId>, IamClientError> {
-        if !valid_fixed_iam_secret(access_token.expose_secret(), "oat_") {
-            return Err(IamClientError::Rejected);
-        }
-        let authorizations = self
-            .scoped_client(environment)?
-            .oauth()
-            .authorizations(access_token.expose_secret())
-            .await
-            .map_err(|error| sdk_error(error, Operation::Service))?
-            .ok_or(IamClientError::Rejected)?;
-        let expected_audience = self.application_identity(environment).0.as_str();
-        let expected_environment = environment.and_then(|value| value.environment_id);
-        let mut organizations = Vec::with_capacity(authorizations.len());
-        for authorization in authorizations {
-            if authorization.audience.as_str() != expected_audience
-                || authorization.testing_environment_id != expected_environment
-                || !is_canonical_iam_organization_id(authorization.org_id.as_str())
-                || authorization.membership_version < 1
-                || authorization.authorization_epoch < 1
-            {
-                return Err(invalid_response("authorization.organization"));
-            }
-            organizations.push(
-                OrganizationId::new(authorization.org_id)
-                    .map_err(|_| invalid_response("authorization.org_id"))?,
-            );
-        }
-        organizations.sort();
-        organizations.dedup();
-        Ok(organizations)
+        Ok(self
+            .inspect_session(access_token, environment)
+            .await?
+            .organizations)
     }
 
     /// Rotates a refresh token without retrying or retaining session state.
@@ -389,10 +395,10 @@ impl IamClient {
         Ok(verified)
     }
 
-    /// Consumes an exact-request OBO proof and its current delegated authority.
+    /// Verifies a reusable delegated token as the receiving application.
     ///
     /// # Errors
-    /// Rejects spent or mismatched proofs. Never retries an uncertain verify.
+    /// Rejects expired, revoked, or mismatched graph authority.
     pub async fn verify_obo(
         &self,
         proof: &SecretString,
@@ -401,20 +407,67 @@ impl IamClient {
         binding: &OboRequestBinding<'_>,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<VerifiedOboAccess, IamClientError> {
-        if !valid_fixed_iam_secret(proof.expose_secret(), "obo_") {
+        if !valid_fixed_iam_secret(proof.expose_secret(), "oba_") {
             return Err(IamClientError::Rejected);
         }
         validate_outbound_binding("obo.method", binding.method, 16)?;
         validate_outbound_binding("obo.path", binding.path, MAX_RESOURCE_BYTES)?;
         validate_outbound_binding("obo.body_sha256", binding.body_sha256, 64)?;
-        let request = serde_json::from_value(serde_json::json!({"access_proof":proof.expose_secret(),"request":{"method":binding.method,"path":binding.path,"body_sha256":binding.body_sha256}}))
-            .map_err(|_| binding_mismatch("obo.request"))?;
-        let response = self
+        let endpoint_id = match binding.path {
+            "/api/v1/obo/uploads/reserve" => "briefcase.uploads.reserve",
+            "/api/v1/obo/uploads/commit" => "briefcase.uploads.commit",
+            "/api/v1/obo/uploads/status" => "briefcase.uploads.status",
+            "/api/v1/obo/uploads/cancel" => "briefcase.uploads.cancel",
+            "/api/v1/obo/invitations" => "briefcase.invitations.create",
+            "/api/v1/obo/link-access" => "briefcase.link_access.update",
+            "/api/v1/obo/files/read" => "briefcase.files.read",
+            "/api/v1/obo/folders/create" => "briefcase.folders.create",
+            "/api/v1/obo/entries/list" => "briefcase.entries.list",
+            "/api/v1/obo/entries/trash" => "briefcase.entries.trash",
+            // Legacy streaming creation encoded per-request metadata in the old proof.
+            // Use resumable reservation/upload/commit with the reusable token protocol.
+            _ => return Err(IamClientError::Rejected),
+        };
+        let request = serde_json::json!({"access_token":proof.expose_secret(),"endpoint_id":endpoint_id,"request":{"method":binding.method,"path":binding.path}});
+        let verified_response = self
             .scoped_client(environment)?
             .obo()
-            .verify(&request)
+            .verify(&self.convert(request)?)
             .await
             .map_err(|error| sdk_error(error, Operation::Obo))?;
+        let mut response: serde_json::Value = self.convert(verified_response)?;
+        if response["active"] != true
+            || response["endpoint"]["app_id"].as_str()
+                != Some(self.application_identity(environment).0.as_str())
+            || response["endpoint"]["endpoint_id"].as_str() != Some(endpoint_id)
+        {
+            return Err(IamClientError::Rejected);
+        }
+        // Adapt the current wire response to the existing local authority validator.
+        // The compatibility timestamp below records this verification, not consumption.
+        response["valid"] = serde_json::json!(true);
+        response["proof_id"] = response["token_id"].clone();
+        response["audience"] = response["endpoint"]["app_id"].clone();
+        response["metadata"] = serde_json::json!({});
+        response["consumed_at"] = serde_json::json!(
+            OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| invalid_response("verification_time"))?
+        );
+        // The actor is always disclosed by OBO; optional IAM self-profile scopes do
+        // not change which represented account this endpoint is authorized for.
+        // Preserve disclosed identity fields so canonical validation rejects any
+        // disagreement with the represented actor instead of silently replacing it.
+        if response["authorization"]["actor_type"].is_null() {
+            response["authorization"]["actor_type"] = response["actor"]["type"].clone();
+        }
+        if response["authorization"]["public_id"].is_null() {
+            response["authorization"]["public_id"] = response["actor"]["public_id"].clone();
+        }
+        response
+            .as_object_mut()
+            .ok_or_else(|| invalid_response("obo.response"))?
+            .remove("active");
         let response = self.prepare(response, environment).await?;
         let snapshot: super::canonical::LocalAuthorization =
             self.convert(response["authorization"].clone())?;
@@ -510,7 +563,13 @@ pub(super) fn session_identity(
     audience: &ApplicationId,
     environment: Option<&IamEnvironmentCredential>,
 ) -> Result<IamSessionIdentity, IamClientError> {
-    if !response.active {
+    if !response.active
+        || response.scope.as_deref().is_some_and(|scope| {
+            scope
+                .split_whitespace()
+                .any(|scope| scope.starts_with("obo:"))
+        })
+    {
         return Err(IamClientError::Rejected);
     }
     if response.client_id.as_deref() != Some(audience.as_str())
@@ -537,7 +596,6 @@ pub(super) fn session_identity(
         (Some(snapshot), None) if response.org_id.as_deref() == Some(snapshot.org_id.as_str()) => {
             vec![snapshot]
         }
-        (None, Some(snapshots)) if response.org_id.is_none() => snapshots,
         _ => return Err(invalid_response("session.authorizations")),
     };
     let mut identity = IamSessionIdentity {

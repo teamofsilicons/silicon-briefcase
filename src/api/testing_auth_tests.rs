@@ -5,7 +5,6 @@ use axum::{body::Bytes, extract::State, http::HeaderMap};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 use wiremock::{
@@ -26,7 +25,7 @@ use crate::{
 const APP: &str = "briefcase";
 const ISSUER: &str = "waveform";
 const TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const PROOF: &str = "oba_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ENDPOINT: &str = "briefcase.folders.create";
 
 struct Fixture {
@@ -177,7 +176,7 @@ impl Fixture {
         );
         if delegated {
             headers.insert("x-app-id", ISSUER.parse()?);
-            headers.insert("x-iam-obo-access-proof", PROOF.parse()?);
+            headers.insert("x-iam-obo-access-token", PROOF.parse()?);
         } else {
             headers.insert("authorization", format!("Bearer {TOKEN}").parse()?);
         }
@@ -205,19 +204,24 @@ impl Fixture {
             "self.membership.read",
             "self.tags.read"
         ]);
-        json!({"valid":true,"proof_id":Uuid::new_v4(),"issuer_app_id":ISSUER,"audience":APP,
+        json!({"active":true,"token_id":Uuid::new_v4(),"grant_id":Uuid::new_v4(),"originating_app_id":ISSUER,"chain":[],"issuer_app_id":ISSUER,"audience":APP,
             "authorization":snapshot,"actor":{"principal_id":self.principal,"type":"carbon","public_id":"c:test-carbon"},
-            "org_id":self.org,"endpoint":{"endpoint_id":ENDPOINT,"path":handlers::delegated::CREATE_FOLDER_PATH},
+            "org_id":self.org,"endpoint":{"app_id":APP,"endpoint_id":ENDPOINT,"path":handlers::delegated::CREATE_FOLDER_PATH},
             "metadata":{},"expires_at":"2099-01-01T00:00:00Z","consumed_at":"2026-09-14T00:00:00Z"})
     }
 
-    async fn proof(&self, body: &[u8], response_body: Value) {
-        Mock::given(method("POST")).and(path("/api/v1/obo-access/verify"))
+    async fn proof(&self, _body: &[u8], response_body: Value) {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .and(header("authorization", self.basic()))
             .and(header("x-testing-application", self.basic()))
-            .and(body_json(json!({"access_proof":PROOF,"request":{"method":"POST",
-                "path":handlers::delegated::CREATE_FOLDER_PATH,"body_sha256":hex::encode(Sha256::digest(body))}})))
-            .respond_with(response(response_body)).mount(&self.iam).await;
+            .and(body_json(
+                json!({"access_token":PROOF,"endpoint_id":ENDPOINT,"request":{"method":"POST",
+                "path":handlers::delegated::CREATE_FOLDER_PATH}}),
+            ))
+            .respond_with(response(response_body))
+            .mount(&self.iam)
+            .await;
     }
 }
 
@@ -348,8 +352,7 @@ async fn imported_world_bearer_rejects_wrong_org_world_audience_and_revoked_auth
 }
 
 #[tokio::test]
-async fn imported_world_delegated_folder_preserves_exact_request_and_tenant_binding()
--> anyhow::Result<()> {
+async fn imported_world_delegated_token_reuse_preserves_tenant_binding() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
         return Ok(());
     };
@@ -370,19 +373,20 @@ async fn imported_world_delegated_folder_preserves_exact_request_and_tenant_bind
     let folder = serde_json::to_value(folder.0)?;
     assert_eq!(folder["org_id"], f.org);
     assert_eq!(folder["name"], "Recordings");
-    // Changing bytes cannot reuse the verified request: fake IAM only accepts
-    // the exact digest, method, path and selected application credential above.
+    // IAM5 grants are reusable for the verified endpoint; each new operation
+    // still executes under the same selected application and tenant authority.
     let changed = Bytes::from(serde_json::to_vec(
         &json!({"operation_id":Uuid::new_v4(),"parent_path":"","name":"Elsewhere"}),
     )?);
-    assert!(
-        test_scope(
-            "changed-request".into(),
-            handlers::delegated::create_folder(State(f.state.clone()), f.headers(true)?, changed)
-        )
-        .await
-        .is_err()
-    );
+    let (status, second) = test_scope(
+        "changed-request".into(),
+        handlers::delegated::create_folder(State(f.state.clone()), f.headers(true)?, changed),
+    )
+    .await?;
+    assert_eq!(status, http::StatusCode::CREATED);
+    let second = serde_json::to_value(second.0)?;
+    assert_eq!(second["org_id"], f.org);
+    assert_eq!(second["name"], "Elsewhere");
     f.cleanup().await?;
     Ok(())
 }
@@ -422,11 +426,11 @@ async fn imported_world_delegation_rejects_unbound_scope_identity_org_and_world(
             "wrong_world" => {
                 proof["authorization"]["testing_environment_id"] = json!(Uuid::new_v4());
             }
-            "wrong_audience" => proof["audience"] = json!("another-app"),
+            "wrong_audience" => proof["endpoint"]["app_id"] = json!("another-app"),
             "wrong_actor" => proof["authorization"]["public_id"] = json!("another-carbon"),
             "no_role" => proof["authorization"]["org_role"] = Value::Null,
             "no_tags" => proof["authorization"]["tags"] = Value::Null,
-            "revoked" => proof["valid"] = json!(false),
+            "revoked" => proof["active"] = json!(false),
             _ => unreachable!(),
         }
         f.proof(&body, proof).await;
@@ -596,93 +600,30 @@ async fn imported_world_public_links_route_data_org_without_granting_private_acc
 }
 
 #[tokio::test]
-async fn imported_world_raw_recording_upload_keeps_verified_data_org_and_bytes()
--> anyhow::Result<()> {
-    raw_recording_upload(true).await
-}
-
-#[tokio::test]
-async fn imported_world_raw_recording_upload_accepts_undisclosed_tags() -> anyhow::Result<()> {
-    raw_recording_upload(false).await
-}
-
-async fn raw_recording_upload(tags_disclosed: bool) -> anyhow::Result<()> {
-    use crate::application::{content::ContentService, ports::ObjectStore};
-    use crate::infrastructure::s3::S3ObjectStore;
-    let Some(mut f) = Fixture::new().await? else {
+async fn imported_world_rejects_retired_metadata_only_streaming_obo() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
         return Ok(());
     };
-    let storage = MockServer::start().await;
-    let bytes = b"isolated recording bytes";
-    let checksum = STANDARD.encode(Sha256::digest(bytes));
-    Mock::given(method("PUT"))
-        .and(wiremock::matchers::body_bytes(bytes.as_slice()))
-        .and(header("x-amz-checksum-sha256", checksum.as_str()))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("etag", "\"recording-fixture\"")
-                .insert_header("x-amz-version-id", "fixture-version")
-                .insert_header("x-amz-checksum-sha256", checksum.as_str())
-                .insert_header("x-amz-checksum-type", "FULL_OBJECT"),
-        )
-        .expect(1)
-        .mount(&storage)
-        .await;
-    let objects: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
-        aws_config::SdkConfig::builder()
-            .behavior_version(aws_config::BehaviorVersion::latest())
-            .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
-                aws_sdk_s3::config::Credentials::new("test", "test", None, None, "fixture"),
-            ))
-            .build(),
-        Some(storage.uri().parse()?),
-        true,
-    ));
-    f.state.content = Arc::new(ContentService::new(
-        f.state.content_adapter.clone(),
-        objects,
-        f.state.temporary_directory.clone(),
-    ));
-    let mut proof = f.proof_response();
-    proof["endpoint"] =
-        json!({"endpoint_id":"briefcase.files.create","path":handlers::obo::CREATE_FILE_PATH});
-    proof["authorization"]["scopes"][0] = json!("obo:briefcase:briefcase.files.create");
-    if !tags_disclosed {
-        proof["authorization"]["scopes"] = json!([
-            "obo:briefcase:briefcase.files.create",
-            "self.identity.read",
-            "self.membership.read"
-        ]);
-        proof["authorization"]["tags"] = Value::Null;
-    }
-    proof["metadata"] =
-        json!({"path":"","name":"recording.bin","content_type":"application/octet-stream"});
-    Mock::given(method("POST")).and(path("/api/v1/obo-access/verify"))
-        .and(header("authorization", f.basic())).and(header("x-testing-application", f.basic()))
-        .and(body_json(json!({"access_proof":PROOF,"request":{"method":"POST",
-            "path":handlers::obo::CREATE_FILE_PATH,"body_sha256":hex::encode(Sha256::digest(bytes))}})))
-        .respond_with(response(proof)).expect(1).mount(&f.iam).await;
-    let (status, entry) = test_scope(
-        "raw-recording".into(),
+    let result = test_scope(
+        "retired-raw-recording".into(),
         handlers::obo::create_file(
             State(f.state.clone()),
             f.headers(true)?,
-            axum::body::Body::from(bytes.as_slice()),
+            axum::body::Body::from("isolated recording bytes"),
         ),
     )
-    .await?;
-    assert_eq!(status, http::StatusCode::CREATED);
-    let entry = serde_json::to_value(entry.0)?;
-    assert_eq!(entry["org_id"], f.org);
-    assert_eq!(entry["origin_app_id"], ISSUER);
-    assert_eq!(entry["name"], "recording.bin");
-    let requests = storage
+    .await;
+    assert!(matches!(result, Err(AppError::RetiredOboUpload)));
+    let requests = f
+        .iam
         .received_requests()
         .await
-        .ok_or_else(|| anyhow::anyhow!("storage requests"))?;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].body, bytes);
-    storage.verify().await;
+        .ok_or_else(|| anyhow::anyhow!("IAM requests"))?;
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().contains("obo-access"))
+    );
     f.cleanup().await?;
     Ok(())
 }

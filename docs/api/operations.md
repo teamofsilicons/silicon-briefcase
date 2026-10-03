@@ -8,7 +8,7 @@
 > data-plane selection. The protected [participant contract](../honeycomb-integration.md)
 > is a separate service integration.
 
-Contract **2.1.0**, API route namespace **v1**. The 62 operations carry the revisions listed below. Identity-bearing IAM, session, testing, delegated, and log operations use revision **2.0.0** for bare application IDs and typed actor IDs. Contract 2.1.0 adds expiring shares and self-destructing files: two new operations, `changeExpiringShare` and `makeEntryPermanent`, at revision **1.0.0**. Every other change it makes is an additive optional request field (`expires_in_minutes`, `self_destruct_minutes`) or an additive response field (`expires_at`, `self_destruct_at`), so no existing revision changed and a 2.0.0 consumer's startup check still passes. Unchanged operations retain their previous revisions. Paths are relative to `/api/v1` except permanent `/org/…` URLs. See the [HTTP guide](README.md), [Rust client](../client/README.md), and [CLI](../cli/README.md).
+Contract **3.0.0**, API namespace **v1**. Delegated JSON operations and the retired raw upload use revision **3.0.0** for reusable IAM OBO access tokens. Ordinary file operations and capability transfer retain their prior revisions. This documentation precedes the coordinated runtime rollout; check `/api/version` before switching clients. See the [OBO migration guide](../obo.md).
 
 | Operation | Method and path | Revision |
 | --- | --- | --- |
@@ -45,16 +45,16 @@ Contract **2.1.0**, API route namespace **v1**. The 62 operations carry the revi
 | `listNotifications` | `GET /notifications` | 1.0.0 |
 | `readNotifications` | `POST /notifications/read` | 1.0.0 |
 | `listEntryActivity` | `GET /entries/{entry_id}/activity` | 1.0.0 |
-| `createFileOnBehalfOfMember` | `POST /obo/files` | 2.0.0 |
-| `reserveDelegatedUpload` | `POST /obo/uploads/reserve` | 2.0.0 |
-| `commitDelegatedUpload` | `POST /obo/uploads/commit` | 2.0.0 |
-| `getDelegatedUploadStatus` | `POST /obo/uploads/status` | 2.0.0 |
-| `cancelDelegatedUpload` | `POST /obo/uploads/cancel` | 2.0.0 |
+| `createFileOnBehalfOfMember` | `POST /obo/files` | 3.0.0 |
+| `reserveDelegatedUpload` | `POST /obo/uploads/reserve` | 3.0.0 |
+| `commitDelegatedUpload` | `POST /obo/uploads/commit` | 3.0.0 |
+| `getDelegatedUploadStatus` | `POST /obo/uploads/status` | 3.0.0 |
+| `cancelDelegatedUpload` | `POST /obo/uploads/cancel` | 3.0.0 |
 | `transferDelegatedUpload` | `PUT /obo/uploads/{upload_id}/content` | 2.0.0 |
-| `createFolderOnBehalfOfMember` | `POST /obo/folders/create` | 2.0.0 |
-| `listEntriesOnBehalfOfMember` | `POST /obo/entries/list` | 2.0.0 |
-| `readFileOnBehalfOfMember` | `POST /obo/files/read` | 2.0.0 |
-| `trashEntryOnBehalfOfMember` | `POST /obo/entries/trash` | 2.0.0 |
+| `createFolderOnBehalfOfMember` | `POST /obo/folders/create` | 3.0.0 |
+| `listEntriesOnBehalfOfMember` | `POST /obo/entries/list` | 3.0.0 |
+| `readFileOnBehalfOfMember` | `POST /obo/files/read` | 3.0.0 |
+| `trashEntryOnBehalfOfMember` | `POST /obo/entries/trash` | 3.0.0 |
 | `listVersions` | `GET /entries/{entry_id}/versions` | 1.0.0 |
 | `restoreVersion` | `POST /entries/{entry_id}/versions/{version_id}/restore` | 1.0.0 |
 | `readOrganizationUsage` | `GET /usage` | 1.0.0 |
@@ -71,6 +71,6 @@ Contract **2.1.0**, API route namespace **v1**. The 62 operations carry the revi
 | `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.1.0 |
 | `listEntryLogs` | `GET /entries/{entry_id}/logs` | 2.0.0 |
 | `readPublicEntry` | `GET /public/{org_id}/{path}` | 1.1.0 |
-| `inviteOnBehalfOfMember` | `POST /obo/invitations` | 2.0.0 |
-| `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 2.0.0 |
+| `inviteOnBehalfOfMember` | `POST /obo/invitations` | 3.0.0 |
+| `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 3.0.0 |
 | `submitTelemetry` | `POST /telemetry` | 1.0.0 |

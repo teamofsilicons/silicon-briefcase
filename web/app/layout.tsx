@@ -2,6 +2,10 @@ import type { Metadata } from 'next';
 import { TelemetryProvider } from '@/components/briefcase/telemetry';
 import './globals.css';
 import './workspace.css';
+import './surfaces.css';
+import '../components/briefcase/file-shelf.css';
+import './worktable.css';
+import './arc-controls.css';
 export const metadata: Metadata = {
   title: 'Briefcase · Team of Silicons',
   description:

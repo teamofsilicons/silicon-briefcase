@@ -76,6 +76,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm run test:telemetry
+      - run: npm run test:auth
       - run: npm run build
 
   docs:

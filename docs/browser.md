@@ -6,35 +6,25 @@ controls reflect the rights returned by the API, rather than defining those righ
 
 ## Sign in and open a file
 
-Choose **Continue with IAM**. No organisation ID is required. Authenticate on
-`auth.iam.teamofsilicons.com`; IAM returns you to Briefcase automatically.
-The production callback is `https://briefcase.teamofsilicons.com/auth/callback`.
-Briefcase adds a per-attempt browser-bound state value to that callback and
-starts a normal, organisation-free IAM login. Opening an existing organisation
-file link supplies its workspace context automatically.
-You do not paste tokens, verification codes, or application secrets into Briefcase.
+Choose **Continue with IAM**. IAM selects one Carbon or Silicon and exactly one
+organization for the login. The production callback is
+`https://briefcase.teamofsilicons.com/auth/callback`; its random state and HttpOnly
+login cookie bind it to this browser. Tokens stay on the gateway.
 
-IAM asks you which organisations Briefcase may access. Login is always
-unscoped, but only those explicitly granted, active organisations are returned.
-New memberships are not automatically included. If there is
-only one, Briefcase opens it directly; otherwise choose a workspace. Use
-**Workspaces & access** in the sidebar to choose another without signing in
-again. The login remains unscoped when its tokens refresh. Organisation choices
-are updated at login and token refresh; IAM checks live membership on every
-file operation. Workspace selection does not change or enlarge IAM consent.
+Use **Workspaces & access** to switch between saved accounts and organizations.
+**Add an account or organization** starts another IAM login while retaining the
+existing sessions. Each saved context owns its token pair, refresh retry state,
+and testing contexts. Refresh cannot change its actor or organization. Old
+unscoped sessions require a new sign-in.
 
-Choose **Create or manage organisations in IAM** from the organisation picker
-or **Organisation settings** to open IAM in a new tab. Organisation creation,
-membership, and invitations stay in IAM. The link is also available when your
-session has no active grants. Choose **Review organisation access in IAM** to
-authorise organisations, including any you have newly created or joined.
-An empty grant list requires reauthorisation, not cached workspace access.
+A file link `/org/{org_id}/{path}` retains its destination through sign-in. It
+can select an already saved context for that organization when exactly one is
+available; otherwise choose or add the intended account. A link or organization
+header never changes a token's authority. An old tab or preview URL receives a
+conflict instead of operating under a newly selected account.
 
-A file link has the form `/org/{org_id}/{path}` on the website's origin. Opening
-one retains the target through the IAM callback without supplying an organisation
-to IAM. After authentication, Briefcase selects that workspace only if IAM
-included it in your grants. Otherwise review access in IAM or open a granted
-workspace; a file link cannot grant access.
+Organization creation, membership, and invitations remain in IAM. Signing out
+removes only the selected session; another saved context remains available.
 
 The address bar follows folder navigation and opened files. **Copy link** copies
 the clean file URL without a token. Browser Back and Forward resolve their target

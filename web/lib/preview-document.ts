@@ -80,7 +80,7 @@ export function escapeMarkup(value: string): string {
 }
 
 const styles = `
-:root{color-scheme:light dark;font:16px/1.6 system-ui,sans-serif;background:light-dark(#fff,#161a20);color:light-dark(#20252c,#e5e9ef)}
+:root{color-scheme:light;font:16px/1.6 system-ui,sans-serif;background:light-dark(#fff,#161a20);color:light-dark(#20252c,#e5e9ef)}
 body{margin:0;padding:20px;overflow-wrap:anywhere}*{box-sizing:border-box}
 pre{white-space:pre;overflow:auto;margin:0;padding:12px;background:light-dark(#f5f7fa,#101419);tab-size:4}
 code{font:14px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace}p code,li code{padding:2px 4px;background:light-dark(#f0f2f5,#222831)}

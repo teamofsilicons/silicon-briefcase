@@ -138,7 +138,7 @@ fn tokens_document() -> serde_json::Value {
             "type": "carbon",
             "public_id": "cos:tester"
         },
-        "org_id": "tos"
+        "org_id": "tos", "organizations": ["tos"]
     })
 }
 
@@ -487,38 +487,26 @@ async fn a_hidden_entry_reads_exactly_like_a_missing_one() {
 }
 
 #[tokio::test]
-async fn an_application_sends_its_proof_and_never_a_bearer() {
+async fn retired_raw_obo_upload_never_sends_credentials_or_bytes() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    assert_eq!(client.update_status(), UpdateStatus::Disabled);
-
-    Mock::given(method("POST"))
-        .and(path("/api/v1/obo/files"))
-        .and(header("x-app-id", "app-notes"))
-        .and(header("x-iam-obo-access-proof", "proof-abc"))
-        .and(header("content-type", "application/octet-stream"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
-        .mount(&server)
-        .await;
-
-    client
+    let result = client
         .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
             "app-notes",
-            "proof-abc",
-            b"written by an application".to_vec(),
+            "oba_secret",
+            b"private audio".to_vec(),
         ))
-        .await
-        .expect("the application file must be created");
-    assert_eq!(client.update_status(), UpdateStatus::Disabled);
-
+        .await;
+    assert!(matches!(
+        result,
+        Err(briefcase_client::Error::Configuration(_))
+    ));
     let requests = server.received_requests().await.unwrap_or_default();
-    let obo = requests
-        .iter()
-        .find(|request| request.url.path() == "/api/v1/obo/files")
-        .expect("the on-behalf-of call must have been sent");
-    // Presenting both credentials at once is a request error, so the client
-    // must not send its bearer token here even when it holds one.
-    assert!(!obo.headers.contains_key("authorization"));
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().starts_with("/api/v1/obo/"))
+    );
 }
 
 #[tokio::test]
@@ -575,10 +563,14 @@ async fn a_testing_key_selects_the_plane_without_replacing_identity() {
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/obo/files"))
+        .and(path("/api/v1/obo/entries/list"))
         .and(header("x-briefcase-app-secret", root_key))
         .and(header("x-app-id", "notes"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .and(header("x-iam-obo-access-token", "oba_reusable"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items":[],"next_cursor":null})),
+        )
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -592,21 +584,26 @@ async fn a_testing_key_selects_the_plane_without_replacing_identity() {
     .await
     .unwrap();
     client.list_entries(&ListEntries::default()).await.unwrap();
-    client
-        .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "notes",
-            "proof",
-            b"body".to_vec(),
-        ))
-        .await
-        .unwrap();
+    for _ in 0..2 {
+        client
+            .list_entries_on_behalf_of(
+                &briefcase_client::ApplicationId::new("notes").unwrap(),
+                briefcase_client::OboProof::new("oba_reusable").unwrap(),
+                &briefcase_client::DelegatedListEntries::default()
+                    .prepare()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
 
     let requests = server.received_requests().await.unwrap_or_default();
     let obo = requests
         .iter()
-        .find(|request| request.url.path() == "/api/v1/obo/files")
+        .find(|request| request.url.path() == "/api/v1/obo/entries/list")
         .unwrap();
     assert!(!obo.headers.contains_key("authorization"));
+    assert!(!obo.headers.contains_key("x-iam-obo-access-proof"));
 }
 
 #[tokio::test]
@@ -750,7 +747,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
         .and(path("/api/v1/auth/slt"))
         .and(header("x-briefcase-app-secret", root_key))
         .and(header("idempotency-key", "login-attempt-0001"))
-        .and(body_json(json!({"slt": "si:worker"})))
+        .and(body_json(json!({"slt": "si:worker", "org_id": "tos"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
         .mount(&server)
         .await;
@@ -810,7 +807,7 @@ async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane()
 }
 
 #[tokio::test]
-async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions() {
+async fn slt_exchange_rejects_unscoped_and_cross_organization_sessions() {
     for returned_organization in [None, Some("other")] {
         let server = MockServer::start().await;
         let mut response = tokens_document();
@@ -825,7 +822,7 @@ async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions()
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/slt"))
             .and(header("idempotency-key", "login-org-check-0001"))
-            .and(body_json(json!({"slt": "slt-once"})))
+            .and(body_json(json!({"slt": "slt-once", "org_id": "tos"})))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .expect(1)
             .mount(&server)
@@ -845,9 +842,10 @@ async fn slt_exchange_accepts_unscoped_but_rejects_cross_organization_sessions()
             assert!(error.to_string().contains("organization other"));
             assert!(error.to_string().contains("configured for tos"));
         } else {
-            let session = result.unwrap();
-            assert!(session.org_id.is_none());
-            assert!(session.organizations.is_empty());
+            assert!(matches!(
+                result.unwrap_err(),
+                briefcase_client::Error::Protocol(_)
+            ));
         }
         let requests = server.received_requests().await.unwrap_or_default();
         assert_eq!(requests.len(), 1);
@@ -1243,7 +1241,7 @@ async fn critical_link_manifest_is_exact_and_never_retries_consumed_proofs() {
     Mock::given(method("POST"))
         .and(path("/api/v1/obo/link-access"))
         .and(header("x-app-id", "notes"))
-        .and(header("x-iam-obo-access-proof", "critical-proof"))
+        .and(header("x-iam-obo-access-token", "critical-proof"))
         .and(body_json(serde_json::to_value(&intent).unwrap()))
         .respond_with(ResponseTemplate::new(503).set_body_json(
             json!({"error":{"code":"iam_unavailable","message":"Try with a fresh proof"}}),

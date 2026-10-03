@@ -1,11 +1,14 @@
 'use client';
 import { TelemetryPreference } from '@/components/briefcase/telemetry';
-import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ArrowRight,
   BriefcaseBusiness,
+  Folder,
   KeyRound,
+  LockKeyhole,
   ShieldCheck,
+  Users,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Workspace from '@/components/briefcase/workspace';
@@ -15,12 +18,18 @@ import IamOrganizationsLink from '@/components/briefcase/iam-organizations-link'
 import {
   api,
   setWorkspaceOrganization,
+  setAccountContext,
   testingEnvironment,
   returnToProduction,
   type AccountSession,
   type BrowserSession,
 } from '@/lib/api';
 import { readFileLocation } from '@/lib/file-location';
+import {
+  completeIamPopup,
+  openIamPopup,
+  type IdentityKind,
+} from '@/lib/iam-popup';
 export default function Home() {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
@@ -42,8 +51,11 @@ export default function Home() {
     setSession(null);
     setChoosingOrganization(false);
     setWorkspaceOrganization(null);
+    setAccountContext(null);
+    window.location.reload();
   }, []);
   useEffect(() => {
+    if (completeIamPopup()) return;
     const selectors = new URLSearchParams(location.search).getAll(
       'test_environment',
     );
@@ -77,21 +89,28 @@ export default function Home() {
     }
     api<BrowserSession | AccountSession>('/session')
       .then(async (value) => {
+        setAccountContext(value.authenticated ? value.context_id : null);
         const target = readFileLocation();
         // A deep link selects a workspace only after IAM has supplied the
         // user's grants. It never contributes consent or scopes login.
         if (value.authenticated && target && value.org !== target.org) {
-          if (value.organizations.includes(target.org)) {
+          if (
+            value.contexts?.filter((context) => context.org === target.org)
+              .length === 1
+          ) {
             value = await api<BrowserSession>('/session', 'PATCH', {
-              org: target.org,
+              context_id: value.contexts.find(
+                (context) => context.org === target.org,
+              )?.context_id,
             });
           } else {
             setChoosingOrganization(true);
             setError(
-              'This workspace was not granted to Briefcase. Continue with IAM to review your organisation selection.',
+              'Sign in to this organization with IAM, then open the file.',
             );
           }
         }
+        setAccountContext(value.authenticated ? value.context_id : null);
         setWorkspaceOrganization(value.authenticated ? value.org : null);
         setSession(value.authenticated ? value : null);
       })
@@ -100,8 +119,7 @@ export default function Home() {
       })
       .finally(() => setChecking(false));
   }, []);
-  async function login(event: SubmitEvent) {
-    event.preventDefault();
+  async function login(kind: IdentityKind) {
     if (testingEnvironment()) {
       returnToProduction();
       return;
@@ -109,23 +127,45 @@ export default function Home() {
     setBusy(true);
     setError('');
     try {
-      const r = await fetch('/browser/login/start', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Briefcase-Browser': '1',
-        },
-        body: JSON.stringify({ return_to: returnTo }),
+      await openIamPopup(async (nonce) => {
+        const r = await fetch('/browser/login/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Briefcase-Browser': '1',
+          },
+          body: JSON.stringify({
+            return_to: returnTo,
+            identity_kind: kind,
+            popup_nonce: nonce,
+          }),
+        });
+        const value = (await r.json()) as {
+          error?: { message?: string };
+          redirect_url: string;
+        };
+        if (!r.ok)
+          throw new Error(
+            value.error?.message || 'Sign-in could not be completed.',
+          );
+        return value.redirect_url;
       });
-      const value = (await r.json()) as {
-        error?: { message?: string };
-        redirect_url: string;
-      };
-      if (!r.ok)
+      // The popup changed the shared cookie. Fence old requests before reading
+      // the new server context, and do not leave the previous account visible.
+      setAccountContext(null);
+      setWorkspaceOrganization(null);
+      setSession(null);
+      const current = await api<BrowserSession | AccountSession>('/session');
+      if (!current.authenticated || current.actor.type !== kind)
         throw new Error(
-          value.error?.message || 'Sign-in could not be completed.',
+          'The selected account could not be verified. Please sign in again.',
         );
-      window.location.assign(value.redirect_url);
+      setAccountContext(current.context_id);
+      setWorkspaceOrganization(current.org);
+      const destination = session
+        ? '/org/' + encodeURIComponent(current.org || '') + '/'
+        : returnTo;
+      window.location.assign(destination);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to reach Briefcase.');
     } finally {
@@ -137,8 +177,9 @@ export default function Home() {
     setError('');
     try {
       const next = await api<BrowserSession>('/session', 'PATCH', {
-        org: selected,
+        context_id: selected,
       });
+      setAccountContext(next.context_id);
       setWorkspaceOrganization(next.org);
       history.replaceState(
         null,
@@ -155,7 +196,12 @@ export default function Home() {
       setBusy(false);
     }
   }
-  if (!checking && !publicDismissed && returnTo.startsWith('/org/'))
+  if (
+    !checking &&
+    !publicDismissed &&
+    returnTo.startsWith('/org/') &&
+    readFileLocation(returnTo)?.path
+  )
     return <PublicEntryView authenticated={!!session} onSignIn={openPrivate} />;
   if (checking)
     return (
@@ -167,7 +213,7 @@ export default function Home() {
   if (session?.org != null && !choosingOrganization)
     return (
       <Workspace
-        key={session.org}
+        key={session.context_id}
         session={{ ...session, org: session.org }}
         onSignOut={signOut}
         onChooseOrganization={() => setChoosingOrganization(true)}
@@ -188,68 +234,81 @@ export default function Home() {
         {/* Full-page navigation resets a deep-link sign-in attempt. */}
         {/* eslint-disable-next-line next/no-html-link-for-pages */}
         <a className="brand" href="/">
-          {/* eslint-disable-next-line next/no-img-element -- Local shared Silicon brand asset. */}
-          <img src="/brand/mark.svg" alt="" width={28} height={28} />
-          <strong>silicon</strong>
-          <span>BRIEFCASE</span>
+          <BriefcaseBusiness aria-hidden="true" />
+          <strong>briefcase</strong>
         </a>
-        <a href="https://docs.briefcase.teamofsilicons.com/">
-          Documentation <ArrowRight size={15} />
+        <a
+          className="entry-docs"
+          href="https://docs.briefcase.teamofsilicons.com/"
+        >
+          Help &amp; guides <ArrowRight size={14} aria-hidden="true" />
         </a>
       </header>
       <main className="signin-grid">
         <section className="signin-intro">
           <div className="eyebrow">
-            {session ? 'YOUR ACCOUNT' : 'YOUR FILES'}
+            {session ? 'Welcome back' : 'Your files, thoughtfully organised'}
           </div>
           <h1>
-            Open your <br />
-            Briefcase<span className="blue">.</span>
+            A place for
+            <br />
+            your work<span className="blue">.</span>
           </h1>
           <p>
-            Sign in as yourself. Your files, shared folders, and organisation
-            spaces will be waiting.
+            Keep your files close and your team in the loop. A calm workspace
+            for everything you’re working on.
           </p>
           <dl className="principles">
             <div>
-              <dt>01 / Public</dt>
-              <dd>Shared across your organisation.</dd>
+              <dt>
+                <Folder size={22} aria-hidden="true" />
+                Public files
+              </dt>
+              <dd>Open to your organisation.</dd>
             </div>
             <div>
-              <dt>02 / Private</dt>
-              <dd>Your files, with access you control.</dd>
+              <dt>
+                <LockKeyhole size={22} aria-hidden="true" />
+                Private files
+              </dt>
+              <dd>Private files. Your permissions.</dd>
             </div>
             <div>
-              <dt>03 / Tags</dt>
-              <dd>Spaces for the teams you belong to.</dd>
+              <dt>
+                <Users size={22} aria-hidden="true" />
+                Team spaces
+              </dt>
+              <dd>Shared spaces for your teams.</dd>
             </div>
           </dl>
-          <div className="identity-note">
-            <ShieldCheck size={19} />
-            <span>Identity by Silicon IAM. Permissions by Briefcase.</span>
-          </div>
         </section>
         <section className="signin-panel" aria-labelledby="signin-title">
           <div className="panel-kicker">
-            <KeyRound size={18} /> MEMBER ACCESS
+            <KeyRound size={15} aria-hidden="true" /> Your workspace awaits
           </div>
           <h2 id="signin-title">
-            {session ? 'Your organisations' : 'Sign in with IAM'}
+            {session ? 'Where shall we work?' : 'Make yourself at home.'}
           </h2>
           {session ? (
             <>
               <p>Signed in as {session.actor.public_id}.</p>
-              <p>Open a workspace you authorised in IAM.</p>
+              <p>Each account has its own organization and files.</p>
               <div className="organization-list">
-                {session.organizations.map((organization) => (
+                {(session.contexts ?? []).map((context) => (
                   <Button
-                    className="primary-action"
-                    key={organization}
+                    className="organization-choice"
+                    variant="outline"
+                    key={context.context_id}
                     disabled={busy}
-                    onClick={() => selectOrganization(organization)}
+                    onClick={() => selectOrganization(context.context_id)}
                   >
-                    {organization}
-                    <ArrowRight size={18} />
+                    <span className="organization-initial" aria-hidden="true">
+                      {context.org.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span>
+                      {context.actor.public_id} · {context.org}
+                    </span>
+                    <ArrowRight size={16} aria-hidden="true" />
                   </Button>
                 ))}
               </div>
@@ -260,23 +319,35 @@ export default function Home() {
                 </output>
               )}
               <IamOrganizationsLink />
-              <form onSubmit={login}>
+              <p className="session-note">
+                Add another account or organization
+              </p>
+              <div className="space-y-3">
                 <Button
-                  className="primary-action"
+                  className="secondary-action"
+                  variant="outline"
                   disabled={busy}
-                  type="submit"
+                  onClick={() => void login('carbon')}
                 >
-                  {busy ? 'Continuing…' : 'Review organisation access in IAM'}
-                  <ArrowRight size={18} />
+                  Continue as Carbon <ArrowRight size={18} />
                 </Button>
-              </form>
+                <Button
+                  className="secondary-action"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void login('silicon')}
+                >
+                  Continue as Silicon <ArrowRight size={18} />
+                </Button>
+              </div>
               {error && (
                 <p className="error-box" role="alert">
                   {error}
                 </p>
               )}
               <Button
-                className="primary-action"
+                className="quiet-action"
+                variant="ghost"
                 disabled={busy}
                 onClick={async () => {
                   setBusy(true);
@@ -299,10 +370,10 @@ export default function Home() {
           ) : (
             <>
               <p>
-                Continue to Silicon IAM to verify your identity. You’ll return
-                here automatically.
+                Sign in with your Silicon account to open your files and shared
+                spaces. We’ll bring you right back here.
               </p>
-              <form onSubmit={login}>
+              <div className="space-y-3">
                 {error && (
                   <p className="error-box" role="alert">
                     {error}
@@ -310,30 +381,40 @@ export default function Home() {
                 )}
                 <Button
                   className="primary-action"
-                  type="submit"
                   disabled={busy}
+                  onClick={() => void login('carbon')}
                 >
-                  {testingEnvironment()
-                    ? 'Return to production to sign in'
-                    : busy
-                      ? 'Continuing to IAM…'
-                      : 'Continue with IAM'}
+                  {busy ? 'Opening IAM…' : 'Continue as Carbon'}{' '}
                   <ArrowRight size={18} />
                 </Button>
-              </form>
+                <Button
+                  className="secondary-action"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void login('silicon')}
+                >
+                  {busy ? 'Opening IAM…' : 'Continue as Silicon'}{' '}
+                  <ArrowRight size={18} />
+                </Button>
+              </div>
             </>
           )}
           {!testingEnvironment() && <TestSignIn />}
           <TelemetryPreference />
-          <p className="session-note">
-            Your session stays on the server. Tokens aren’t saved in browser
-            storage.
-          </p>
+          <div className="session-note identity-note">
+            <ShieldCheck size={15} aria-hidden="true" />
+            <span>
+              Your identity stays with Silicon IAM. You control who can access
+              your files.
+            </span>
+          </div>
         </section>
       </main>
       <footer className="entry-footer">
-        <span>TEAM OF SILICONS</span>
-        <span>Files for Carbons & Silicons</span>
+        <span>A little space. A lot of possibility.</span>
+        <a href="https://docs.briefcase.teamofsilicons.com/">
+          Made for Carbons &amp; Silicons
+        </a>
       </footer>
     </div>
   );

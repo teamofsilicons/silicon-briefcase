@@ -8,47 +8,27 @@ import {
 } from 'react';
 import {
   Folder,
-  File as FileIcon,
-  Globe,
-  LockKeyhole,
-  Tags,
   Trash2,
-  Clock3,
   Search,
   Plus,
   Upload,
   ArrowUpRight,
   Download,
-  MoreHorizontal,
   LogOut,
   RefreshCw,
   Link as LinkIcon,
   X,
   ChevronDown,
   Hourglass,
+  BriefcaseBusiness,
+  LayoutGrid,
+  List,
+  SlidersHorizontal,
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  LoaderCircle,
 } from 'lucide-react';
-import {
-  SidebarProvider,
-  Sidebar,
-  SidebarContent,
-  SidebarHeader,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuItem,
-  SidebarMenuButton,
-  SidebarInset,
-  SidebarTrigger,
-} from '@/components/ui/sidebar';
-import {
-  Table,
-  TableHeader,
-  TableRow,
-  TableHead,
-  TableBody,
-  TableCell,
-} from '@/components/ui/table';
 import {
   Sheet,
   SheetContent,
@@ -73,15 +53,15 @@ import {
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
-import { ButtonGroup } from '@/components/ui/button-group';
+import {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from '@/components/ui/popover';
+import FileShelf, { type FileShelfAction } from './file-shelf';
+import FolderPicker from './folder-picker';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -230,6 +210,14 @@ export default function Workspace({
     [detailLoading, setDetailLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null),
     [retryUpload, setRetryUpload] = useState(false);
+  useEffect(() => {
+    if (uploadProgress === null && !retryUpload) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [uploadProgress, retryUpload]);
   const [routeLoading, setRouteLoading] = useState(true),
     [missingPath, setMissingPath] = useState<string | null>(null),
     [locationError, setLocationError] = useState(''),
@@ -241,6 +229,44 @@ export default function Workspace({
     truncated: boolean;
   } | null>(null);
   const [navigation, setNavigation] = useState(0);
+  const [view, setView] = useState<'grid' | 'list'>('grid');
+  const [focusedFile, setFocusedFile] = useState<Entry | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [destination, setDestination] = useState<{
+    files: File[];
+    move?: Entry;
+    moveOperations?: Map<string, string>;
+  } | null>(null);
+  const [uploadName, setUploadName] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [uploadRejected, setUploadRejected] = useState(false);
+  const uploadXhr = useRef<XMLHttpRequest | null>(null);
+  const uploadLive = useRef(true);
+  const [uploadCount, setUploadCount] = useState(0);
+  const [recipientType, setRecipientType] = useState<
+    'email' | 'c' | 'si' | 'tag'
+  >('email');
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchReturn = useRef({ path: '', scope: 'files' as Scope });
+  const dragDepth = useRef(0);
+  const uploadQueue = useRef<{ file: File; parent: string }[]>([]);
+  const uploadTarget = useRef<string | null>(null);
+  const refreshCurrent = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    const stored = localStorage.getItem('briefcase-file-view');
+    // eslint-disable-next-line react/react-compiler -- Restore a local presentation preference after hydration.
+    if (stored === 'list' || stored === 'grid') setView(stored);
+    const shortcuts = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchInput.current?.focus();
+        searchInput.current?.select();
+      }
+    };
+    window.addEventListener('keydown', shortcuts);
+    return () => window.removeEventListener('keydown', shortcuts);
+  }, []);
   useVisibleFilesTool({
     org: session.org,
     path,
@@ -260,6 +286,34 @@ export default function Workspace({
       selfDestruct?: number;
     } | null>(null),
     generation = useRef(0);
+  useEffect(() => {
+    uploadLive.current = true;
+    return () => {
+      uploadLive.current = false;
+      uploadQueue.current = [];
+      const xhr = uploadXhr.current;
+      if (xhr) {
+        xhr.onload = null;
+        xhr.onerror = null;
+        xhr.ontimeout = null;
+        xhr.upload.onprogress = null;
+        xhr.abort();
+      }
+    };
+  }, []);
+  useEffect(() => {
+    const deselect = (event: KeyboardEvent) => {
+      if (
+        event.key === 'Escape' &&
+        !document.querySelector(
+          '[role="dialog"], [role="menu"], [data-slot="popover-content"]',
+        )
+      )
+        setFocusedFile(null);
+    };
+    window.addEventListener('keydown', deselect);
+    return () => window.removeEventListener('keydown', deselect);
+  }, []);
   const fail = useCallback(
     (e: unknown) => {
       if (e instanceof ApiError && e.status === 401) {
@@ -405,6 +459,9 @@ export default function Workspace({
     ],
   );
   useEffect(() => {
+    refreshCurrent.current = load;
+  }, [load]);
+  useEffect(() => {
     // eslint-disable-next-line react/react-compiler -- Set pending state when starting an external listing request; response writes are generation-fenced.
     void load();
   }, [load, navigation]);
@@ -415,6 +472,9 @@ export default function Workspace({
     api<Usage>('/usage').then(setUsage).catch(fail);
   }, [fail]);
   function navigate(p: string, s: Scope = 'files') {
+    setAddOpen(false);
+    setFocusedFile(null);
+    setAdvanced(false);
     setNavigation((value) => value + 1);
     routeGeneration.current++;
     generation.current++;
@@ -451,6 +511,8 @@ export default function Workspace({
       history.pushState(null, '', fileLocation(session.org, entry.path));
   }
   function edit(kind: Editor['kind'], entry?: Entry) {
+    setAddOpen(false);
+    setRecipientType('email');
     setRights(['read']);
     setEditor({
       kind,
@@ -494,19 +556,22 @@ export default function Workspace({
         });
       }
       if (editor.kind === 'share') {
-        const expiring = editor.expiring ? durationMinutes(editor.expiring) : undefined;
+        const expiring = editor.expiring
+          ? durationMinutes(editor.expiring)
+          : undefined;
         if (expiring === null)
           throw new Error('Choose a time between 1 minute and 30 days.');
-        const [type, ...name] = editor.value.split(':');
-        if (
-          !['c', 'si', 'email', 'tag'].includes(type) ||
-          !name.join(':')
-        )
-          throw new Error(
-            'Use c:ID, si:ID, email:address, or tag:tag.',
-          );
+        const recipient = /^(c|si|email|tag):/.test(editor.value.trim())
+          ? editor.value.trim()
+          : recipientType + ':' + editor.value.trim();
+        const [type, ...name] = recipient.split(':');
+        if (!['c', 'si', 'email', 'tag'].includes(type) || !name.join(':'))
+          throw new Error('Use c:ID, si:ID, email:address, or tag:tag.');
         await api('/entries/' + editor.entry!.id + '/invitations', 'POST', {
-          principal: { type: type === 'c' ? 'carbon' : type === 'si' ? 'silicon' : type, id: type === 'c' || type === 'si' ? editor.value : name.join(':') },
+          principal: {
+            type: type === 'c' ? 'carbon' : type === 'si' ? 'silicon' : type,
+            id: type === 'c' || type === 'si' ? recipient : name.join(':'),
+          },
           // An expiring share only ever lets people view and download.
           access: expiring ? ['read'] : rights,
           expires_in_minutes: expiring,
@@ -569,16 +634,24 @@ export default function Workspace({
       setWorking(false);
     }
   }
-  async function upload(file?: File, selfDestruct?: number) {
+  async function upload(
+    file?: File,
+    selfDestruct?: number,
+    targetPath?: string,
+  ) {
     if (file)
       uploadIntent.current = {
         file,
-        parent: path,
+        parent: targetPath ?? uploadTarget.current ?? path,
         operation: crypto.randomUUID(),
         selfDestruct,
       };
     const intent = uploadIntent.current;
-    if (!intent) return;
+    if (!intent || !uploadLive.current) return;
+    setUploadError('');
+    setUploadRejected(false);
+    setUploadName(intent.file.name);
+    setUploadCount(uploadQueue.current.length + 1);
     setUploadProgress(0);
     setRetryUpload(false);
     setError('');
@@ -591,6 +664,7 @@ export default function Workspace({
     if (intent.selfDestruct)
       p.set('self_destruct_minutes', String(intent.selfDestruct));
     const xhr = new XMLHttpRequest();
+    uploadXhr.current = xhr;
     xhr.open('POST', browserUrl('/browser/upload?' + p));
     xhr.setRequestHeader('X-Briefcase-Browser', '1');
     xhr.setRequestHeader('X-Briefcase-Organization', session.org);
@@ -599,10 +673,12 @@ export default function Workspace({
       if (e.lengthComputable)
         setUploadProgress(Math.round((e.loaded / e.total) * 100));
     };
-    const failed = (message: string) => {
+    const failed = (message: string, rejected = false) => {
+      if (!uploadLive.current) return;
       setUploadProgress(null);
       setRetryUpload(true);
-      setError(message);
+      setUploadError(message);
+      setUploadRejected(rejected);
     };
     xhr.onerror = () =>
       failed(
@@ -613,6 +689,11 @@ export default function Workspace({
         'The upload timed out. Retry this same upload to recover its result.',
       );
     xhr.onload = () => {
+      if (!uploadLive.current) return;
+      if (xhr.status === 401) {
+        onSignOut();
+        return;
+      }
       let result;
       try {
         result = JSON.parse(xhr.responseText);
@@ -621,12 +702,29 @@ export default function Workspace({
         return;
       }
       if (xhr.status < 200 || xhr.status >= 300) {
-        failed(result.error?.message || 'Upload failed.');
+        const message = result.error?.message || 'Upload failed.';
+        const rejectedConflict =
+          xhr.status === 409 &&
+          (message.startsWith('Self destruct only applies to new files') ||
+            message.startsWith('The destination changed during upload'));
+        failed(
+          message,
+          rejectedConflict ||
+            [400, 403, 404, 413, 415, 422].includes(xhr.status),
+        );
         return;
       }
-      setUploadProgress(null);
       uploadIntent.current = null;
-      void refreshed(
+      const next = uploadQueue.current.shift();
+      if (next) void upload(next.file, undefined, next.parent);
+      else {
+        setUploadProgress(null);
+        setUploadCount(0);
+        uploadTarget.current = null;
+      }
+      void refreshCurrent.current();
+      api<Usage>('/usage').then(setUsage).catch(fail);
+      setNotice(
         'Uploaded ' +
           intent.file.name +
           (result.self_destruct_at
@@ -811,7 +909,10 @@ export default function Workspace({
             setActivity(a.items);
             setLogCursor(a.next_cursor);
           }
-        } else if (selected.type === 'file') {
+        } else if (
+          selected.type === 'file' &&
+          selected.effective_access.includes('read')
+        ) {
           const format = textFormat(selected);
           if (format) {
             const excerpt = await textPreview(
@@ -866,6 +967,55 @@ export default function Workspace({
     !!path &&
     path !== 'private' &&
     !!parent?.effective_access.includes('write');
+  const uploadBusy = uploadProgress !== null || retryUpload;
+  function beginUpload(files: File[], target?: string) {
+    if (!files.length || uploadBusy || uploadIntent.current) return;
+    if (!target && !canUpload) {
+      setDestination({ files });
+      return;
+    }
+    const parentPath = target ?? path;
+    uploadQueue.current = files
+      .slice(1)
+      .map((file) => ({ file, parent: parentPath }));
+    void upload(files[0], undefined, parentPath);
+  }
+  function chooseFiles() {
+    setAddOpen(false);
+    if (canUpload) {
+      uploadTarget.current = path;
+      fileInput.current?.click();
+    } else setDestination({ files: [] });
+  }
+  function searchFiles(event: SubmitEvent) {
+    event.preventDefault();
+    if (!query.trim()) return;
+    if (scope !== 'search') searchReturn.current = { path, scope };
+    navigate('', 'search');
+    setSearch(query.trim());
+  }
+  function leaveSearch() {
+    setQuery('');
+    setSearch('');
+    navigate(searchReturn.current.path, searchReturn.current.scope);
+    searchInput.current?.focus();
+  }
+  function fileAction(action: FileShelfAction, entry: Entry) {
+    if (action === 'download')
+      window.location.assign(
+        browserUrl('/browser/entries/' + entry.id + '/content?download=true'),
+      );
+    else if (action === 'delete') {
+      setError('');
+      setConfirm(entry);
+    } else if (action === 'restore') void restore(entry);
+    else if (action === 'details') {
+      setSelected(entry);
+      setTab('activity');
+    } else if (action === 'move')
+      setDestination({ files: [], move: entry, moveOperations: new Map() });
+    else edit(action, entry);
+  }
   // Self destruct is refused for a new version of a file already listed here.
   const selfDestructName = selfDestructUpload?.file?.name.trim();
   const selfDestructClash =
@@ -898,176 +1048,69 @@ export default function Workspace({
     ).values(),
   ];
   return (
-    <SidebarProvider>
-      <Sidebar className="briefcase-sidebar">
-        <SidebarHeader>
-          {/* Full-page navigation intentionally resets the workspace and its browser-bound state. */}
-          {/* eslint-disable-next-line next/no-html-link-for-pages */}
-          <a href="/" className="brand workspace-brand">
-            {/* eslint-disable-next-line next/no-img-element -- Local shared Silicon brand asset. */}
-            <img src="/brand/mark.svg" alt="" width={28} height={28} />
-            <strong>silicon</strong>
-            <span>BRIEFCASE</span>
-          </a>
-          <div className="org-label">
-            <div className="org-heading">ORGANISATION</div>
-            <span>{session.org}</span>
-            <Button variant="ghost" onClick={onChooseOrganization}>
-              Workspaces & access
-            </Button>
-            <small>
-              {session.testing
-                ? 'Testing environment'
-                : 'Organisation workspace'}
-            </small>
+    <div className="worktable">
+      {session.testing && (
+        <aside className="testing-view-banner" aria-label="Testing environment">
+          <div>
+            <strong>
+              Testing environment · {session.test_environment?.name}
+            </strong>
+            <p>
+              Files and changes stay in this environment. Signed in as{' '}
+              {session.actor.public_id}.
+            </p>
           </div>
-        </SidebarHeader>
-        <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>LIBRARY</SidebarGroupLabel>
-            <SidebarMenu>
-              {[
-                { label: 'All files', icon: Folder, p: '', s: 'files' },
-                { label: 'Recent', icon: Clock3, p: '', s: 'recent' },
-                { label: 'Public', icon: Globe, p: 'public', s: 'files' },
-                {
-                  label: 'My files',
-                  icon: LockKeyhole,
-                  p: 'private/' + session.actor.public_id,
-                  s: 'files',
-                },
-                { label: 'Bin', icon: Trash2, p: '', s: 'bin' },
-              ].map((n) => (
-                <SidebarMenuItem key={n.label}>
-                  <SidebarMenuButton
-                    isActive={scope === n.s && path === n.p}
-                    onClick={() => navigate(n.p, n.s as Scope)}
-                  >
-                    <n.icon />
-                    <span>{n.label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroup>
-          {roots.some((r) => r.root_type === 'tag') && (
-            <SidebarGroup>
-              <SidebarGroupLabel>TEAM SPACES</SidebarGroupLabel>
-              <SidebarMenu>
-                {roots
-                  .filter((r) => r.root_type === 'tag')
-                  .map((r) => (
-                    <SidebarMenuItem key={r.id}>
-                      <SidebarMenuButton
-                        onClick={() => navigate(r.path)}
-                        isActive={path === r.path}
-                      >
-                        <Tags />
-                        <span>{r.name}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-              </SidebarMenu>
-            </SidebarGroup>
-          )}
-        </SidebarContent>
-        <SidebarFooter>
-          <TestingEnvironments session={session} onUnauthorized={onSignOut} />
-          <OrganizationSettings session={session} onUnauthorized={onSignOut} />
-          {usage && (
-            <div className="storage-meter">
-              <div>
-                <span>Storage</span>
-                <span>{bytes(usage.storage.used_bytes)}</span>
-              </div>
-              <meter
-                min={0}
-                max={usage.storage.limit_bytes || 1}
-                value={usage.storage.used_bytes}
-              />
-              <small>
-                {bytes(usage.storage.limit_bytes)} available capacity
-              </small>
-            </div>
-          )}
-          <div className="member">
-            <span className="avatar">
-              {session.actor.public_id.slice(0, 2).toUpperCase()}
-            </span>
-            <span>
-              <strong>{session.actor.public_id}</strong>
-              <small>{session.actor.type}</small>
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              title="Sign out"
-              aria-label="Sign out"
-              onClick={async () => {
-                try {
-                  await api('/session', 'DELETE');
-                  onSignOut();
-                } catch (e) {
-                  fail(e);
-                }
-              }}
-            >
-              <LogOut size={17} />
-            </Button>
-          </div>
-        </SidebarFooter>
-      </Sidebar>
-      <SidebarInset className="workspace-main">
-        {session.testing && (
-          <aside
-            className="testing-view-banner"
-            aria-label="Testing environment"
+          <Button
+            variant="outline"
+            disabled={uploadBusy}
+            onClick={returnToProduction}
           >
-            <div>
-              <strong>
-                Testing environment · {session.test_environment?.name}
-              </strong>
-              <p>
-                Files and changes stay in this environment. Signed in as{' '}
-                {session.actor.public_id}.
-              </p>
-            </div>
-            <Button variant="outline" onClick={returnToProduction}>
-              Return to production
-            </Button>
-          </aside>
-        )}
-        <header className="workspace-top">
-          <SidebarTrigger />
-          <div className="workspace-context">
-            <span>Silicon / Briefcase</span>
-            <span className="workspace-environment">
-              <i aria-hidden="true" />
-              {session.testing ? 'Testing' : 'Production'}
-            </span>
-          </div>
-          <form
-            className="search-box"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (query.trim()) {
-                setSearch(query.trim());
-                setScope('search');
-                setPath('');
-              }
-            }}
+            Return to production
+          </Button>
+        </aside>
+      )}
+      <header className="worktable-header">
+        <div className="worktable-identity">
+          <button
+            className="worktable-brand"
+            onClick={() => navigate('')}
+            aria-label="Briefcase, all files"
           >
-            <Search size={18} />
-            <Input
-              aria-label="Search filenames and contents"
-              placeholder="Search your files and their contents"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <Button variant="ghost" type="submit">
-              Search
-            </Button>
-          </form>
+            <BriefcaseBusiness size={26} strokeWidth={1.7} />
+            <span>briefcase</span>
+          </button>
+          <button
+            className="workspace-switch"
+            disabled={uploadBusy}
+            title={
+              uploadBusy
+                ? 'Finish or retry your upload before switching workspaces'
+                : 'Switch workspace'
+            }
+            onClick={onChooseOrganization}
+          >
+            {session.org}
+            <ChevronDown size={15} />
+          </button>
+        </div>
+        <form className="worktable-search" onSubmit={searchFiles}>
+          <Search size={19} aria-hidden="true" />
+          <input
+            ref={searchInput}
+            aria-label="Search filenames and contents"
+            placeholder="Find a file"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {query ? (
+            <button type="submit" aria-label="Search files">
+              <ArrowRight size={17} />
+            </button>
+          ) : (
+            <kbd title="Command or Control K">⌘ K</kbd>
+          )}
+        </form>
+        <div className="worktable-account">
           <Notifications
             onEntry={(entry) => {
               navigate(
@@ -1087,354 +1130,536 @@ export default function Workspace({
             }}
             onUnauthorized={onSignOut}
           />
-          <a
-            className="docs-link"
-            href="https://docs.briefcase.teamofsilicons.com/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Help <ArrowUpRight size={15} />
-          </a>
-        </header>
-        <main className="file-surface">
-          <nav className="breadcrumbs" aria-label="Folder path">
-            <button onClick={() => navigate('')}>{session.org}</button>
-            {path
-              .split('/')
-              .filter(Boolean)
-              .map((part, i, all) => (
-                <span key={i}>
-                  {' '}
-                  /{' '}
-                  <button
-                    onClick={() => navigate(all.slice(0, i + 1).join('/'))}
-                  >
-                    {part}
-                  </button>
-                </span>
-              ))}
-          </nav>
-          <div className="file-title">
-            <div>
-              <div className="eyebrow">
-                {scope === 'bin'
-                  ? 'RECOVERABLE FOR 45 DAYS'
-                  : session.testing
-                    ? 'ISOLATED TEST DATA'
-                    : 'YOUR LIBRARY'}
-              </div>
-              <h1>{title}</h1>
-            </div>
-            <div className="toolbar">
-              {scope === 'files' && (
+          <Popover>
+            <PopoverTrigger
+              render={
                 <Button
-                  variant="outline"
-                  onClick={() => setAdvanced((v) => !v)}
-                >
-                  Filter
-                </Button>
+                  variant="ghost"
+                  className="account-trigger"
+                  aria-label="Account and workspace"
+                />
+              }
+            >
+              <span>
+                {session.actor.public_id
+                  .replace(/^[^:]+:/, '')
+                  .slice(0, 2)
+                  .toUpperCase()}
+              </span>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="account-popover">
+              <strong>{session.actor.public_id}</strong>
+              <small>
+                {session.testing
+                  ? 'Testing environment'
+                  : 'Organisation workspace'}
+              </small>
+              {usage && (
+                <small>
+                  {bytes(usage.storage.used_bytes)} used ·{' '}
+                  {bytes(usage.storage.remaining_bytes)} available
+                </small>
               )}
               <Button
-                variant="outline"
+                variant="ghost"
+                disabled={uploadBusy}
+                onClick={onChooseOrganization}
+              >
+                Switch workspace <ChevronDown size={15} />
+              </Button>
+              <TestingEnvironments
+                session={session}
+                onUnauthorized={onSignOut}
+                disabled={uploadBusy}
+              />
+              {uploadBusy && (
+                <small>
+                  Finish or resolve your upload before leaving this workspace.
+                </small>
+              )}
+              <a
+                href="https://docs.briefcase.teamofsilicons.com/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Help & documentation <ArrowUpRight size={15} />
+              </a>
+              <Button
+                variant="ghost"
+                disabled={uploadBusy}
+                onClick={async () => {
+                  try {
+                    await api('/session', 'DELETE');
+                    onSignOut();
+                  } catch (e) {
+                    fail(e);
+                  }
+                }}
+              >
+                <LogOut size={16} /> Sign out
+              </Button>
+            </PopoverContent>
+          </Popover>
+        </div>
+      </header>
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Native file drop complements the keyboard-accessible Add files button. */}
+      <main
+        className={
+          'file-surface worktable-surface' + (dragging ? ' is-dragging' : '')
+        }
+        onDragEnter={(event) => {
+          if (Array.from(event.dataTransfer.types).includes('Files')) {
+            event.preventDefault();
+            dragDepth.current++;
+            setDragging(true);
+          }
+        }}
+        onDragOver={(event) => {
+          if (Array.from(event.dataTransfer.types).includes('Files')) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = uploadBusy ? 'none' : 'copy';
+          }
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (!dragDepth.current) setDragging(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          dragDepth.current = 0;
+          setDragging(false);
+          if (!uploadBusy) beginUpload(Array.from(event.dataTransfer.files));
+        }}
+      >
+        <nav className="breadcrumbs" aria-label="Folder path">
+          <button onClick={() => navigate('')}>{session.org}</button>
+          {path
+            .split('/')
+            .filter(Boolean)
+            .map((part, i, all) => (
+              <span key={i}>
+                <span aria-hidden="true">/</span>
+                <button onClick={() => navigate(all.slice(0, i + 1).join('/'))}>
+                  {part}
+                </button>
+              </span>
+            ))}
+        </nav>
+        <div className="file-title">
+          <div>
+            <h1>{title}</h1>
+            <p className="workspace-subtitle">
+              {scope === 'bin'
+                ? 'A second chance. Restore files within 45 days.'
+                : scope === 'search'
+                  ? 'Files matching “' + search + '”'
+                  : scope === 'recent'
+                    ? 'The latest work, within reach.'
+                    : path
+                      ? 'A little space for your work.'
+                      : 'Everything has its place.'}
+            </p>
+          </div>
+          <Popover open={addOpen} onOpenChange={setAddOpen}>
+            <PopoverTrigger
+              render={
+                <Button
+                  className="add-files"
+                  disabled={scope === 'bin' || uploadBusy}
+                />
+              }
+            >
+              <Plus size={21} /> Add files
+            </PopoverTrigger>
+            <PopoverContent align="end" sideOffset={12} className="add-popover">
+              <p>Add to {canUpload ? title : 'a folder'}</p>
+              <button onClick={chooseFiles}>
+                <Upload size={21} />
+                <span>
+                  Upload files<small>Choose from your device</small>
+                </span>
+              </button>
+              <button
                 disabled={!canCreateFolder || working}
                 onClick={() => edit('folder')}
               >
-                <Plus size={16} /> New folder
-              </Button>
-              <ButtonGroup className="upload-group">
-                <Button
-                  disabled={!canUpload || uploadProgress !== null}
-                  onClick={() => fileInput.current?.click()}
-                >
-                  <Upload size={16} /> Upload file
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        size="icon"
-                        disabled={!canUpload || uploadProgress !== null}
-                        aria-label="More upload options"
-                      />
-                    }
-                  >
-                    <ChevronDown size={16} />
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onClick={() => {
-                        setError('');
-                        setSelfDestructUpload({
-                          file: null,
-                          duration: DEFAULT_DURATION,
-                        });
-                      }}
-                    >
-                      <Hourglass size={15} /> Self-destructing upload…
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </ButtonGroup>
-              <input
-                ref={fileInput}
-                type="file"
-                hidden
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void upload(file);
-                  e.currentTarget.value = '';
-                }}
-              />
-            </div>
-          </div>
-          {advanced && scope === 'files' && (
-            <form
-              className="filter-bar"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const value = new FormData(e.currentTarget).get('filter');
-                setFilter(typeof value === 'string' ? value : '');
-              }}
-            >
-              <Input
-                name="filter"
-                aria-label="Advanced file filter"
-                placeholder="is:pdf after:01-09-2026 sort:newest"
-                defaultValue={filter}
-              />
-              <Button type="submit" variant="outline">
-                Apply filter
-              </Button>
-            </form>
-          )}
-          {locationError && (
-            <p className="error-box" role="alert">
-              {locationError}
-            </p>
-          )}
-          {missingPath && (
-            <p className="error-box" role="alert">
-              File not found
-            </p>
-          )}
-          {parent &&
-            (parent.visibility === 'traversal' ||
-              (parent.root_type === 'private' &&
-                parent.owner?.id !== session.actor.public_id)) && (
-              <p className="detail-hint">
-                You might not be seeing all the contents of this folder. This is
-                a permission-based folder.
-              </p>
-            )}
-          {error && (
-            <div role="alert" className="error-box">
-              {error}
-              {retryUpload && (
-                <Button variant="outline" onClick={() => void upload()}>
-                  Retry same upload
-                </Button>
-              )}
-            </div>
-          )}
-          {notice && (
-            <output className="notice">
-              {notice}
-              <button aria-label="Dismiss" onClick={() => setNotice('')}>
-                <X size={16} />
+                <Folder size={21} />
+                <span>
+                  New folder<small>Make a little room</small>
+                </span>
               </button>
-            </output>
-          )}
-          {uploadProgress !== null && (
-            <output className="upload-status">
-              <Upload size={17} />
-              {uploadProgress === 100
-                ? 'Storing your file…'
-                : `Uploading ${uploadProgress}%`}
-              <progress value={uploadProgress} max={100} />
-            </output>
-          )}
-          <Table className="file-table">
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Modified</TableHead>
-                <TableHead>Size</TableHead>
-                <TableHead>
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((entry) => (
-                <TableRow key={entry.id}>
-                  <TableCell>
-                    <button className="file-name" onClick={() => open(entry)}>
-                      {entry.type === 'folder' ? (
-                        <Folder size={22} />
-                      ) : (
-                        <FileIcon size={22} />
-                      )}
-                      <span>
-                        <strong>{entry.name}</strong>
-                        {scope !== 'files' && <small>{entry.path}</small>}
-                        {entry.visibility === 'traversal' && (
-                          <small>Only shared contents are visible</small>
-                        )}
-                        {entry.self_destruct_at && scope !== 'bin' && (
-                          <Lifetime
-                            kind="self-destruct"
-                            at={entry.self_destruct_at}
-                            onElapsed={() => selfDestructed(entry)}
-                          />
-                        )}
-                      </span>
-                    </button>
-                  </TableCell>
-                  <TableCell>
-                    {entry.type === 'folder'
-                      ? 'Folder'
-                      : entry.render || 'File'}
-                  </TableCell>
-                  <TableCell>{date(entry.updated_at)}</TableCell>
-                  <TableCell>
-                    {entry.type === 'folder' ? '—' : bytes(entry.size)}
-                  </TableCell>
-                  <TableCell>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={'Actions for ' + entry.name}
-                          />
-                        }
-                      >
-                        <MoreHorizontal size={18} />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        {scope === 'bin' ? (
-                          <DropdownMenuItem onClick={() => void restore(entry)}>
-                            Restore
-                          </DropdownMenuItem>
-                        ) : (
-                          <>
-                            <DropdownMenuItem
-                              onClick={() => {
-                                setSelected(entry);
-                                setTab('activity');
-                              }}
-                            >
-                              Details & history
-                            </DropdownMenuItem>
-                            {
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  window.location.assign(
-                                    browserUrl(
-                                      '/browser/entries/' +
-                                        entry.id +
-                                        '/content?download=true',
-                                    ),
-                                  )
-                                }
-                              >
-                                Download
-                              </DropdownMenuItem>
-                            }
-                            {entry.effective_access.includes('update') && (
-                              <>
-                                <DropdownMenuItem
-                                  onClick={() => edit('rename', entry)}
-                                >
-                                  Rename
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  onClick={() => edit('move', entry)}
-                                >
-                                  Move
-                                </DropdownMenuItem>
-                              </>
-                            )}
-                            {entry.effective_access.includes(
-                              'manage_permissions',
-                            ) && (
-                              <DropdownMenuItem
-                                onClick={() => edit('share', entry)}
-                              >
-                                Share
-                              </DropdownMenuItem>
-                            )}
-                            {entry.effective_access.includes('delete') && (
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onClick={() => setConfirm(entry)}
-                              >
-                                {entry.self_destruct_at
-                                  ? 'Delete permanently'
-                                  : 'Move to bin'}
-                              </DropdownMenuItem>
-                            )}
-                          </>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {(loading || routeLoading) && (
-            <output className="empty-state">Loading files…</output>
-          )}
-          {!loading &&
-            !routeLoading &&
-            !missingPath &&
-            !locationError &&
-            !error &&
-            items.length === 0 && (
-              <div className="empty-state">
-                <Folder size={38} />
-                <h2>
-                  {scope === 'search'
-                    ? 'No matching files'
-                    : scope === 'bin'
-                      ? 'Your bin is empty'
-                      : 'Nothing here yet'}
-                </h2>
-                <p>
-                  {canUpload
-                    ? 'Upload a file or create a folder to get started.'
-                    : scope === 'search'
-                      ? 'Try a different filename or a word inside a document.'
-                      : 'Only files and folders you can access appear here.'}
-                </p>
-              </div>
-            )}
-          <div className="listing-footer">
-            <span>
-              {items.length} {items.length === 1 ? 'entry' : 'entries'}
-            </span>
-            {cursor && (
-              <Button
-                variant="outline"
-                onClick={() => void load(cursor)}
-                disabled={loading}
+              <button
+                disabled={!canUpload}
+                onClick={() => {
+                  setAddOpen(false);
+                  setError('');
+                  uploadTarget.current = path;
+                  setSelfDestructUpload({
+                    file: null,
+                    duration: DEFAULT_DURATION,
+                  });
+                }}
               >
-                Load more
+                <Hourglass size={21} />
+                <span>
+                  Self-destructing file
+                  <small>Automatically delete after a set time</small>
+                </span>
+              </button>
+              <small className="add-hint">
+                You can also drop files into this space.
+              </small>
+            </PopoverContent>
+          </Popover>
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              beginUpload(files, uploadTarget.current ?? undefined);
+              event.currentTarget.value = '';
+            }}
+          />
+        </div>
+        <div className="worktable-navigation">
+          <nav className="space-pills" aria-label="File spaces">
+            {[
+              { label: 'All files', p: '', s: 'files' as Scope },
+              { label: 'Recent', p: '', s: 'recent' as Scope },
+              { label: 'Public', p: 'public', s: 'files' as Scope },
+              {
+                label: 'Private',
+                p: 'private/' + session.actor.public_id,
+                s: 'files' as Scope,
+              },
+              ...roots
+                .filter((root) => root.root_type === 'tag')
+                .map((root) => ({
+                  label: root.name,
+                  p: root.path,
+                  s: 'files' as Scope,
+                })),
+            ].map((item) => (
+              <button
+                key={item.label + item.p}
+                className={
+                  scope === item.s &&
+                  (path === item.p ||
+                    (!!item.p && path.startsWith(item.p + '/')))
+                    ? 'active'
+                    : ''
+                }
+                aria-current={
+                  scope === item.s &&
+                  (path === item.p ||
+                    (!!item.p && path.startsWith(item.p + '/')))
+                    ? 'page'
+                    : undefined
+                }
+                onClick={() => navigate(item.p, item.s)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <div className="view-controls">
+            {scope === 'search' && (
+              <Button variant="ghost" onClick={leaveSearch}>
+                <ArrowLeft size={15} /> Back
               </Button>
             )}
+            {scope === 'files' && (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Filter files"
+                aria-expanded={advanced}
+                onClick={() => setAdvanced((value) => !value)}
+              >
+                <SlidersHorizontal size={17} />
+              </Button>
+            )}
+            <fieldset className="view-switch" aria-label="File view">
+              <button
+                aria-label="Grid view"
+                aria-pressed={view === 'grid'}
+                onClick={() => {
+                  setView('grid');
+                  localStorage.setItem('briefcase-file-view', 'grid');
+                }}
+              >
+                <LayoutGrid size={17} />
+              </button>
+              <button
+                aria-label="List view"
+                aria-pressed={view === 'list'}
+                onClick={() => {
+                  setView('list');
+                  localStorage.setItem('briefcase-file-view', 'list');
+                }}
+              >
+                <List size={18} />
+              </button>
+            </fieldset>
+          </div>
+        </div>
+        {advanced && scope === 'files' && (
+          <form
+            className="filter-bar"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const value = new FormData(e.currentTarget).get('filter');
+              setFilter(typeof value === 'string' ? value : '');
+            }}
+          >
+            <Input
+              name="filter"
+              aria-label="Advanced file filter"
+              placeholder="is:pdf after:01-09-2026 sort:newest"
+              defaultValue={filter}
+            />
+            <Button type="submit" variant="outline">
+              Apply filter
+            </Button>
+          </form>
+        )}
+        {locationError && (
+          <p className="error-box" role="alert">
+            {locationError}
+          </p>
+        )}
+        {missingPath && (
+          <p className="error-box" role="alert">
+            File not found
+          </p>
+        )}
+        {parent &&
+          (parent.visibility === 'traversal' ||
+            (parent.root_type === 'private' &&
+              parent.owner?.id !== session.actor.public_id)) && (
+            <p className="detail-hint">
+              You might not be seeing all the contents of this folder. This is a
+              permission-based folder.
+            </p>
+          )}
+        {error && (
+          <div role="alert" className="error-box">
+            {error}
+          </div>
+        )}
+        {notice && (
+          <output className="notice worktable-toast">
+            <Check size={18} />
+            <span>{notice}</span>
+            <button aria-label="Dismiss" onClick={() => setNotice('')}>
+              <X size={16} />
+            </button>
+          </output>
+        )}
+        {(uploadProgress !== null || retryUpload) && (
+          <output className="upload-capsule">
+            <span className="upload-symbol">
+              <Upload size={24} />
+            </span>
+            <span className="upload-caption">
+              <strong>{uploadName}</strong>
+              {retryUpload ? (
+                <>
+                  <span>{uploadError}</span>
+                  <span className="upload-recovery">
+                    <Button size="sm" onClick={() => void upload()}>
+                      Retry same upload
+                    </Button>
+                    {uploadRejected && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          uploadQueue.current = [];
+                          uploadIntent.current = null;
+                          uploadTarget.current = null;
+                          setRetryUpload(false);
+                          setUploadError('');
+                          setUploadCount(0);
+                        }}
+                      >
+                        Dismiss
+                      </Button>
+                    )}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>
+                    {uploadProgress === 100
+                      ? 'Finishing upload…'
+                      : `Uploading · ${uploadProgress}%`}
+                    {uploadCount > 1 ? ` · ${uploadCount - 1} waiting` : ''}
+                  </span>
+                  <progress value={uploadProgress ?? 0} max={100} />
+                </>
+              )}
+            </span>
+            {!retryUpload && <LoaderCircle size={19} className="is-spinning" />}
+          </output>
+        )}
+        <FileShelf
+          entries={items}
+          mode={view}
+          scope={scope}
+          selectedId={focusedFile?.id}
+          onSelect={(entry) =>
+            setFocusedFile((previous) =>
+              previous?.id === entry.id ? null : entry,
+            )
+          }
+          onOpen={open}
+          onAction={fileAction}
+          onSelfDestruct={selfDestructed}
+        />
+        {(loading || routeLoading) && (
+          <output className="loading-files">
+            <LoaderCircle size={22} className="is-spinning" /> Gathering your
+            files…
+          </output>
+        )}
+        {!loading &&
+          !routeLoading &&
+          !missingPath &&
+          !locationError &&
+          !error &&
+          items.length === 0 && (
+            <div className="empty-state">
+              <Folder size={38} />
+              <h2>
+                {scope === 'search'
+                  ? 'No matching files'
+                  : scope === 'bin'
+                    ? 'Your bin is empty'
+                    : 'Nothing here yet'}
+              </h2>
+              <p>
+                {canUpload
+                  ? 'Upload a file or create a folder to get started.'
+                  : scope === 'search'
+                    ? 'Try a different filename or a word inside a document.'
+                    : 'Only files and folders you can access appear here.'}
+              </p>
+            </div>
+          )}
+        <div className="listing-footer">
+          <span>
+            {items.length} {items.length === 1 ? 'entry' : 'entries'}
+          </span>
+          {cursor && (
             <Button
-              variant="ghost"
-              onClick={() => void load()}
+              variant="outline"
+              onClick={() => void load(cursor)}
               disabled={loading}
             >
-              <RefreshCw size={14} /> Refresh
+              Load more
             </Button>
+          )}
+          <Button
+            variant="ghost"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            <RefreshCw size={14} /> Refresh
+          </Button>
+        </div>
+        {dragging && (
+          <div className="drop-overlay">
+            <Upload size={42} />
+            <strong>
+              {uploadBusy
+                ? 'An upload is already in progress'
+                : canUpload
+                  ? 'Let go. We’ll put it here.'
+                  : 'Drop your files, then choose a folder.'}
+            </strong>
+            <span>{canUpload ? path : 'Choose where your files belong'}</span>
           </div>
-        </main>
-      </SidebarInset>
+        )}
+      </main>
+      <footer className="worktable-footer">
+        <span className="drop-hint">
+          <Upload size={18} />{' '}
+          {uploadBusy
+            ? 'Your upload stays here while you browse.'
+            : 'Drop files into your workspace.'}
+        </span>
+        <div>
+          <Button
+            variant="ghost"
+            onClick={() => navigate('', 'bin')}
+            aria-current={scope === 'bin' ? 'page' : undefined}
+          >
+            <Trash2 size={17} /> Bin
+          </Button>
+          <OrganizationSettings session={session} onUnauthorized={onSignOut} />
+        </div>
+      </footer>
+      {destination && (
+        <FolderPicker
+          title={
+            destination.move
+              ? 'Move ' + destination.move.name
+              : 'Where should these files go?'
+          }
+          description={
+            destination.move
+              ? 'Choose a folder you can add content to.'
+              : 'Pick a home for your upload.'
+          }
+          excludePath={
+            destination.move?.type === 'folder'
+              ? destination.move.path
+              : undefined
+          }
+          chooseLabel={destination.move ? 'Move here' : 'Choose this folder'}
+          pendingLabel={destination.move ? 'Moving…' : 'Choosing…'}
+          onClose={() => setDestination(null)}
+          onChoose={(folder) => {
+            const choice = destination;
+            if (choice.move) {
+              const entry = choice.move;
+              const key = entry.id + ':' + folder.id;
+              const operations = choice.moveOperations!;
+              let operation = operations.get(key);
+              if (!operation) {
+                operation = crypto.randomUUID();
+                operations.set(key, operation);
+              }
+              return api<Entry>('/entries/' + entry.id, 'PATCH', {
+                parent_id: folder.id,
+                operation_id: operation,
+              })
+                .then(async () => {
+                  setDestination(null);
+                  setFocusedFile(null);
+                  setSelected(null);
+                  await refreshed('Moved ' + entry.name + '.');
+                })
+                .catch((reason: unknown) => {
+                  if (reason instanceof ApiError && reason.status === 401)
+                    onSignOut();
+                  throw reason;
+                });
+            }
+            setDestination(null);
+            if (choice.files.length) beginUpload(choice.files, folder.path);
+            else {
+              uploadTarget.current = folder.path;
+              fileInput.current?.click();
+            }
+          }}
+        />
+      )}
+
       <Dialog
         open={!!editor}
         onOpenChange={(open) => {
@@ -1454,8 +1679,10 @@ export default function Workspace({
             </DialogTitle>
             <DialogDescription>
               {editor?.kind === 'share'
-                ? 'Grant access to an existing organisation member.'
-                : 'Changes apply to this organisation and the selected environment.'}
+                ? 'Choose who can access this file, and for how long.'
+                : editor?.kind === 'move'
+                  ? 'Confirm your destination below.'
+                  : 'Give it a name that’s easy to find.'}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={save}>
@@ -1542,16 +1769,58 @@ export default function Workspace({
             )}
             <label htmlFor="editor-value">
               {editor?.kind === 'share'
-                ? 'Member (c:id or si:id)'
+                ? 'Person or team'
                 : editor?.kind === 'move'
                   ? 'Destination folder path'
                   : 'Name'}
             </label>
+            {editor?.kind === 'share' && (
+              <Select
+                value={recipientType}
+                disabled={working}
+                onValueChange={(value) => {
+                  if (
+                    value === 'email' ||
+                    value === 'c' ||
+                    value === 'si' ||
+                    value === 'tag'
+                  )
+                    setRecipientType(value);
+                }}
+              >
+                <SelectTrigger aria-label="Recipient type">
+                  <SelectValue>
+                    {recipientType === 'email'
+                      ? 'Email address'
+                      : recipientType === 'c'
+                        ? 'Carbon ID'
+                        : recipientType === 'si'
+                          ? 'Silicon ID'
+                          : 'Team tag'}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="email">Email address</SelectItem>
+                  <SelectItem value="c">Carbon ID</SelectItem>
+                  <SelectItem value="si">Silicon ID</SelectItem>
+                  <SelectItem value="tag">Team tag</SelectItem>
+                </SelectContent>
+              </Select>
+            )}
             <Input
               id="editor-value"
               disabled={working}
               required
               maxLength={255}
+              placeholder={
+                editor?.kind === 'share'
+                  ? recipientType === 'email'
+                    ? 'name@company.com'
+                    : recipientType === 'tag'
+                      ? 'design'
+                      : 'Enter an ID'
+                  : undefined
+              }
               value={editor?.value || ''}
               onChange={(e) =>
                 setEditor((v) => (v ? { ...v, value: e.target.value } : null))
@@ -1569,7 +1838,9 @@ export default function Workspace({
                         right === 'read' ||
                         (!editor.expiring && rights.includes(right))
                       }
-                      disabled={working || right === 'read' || !!editor.expiring}
+                      disabled={
+                        working || right === 'read' || !!editor.expiring
+                      }
                       onCheckedChange={(checked) =>
                         setRights((v) =>
                           checked
@@ -1578,14 +1849,21 @@ export default function Workspace({
                         )
                       }
                     />
-                    {right === 'write' ? 'Create new content' : right}
+                    {right === 'write'
+                      ? 'Add files'
+                      : right === 'read'
+                        ? 'View & download'
+                        : 'Edit content'}
                   </label>
                 ))}
               </div>
             )}
             {editor?.kind === 'share' && (
               <div className="lifetime-fields">
-                <label className="lifetime-toggle" htmlFor="share-expiring-toggle">
+                <label
+                  className="lifetime-toggle"
+                  htmlFor="share-expiring-toggle"
+                >
                   <Checkbox
                     id="share-expiring-toggle"
                     checked={!!editor.expiring}
@@ -1614,7 +1892,7 @@ export default function Workspace({
                       }
                     />
                     <p className="field-note">
-                      View and download only. This access ends by itself{' '}
+                      View and download only. This shared access ends{' '}
                       {(() => {
                         const minutes = durationMinutes(editor.expiring);
                         return minutes
@@ -1626,7 +1904,7 @@ export default function Workspace({
                   </>
                 ) : (
                   <p className="field-note">
-                    Off: the share lasts until you revoke it.
+                    Access stays until you revoke it. Your file stays in place.
                   </p>
                 )}
               </div>
@@ -1642,10 +1920,24 @@ export default function Workspace({
               disabled={
                 working ||
                 (editor?.rootType === 'tag' && !editor.tag) ||
-                (!!editor?.expiring && durationMinutes(editor.expiring) === null)
+                (!!editor?.expiring &&
+                  durationMinutes(editor.expiring) === null)
               }
             >
-              {working ? 'Saving…' : 'Save'}
+              {working
+                ? 'Saving…'
+                : editor?.kind === 'share'
+                  ? editor.expiring
+                    ? 'Share for ' +
+                      (durationMinutes(editor.expiring)
+                        ? spokenDuration(durationMinutes(editor.expiring)!)
+                        : 'a limited time')
+                    : 'Share file'
+                  : editor?.kind === 'folder'
+                    ? 'Create folder'
+                    : editor?.kind === 'move'
+                      ? 'Move here'
+                      : 'Save name'}
             </Button>
           </form>
         </DialogContent>
@@ -1768,7 +2060,7 @@ export default function Workspace({
           if (!open) closeDetails();
         }}
       >
-        <SheetContent className="details-sheet data-[side=right]:sm:max-w-2xl">
+        <SheetContent className="details-sheet file-details data-[side=right]:sm:max-w-2xl">
           <SheetHeader>
             <SheetTitle>{selected?.name}</SheetTitle>
             <SheetDescription>{selected?.path}</SheetDescription>
@@ -1776,18 +2068,31 @@ export default function Workspace({
           {selected && (
             <div className="detail-body">
               <div className="detail-actions">
-                {scope !== 'bin' && (
-                  <a
-                    className="download-link"
-                    href={
-                      contentUrl +
-                      (contentUrl.includes('?') ? '&' : '?') +
-                      'download=true'
-                    }
-                  >
-                    <Download size={16} /> Download
-                  </a>
-                )}
+                {scope !== 'bin' &&
+                  selected.effective_access.includes('manage_permissions') && (
+                    <Button
+                      onClick={() => {
+                        const entry = selected;
+                        closeDetails();
+                        edit('share', entry);
+                      }}
+                    >
+                      Share file <ArrowUpRight size={16} />
+                    </Button>
+                  )}
+                {scope !== 'bin' &&
+                  selected.effective_access.includes('read') && (
+                    <a
+                      className="download-link"
+                      href={
+                        contentUrl +
+                        (contentUrl.includes('?') ? '&' : '?') +
+                        'download=true'
+                      }
+                    >
+                      <Download size={16} /> Download
+                    </a>
+                  )}
                 <Button
                   variant="outline"
                   onClick={async () => {
@@ -1843,7 +2148,7 @@ export default function Workspace({
                   {selected.type === 'file' && (
                     <TabsTrigger value="versions">Versions</TabsTrigger>
                   )}
-                  <TabsTrigger value="activity">Logs · 365 days</TabsTrigger>
+                  <TabsTrigger value="activity">Activity</TabsTrigger>
                 </TabsList>
                 {detailError && <p className="error-box">{detailError}</p>}
                 {detailLoading && <output>Loading…</output>}
@@ -1851,6 +2156,8 @@ export default function Workspace({
                   <div className="preview">
                     {scope === 'bin' ? (
                       <p>Restore this entry to open its content.</p>
+                    ) : !selected.effective_access.includes('read') ? (
+                      <p>You do not have permission to preview this file.</p>
                     ) : selected.type === 'folder' ? (
                       <Folder size={64} />
                     ) : selected.render === 'image' ? (
@@ -1922,7 +2229,20 @@ export default function Workspace({
                     </div>
                     <div>
                       <dt>Your access</dt>
-                      <dd>{selected.effective_access.join(', ')}</dd>
+                      <dd>
+                        {selected.effective_access
+                          .map(
+                            (access) =>
+                              ({
+                                read: 'View & download',
+                                write: 'Add files',
+                                update: 'Edit content',
+                                delete: 'Delete',
+                                manage_permissions: 'Manage sharing',
+                              })[access] || access,
+                          )
+                          .join(' · ')}
+                      </dd>
                     </div>
                   </dl>
                 </TabsContent>
@@ -2078,7 +2398,9 @@ export default function Workspace({
                                 checked={!!linkExpiring}
                                 disabled={working}
                                 onCheckedChange={(checked) =>
-                                  setLinkExpiring(checked ? DEFAULT_DURATION : null)
+                                  setLinkExpiring(
+                                    checked ? DEFAULT_DURATION : null,
+                                  )
                                 }
                               />
                               Expires after
@@ -2154,7 +2476,9 @@ export default function Workspace({
                               <Button
                                 variant="outline"
                                 disabled={working}
-                                onClick={() => setLinkExpiring(DEFAULT_DURATION)}
+                                onClick={() =>
+                                  setLinkExpiring(DEFAULT_DURATION)
+                                }
                               >
                                 Change time
                               </Button>
@@ -2243,7 +2567,9 @@ export default function Workspace({
                                 grantChange.duration,
                               );
                               if (minutes)
-                                void changeExpiring(selected, grant, { minutes });
+                                void changeExpiring(selected, grant, {
+                                  minutes,
+                                });
                             }}
                           >
                             <label htmlFor={'expiring-' + grant.id}>
@@ -2422,6 +2748,6 @@ export default function Workspace({
           )}
         </SheetContent>
       </Sheet>
-    </SidebarProvider>
+    </div>
   );
 }
