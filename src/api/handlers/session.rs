@@ -19,6 +19,7 @@ use super::super::{extract, state::AppState};
 #[serde(deny_unknown_fields)]
 pub(crate) struct ShortLivedTokenRequest {
     slt: SecretString,
+    org_id: Option<String>,
 }
 
 /// Rotating IAM Application refresh credential.
@@ -125,6 +126,7 @@ pub(crate) async fn status(
             "authenticated": true,
             "actor": { "principal_id": identity.principal_id, "type": identity.actor_kind,
                 "public_id": identity.public_id },
+            "org_id": identity.organizations.first(),
             "organizations": identity.organizations,
             "expires_at": identity.expires_at,
         }),
@@ -158,13 +160,21 @@ pub(crate) async fn exchange_slt(
         .transpose()?;
     let tokens = state
         .iam
-        .exchange_short_lived_token(&body.slt, idempotency_key, environment.as_ref())
+        .exchange_short_lived_token_in_organization(
+            &body.slt,
+            idempotency_key,
+            environment.as_ref(),
+            body.org_id.as_deref(),
+        )
         .await?;
     let organizations = state
         .iam
         .reachable_organizations(tokens.access_token(), environment.as_ref())
         .await?;
     extract::touch_testing_access(&state, access.as_ref()).await?;
+    if organizations.len() != 1 || tokens.organization_id() != organizations.first() {
+        return Err(AppError::Unauthenticated);
+    }
     Ok(token_response(&tokens, organizations))
 }
 
@@ -191,6 +201,9 @@ pub(crate) async fn refresh(
         .reachable_organizations(tokens.access_token(), environment.as_ref())
         .await?;
     extract::touch_testing_access(&state, access.as_ref()).await?;
+    if organizations.len() != 1 || tokens.organization_id() != organizations.first() {
+        return Err(AppError::Unauthenticated);
+    }
     Ok(token_response(&tokens, organizations))
 }
 

@@ -29,7 +29,7 @@ client.download(file.id).await?.write_to_file("report-copy.pdf").await?;
 
 `connect` negotiates before sending credentials. `new_unchecked` is available when the caller has already verified the deployment. Configuration accepts only the canonical `/api/v1/` path, HTTPS except on loopback, and no embedded credentials/query/fragment. Redirects are refused so credentials and mutation bodies cannot move to another origin.
 
-For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Login may be unscoped; select one of the returned authorized organizations with `with_organization`. The package owns no session or API cache. Applications own persistence and token rotation.
+For initial sign-in, use `Config::for_sign_in`, `iam_info`, `login_with_slt` and the durable-key equivalents. The backend holds the production IAM Application secret; users present only the IAM SLT/access/refresh credentials. Every IAM 5 token belongs to exactly one account and organization. Configure `with_organization` for that returned `org_id`; changing it cannot retarget the bearer. Keep additional accounts in separate clients and credential stores. The package owns no session or API cache. Applications own persistence and token rotation.
 
 `EnvironmentKey::new(test_app_secret)` plus `Config::with_environment` selects testing and redacts Debug output. Shared lifecycle management uses `honeycomb::manage_environment(&arguments)`, which invokes the official Honeycomb CLI with its own session and retry state. The library stores no Honeycomb credentials. Legacy direct management methods receive `testing_environment_managed_by_honeycomb`; use Honeycomb rather than an IAM root pairing. See [Testing environments](../testing-environments.md).
 
@@ -74,11 +74,11 @@ Set `Invite::expires_in_minutes` (1 to 43,200) for an expiring share: read-only,
 
 ## Delegated applications
 
-Use `delegated::DelegatedManifest` to serialize once and obtain the exact method, path, endpoint ID and SHA-256 to bind into an IAM proof. `OboProof` is consumed once. Never retry a proof; acquire a new proof for the same immutable manifest and logical operation ID.
+Use `delegated::DelegatedManifest` to serialize once and retain the request method, path, endpoint ID and SHA-256 for integrity/idempotency. `OboProof` wraps a reusable IAM OBO access token. Keep the same manifest and logical operation ID when retrying an uncertain mutation.
 
-Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests; `DelegatedInvite.invitation.expires_in_minutes` and `DelegatedLinkAccess.expires_in_minutes` make them expiring shares, bound into the proof like the rest of the body. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
+Available typed manifests cover folder creation, listing, file reads, trash, staged upload reserve/commit/status/cancel, and the critical `DelegatedInvite` / `DelegatedLinkAccess` operations. The last two require user approval in the IAM endpoint catalog. Call `invite_on_behalf_of` and `set_link_access_on_behalf_of` with the prepared manifests; `DelegatedInvite.invitation.expires_in_minutes` and `DelegatedLinkAccess.expires_in_minutes` make them expiring shares, part of the immutable request body. All operations stay inside `apps/<app-id>/` and retain the subject's normal permissions, including for owner subjects.
 
-For large or recoverable transfers, reserve private staging, upload with the returned capability, then commit with a fresh proof. A capability cannot publish or download content. See [OBO](../obo.md) and [delegated uploads](../api/delegated-uploads.md).
+For large or recoverable transfers, reserve private staging, upload with the returned capability, then commit with a valid OBO access token. A capability cannot publish or download content. See [OBO](../obo.md) and [delegated uploads](../api/delegated-uploads.md).
 
 ## Errors and maintenance
 
@@ -115,96 +115,29 @@ branches, and `retry_after` carries the delay a spent allowance names.
 
 ## Delegated request examples
 
-Applications use fresh IAM proofs for the represented member, never a
-Browser-bound or other application-bound bearer on the ordinary Briefcase API.
-The API, SDK and CLI surfaces are listed in the
-[operation map](../api/operations.md). No delegated SDK call automatically
-retries, sends the configured bearer, stores a session or runs maintenance.
+> **Live integration baseline — October 3, 2026:** Briefcase contract 3.0.0 and IAM 5.0.0 are deployed, together with the Briefcase 3.0.1 account picker and Carbon/Silicon popup interface. Check `/api/version` for the backend contract; native client releases have their own package version.
 
-### Exact-JSON operations
-
-Prepare a typed manifest before asking IAM to issue its single-use proof:
+Use a valid IAM OBO access token for the approved endpoint graph. The historical `OboProof` name remains for source compatibility; it now wraps a reusable token, is cloneable and redacts debug output.
 
 ```rust
 use briefcase_client::{ApplicationId, DelegatedCreateFolder, OboProof};
 
 let manifest = DelegatedCreateFolder {
-    operation_id, // retain this non-nil UUID with the unchanged logical request
-    parent_path: String::new(), // the represented member's private app folder
+    operation_id, // keep this UUID with the unchanged logical request
+    parent_path: String::new(),
     name: "recordings".into(),
 }.prepare()?;
-
-// Obtain fresh_proof from IAM with the caller application's own credentials
-// and current initiating member authority. Bind manifest.endpoint_id(),
-// method(), path(), body_sha256() and empty metadata {}. The SDK sends
-// manifest.body_bytes() unchanged, not a second serialization.
+let token = OboProof::new(obo_access_token_from_iam)?;
 let folder = client.create_folder_on_behalf_of(
-    &ApplicationId::new("browser")?,
-    OboProof::new(fresh_proof)?,
-    &manifest,
+    &ApplicationId::new("browser")?, token.clone(), &manifest,
 ).await?;
 ```
 
-`DelegatedListEntries` binds the parent, filter, cursor and limit;
-`DelegatedReadFile` binds the file UUID, optional range and download flag;
-`DelegatedTrashEntry` binds the entry UUID and logical operation UUID. Each
-has the same `prepare()` interface. File reads return `ContentStream`. Each
-new listing page or different read range needs a newly prepared manifest and
-proof. Trash requires both the represented member's delete permission and confinement to the calling application's namespace.
+The SDK sends `X-IAM-OBO-Access-Token` and `X-App-ID`, with no configured actor bearer. Prepared manifests retain exact JSON and SHA-256 for integrity/idempotency, not IAM proof issuance. Preserve the manifest and logical operation UUID after an uncertain mutation result. A still-valid token may be reused; the initiating app handles OBO refresh and revocation through IAM. No delegated SDK call automatically retries or stores credentials.
 
-After an uncertain create/trash response, preserve the exact manifest and
-operation UUID but obtain a fresh proof before retrying. Current permissions
-are checked before logical replay. `OboProof` is redacted, non-cloneable and
-non-serializable, and is consumed by the call.
+For file upload, prepare `DelegatedReserveUpload`, call `reserve_delegated_upload`, transfer bytes with the returned `UploadCapability`, then prepare `DelegatedCommitUpload` and call `commit_delegated_upload` with a valid OBO token. `DelegatedUploadQuery` and `DelegatedCancelUpload` reconcile or abandon unpublished content. The capability permits byte staging only. Current identity, destination permission and quota are checked at publication.
 
-### Staged uploads and recovery
-
-For a long or recoverable upload, use the [staged-upload protocol](../api/delegated-uploads.md):
-
-1. `DelegatedReserveUpload::file(operation_id, parent_path, local_path).await?`
-   hashes a regular file with bounded memory. Retain that manifest and keep the
-   source unchanged. Call `prepare()` before minting its reserve proof.
-2. `reserve_delegated_upload(&app_id, proof, &manifest)` returns the durable
-   status and, only while idle/reserved, a narrow `UploadCapability`.
-3. `transfer_delegated_upload(upload_id, capability, &source)` sends
-   `UploadSource::File` or `UploadSource::Bytes` using only the capability and
-   the configured organization/plane. The server verifies the complete size
-   and digest; this does not publish the file.
-4. Prepare `DelegatedCommitUpload { operation_id, upload_id }`, obtain another
-   fresh proof, and call `commit_delegated_upload`. It publishes the existing
-   staged object after current identity, destination permissions and quota
-   pass. Successful logical retries do not create another version.
-
-Use `DelegatedUploadQuery` with `delegated_upload_status` after an uncertain
-result, and `DelegatedCancelUpload` with `cancel_delegated_upload` to abandon
-an unpublished operation. Each control request requires its own fresh proof.
-Status/cancel remain available to the same immutable member/application/plane
-after destination write access is lost, but never disclose a capability or
-file contents. A fresh reserve can rotate an idle capability, not extend its
-original deadline. Capabilities are secret, non-cloneable, non-serializable
-and consumed by transfer; persist one only in caller-owned secure storage if
-needed. Do not save an IAM proof or authorization snapshot as an outbox grant.
-
-### One-shot uploads
-
-The existing small, immediate raw-body operation remains available:
-
-```rust
-use briefcase_client::OnBehalfOfUpload;
-
-let entry = client
-    .create_file_on_behalf_of(&OnBehalfOfUpload::file("app-notes", proof, "./generated.md"))
-    .await?;
-```
-
-For this one-shot operation, the destination, name, and media type travel inside the proof rather than in
-the request, so an application cannot redirect a proof it legitimately
-obtained. The client never sends its own bearer token here, because presenting
-both credentials at once is a request error. A refused proof must never be
-retried: IAM consumes it exactly once. Body staging must finish while the
-proof and its parent authorization are still valid. After an uncertain
-one-shot result, a new proof is not an idempotent retry; use the staged protocol
-when durable recovery is needed.
+`create_file_on_behalf_of` is retired and returns a configuration error before transmitting bytes. The raw route returns 410. Use the same resumable protocol for small uploads. See the [OBO migration guide](../obo.md) and [delegated uploads](../api/delegated-uploads.md).
 
 ## Organisation-owned storage
 

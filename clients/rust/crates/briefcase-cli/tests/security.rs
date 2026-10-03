@@ -50,7 +50,7 @@ fn session(expires_at: &str) -> Value {
         "actor": {
             "principal_id": ACTOR_ID,
             "type": "carbon",
-            "public_id": "cos:tester",
+            "public_id": "c:tester",
         },
         "org_id": "tos",
     })
@@ -85,17 +85,17 @@ fn entry_document() -> Value {
         "type": "file",
         "visibility": "full",
         "name": "note.txt",
-        "path": "apps/notes/private/cos:tester/note.txt",
+        "path": "apps/notes/private/c:tester/note.txt",
         "parent_id": null,
         "root_type": "private",
         "tag": null,
         "content_type": "text/plain",
         "size": 4,
         "render": "document",
-        "permanent_url": "https://briefcase.example/org/tos/apps/notes/private/cos:tester/note.txt",
+        "permanent_url": "https://briefcase.example/org/tos/apps/notes/private/c:tester/note.txt",
         "content_url": null,
         "download_url": null,
-        "owner": {"type": "carbon", "id": "cos:tester"},
+        "owner": {"type": "carbon", "id": "c:tester"},
         "origin_app_id": "notes",
         "effective_access": ["read", "update"],
         "created_at": "2026-09-04T00:00:00Z",
@@ -357,7 +357,7 @@ async fn test_actor_login_sends_the_id_and_preserves_the_production_session() {
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/slt"))
             .and(header("x-briefcase-app-secret", ROOT_KEY))
-            .and(body_json(json!({"slt": actor_id})))
+            .and(body_json(json!({"slt": actor_id, "org_id": "tos"})))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "access_token": "test-access",
                 "refresh_token": "test-refresh",
@@ -365,6 +365,7 @@ async fn test_actor_login_sends_the_id_and_preserves_the_production_session() {
                 "expires_in": 1800,
                 "scope": "briefcase",
                 "actor": {"principal_id": ACTOR_ID, "type": actor_type, "public_id": actor_id},
+                "org_id": "tos",
                 "organizations": ["tos"],
             })))
             .expect(1)
@@ -412,7 +413,7 @@ async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
     let home = tempfile::tempdir().unwrap();
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/slt"))
-        .and(body_json(json!({"slt": "unscoped-slt"})))
+        .and(body_json(json!({"slt": "unscoped-slt", "org_id": "tos"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "unscoped-access",
             "refresh_token": "unscoped-refresh",
@@ -422,7 +423,7 @@ async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
             "actor": {
                 "principal_id": ACTOR_ID,
                 "type": "carbon",
-                "public_id": "cos:tester"
+                "public_id": "c:tester"
             }
         })))
         .expect(1)
@@ -444,29 +445,16 @@ async fn unscoped_login_does_not_turn_the_workspace_preference_into_a_grant() {
     )
     .await;
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("one organization per session"));
     let credentials: Value =
         serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
             .unwrap();
-    assert_eq!(
-        credentials["sessions"]["default"]["access_token"],
-        "unscoped-access"
+    assert!(
+        credentials["sessions"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty)
     );
-    assert!(credentials["sessions"]["default"]["org_id"].is_null());
-    assert_eq!(
-        credentials["sessions"]["default"]["organizations"],
-        json!([])
-    );
-    assert_eq!(
-        credentials["production_credential_scopes"]["default"]["organization"],
-        ""
-    );
-    assert_eq!(credentials["test_sessions"], json!({}));
-    assert_eq!(credentials["tokens"], json!({}));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -573,7 +561,7 @@ async fn all_entry_pages_reach_exhaustion_and_reject_cursor_cycles() {
     let mut second_entry = entry_document();
     second_entry["id"] = json!("01a067ce-7f19-7790-820a-0be6b3d4f829");
     second_entry["name"] = json!("second.txt");
-    second_entry["path"] = json!("apps/notes/private/cos:tester/second.txt");
+    second_entry["path"] = json!("apps/notes/private/c:tester/second.txt");
     Mock::given(method("GET"))
         .and(path("/api/v1/entries"))
         .and(query_param("cursor", "page-one"))
@@ -747,12 +735,18 @@ async fn an_obo_upload_never_loads_or_refreshes_an_invalid_stored_member_session
     .await;
 
     assert!(
-        output.status.success(),
+        !output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = server.received_requests().await.unwrap_or_default();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Raw OBO uploads are retired"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() == "/api/version")
+    );
     assert!(
         requests
             .iter()
@@ -1058,7 +1052,7 @@ async fn login_status_checks_override_identity_instead_of_the_saved_actor() {
 }
 
 #[tokio::test]
-async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organization() {
+async fn login_status_rejects_legacy_unscoped_sessions_without_sending_credentials() {
     let server = authenticated_server().await;
     let home = tempfile::tempdir().unwrap();
     let mut stored = session("2020-01-01T00:00:00Z");
@@ -1076,52 +1070,14 @@ async fn login_status_refreshes_unscoped_sessions_without_choosing_an_organizati
     let mut config: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
     config["profiles"]["work"]["org"] = json!("");
     std::fs::write(config_file, serde_json::to_vec(&config).unwrap()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/api/version"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("briefcase-api-version", "v1")
-                .set_body_json(version_document()),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
-        .and(body_json(json!({"refresh_token": "stored-refresh-must-not-leak"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": "new-access", "refresh_token": "new-refresh", "token_type": "Bearer",
-            "expires_in": 1800, "scope": "profile", "org_id": null, "organizations": ["tos", "other"],
-            "actor": {"principal_id": ACTOR_ID, "type": "carbon", "public_id": "cos:tester"}
-        }))).expect(1).mount(&server).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer new-access"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "authenticated": true,
-            "actor": {"principal_id": ACTOR_ID, "type": "carbon", "public_id": "cos:tester"},
-            "organizations": ["tos", "other"], "expires_at": 4_102_444_800_i64
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
     let output = briefcase(
         home.path(),
         &["login".into(), "status".into(), "--json".into()],
     )
     .await;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["authenticated"], true);
-    let credentials: Value =
-        serde_json::from_slice(&std::fs::read(home.path().join("credentials.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        credentials["sessions"]["work"]["refresh_token"],
-        "new-refresh"
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("IAM 5 sign-in"));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

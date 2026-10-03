@@ -14,7 +14,7 @@ reports `Disabled`. Honeycomb manages CLI installation and updates.
 
 ```toml
 [dependencies]
-briefcase-client = "2.0.0"
+briefcase-client = "3.0.1"
 ```
 
 ```rust
@@ -45,14 +45,11 @@ mid-request.
 with clear-text HTTP limited to `localhost` and loopback IPs for local tests.
 The version response header and body must select the same API major.
 
-IAM login uses `Client::login_with_slt`. For the default all-organizations flow,
-create the anonymous client with `Config::for_sign_in(base_url)`. It accepts an
-unscoped session, and `SessionTokens::organizations` contains the IAM handles
-currently reachable by that token. After the caller chooses one, build a file
-client with `Config::for_sign_in(base_url)?.with_organization(handle)?` and
-attach the same access token. This switches request context without minting a
-new login. A `Config::new(base_url, org)` login remains available when the
-caller deliberately wants IAM to bind the token to one organization. The IAM
+IAM login uses `Client::login_with_slt`. `Config::for_sign_in(base_url)` can
+exchange a code before the caller knows its organization. Every returned IAM 5
+session has exactly one `org_id`; `organizations` contains only that ID. Build
+a file client for the same organization, and store additional accounts in
+separate clients and credential contexts. The IAM
 Application secret stays on the Briefcase backend. Testing environments use a
 typed IAM app-secret `EnvironmentKey` in `Config::with_environment`,
 independently of the bearer credential. Production-only management methods
@@ -64,64 +61,6 @@ before the first attempt.
 
 ## Delegated operations
 
-The SDK exposes `create_folder_on_behalf_of`, `list_entries_on_behalf_of`,
-`read_file_on_behalf_of`, and `trash_entry_on_behalf_of`. Each requires the
-calling application's canonical `ApplicationId`, a fresh `OboProof` supplied
-by that caller, and an immutable `DelegatedManifest` of the matching request
-type. The SDK never mints a proof, retries one, sends its configured bearer
-alongside it, or starts package maintenance during these calls.
+The SDK exposes delegated folder, listing, read, trash, invitation, link-access and resumable upload operations. `OboProof` now wraps a reusable IAM OBO access token. Prepare a typed manifest, pass the calling `ApplicationId` and a valid token, and preserve logical mutation IDs for retries. Tokens may be cloned while valid; the caller owns OBO refresh and secret storage. The SDK never sends its configured actor bearer with delegated credentials.
 
-Prepare the manifest before asking IAM for a proof:
-
-```rust
-use briefcase_client::{ApplicationId, DelegatedCreateFolder, OboProof};
-
-let manifest = DelegatedCreateFolder {
-    operation_id, // a caller-generated non-nil UUID, retained for logical retries
-    parent_path: String::new(), // the represented member's private app folder
-    name: "reports".into(),
-}.prepare()?;
-
-// Ask IAM using the caller application's own credentials and delegated authority.
-// Bind manifest.endpoint_id(), manifest.method(), manifest.path(), and
-// manifest.body_sha256(); the endpoint metadata must be the empty object {}.
-// manifest.body_bytes() is exactly what this SDK will send, not a re-serialization.
-let proof = OboProof::new(fresh_proof_from_iam)?;
-let folder = client.create_folder_on_behalf_of(
-    &ApplicationId::new("notes")?, proof, &manifest,
-).await?;
-```
-
-The other strict JSON DTOs are `DelegatedListEntries` (parent, filter, cursor,
-limit), `DelegatedReadFile` (file UUID, optional range, download disposition),
-and `DelegatedTrashEntry` (stable operation UUID, entry UUID). Each has
-`prepare()` and the same binding accessors. Read results use `ContentStream`;
-range and disposition are bound inside the manifest, not unbound headers or
-query parameters. Listing each new page requires a new manifest and proof.
-After an uncertain mutation result, retain the exact manifest and operation
-UUID but mint a fresh proof before retrying. `OboProof` is consumed per call,
-redacted in debug output, and cannot be cloned or serialized. Fixed binding
-path and IAM endpoint constants are also available in the `delegated` module.
-The existing raw-byte `create_file_on_behalf_of` API is unchanged.
-
-For a long or recoverable upload, use `DelegatedReserveUpload::file` to hash the
-file before minting a proof, then call `reserve_delegated_upload`. Transfer with
-the returned narrow `UploadCapability` using `transfer_delegated_upload`.
-Prepare `DelegatedCommitUpload` and obtain a new proof for
-`commit_delegated_upload`; the private transfer alone never publishes a file.
-`DelegatedUploadQuery` and `DelegatedCancelUpload` support reconciliation and
-cancellation. Retain the logical operation UUID and manifest, not an IAM proof
-or parent credential, in your outbox. See the [staged-upload guide][staging].
-
-Full guide: [Rust client guide][guide]. The `briefcase` command-line client is
-built on this package and lives in the same repository.
-
-[service]: https://briefcase.teamofsilicons.com
-[guide]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/client/README.md
-[staging]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/api/delegated-uploads.md
-
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
-or Silicon ID (e.g. `worker:tos`). Configure the test app secret and pass that
-ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
-IAM issues the test session and determines its current access. Production
-continues to require a one-time IAM login code.
+The legacy raw `create_file_on_behalf_of` operation is retired without transmitting bytes. Use reserve, capability transfer and commit. See the [3.0 migration guide](https://docs.briefcase.teamofsilicons.com/obo/) and [client guide](https://docs.briefcase.teamofsilicons.com/client/) for current examples. Documentation is published ahead of runtime rollout; verify `/api/version` before switching production clients.

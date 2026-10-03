@@ -820,7 +820,7 @@ fn validate_application_id(name: &'static str, value: &str) -> Result<(), Settin
     } else {
         Err(invalid(
             name,
-            "must be a qualified IAM Application ID in the form '{org_id}>{handle}'",
+            "must be a canonical bare IAM Application ID, such as 'briefcase'",
         ))
     }
 }

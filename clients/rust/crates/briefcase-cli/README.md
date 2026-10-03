@@ -6,7 +6,7 @@ download, and share organization files.
 ```bash
 cargo install briefcase-cli
 briefcase daemon install
-# Ask IAM for an unscoped SLT; choose the organization grants in IAM:
+# Ask IAM for an SLT for one account and organization:
 iam login --app-id 'briefcase'
 briefcase login <slt>
 
@@ -31,8 +31,8 @@ uses an explicit `--url`, then `BRIEFCASE_URL`, then the saved profile URL,
 then `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the optional
 override only for local development or another deployment.
 
-For a normal production login the organization is optional: IAM returns the
-member's available organizations. Use `briefcase login <slt>` for a direct
+For a normal production login the organization is optional: IAM returns exactly
+one selected organization. Use `briefcase login <slt>` for a direct
 exchange, or omit the token to use the hidden prompt. Configure the state
 parent with `briefcase config home /path/to/existing-directory`; the path must
 already be a directory.
@@ -49,16 +49,16 @@ Paginated `ls`, `find`, and `bin list` commands return `items` plus the opaque
 page without a silent entry cap.
 
 State replacement is atomic and cross-process locked. Stored credentials are
-bound to their canonical deployment origin. Login is unscoped; `--org` selects
-each workspace operation without granting access. Legacy scoped credentials and
-test roots retain their original tenant boundary. One-time login,
+bound to their canonical deployment origin, account, and organization. Use
+separate profiles for additional accounts; `--org` cannot retarget a saved token.
+Old unscoped credentials require sign-in. Testing roots keep their tenant boundary. One-time login,
 refresh, testing-environment mutations, folder creation, upload, move, and
 version restore persist their idempotency identity before the request and
 retain it after an uncertain result, so rerunning the exact command recovers
 the original answer instead of applying it twice.
 
 `briefcase app request <operation> --body request.json --describe` prepares an
-exact-body IAM binding entirely locally. Send that same body with a fresh proof
+operation metadata entirely locally. Send the request with a valid reusable IAM OBO access token
 to create folders, list/read/trash entries, or reserve/commit/check/cancel staged
 uploads, without loading a member session or automatically retrying. File reads
 require `--output` and protect existing files unless `--force` is explicit.
@@ -66,7 +66,7 @@ require `--output` and protect existing files unless `--force` is explicit.
 For large delegated uploads, `app prepare-upload` hashes a file locally,
 `app request upload-reserve` saves its narrow capability to a new owner-only
 `--capability-file`, and `app transfer` streams private bytes using that
-capability. A separate fresh-proof commit publishes them. Capabilities never
+capability. A separate OBO-authorized commit publishes them. Capabilities never
 appear in normal output; retain the logical operation UUID for status recovery.
 
 `briefcase --help` lists every command. Full guide: [docs/cli.md][guide].
@@ -82,7 +82,7 @@ Remove an older service used only for updates with `briefcase daemon uninstall`.
 [package]: https://crates.io/crates/briefcase-client
 [guide]: https://github.com/teamofsilicons/silicon-briefcase/blob/main/docs/cli/README.md
 
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `alice`)
+In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `c:alice`)
 or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
 ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
 IAM issues the test session and determines its current access. Production

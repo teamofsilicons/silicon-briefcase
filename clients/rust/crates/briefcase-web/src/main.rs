@@ -264,51 +264,54 @@ fn extract_environment_selector(request: &mut Request) -> Result<()> {
         return Ok(());
     };
     let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    let selectors: Vec<_> = pairs
-        .iter()
-        .filter(|(k, _)| k == "test_environment")
-        .collect();
-    if selectors.is_empty() {
-        return Ok(());
+    let mut selected = Vec::new();
+    for (query_key, header_name) in [
+        ("test_environment", "x-briefcase-environment"),
+        ("account_context", "x-briefcase-context"),
+    ] {
+        let selectors: Vec<_> = pairs.iter().filter(|(key, _)| key == query_key).collect();
+        if selectors.is_empty() {
+            continue;
+        }
+        if selectors.len() != 1
+            || uuid::Uuid::parse_str(&selectors[0].1)
+                .ok()
+                .is_none_or(|id| id.is_nil())
+            || request.headers().get_all(header_name).iter().count() > 1
+            || request
+                .headers()
+                .get(header_name)
+                .is_some_and(|value| value.to_str().ok() != Some(selectors[0].1.as_ref()))
+        {
+            return Err(bad("Invalid account or testing environment selection."));
+        }
+        selected.push((
+            header_name,
+            HeaderValue::from_str(&selectors[0].1).map_err(|_| bad("Invalid request context."))?,
+        ));
     }
-    if selectors.len() != 1
-        || uuid::Uuid::parse_str(&selectors[0].1)
-            .ok()
-            .is_none_or(|id| id.is_nil())
-        || request
-            .headers()
-            .get_all("x-briefcase-environment")
-            .iter()
-            .count()
-            > 1
-        || request
-            .headers()
-            .get("x-briefcase-environment")
-            .is_some_and(|h| h.to_str().ok() != Some(selectors[0].1.as_ref()))
-    {
-        return Err(bad("Invalid testing environment."));
-    }
-    let value =
-        HeaderValue::from_str(&selectors[0].1).map_err(|_| bad("Invalid testing environment."))?;
     let remaining = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(pairs.iter().filter(|(k, _)| k != "test_environment"))
+        .extend_pairs(
+            pairs
+                .iter()
+                .filter(|(key, _)| key != "test_environment" && key != "account_context"),
+        )
         .finish();
     let mut uri = request.uri().clone().into_parts();
-    let path = request.uri().path();
     uri.path_and_query = Some(
         if remaining.is_empty() {
-            path.to_owned()
+            request.uri().path().to_owned()
         } else {
-            format!("{path}?{remaining}")
+            format!("{}?{remaining}", request.uri().path())
         }
         .parse()
         .map_err(|_| bad("Invalid request query."))?,
     );
     *request.uri_mut() =
         axum::http::Uri::from_parts(uri).map_err(|_| bad("Invalid request query."))?;
-    request
-        .headers_mut()
-        .insert("x-briefcase-environment", value);
+    for (name, value) in selected {
+        request.headers_mut().insert(name, value);
+    }
     Ok(())
 }
 

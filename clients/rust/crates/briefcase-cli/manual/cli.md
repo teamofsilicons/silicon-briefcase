@@ -28,15 +28,12 @@ briefcase login <slt>
 # Or run `briefcase login` and paste only the SLT at the hidden prompt.
 ```
 
-The positional form exchanges the supplied SLT directly. To use the hidden
-prompt instead, run `briefcase login` with no token. A normal production login
-is always unscoped: IAM prompts you to select the organizations Briefcase may
-access, and Briefcase keeps that one token family for the selected set.
-For noninteractive IAM use, explicitly supply `--grant-org tos,my-team` or
-`--all-orgs` to IAM (the latter grants only memberships shown now).
-Briefcase's `--org` selects a workspace, never consent or a scoped login.
-When several granted organizations are available, commands that
-touch files ask you to choose with `--org`; no second IAM login is required.
+The positional form exchanges the supplied SLT directly; omit it for a hidden
+prompt. IAM 5 selects one account and organization per login. Use a separate
+named profile for each combination, for example `briefcase login <slt> --save-as
+alice-tos`, then `briefcase --profile alice-tos ls`. Use `--org` to verify the
+selected organization, not to move a saved session into a different one.
+Testing actor login forwards the selected organization's ID to IAM.
 
 The CLI connects to the hosted Briefcase service automatically. You do not
 need to find or enter a backend URL for normal use.
@@ -51,9 +48,9 @@ The deployment and current workspace preference are saved in
 `{home_dir}/.briefcase/config.json`.
 Briefcase exchanges the SLT for an access/refresh pair and stores the rotating
 session in `{home_dir}/.briefcase/credentials.json` with owner-only permissions. It
-preserves unscoped sessions and the IAM-selected organization list. A workspace
-preference cannot add grants. If IAM returns no active grants, revisit IAM to
-select organizations and sign in again; do not reuse cached access. It
+keeps each profile bound to its account and organization. Legacy unscoped
+credentials require a new login. Refresh cannot replace the saved actor or
+organization. It
 refreshes one minute before expiry and persists the new refresh token before
 sending the requested command. It records a refresh idempotency key before the
 network call, so an uncertain outcome reuses the exact token/key pair. A
@@ -79,14 +76,11 @@ or the process stops, rerun the exact command with the same SLT; the CLI reuses
 the key and recovers the original server response. Raw SLTs and IAM secrets are
 never written into the retry record.
 
-Stored credentials remain bound to their canonical deployment origin. A scoped
-session also stays bound to its organization; an unscoped production session can
-select another currently reachable organization with `--org`. A test root
-always retains its owning organization, even with an unscoped IAM session.
-An incompatible `--url` or scoped/root `--org` override therefore fails before
-forwarding a stored credential. An explicit `--token` authorizes its own
-production destination override; it never authorizes forwarding a stored test
-root.
+Stored credentials remain bound to their canonical deployment origin and the
+single selected organization. A conflicting `--url` or `--org` fails before a
+stored credential is sent. Testing roots also retain their own tenant boundary.
+An explicit `--token` selects caller-owned credentials; it cannot authorize
+forwarding an unrelated saved test root.
 
 Save a named hosted profile, or explicitly select a local deployment:
 
@@ -431,8 +425,7 @@ briefcase history private/si:cos/notes/report.pdf   # who did what, when
 briefcase usage                                      # storage and today's uploads
 briefcase version                                    # client and server contracts
 briefcase storage configure --bucket … --region … --role-arn … --account …
-briefcase app upload --app-id 'app-notes' ./generated.md # hidden proof prompt
-briefcase app upload --app-id 'app-notes' --proof-stdin ./generated.md < proof.txt
+# Raw app upload is retired in 3.0. Use prepare-upload, reserve, transfer and commit below.
 ```
 
 `storage configure` prints its operation UUID to stderr before submitting the
@@ -446,14 +439,14 @@ the operation ID and diagnostics go to stderr.
 Application IDs on client-facing operations are always canonical
 `{org_id}>{handle}`. A local handle such as `app-notes` is rejected before a
 request so it cannot silently target the wrong organization. Explicit
-`--proof "$PROOF"` remains available, but can expose the proof through the
+The historical `--proof` option now takes an `oba_` OBO access token. `--proof "$PROOF"` remains available, but can expose the proof through the
 process list; prefer the hidden prompt or `--proof-stdin`.
 
 ### Delegated application requests
 
 Applications can create folders, list entries, read files, move entries to the
 bin, and stage uploads without a saved member session. Prepare the operation's
-JSON file, then describe it locally before asking IAM for a proof:
+JSON file, then describe it locally before requesting OBO consent:
 
 ```bash
 briefcase app request folder-create --body folder.json --describe
@@ -466,8 +459,8 @@ selected operation, and prints its canonical `body` string, HTTP `method`,
 `path`, IAM `endpoint_id`, `body_sha256`, and empty `metadata` object. It does
 not read profiles or credentials, contact a server, or check for updates.
 Give IAM those exact binding values, then repeat the command with the same
-JSON file and a fresh proof at the hidden prompt or through `--proof-stdin`.
-Unknown JSON fields are rejected. See the [API request schemas](../obo.md#json-controls-and-recoverable-uploads)
+JSON file and a valid OBO access token at the hidden prompt or through `--proof-stdin`.
+Unknown JSON fields are rejected. See the [API request schemas](../obo.md#choose-an-operation)
 for the body fields.
 
 The available operations are `folder-create`, `entries-list`, `file-read`,
@@ -475,9 +468,9 @@ The available operations are `folder-create`, `entries-list`, `file-read`,
 `upload-status`, and `upload-cancel`. `invite` and `link-access` accept an
 optional `expires_in_minutes` (1 to 43,200) — inside `invitation` for `invite`,
 and beside `"enabled": true` for `link-access` — to create a read-only expiring
-share or expiring link. It is part of the exact body the proof binds. Each request uses fresh IAM authorization; no proof is cached
+share or expiring link. It is part of the immutable JSON body. Each request verifies current IAM authority; a valid OBO token may be reused
 or retried automatically. Keep a mutation's `operation_id` and body unchanged
-when obtaining a fresh proof for a retry. A file read requires `--output`
+when obtaining a valid OBO access token for a retry. A file read requires `--output`
 before any proof or request is sent. Its destination appears only after the
 complete response is saved; existing paths are protected unless `--force`
 explicitly permits replacement. Ranges and download disposition belong in
@@ -485,7 +478,7 @@ the signed JSON body, not separate request headers.
 
 ### Staged application uploads
 
-Prepare a reservation before minting its short-lived proof. This local command
+Prepare a reservation before using its approved OBO token. This local command
 hashes the file with bounded memory and prints a credential-free JSON manifest:
 
 ```bash
@@ -503,21 +496,21 @@ path, not a symlink, pipe or device. `prepare-upload` needs no configured
 profile, credential, network, or update check.
 
 Reservation requires a new `--capability-file` and creates it with owner-only
-Unix permissions before consuming a proof. The capability is never included
+Unix permissions before making a control request. The capability is never included
 in ordinary JSON or terminal output, and an existing file is never replaced.
 If the request fails or the server returns no capability, that new file may remain
 empty; a local write failure may instead leave incomplete content. Reconcile
-with a fresh status proof before retrying, and use a new filename for a later
+with a valid OBO status token before retrying, and use a new filename for a later
 reservation attempt. Transfer accepts
 the private file, a hidden prompt, or `--capability-stdin`. It refuses symlink
 capability files, special files, and files accessible to other users. Secret
 input is limited to 64 KiB. Capability-file handling
 requires Unix file permissions.
 
-Transfer only stores private bytes. Publish with a fresh proof for
+Transfer only stores private bytes. Publish with a valid OBO access token for
 `upload-commit`, using a body containing the original `operation_id` and the
 returned `upload_id`. `upload-status` and `upload-cancel` take a body containing
-the original `operation_id`, also with a fresh proof. After any uncertain
+the original `operation_id`, also with a valid OBO access token. After any uncertain
 transfer or commit, reconcile with status before retrying; never infer
 publication from a completed transfer. Retain the credential-free manifest
 and status for recovery, not IAM proofs or parent tokens. Protect the capability

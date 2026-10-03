@@ -1,9 +1,15 @@
 import { telemetryEnabled, trackRequest } from './telemetry';
 export type BrowserSession = {
   authenticated: boolean;
+  context_id: string;
+  contexts: {
+    context_id: string;
+    org: string;
+    actor: { type: string; public_id: string };
+  }[];
   org: string;
   organizations: string[];
-  actor: { type: string; public_id: string };
+  actor: { type: 'carbon' | 'silicon'; public_id: string };
   testing: boolean;
   test_environment?: { id: string; name: string } | null;
 };
@@ -39,6 +45,13 @@ export class ApiError extends Error {
 // Per-tab request context. This is a consistency guard, not an authorization
 // credential: the gateway and IAM still authorize every file request.
 let workspaceOrganization: string | null = null;
+let accountContext: string | null = null;
+let contextEpoch = 0;
+export const browserContextGeneration = () => contextEpoch;
+export function setAccountContext(context: string | null) {
+  if (accountContext !== context) contextEpoch += 1;
+  accountContext = context;
+}
 export function setWorkspaceOrganization(org: string | null) {
   workspaceOrganization = org;
 }
@@ -48,33 +61,37 @@ export function testingEnvironment(): string | null {
     : sessionStorage.getItem('briefcase-test-environment');
 }
 export function enterTestingEnvironment(id: string) {
+  contextEpoch += 1;
   sessionStorage.setItem('briefcase-test-environment', id);
   window.location.assign('/');
 }
 export function returnToProduction() {
+  contextEpoch += 1;
   sessionStorage.removeItem('briefcase-test-environment');
   window.location.assign('/');
 }
 export function browserUrl(path: string): string {
+  const params = new URLSearchParams();
   const id = testingEnvironment();
-  return id
-    ? path +
-        (path.includes('?') ? '&' : '?') +
-        'test_environment=' +
-        encodeURIComponent(id)
-    : path;
+  if (id) params.set('test_environment', id);
+  if (accountContext) params.set('account_context', accountContext);
+  return params.size ? path + (path.includes('?') ? '&' : '?') + params : path;
 }
 export async function api<T>(
   path: string,
   method = 'GET',
   body?: unknown,
 ): Promise<T> {
+  const context = accountContext;
+  const epoch = contextEpoch;
+  const environment = testingEnvironment();
   const options: RequestInit = {
     method,
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       'X-Briefcase-Browser': '1',
+      ...(context ? { 'X-Briefcase-Context': context } : {}),
       'X-Briefcase-Telemetry': telemetryEnabled() ? 'on' : 'off',
       ...(workspaceOrganization && path !== '/session'
         ? { 'X-Briefcase-Organization': workspaceOrganization }
@@ -90,9 +107,27 @@ export async function api<T>(
   const started = performance.now();
   const response = await fetch(browserUrl('/browser' + path), options);
   trackRequest(method, response.status, performance.now() - started);
+  if (
+    contextEpoch !== epoch ||
+    accountContext !== context ||
+    testingEnvironment() !== environment
+  )
+    throw new ApiError(
+      'The account changed while this request was running.',
+      409,
+    );
   const value = (await response.json().catch(() => null)) as {
     error?: { message?: string };
   } | null;
+  if (
+    contextEpoch !== epoch ||
+    accountContext !== context ||
+    testingEnvironment() !== environment
+  )
+    throw new ApiError(
+      'The account changed while this response was arriving.',
+      409,
+    );
   if (!response.ok)
     throw new ApiError(
       value?.error?.message || 'Briefcase could not complete this request.',

@@ -10,7 +10,7 @@ const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
 const { d1, r2 } = hostingConfig;
 
 const browserProxy: ProxyOptions = {
-  target: 'http://127.0.0.1:4318',
+  target: process.env.BRIEFCASE_DEV_GATEWAY || 'http://127.0.0.1:4318',
   changeOrigin: false,
   configure(proxy) {
     proxy.on('proxyReq', (outgoing, incoming) => {
@@ -67,7 +67,7 @@ export default defineConfig(async () => {
       proxy: {
         '/browser': browserProxy,
         '/auth/callback': {
-          target: 'http://127.0.0.1:4318',
+          target: process.env.BRIEFCASE_DEV_GATEWAY || 'http://127.0.0.1:4318',
           changeOrigin: false,
         },
       },
