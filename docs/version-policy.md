@@ -1,6 +1,6 @@
 # API version policy
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 Briefcase 3.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSON operation revisions change to 3.0.0, and the legacy raw upload returns 410. The route namespace remains `/api/v1`. Ordinary file operations and the capability-only byte transfer keep their previous revisions. Deploy matched consumers and service together; see the [migration guide](obo.md).
 
