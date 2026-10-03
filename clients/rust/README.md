@@ -54,8 +54,8 @@ Both crates also support disposable IAM-coupled test planes; see the guides for
 the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
 
 The Rust package does not update dependencies or mutate the consuming project.
-Honeycomb owns CLI installation and updates. Legacy daemon commands provide
-migration guidance; they do not install an independent updater.
+Honeycomb owns CLI installation and updates. The optional shared daemon
+supports local command coordination; it does not install an independent updater.
 
 ## The contract check
 
