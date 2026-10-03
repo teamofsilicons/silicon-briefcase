@@ -34,6 +34,9 @@ pub enum AppError {
     /// The resource does not exist or must remain undisclosed.
     #[error("resource was not found")]
     NotFound,
+    /// Legacy raw OBO uploads have been replaced by resumable delegated uploads.
+    #[error("raw OBO uploads are retired; use reserve, transfer, and commit")]
+    RetiredOboUpload,
     /// The operation conflicts with current durable state.
     #[error("request conflicts with current state")]
     Conflict {
@@ -161,6 +164,13 @@ impl AppError {
                 StatusCode::NOT_FOUND,
                 Cow::Borrowed("not_found"),
                 Cow::Borrowed("The requested resource was not found."),
+            ),
+            Self::RetiredOboUpload => (
+                StatusCode::GONE,
+                Cow::Borrowed("obo_upload_retired"),
+                Cow::Borrowed(
+                    "Raw OBO uploads are retired. Use delegated upload reserve, transfer, and commit.",
+                ),
             ),
             Self::Conflict { code } => (
                 StatusCode::CONFLICT,

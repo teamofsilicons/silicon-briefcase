@@ -389,10 +389,10 @@ impl IamClient {
         Ok(verified)
     }
 
-    /// Consumes an exact-request OBO proof and its current delegated authority.
+    /// Verifies a reusable delegated token as the receiving application.
     ///
     /// # Errors
-    /// Rejects spent or mismatched proofs. Never retries an uncertain verify.
+    /// Rejects expired, revoked, or mismatched graph authority.
     pub async fn verify_obo(
         &self,
         proof: &SecretString,
@@ -401,20 +401,67 @@ impl IamClient {
         binding: &OboRequestBinding<'_>,
         environment: Option<&IamEnvironmentCredential>,
     ) -> Result<VerifiedOboAccess, IamClientError> {
-        if !valid_fixed_iam_secret(proof.expose_secret(), "obo_") {
+        if !valid_fixed_iam_secret(proof.expose_secret(), "oba_") {
             return Err(IamClientError::Rejected);
         }
         validate_outbound_binding("obo.method", binding.method, 16)?;
         validate_outbound_binding("obo.path", binding.path, MAX_RESOURCE_BYTES)?;
         validate_outbound_binding("obo.body_sha256", binding.body_sha256, 64)?;
-        let request = serde_json::from_value(serde_json::json!({"access_proof":proof.expose_secret(),"request":{"method":binding.method,"path":binding.path,"body_sha256":binding.body_sha256}}))
-            .map_err(|_| binding_mismatch("obo.request"))?;
-        let response = self
+        let endpoint_id = match binding.path {
+            "/api/v1/obo/uploads/reserve" => "briefcase.uploads.reserve",
+            "/api/v1/obo/uploads/commit" => "briefcase.uploads.commit",
+            "/api/v1/obo/uploads/status" => "briefcase.uploads.status",
+            "/api/v1/obo/uploads/cancel" => "briefcase.uploads.cancel",
+            "/api/v1/obo/invitations" => "briefcase.invitations.create",
+            "/api/v1/obo/link-access" => "briefcase.link_access.update",
+            "/api/v1/obo/files/read" => "briefcase.files.read",
+            "/api/v1/obo/folders/create" => "briefcase.folders.create",
+            "/api/v1/obo/entries/list" => "briefcase.entries.list",
+            "/api/v1/obo/entries/trash" => "briefcase.entries.trash",
+            // Legacy streaming creation encoded per-request metadata in the old proof.
+            // Use resumable reservation/upload/commit with the reusable token protocol.
+            _ => return Err(IamClientError::Rejected),
+        };
+        let request = serde_json::json!({"access_token":proof.expose_secret(),"endpoint_id":endpoint_id,"request":{"method":binding.method,"path":binding.path}});
+        let verified_response = self
             .scoped_client(environment)?
             .obo()
-            .verify(&request)
+            .verify(&self.convert(request)?)
             .await
             .map_err(|error| sdk_error(error, Operation::Obo))?;
+        let mut response: serde_json::Value = self.convert(verified_response)?;
+        if response["active"] != true
+            || response["endpoint"]["app_id"].as_str()
+                != Some(self.application_identity(environment).0.as_str())
+            || response["endpoint"]["endpoint_id"].as_str() != Some(endpoint_id)
+        {
+            return Err(IamClientError::Rejected);
+        }
+        // Adapt the current wire response to the existing local authority validator.
+        // The compatibility timestamp below records this verification, not consumption.
+        response["valid"] = serde_json::json!(true);
+        response["proof_id"] = response["token_id"].clone();
+        response["audience"] = response["endpoint"]["app_id"].clone();
+        response["metadata"] = serde_json::json!({});
+        response["consumed_at"] = serde_json::json!(
+            OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| invalid_response("verification_time"))?
+        );
+        // The actor is always disclosed by OBO; optional IAM self-profile scopes do
+        // not change which represented account this endpoint is authorized for.
+        // Preserve disclosed identity fields so canonical validation rejects any
+        // disagreement with the represented actor instead of silently replacing it.
+        if response["authorization"]["actor_type"].is_null() {
+            response["authorization"]["actor_type"] = response["actor"]["type"].clone();
+        }
+        if response["authorization"]["public_id"].is_null() {
+            response["authorization"]["public_id"] = response["actor"]["public_id"].clone();
+        }
+        response
+            .as_object_mut()
+            .ok_or_else(|| invalid_response("obo.response"))?
+            .remove("active");
         let response = self.prepare(response, environment).await?;
         let snapshot: super::canonical::LocalAuthorization =
             self.convert(response["authorization"].clone())?;

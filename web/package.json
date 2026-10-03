@@ -1,6 +1,6 @@
 {
   "name": "silicon-briefcase-web",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -11,7 +11,8 @@
     "start": "cd ../clients/rust && BRIEFCASE_WEB_ORIGIN=${BRIEFCASE_WEB_ORIGIN:-http://localhost:4318} cargo run -p briefcase-web --release --locked",
     "lint": "oxlint",
     "format": "oxfmt",
-    "test:telemetry": "node --test tests/telemetry.test.mjs"
+    "test:telemetry": "node --test tests/telemetry.test.mjs",
+    "test:auth": "node --experimental-strip-types --test tests/iam-popup.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",

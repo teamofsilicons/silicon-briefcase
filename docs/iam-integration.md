@@ -47,7 +47,7 @@ within the budget, the failure is returned without an early retry. Invalid
 credentials, inactive tokens, malformed replies and authorization-binding failures
 never become successful authorizations. Every attempt uses the same token, app
 credential, organization, and testing-environment selection. No stale authorization
-is used as a fallback. Token exchanges, refreshes, and single-use OBO proofs are
+is used as a fallback. Token exchanges, refreshes, and legacy single-use OBO proofs are
 not retried by this policy.
 
 Structured logs preserve `iam.failure`, upstream HTTP status and validated UUID
@@ -162,60 +162,15 @@ An unsigned POST returning 401 verifies rejection only. Healthy `/readyz` proves
 database readiness only. Neither is evidence that IAM has approved, scheduled,
 delivered, or successfully replayed a webhook.
 
-## OBO registration is separate
+## OBO registration and consent
 
-The caller-facing companion to this section is the [OBO guide](obo.md).
+> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
 
-Configure these fixed paths in the Briefcase Application through Honeycomb.
-IAM uses the accepted endpoint catalog for proof issuance and verification.
-Every operation uses `POST`; endpoint IDs must not be repointed to other paths.
+Briefcase 3.0.0 verifies reusable `oba_` access tokens online through IAM 5.0.0. Request OBO consent after login, exchange and refresh the OBO tokens through the initiating app, and send `X-App-ID` plus `X-IAM-OBO-Access-Token` to supported delegated routes. The legacy one-shot raw upload is retired. See the [OBO migration guide](obo.md) for endpoint registration, code migration and release gates.
 
-| Endpoint ID | Registered path | IAM metadata schema |
-| --- | --- | --- |
-| `briefcase.files.create` | `/api/v1/obo/files` | Required strings `path`, `name`, `content_type` |
-| `briefcase.folders.create` | `/api/v1/obo/folders/create` | Empty object `{}` |
-| `briefcase.entries.list` | `/api/v1/obo/entries/list` | Empty object `{}` |
-| `briefcase.files.read` | `/api/v1/obo/files/read` | Empty object `{}` |
-| `briefcase.entries.trash` | `/api/v1/obo/entries/trash` | Empty object `{}` |
-| `briefcase.uploads.reserve` | `/api/v1/obo/uploads/reserve` | Empty object `{}` |
-| `briefcase.uploads.commit` | `/api/v1/obo/uploads/commit` | Empty object `{}` |
-| `briefcase.uploads.status` | `/api/v1/obo/uploads/status` | Empty object `{}` |
-| `briefcase.uploads.cancel` | `/api/v1/obo/uploads/cancel` | Empty object `{}` |
+IAM verifies the receiving app and approved endpoint graph; Briefcase still checks the represented identity, selected organization, current membership, role/tag disclosure, app namespace and resource permissions. Missing identity or role disclosure fails closed. Undisclosed tags remain unknown and never grant tag-based access or erase cached assignments. A verified snapshot is never cached as authorization for a later request.
 
-The one-shot file endpoint keeps its raw-byte body and metadata contract.
-The other operations put all inputs in exact JSON body bytes, including range,
-disposition, pagination and logical mutation UUIDs. IAM's issuer/audience
-registration and current consent checks remain authoritative. The represented
-member's selected data organization may differ from the applications' owning
-organization. Proofs bind exact
-body bytes by SHA-256, method, endpoint, audience, actor, and environment; they
-are single-use and must not be blindly retried. Keep the same logical mutation
-UUID when recovering an uncertain JSON mutation, but obtain a fresh proof.
-Briefcase always rechecks current authority and its ordinary resource policy.
-
-The raw `PUT /api/v1/obo/uploads/{upload_id}/content` is not an IAM catalog
-endpoint. Its narrow capability permits private staging only; a fresh commit
-proof separately authorizes publication. See [delegated uploads](api/delegated-uploads.md).
-
-Webhook approval and OBO catalog registration are separate operations.
-Confirm the Briefcase Application's `self.identity.read` and
-`self.membership.read` disclosure and accepted Honeycomb endpoint configuration
-before making OBO calls.
-The issuing member's Application token needs the exact
-`obo:briefcase:<endpoint_id>` grant; `obo.issue` is obsolete. Delegated `self.identity.read`, `self.membership.read` and
-`self.tags.read` disclosures require their intersection across the parent token,
-current exact consent, issuer approval and recipient approval. Briefcase requires
-identity and role disclosure. Tags may be undisclosed: they remain unknown,
-never authorize tag-based access and never overwrite directory assignments.
-Explicit owner, actor, role and permission-grant authority remains available.
-Disclosed empty tags still replace assignments; scope/disclosure inconsistencies fail closed.
-The snapshot must include exactly the verified endpoint's canonical delegated
-scope, for example `obo:briefcase:briefcase.files.create`. Briefcase validates
-the audience and endpoint components, rejects missing or foreign OBO scopes,
-and preserves IAM's sorted, unique scope-set contract. The [API](obo.md#choose-an-operation)
-documents the exact request bodies and recovery behavior. Proofs remain
-dependent on current initiator authorization; storing a verified snapshot does
-not create permission for later requests.
+Webhook approval, endpoint registration, login scopes and OBO consent are separate actions. The capability-only byte transfer is not an IAM endpoint and cannot publish; commit requires a valid OBO token and a fresh online authority check.
 
 ## First official release requirements
 

@@ -1,6 +1,8 @@
 # API version policy
 
-The candidate source release is **2.0.0** for the service, Rust client, CLI and browser gateway, using the existing `/api/v1` route namespace. The OpenAPI contract is now 2.1.0: it adds expiring shares and self-destructing files through two new operations (`changeExpiringShare`, `makeEntryPermanent`, both revision 1.0.0) plus optional request fields and additive response fields on existing operations, so no existing operation revision changed. It requires bare application IDs and typed `c:` / `si:` actor IDs. Deploy the matched service and consumers together after the documented identifier migration; legacy file URLs continue resolving through protected path aliases. Release 1.0.0 was the first official Briefcase release; earlier development releases are unsupported.
+> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+
+Briefcase 3.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSON operation revisions change to 3.0.0, and the legacy raw upload returns 410. The route namespace remains `/api/v1`. Ordinary file operations and the capability-only byte transfer keep their previous revisions. Deploy matched consumers and service together; see the [migration guide](obo.md).
 
 ## Negotiation
 
@@ -10,12 +12,12 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 ## Compatibility matrix
 
-| API contract | Backend | Rust client | CLI | Browser gateway | IAM SDK |
-| --- | --- | --- | --- | --- | --- |
-| 2.1.0 / v1 | 2.0.0 | 2.0.0 | 2.0.0 | 2.0.0 | silicon-iam-client 4.0.0 |
-| Development 0.x | Unsupported | Unsupported | Unsupported | Unsupported | Not a release target |
+| API contract | Backend | Rust client / CLI | IAM SDK |
+| --- | --- | --- | --- |
+| 3.0.0 / v1 | 3.0.0 | 3.0.0 | silicon-iam-client 5.0.0 |
+| 2.1.0 / v1 | 2.1.0 | 2.1.0 | silicon-iam-client 4.0.0 |
 
-A consumer built against contract 2.0.0 still passes negotiation against 2.1.0: its operations keep their revisions, and the two extra operation IDs are allowed. The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference. All initial official operation revisions are 1.0.0. Future observable request, response, and behavior changes must update the affected operation revision and its consumers together. Breaking API-major changes use a new versioned namespace.
+Clients must not ignore mismatched operation revisions. Contract 3.0 changes delegated authentication behavior; 2.x clients do not pass the complete 3.0 operation check. Existing ordinary resource IDs and stored data are unchanged; this release adds no Briefcase database migration. The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference.
 
 ## Deprecation and sunset
 

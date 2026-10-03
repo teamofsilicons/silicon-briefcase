@@ -15,7 +15,7 @@ use crate::{
 };
 
 const ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
-const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-proof");
+const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-token");
 const APP_ID: HeaderName = HeaderName::from_static("x-app-id");
 const TESTING_ENVIRONMENT_KEY: HeaderName = HeaderName::from_static("x-briefcase-app-secret");
 
@@ -249,7 +249,7 @@ pub(crate) fn obo_credentials(
     }
     let application = ApplicationId::new(app_id.to_owned())
         .map_err(|_| AppError::bad_request("invalid_app_id"))?;
-    Ok((application, parse_iam_secret_header(proof, "obo_")?))
+    Ok((application, parse_iam_secret_header(proof, "oba_")?))
 }
 
 /// Reads an optional tenant header, for a route where IAM names the tenant.
@@ -352,7 +352,7 @@ mod tests {
     use super::{IamAction, obo_credentials, parse_bearer, require_bearer_shape};
 
     const ACCESS_TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OBO_PROOF: &str = "obo_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const OBO_PROOF: &str = "oba_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
     fn action_names_are_stable_capabilities() {
@@ -404,7 +404,7 @@ mod tests {
         let mut proof_only = HeaderMap::new();
         proof_only.insert("x-org-id", HeaderValue::from_static("org_example"));
         proof_only.insert(
-            "x-iam-obo-access-proof",
+            "x-iam-obo-access-token",
             HeaderValue::from_static(OBO_PROOF),
         );
         proof_only.insert("x-app-id", HeaderValue::from_static("app-example"));
@@ -425,7 +425,7 @@ mod tests {
             )),
         );
         headers.insert(
-            "x-iam-obo-access-proof",
+            "x-iam-obo-access-token",
             HeaderValue::from_static(OBO_PROOF),
         );
         headers.insert("x-app-id", HeaderValue::from_static("app-example"));
