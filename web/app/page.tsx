@@ -31,6 +31,13 @@ import {
   openIamPopup,
   continueIamInThisTab,
   safeLoginReturn,
+  savedLoginAttempt,
+  retiredLoginAttempts,
+  retireLoginAttempt,
+  beginLoginAttempt,
+  bindLoginAttempt,
+  completeLoginAttempt,
+  isCurrentLoginState,
   type IdentityKind,
 } from '@/lib/iam-popup';
 export default function Home() {
@@ -46,6 +53,7 @@ export default function Home() {
     if (attempt) {
       // The durable nonce tombstone also cancels a start that has not arrived.
       // Late responses have separate cookies and cannot erase a successor.
+      retireLoginAttempt(attempt.nonce);
       await api('/login/cancel', 'POST', { attempt_nonce: attempt.nonce });
     }
   }, []);
@@ -88,7 +96,10 @@ export default function Home() {
       history.replaceState(null, '', location.pathname);
       if (
         !/^[a-f0-9]{64}$/.test(state || '') ||
-        !/^[a-f0-9-]{36}$/.test(context || '')
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+          context || '',
+        ) ||
+        !isCurrentLoginState(state)
       ) {
         // eslint-disable-next-line react/react-compiler -- Validate callback parameters once after hydration.
         setError('Invalid sign-in completion. Start sign-in again.');
@@ -106,6 +117,11 @@ export default function Home() {
       void (async () => {
         try {
           const receipt = JSON.parse(retained);
+          const attempt = savedLoginAttempt();
+          if (!attempt || attempt.state !== receipt.state)
+            throw new Error(
+              'This sign-in was superseded. Start sign-in again.',
+            );
           const current = await api<BrowserSession & { return_to: string }>(
             '/login/activate',
             'POST',
@@ -115,8 +131,8 @@ export default function Home() {
           if (
             !current.authenticated ||
             current.context_id !== receipt.context_id ||
-            current.actor.type !==
-              sessionStorage.getItem('briefcase-login-kind')
+            current.actor.type !== attempt.kind ||
+            savedLoginAttempt()?.nonce !== attempt.nonce
           )
             throw new Error(
               'The selected account could not be verified. Start sign-in again.',
@@ -124,7 +140,7 @@ export default function Home() {
           const destination = safeLoginReturn(current.return_to);
           setAccountContext(current.context_id);
           sessionStorage.removeItem('briefcase-login-return');
-          sessionStorage.removeItem('briefcase-login-kind');
+          completeLoginAttempt(attempt.nonce);
           window.location.assign(destination);
         } catch (error) {
           if (!active) return;
@@ -224,7 +240,6 @@ export default function Home() {
     try {
       let boundAttempt = '';
       const start = async (nonce?: string) => {
-        await previous;
         if (controller.signal.aborted) throw new Error('Sign-in cancelled.');
         boundAttempt =
           nonce ||
@@ -232,11 +247,12 @@ export default function Home() {
             value.toString(16).padStart(2, '0'),
           ).join('');
         sessionStorage.removeItem('briefcase-login-return');
-        sessionStorage.setItem('briefcase-login-kind', kind);
+        beginLoginAttempt(boundAttempt, kind);
         const started = api<{ redirect_url: string }>('/login/start', 'POST', {
           return_to: returnTo,
           identity_kind: kind,
           attempt_nonce: boundAttempt,
+          retired_attempt_nonces: retiredLoginAttempts(),
           ...(nonce ? { popup_nonce: nonce } : {}),
         });
         loginAttempt.current = { nonce: boundAttempt, started };
@@ -246,6 +262,7 @@ export default function Home() {
           browserContextGeneration() !== generation
         )
           throw new Error('The workspace changed. Please start sign-in again.');
+        bindLoginAttempt(boundAttempt, value.redirect_url);
         return value.redirect_url;
       };
       if (fullPage) {
@@ -275,6 +292,7 @@ export default function Home() {
         );
       if (controller.signal.aborted) return;
       loginAttempt.current = null;
+      completeLoginAttempt(boundAttempt);
       setAccountContext(current.context_id);
       setWorkspaceOrganization(current.org);
       const destination = session

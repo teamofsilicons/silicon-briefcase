@@ -112,9 +112,10 @@ const pageErrors = [],
   requests = [],
   starts = [],
   cancellations = [],
+  appliedCancellations = [],
   activations = [];
 const held = new Map();
-let firstActivation, activationGate;
+let firstActivation, activationGate, cancelGate;
 context.on('page', (page) =>
   page.on('pageerror', (error) => pageErrors.push(error.message)),
 );
@@ -156,10 +157,15 @@ await context.route('**/*', async (route) => {
     const gate = deferred();
     held.set(body.attempt_nonce, gate);
     const status = await gate.promise;
+    const handoff = new URL('/fixture/iam', origin);
+    handoff.searchParams.set('attempt', body.attempt_nonce);
+    const callback = new URL('/auth/callback', origin);
+    callback.searchParams.set('state', body.attempt_nonce);
+    handoff.searchParams.set('redirect_uri', callback.href);
     return reply(
       status === 200
         ? {
-            redirect_url: `${origin}/fixture/iam?attempt=${body.attempt_nonce}`,
+            redirect_url: handoff.href,
           }
         : { error: { message: 'This previous attempt was cancelled.' } },
       status,
@@ -167,7 +173,11 @@ await context.route('**/*', async (route) => {
   }
   if (url.pathname === '/browser/login/cancel') {
     cancellations.push(body.attempt_nonce);
-    return reply({ cancelled: true });
+    // Delay arrival at the synthetic server, not just a successful response:
+    // no cancellation is considered applied until this gate is released.
+    if (cancelGate) await cancelGate.promise;
+    appliedCancellations.push(body.attempt_nonce);
+    return reply({ cancelled: true }).catch(() => {});
   }
   if (url.pathname === '/browser/login/activate') {
     activations.push(body);
@@ -238,6 +248,7 @@ try {
     .click();
   await expect.poll(() => starts.length).toBe(1);
   const old = starts[0].attempt_nonce;
+  cancelGate = deferred();
   await expect(
     page.getByRole('button', {
       name: 'Continue as Silicon in this tab',
@@ -250,8 +261,9 @@ try {
   await expect.poll(() => cancellations.includes(old)).toBe(true);
   assert(
     held.has(old),
-    'Cancellation must finish while the original start response is still held.',
+    'The original start response remains held after Close.',
   );
+  assert.deepEqual(appliedCancellations, []);
   await page
     .getByRole('button', {
       name: 'Continue as Silicon in this tab',
@@ -263,7 +275,19 @@ try {
   assert.notEqual(old, next);
   assert.equal(starts[1].identity_kind, 'silicon');
   assert.equal(starts[1].popup_nonce, undefined);
+  assert.deepEqual(
+    starts[1].retired_attempt_nonces,
+    [old],
+    'The successor carries its exact retired attempt before cancellation reaches the gateway.',
+  );
+  const staleReply = page.waitForResponse(
+    (response) =>
+      response.url().includes('/browser/login/start') &&
+      response.request().postDataJSON()?.attempt_nonce === old,
+  );
   held.get(old).resolve(409);
+  await (await staleReply).finished();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(
     page.getByRole('button', { name: 'Cancel sign-in', exact: true }),
   ).toBeVisible();
@@ -275,15 +299,27 @@ try {
   ).toBeDisabled();
   assert.deepEqual(cancellations, [old]);
   held.get(next).resolve(200);
-  await page.waitForURL(`${origin}/fixture/iam?attempt=${next}`);
+  await page.waitForURL(
+    (url) =>
+      url.pathname === '/fixture/iam' &&
+      url.searchParams.get('attempt') === next,
+  );
+  assert.deepEqual(
+    appliedCancellations,
+    [],
+    'Fresh full-page handoff must proceed before the old cancellation arrives.',
+  );
   assert.deepEqual(
     cancellations,
     [old],
     'A late rejected start must not cancel its successor.',
   );
   assert.equal(await selected(page), 'anonymous');
+  cancelGate.resolve();
+  cancelGate = undefined;
+  await expect.poll(() => appliedCancellations.includes(old)).toBe(true);
   console.log(
-    'PASS delayed start cancellation and fresh typed full-page fallback',
+    'PASS delayed start and cancellation do not block or cancel a fresh typed full-page fallback',
   );
   await page.close();
 
@@ -349,8 +385,52 @@ try {
     'PASS two-tab selectors survive shared-cookie replacement/reload; unknown selector never falls back',
   );
 
+  const obsolete = await newPage(A);
+  await obsolete.goto(origin);
+  const newerAttempt = {
+    nonce: 'e'.repeat(64),
+    kind: 'carbon',
+    state: 'b'.repeat(64),
+  };
+  await obsolete.evaluate(
+    (attempt) =>
+      sessionStorage.setItem(
+        'briefcase-login-attempt',
+        JSON.stringify(attempt),
+      ),
+    newerAttempt,
+  );
+  const previousActivations = activations.length;
+  await obsolete.goto(`${origin}/?iam_activate=${'a'.repeat(64)}&context=${C}`);
+  await expect(obsolete.getByRole('alert')).toContainText(
+    'Invalid sign-in completion',
+  );
+  assert.equal(
+    activations.length,
+    previousActivations,
+    'An old same-kind callback must be rejected before activation.',
+  );
+  assert.equal(await selected(obsolete), A);
+  assert.deepEqual(
+    await obsolete.evaluate(() =>
+      JSON.parse(sessionStorage.getItem('briefcase-login-attempt')),
+    ),
+    newerAttempt,
+  );
+  await obsolete.close();
+  console.log(
+    'PASS an old same-kind full-page callback cannot activate after a newer saved attempt',
+  );
+
   await left.evaluate(() =>
-    sessionStorage.setItem('briefcase-login-kind', 'carbon'),
+    sessionStorage.setItem(
+      'briefcase-login-attempt',
+      JSON.stringify({
+        nonce: 'd'.repeat(64),
+        kind: 'carbon',
+        state: 'a'.repeat(64),
+      }),
+    ),
   );
   firstActivation = deferred();
   activationGate = deferred();
@@ -389,6 +469,7 @@ try {
   assert.deepEqual(pageErrors, []);
 } finally {
   for (const gate of held.values()) gate.resolve(409);
+  cancelGate?.resolve();
   activationGate?.resolve();
   await context.close().catch(() => {});
   await browser.close();

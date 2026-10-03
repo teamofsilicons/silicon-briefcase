@@ -21,7 +21,7 @@ async function preview(t, options) {
   return { request, origin };
 }
 
-test('preview rejects nonlocal origins and hosts before changing state', async (t) => {
+void test('preview rejects nonlocal origins and hosts before changing state', async (t) => {
   const { request, origin } = await preview(t);
   assert.equal(
     (
@@ -59,7 +59,7 @@ test('preview rejects nonlocal origins and hosts before changing state', async (
   );
 });
 
-test('session simulation is explicitly local and restart-isolated', async (t) => {
+void test('session simulation is explicitly local and restart-isolated', async (t) => {
   const { request } = await preview(t, { signedOut: true });
   const session = await (await request('/session')).json();
   assert.equal(session.authenticated, false);
@@ -77,7 +77,7 @@ test('session simulation is explicitly local and restart-isolated', async (t) =>
   assert.equal((await second.request('/entries')).status, 200);
 });
 
-test('folder changes preserve descendant paths, prevent cycles, and restore bin state', async (t) => {
+void test('folder changes preserve descendant paths, prevent cycles, and restore bin state', async (t) => {
   const { request } = await preview(t);
   const campaign = await (
     await request('/entries?path=Design%2FAutumn%20campaign')
@@ -140,7 +140,7 @@ test('folder changes preserve descendant paths, prevent cycles, and restore bin 
   );
 });
 
-test('previews contain valid file bytes and public access only opens after enabling a link', async (t) => {
+void test('previews contain valid file bytes and public access only opens after enabling a link', async (t) => {
   const { request, origin } = await preview(t);
   const pdf = await request('/entries/brand-guide/content', 'GET', undefined, {
     Range: 'bytes=0-7',
@@ -179,7 +179,7 @@ test('previews contain valid file bytes and public access only opens after enabl
   assert.match(download.headers.get('content-disposition'), /^attachment;/);
 });
 
-test('controlled upload rejection and lost response keep retry behavior testable', async (t) => {
+void test('controlled upload rejection and lost response keep retry behavior testable', async (t) => {
   const { request, origin } = await preview(t);
   const upload = (name, operation) => {
     const params = new URLSearchParams({
@@ -218,7 +218,7 @@ test('controlled upload rejection and lost response keep retry behavior testable
   );
 });
 
-test('preview selects only its public saved context, never an organization substitute', async (t) => {
+void test('preview selects only its public saved context, never an organization substitute', async (t) => {
   const { request } = await preview(t);
   const session = await (await request('/session')).json();
   assert.equal(session.contexts.length, 1);

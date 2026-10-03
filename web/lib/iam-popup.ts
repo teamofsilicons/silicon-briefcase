@@ -142,3 +142,81 @@ export function safeLoginReturn(value: unknown): string {
     throw new Error('Invalid sign-in return path.');
   return value;
 }
+
+export type SavedLoginAttempt = {
+  nonce: string;
+  kind: IdentityKind;
+  state?: string;
+};
+const attemptKey = 'briefcase-login-attempt';
+const retiredKey = 'briefcase-retired-login-attempts';
+const validNonce = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+export function savedLoginAttempt(): SavedLoginAttempt | null {
+  const raw = sessionStorage.getItem(attemptKey);
+  if (!raw) return null;
+  const value = JSON.parse(raw) as SavedLoginAttempt;
+  if (
+    !validNonce(value.nonce) ||
+    !['carbon', 'silicon'].includes(value.kind) ||
+    (value.state !== undefined && !validNonce(value.state))
+  )
+    throw new Error('Invalid saved sign-in attempt.');
+  return value;
+}
+export function retiredLoginAttempts(): string[] {
+  const values: unknown = JSON.parse(
+    sessionStorage.getItem(retiredKey) || '[]',
+  );
+  return Array.isArray(values) ? values.filter(validNonce).slice(-32) : [];
+}
+export function retireLoginAttempt(nonce: string) {
+  sessionStorage.setItem(
+    retiredKey,
+    JSON.stringify(
+      [
+        ...retiredLoginAttempts().filter((value) => value !== nonce),
+        nonce,
+      ].slice(-32),
+    ),
+  );
+  if (savedLoginAttempt()?.nonce === nonce) {
+    sessionStorage.removeItem(attemptKey);
+    sessionStorage.removeItem('briefcase-login-return');
+  }
+}
+export function beginLoginAttempt(nonce: string, kind: IdentityKind) {
+  const previous = savedLoginAttempt();
+  if (previous && previous.nonce !== nonce) retireLoginAttempt(previous.nonce);
+  sessionStorage.setItem(attemptKey, JSON.stringify({ nonce, kind }));
+}
+export function bindLoginAttempt(nonce: string, redirectUrl: string) {
+  const attempt = savedLoginAttempt();
+  if (!attempt || attempt.nonce !== nonce)
+    throw new Error('Sign-in was superseded.');
+  const callback = new URL(
+    new URL(redirectUrl, window.location.origin).searchParams.get(
+      'redirect_uri',
+    ) || '',
+  );
+  const state = callback.searchParams.get('state');
+  if (
+    callback.origin !== window.location.origin ||
+    callback.pathname !== '/auth/callback' ||
+    !validNonce(state)
+  )
+    throw new Error('Invalid sign-in callback.');
+  sessionStorage.setItem(attemptKey, JSON.stringify({ ...attempt, state }));
+}
+export function completeLoginAttempt(nonce: string) {
+  if (savedLoginAttempt()?.nonce === nonce)
+    sessionStorage.removeItem(attemptKey);
+}
+
+export function isCurrentLoginState(state: unknown): boolean {
+  try {
+    return validNonce(state) && savedLoginAttempt()?.state === state;
+  } catch {
+    return false;
+  }
+}

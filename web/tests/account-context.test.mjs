@@ -10,7 +10,7 @@ globalThis.window = {};
 globalThis.sessionStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
 globalThis.localStorage = { getItem: () => 'off' };
 
-test('requests and media retain the account and testing context that initiated them', async () => {
+void test('requests and media retain the account and testing context that initiated them', async () => {
   api.setAccountContext('account-a');
   api.setWorkspaceOrganization('org-a');
   values.set('briefcase-test-environment', 'test-a');
@@ -32,7 +32,7 @@ test('requests and media retain the account and testing context that initiated t
   values.clear();
 });
 
-test('same-context responses are accepted and switching never replays a mutation', async () => {
+void test('same-context responses are accepted and switching never replays a mutation', async () => {
   api.setAccountContext('account-c');
   let calls = 0;
   globalThis.fetch = async () => { calls += 1; return new Response(JSON.stringify({ id: 'saved' })); };
@@ -40,7 +40,7 @@ test('same-context responses are accepted and switching never replays a mutation
   assert.equal(calls, 1);
 });
 
-test('a delayed JSON body is fenced even after switching away and back', async () => {
+void test('a delayed JSON body is fenced even after switching away and back', async () => {
   api.setAccountContext('account-body');
   let finishBody;
   let startedBody;
@@ -57,7 +57,7 @@ test('a delayed JSON body is fenced even after switching away and back', async (
   await assert.rejects(pending, error => error.status === 409);
 });
 
-test('test re-entry replaces only its world selector, preserving production after an anonymous visit', () => {
+void test('test re-entry replaces only its world selector, preserving production after an anonymous visit', () => {
   const production = '11111111-1111-4111-8111-111111111111';
   const world = '22222222-2222-4222-8222-222222222222';
   const next = '33333333-3333-4333-8333-333333333333';
@@ -74,7 +74,7 @@ test('test re-entry replaces only its world selector, preserving production afte
   assert.throws(() => api.enterTestingEnvironment(world, '------------------------------------'), /verified/);
 });
 
-test('anonymous selection is explicit and survives a late cookie without adopting that account', async () => {
+void test('anonymous selection is explicit and survives a late cookie without adopting that account', async () => {
   api.setAccountContext(null);
   globalThis.fetch = async (url, options) => {
     assert.equal(options.headers['X-Briefcase-Context'], 'anonymous');

@@ -175,6 +175,8 @@ pub(crate) struct LoginFlow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Start {
+    #[serde(default)]
+    retired_attempt_nonces: Vec<String>,
     attempt_nonce: Option<String>,
     return_to: Option<String>,
     identity_kind: Option<ActorType>,
@@ -229,10 +231,29 @@ pub(crate) async fn start(
     if flows.contains_key(&format!("cancel-{attempt_nonce}")) {
         return Err(login_changed());
     }
-    for flow in flows.values_mut() {
-        if browser_group.is_some() && flow.browser_group == browser_group {
-            flow.cancelled = true;
+    if input.retired_attempt_nonces.len() > 32
+        || input
+            .retired_attempt_nonces
+            .iter()
+            .any(|retired| !valid_nonce(retired) || retired == &attempt_nonce)
+    {
+        return Err(bad("Invalid retired sign-in attempts."));
+    }
+    if flows.len() + input.retired_attempt_nonces.len() >= 256 {
+        return Err(Failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sign-in attempts. Try again shortly.".into(),
+        ));
+    }
+    // A replacement start carries the tab's cancellation intent atomically.
+    // It does not wait for, or trust the arrival order of, a separate cancel.
+    for retired in input.retired_attempt_nonces {
+        for flow in flows.values_mut() {
+            if flow.attempt_nonce == retired {
+                flow.cancelled = true;
+            }
         }
+        flows.insert(format!("cancel-{retired}"), cancellation_marker(retired));
     }
     if flows.len() >= 256 {
         return Err(Failure(
@@ -455,6 +476,23 @@ async fn invalidate_logins(app: &App, headers: &HeaderMap) -> Result<()> {
     }
     save_flows(app, &flows)
 }
+fn cancellation_marker(attempt_nonce: String) -> LoginFlow {
+    LoginFlow {
+        activation_version: 0,
+        attempt_nonce,
+        previous_context: None,
+        candidate_id: None,
+        cancelled: true,
+        activated: false,
+        browser_group: None,
+        return_to: "/".into(),
+        deadline: SystemTime::now() + Duration::from_secs(600),
+        operation_id: Uuid::nil(),
+        telemetry: false,
+        identity_kind: None,
+        popup_nonce: None,
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CancelLogin {
@@ -481,24 +519,7 @@ pub(crate) async fn cancel_login(
             "Too many sign-in attempts. Retry cancellation shortly.".into(),
         ));
     }
-    flows.insert(
-        tombstone,
-        LoginFlow {
-            activation_version: 0,
-            attempt_nonce: input.attempt_nonce.clone(),
-            previous_context: None,
-            candidate_id: None,
-            cancelled: true,
-            activated: false,
-            browser_group: None,
-            return_to: "/".into(),
-            deadline: SystemTime::now() + Duration::from_secs(600),
-            operation_id: Uuid::nil(),
-            telemetry: false,
-            identity_kind: None,
-            popup_nonce: None,
-        },
-    );
+    flows.insert(tombstone, cancellation_marker(input.attempt_nonce.clone()));
     save_flows(&app, &flows)?;
     let clear = HeaderValue::from_str(&format!(
         "{}-login-{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
@@ -1616,6 +1637,7 @@ pub(crate) mod tests {
             State(app.clone()),
             HeaderMap::new(),
             Json(Start {
+                retired_attempt_nonces: vec![],
                 attempt_nonce: None,
                 return_to: None,
                 identity_kind: Some(ActorType::Carbon),
@@ -1675,6 +1697,7 @@ pub(crate) mod tests {
             State(app.clone()),
             headers(&first_id, None),
             Json(Start {
+                retired_attempt_nonces: vec![],
                 attempt_nonce: None,
                 return_to: None,
                 identity_kind: Some(ActorType::Silicon),
@@ -1707,6 +1730,7 @@ pub(crate) mod tests {
             State(app.clone()),
             headers(&old_id, None),
             Json(Start {
+                retired_attempt_nonces: vec![],
                 attempt_nonce: Some(nonce.clone()),
                 identity_kind: Some(ActorType::Carbon),
                 popup_nonce: popup.then(|| nonce.clone()),
@@ -1816,6 +1840,7 @@ pub(crate) mod tests {
             State(app.clone()),
             h.clone(),
             Json(Start {
+                retired_attempt_nonces: vec![old_nonce.clone()],
                 attempt_nonce: Some("c".repeat(64)),
                 identity_kind: Some(ActorType::Silicon),
                 popup_nonce: Some("d".repeat(64)),
@@ -1881,6 +1906,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_start_retires_delayed_predecessor_before_cancel_arrives() {
+        let app = app();
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        start(
+            State(app.clone()),
+            HeaderMap::new(),
+            Json(Start {
+                retired_attempt_nonces: vec![a.clone()],
+                attempt_nonce: Some(b.clone()),
+                identity_kind: Some(ActorType::Silicon),
+                popup_nonce: None,
+                return_to: None,
+            }),
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert!(
+            start(
+                State(app.clone()),
+                HeaderMap::new(),
+                Json(Start {
+                    retired_attempt_nonces: vec![],
+                    attempt_nonce: Some(a.clone()),
+                    identity_kind: Some(ActorType::Carbon),
+                    popup_nonce: Some(a.clone()),
+                    return_to: None,
+                })
+            )
+            .await
+            .is_err()
+        );
+        cancel_login(State(app.clone()), Json(CancelLogin { attempt_nonce: a }))
+            .await
+            .ok()
+            .unwrap();
+        assert!(
+            app.logins
+                .lock()
+                .await
+                .values()
+                .any(|flow| flow.attempt_nonce == b
+                    && !flow.cancelled
+                    && flow.identity_kind == Some(ActorType::Silicon))
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_before_start_is_durable_and_does_not_block_a_new_nonce() {
         let mut app = app();
         let root = tempfile::tempdir().unwrap();
@@ -1898,6 +1972,7 @@ pub(crate) mod tests {
         .unwrap();
         app.logins = Arc::new(Mutex::new(storage.read("logins").unwrap().unwrap()));
         let old = Start {
+            retired_attempt_nonces: vec![],
             attempt_nonce: Some(nonce.clone()),
             identity_kind: Some(ActorType::Carbon),
             popup_nonce: Some(nonce),
@@ -1912,6 +1987,7 @@ pub(crate) mod tests {
             StatusCode::CONFLICT
         );
         let new = Start {
+            retired_attempt_nonces: vec![],
             attempt_nonce: Some("c".repeat(64)),
             identity_kind: Some(ActorType::Silicon),
             popup_nonce: None,
@@ -2003,6 +2079,7 @@ pub(crate) mod tests {
             State(app.clone()),
             h,
             Json(Start {
+                retired_attempt_nonces: vec![],
                 attempt_nonce: Some("c".repeat(64)),
                 return_to: None,
                 identity_kind: Some(ActorType::Carbon),
@@ -2086,6 +2163,7 @@ pub(crate) mod tests {
                 State(app.clone()),
                 headers(&first_id, None),
                 Json(Start {
+                    retired_attempt_nonces: vec![],
                     attempt_nonce: None,
                     return_to: Some(destination.into()),
                     identity_kind: Some(kind),
@@ -2344,6 +2422,7 @@ pub(crate) mod tests {
                 State(app.clone()),
                 HeaderMap::new(),
                 Json(Start {
+                    retired_attempt_nonces: vec![],
                     attempt_nonce: None,
                     identity_kind: Some(ActorType::Silicon),
                     popup_nonce: Some("a".repeat(64)),

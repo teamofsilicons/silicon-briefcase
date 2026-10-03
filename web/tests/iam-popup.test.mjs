@@ -6,6 +6,11 @@ import {
   PopupBlockedError,
   continueIamInThisTab,
   safeLoginReturn,
+  beginLoginAttempt,
+  bindLoginAttempt,
+  savedLoginAttempt,
+  retireLoginAttempt,
+  retiredLoginAttempts,
 } from '../lib/iam-popup.ts';
 
 function browser(t) {
@@ -35,7 +40,7 @@ function browser(t) {
   });
   return { window, popup, send: (data) => listeners.get('message')?.(data) };
 }
-test('popup completion requires the exact origin, opened window and unpredictable nonce', async (t) => {
+void test('popup completion requires the exact origin, opened window and unpredictable nonce', async (t) => {
   const b = browser(t);
   let nonce,
     completed = false;
@@ -69,7 +74,7 @@ test('popup completion requires the exact origin, opened window and unpredictabl
   assert.equal(completed, true);
   assert.equal(b.popup.closed, true);
 });
-test('blocked popups fail clearly and completion never sends callback credentials', async (t) => {
+void test('blocked popups fail clearly and completion never sends callback credentials', async (t) => {
   const b = browser(t);
   b.window.open = () => null;
   await assert.rejects(
@@ -97,7 +102,7 @@ test('blocked popups fail clearly and completion never sends callback credential
   });
 });
 
-test('aborting a popup closes it and ignores its late reply', async (t) => {
+void test('aborting a popup closes it and ignores its late reply', async (t) => {
   const b = browser(t);
   const controller = new AbortController();
   const pending = openIamPopup(() => '/start', controller.signal);
@@ -111,7 +116,7 @@ test('aborting a popup closes it and ignores its late reply', async (t) => {
   );
 });
 
-test('blocked popup permits an explicit full-page start and cancelled starts never navigate', async (t) => {
+void test('blocked popup permits an explicit full-page start and cancelled starts never navigate', async (t) => {
   const b = browser(t);
   let assigned,
     starts = 0;
@@ -157,10 +162,48 @@ test('blocked popup permits an explicit full-page start and cancelled starts nev
   assert.equal(assigned, undefined);
 });
 
-test('full-page completion permits only canonical local workspace paths', t => {
+void test('full-page completion permits only canonical local workspace paths', (t) => {
   browser(t);
   assert.equal(safeLoginReturn('/'), '/');
   assert.equal(safeLoginReturn('/org/tos/files'), '/org/tos/files');
-  for (const value of ['https://evil.example', '//evil.example', '/org/../evil', '/org/tos?redirect=evil', '/org/tos#bad', undefined])
+  for (const value of [
+    'https://evil.example',
+    '//evil.example',
+    '/org/../evil',
+    '/org/tos?redirect=evil',
+    '/org/tos#bad',
+    undefined,
+  ])
     assert.throws(() => safeLoginReturn(value), /Invalid/);
+});
+
+void test('a newer same-kind attempt retires the persisted full-page predecessor', (t) => {
+  browser(t);
+  const previous = globalThis.sessionStorage;
+  const values = new Map();
+  globalThis.sessionStorage = {
+    getItem: (k) => values.get(k) ?? null,
+    setItem: (k, v) => values.set(k, v),
+    removeItem: (k) => values.delete(k),
+  };
+  t.after(() => {
+    globalThis.sessionStorage = previous;
+  });
+  const a = 'a'.repeat(64),
+    b = 'b'.repeat(64),
+    stateA = 'c'.repeat(64),
+    stateB = 'd'.repeat(64);
+  const redirect = (state) =>
+    'https://iam.example/login?redirect_uri=' +
+    encodeURIComponent('https://app.example/auth/callback?state=' + state);
+  beginLoginAttempt(a, 'carbon');
+  bindLoginAttempt(a, redirect(stateA));
+  assert.equal(savedLoginAttempt().state, stateA);
+  beginLoginAttempt(b, 'carbon');
+  bindLoginAttempt(b, redirect(stateB));
+  assert.deepEqual(retiredLoginAttempts(), [a]);
+  assert.equal(savedLoginAttempt().state, stateB);
+  assert.throws(() => bindLoginAttempt(a, redirect(stateA)), /superseded/);
+  retireLoginAttempt(a);
+  assert.equal(savedLoginAttempt().nonce, b);
 });
