@@ -32,7 +32,7 @@ export default function TestSignIn() {
         throw new Error('Briefcase did not return a testing environment.');
       setSecret('');
       setSlt('');
-      enterTestingEnvironment(result.test_environment.id);
+      enterTestingEnvironment(result.test_environment.id, result.context_id);
     } catch (error) {
       setError(
         error instanceof Error

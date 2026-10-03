@@ -5,6 +5,7 @@ import {
   completeIamPopup,
   PopupBlockedError,
   continueIamInThisTab,
+  safeLoginReturn,
 } from '../lib/iam-popup.ts';
 
 function browser(t) {
@@ -154,4 +155,12 @@ test('blocked popup permits an explicit full-page start and cancelled starts nev
   resolve('/must-not-navigate');
   await assert.rejects(pending, /cancelled/);
   assert.equal(assigned, undefined);
+});
+
+test('full-page completion permits only canonical local workspace paths', t => {
+  browser(t);
+  assert.equal(safeLoginReturn('/'), '/');
+  assert.equal(safeLoginReturn('/org/tos/files'), '/org/tos/files');
+  for (const value of ['https://evil.example', '//evil.example', '/org/../evil', '/org/tos?redirect=evil', '/org/tos#bad', undefined])
+    assert.throws(() => safeLoginReturn(value), /Invalid/);
 });

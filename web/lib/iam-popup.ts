@@ -21,8 +21,8 @@ const validContext = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 
-// Completion carries only a correlation nonce. The opener reloads its own
-// server session; a window message never supplies identity or credentials.
+// Completion carries a nonce and public candidate receipt. Only explicit
+// server activation can select it; messages never contain credentials.
 export function completeIamPopup(): boolean {
   const url = new URL(window.location.href);
   if (url.searchParams.get('iam_popup') !== 'complete') return false;
@@ -123,4 +123,22 @@ export function openIamPopup(
         ),
       );
   });
+}
+
+/** Verify server return paths again before browser navigation. */
+export function safeLoginReturn(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    (value !== '/' && !value.startsWith('/org/'))
+  )
+    throw new Error('Invalid sign-in return path.');
+  const parsed = new URL(value, window.location.origin);
+  if (
+    parsed.origin !== window.location.origin ||
+    parsed.pathname !== value ||
+    parsed.search ||
+    parsed.hash
+  )
+    throw new Error('Invalid sign-in return path.');
+  return value;
 }

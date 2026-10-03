@@ -50,7 +50,7 @@ export default function TestingEnvironments({
         );
       setAppSecret('');
       setSlt('');
-      enterTestingEnvironment(result.test_environment.id);
+      enterTestingEnvironment(result.test_environment.id, result.context_id);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       setError(

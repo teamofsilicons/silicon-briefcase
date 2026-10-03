@@ -8,18 +8,12 @@ sharing, and notifications.
 
 ## Sign-in
 
-1. Select **Continue with IAM**. No organisation ID is required.
-2. Briefcase redirects to `https://auth.iam.teamofsilicons.com/login`, passing
-   `app_id=briefcase` and a server-generated `redirect_uri`. The
-   organization is selected in IAM; existing file links retain their destination
-   without changing the session scope.
-   Production uses `https://briefcase.teamofsilicons.com/auth/callback`;
-   local development uses the same path on the configured local origin.
-   The callback URL includes a random, short-lived `state` query value matched
-   against the browser's HttpOnly login cookie and pending server-side flow.
-3. IAM authenticates you and returns a short-lived token to the callback.
-4. The gateway validates the browser-bound callback, exchanges the token through
-   Briefcase, and redirects to the file manager with the token removed from the URL.
+1. Choose **Continue as Carbon** or **Continue as Silicon**. IAM selects the organization. A same-tab option remains available when the popup is blocked or while it is pending.
+2. Briefcase creates a ten-minute server flow, random state, and separate HttpOnly cookie for that attempt. The callback is `/auth/callback` on the configured origin.
+3. IAM authenticates you and returns an SLT. The gateway exchanges it once, verifies the selected kind, and saves a quarantined candidate. The callback never selects the browser account or clears a newer attempt's cookie.
+4. The initiating tab explicitly activates the candidate using its matching state or popup nonce. A cancelled, expired, mismatched, or superseded flow cannot activate. Cancellation is recorded durably even if it arrives before a delayed start.
+
+Each tab keeps only a public context UUID (or explicit `anonymous`) in sessionStorage, separately for production and each testing world. The gateway resolves that selector only within the cookie-authenticated browser group and exact world; it is not a credential. A late cookie response cannot change an already selected tab, including after reload. Invalid selectors fail closed, and a current 401 clears only that tab's selection. The gateway retains the same callback exchange and activation identity for bounded retries; tokens never enter popup messages or browser storage.
 
 When sign-in starts from a file link, the gateway retains its validated same-origin
 `/org/` return path in the pending flow. Absolute URLs, other origins, query strings,
@@ -89,8 +83,7 @@ Serve the assets and `/browser` routes on the same browser origin. For HTTPS
 deployment, build the assets before starting the gateway and configure the
 canonical HTTPS origin. HTTP origins are accepted only for loopback development.
 
-Browser sessions last at most eight hours and are held in gateway memory.
-Restarting the gateway signs users out. HTTPS cookies use `Secure`, `HttpOnly`,
+Browser session families have a maximum 900-day gateway lifetime and remain subject to IAM validity. The configured private durable session store preserves sessions and pending receipts across gateway restarts. HTTPS cookies use `Secure`, `HttpOnly`,
 and the `__Host-` prefix. Pending sign-ins expire after ten minutes.
 Exclude callback query strings and authentication headers from proxy access logs.
 

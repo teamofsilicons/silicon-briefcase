@@ -47,8 +47,36 @@ export class ApiError extends Error {
 let workspaceOrganization: string | null = null;
 let accountContext: string | null = null;
 let contextEpoch = 0;
-export const browserContextGeneration = () => contextEpoch;
+let selectorLoaded = false;
+let anonymousSelected = false;
+const selectorKey = () =>
+  'briefcase-context:' + (testingEnvironment() || 'production');
+function loadSelector() {
+  if (selectorLoaded || typeof window === 'undefined') return;
+  const saved = sessionStorage.getItem(selectorKey());
+  if (
+    saved &&
+    saved !== 'anonymous' &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      saved,
+    )
+  )
+    throw new ApiError(
+      'The saved account selection is invalid. Sign in again.',
+      409,
+    );
+  accountContext = saved && saved !== 'anonymous' ? saved : null;
+  anonymousSelected = saved === 'anonymous';
+  selectorLoaded = true;
+}
+export const browserContextGeneration = () => {
+  loadSelector();
+  return contextEpoch;
+};
 export function setAccountContext(context: string | null) {
+  sessionStorage.setItem(selectorKey(), context || 'anonymous');
+  selectorLoaded = true;
+  anonymousSelected = context === null;
   if (accountContext !== context) contextEpoch += 1;
   accountContext = context;
 }
@@ -60,21 +88,34 @@ export function testingEnvironment(): string | null {
     ? null
     : sessionStorage.getItem('briefcase-test-environment');
 }
-export function enterTestingEnvironment(id: string) {
+export function enterTestingEnvironment(id: string, context: string) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      context,
+    )
+  )
+    throw new ApiError('The testing account could not be verified.', 409);
+  sessionStorage.setItem('briefcase-context:' + id, context);
   contextEpoch += 1;
   sessionStorage.setItem('briefcase-test-environment', id);
+  selectorLoaded = false;
+  loadSelector();
   window.location.assign('/');
 }
 export function returnToProduction() {
   contextEpoch += 1;
   sessionStorage.removeItem('briefcase-test-environment');
+  selectorLoaded = false;
+  loadSelector();
   window.location.assign('/');
 }
 export function browserUrl(path: string): string {
+  loadSelector();
   const params = new URLSearchParams();
   const id = testingEnvironment();
   if (id) params.set('test_environment', id);
   if (accountContext) params.set('account_context', accountContext);
+  else if (anonymousSelected) params.set('account_context', 'anonymous');
   return params.size ? path + (path.includes('?') ? '&' : '?') + params : path;
 }
 export async function api<T>(
@@ -82,6 +123,7 @@ export async function api<T>(
   method = 'GET',
   body?: unknown,
 ): Promise<T> {
+  loadSelector();
   const context = accountContext;
   const epoch = contextEpoch;
   const environment = testingEnvironment();
@@ -91,7 +133,11 @@ export async function api<T>(
     headers: {
       'Content-Type': 'application/json',
       'X-Briefcase-Browser': '1',
-      ...(context ? { 'X-Briefcase-Context': context } : {}),
+      ...(context
+        ? { 'X-Briefcase-Context': context }
+        : anonymousSelected
+          ? { 'X-Briefcase-Context': 'anonymous' }
+          : {}),
       'X-Briefcase-Telemetry': telemetryEnabled() ? 'on' : 'off',
       ...(workspaceOrganization && path !== '/session'
         ? { 'X-Briefcase-Organization': workspaceOrganization }
