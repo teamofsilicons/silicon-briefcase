@@ -1,6 +1,6 @@
 # On-behalf-of access
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 OBO lets an application act for a carbon or silicon after that person or custodian-approved identity authorizes a feature. Login grants an application session for one account and organization. Request Briefcase OBO consent separately, when the user chooses a feature that reads or stores files. IAM displays the selected endpoints, dependencies and destination account/organization before approval.
 

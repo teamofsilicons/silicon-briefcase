@@ -164,7 +164,7 @@ delivered, or successfully replayed a webhook.
 
 ## OBO registration and consent
 
-> **Integration preview for Briefcase 3.0.0 / IAM 5.0.0.** These docs are published ahead of the coordinated runtime rollout. Check `/api/version` before switching a production client; a published guide does not mean the new service is live.
+> **Live integration baseline — October 3, 2026:** Briefcase 3.0.0 and IAM 5.0.0 are deployed. Browser popup and expanded saved-workspace interface changes are a separate follow-up; use the API/CLI contracts below now, and check the application before relying on those interface additions.
 
 Briefcase 3.0.0 verifies reusable `oba_` access tokens online through IAM 5.0.0. Request OBO consent after login, exchange and refresh the OBO tokens through the initiating app, and send `X-App-ID` plus `X-IAM-OBO-Access-Token` to supported delegated routes. The legacy one-shot raw upload is retired. See the [OBO migration guide](obo.md) for endpoint registration, code migration and release gates.
 
@@ -174,7 +174,7 @@ Webhook approval, endpoint registration, login scopes and OBO consent are separa
 
 ## First official release requirements
 
-Use IAM client 1.8.0 and the corresponding deployed IAM contract. Subject
+Use IAM client 5.0.0 and the corresponding deployed IAM contract. Subject
 snapshots require `self.identity.read` and `self.membership.read`.
 `self.tags.read` adds tag-based access; its absence does not block the member's
 own private files. Use `self.organizations.read` for organization selection.
@@ -199,3 +199,5 @@ through the official SDK and discovers its environment without manual pairing.
 Honeycomb owns creation, imports, root-key rotation and lifecycle; IAM remains
 the runtime identity authority. Production and testing credentials are never
 interchangeable. See [participant integration](honeycomb-integration.md).
+
+For current browser integration patterns, see [the application guide](build-with-iam5.md).
