@@ -26,7 +26,11 @@ NOBYPASSRLS and `briefcase_worker` BYPASSRLS, already app-prefixed).
 
 ### What changed
 
-Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the testing plane":
+Commits: `eca8ed0` Authenticate with Silicon Accounts and retire IAM and the testing plane; `e9d76cc` Record the
+Silicon Accounts identity stage of the migration; `c966514` Resolve recipient ids at Silicon Accounts and word
+token refusals for callers; `aee2e80` Refuse an account in a tenant recorded for another owner; `8e0891f` Log the
+post-guard end-to-end run and migration gotchas; `636c554` Version the service 4.0.0 with contract 4.0.0 (and the
+commit adding this line).
 
 - **Dependencies.** `silicon-accounts-client = "0.4.0"` (crates.io) replaces `silicon-iam-client` and the whole
   `vendor/silicon-iam-client` tree (deleted). `ed25519-dalek` is a dev-dependency (test token signing).
