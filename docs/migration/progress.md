@@ -103,7 +103,7 @@ Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the test
 | `cd clients/rust && cargo test --locked --workspace --all-targets --all-features` | 177 passed, 0 failed, 2 ignored (unchanged; the client workspace is untouched) |
 | `cargo test --lib api::accounts_tests` (DB + wiremock Accounts) | 10 passed |
 | `cargo test --lib infrastructure::accounts` (wiremock Accounts) | 6 passed |
-| end-to-end against the shared local Silicon Accounts stack: `python3 <scratch>/briefcase-e2e/e2e.py r3` with the API on 127.0.0.1:4101 (`<scratch>/briefcase-e2e/run-api.py`) | 19/19 steps passed (below) |
+| end-to-end against the shared local Silicon Accounts stack: `python3 <scratch>/briefcase-e2e/e2e.py r3` with the API on 127.0.0.1:4101 (`<scratch>/briefcase-e2e/run-api.py`) | 19/19 steps passed (below); rerun as `r4` after the tenant owner guard on a fresh `briefcase_e2e`: 19/19, tenant `VHP` recorded with owner `VHP`, no warnings or errors in the log |
 | `briefcase-migrate` on a fresh database `briefcase_e2e` | 0001–0048 applied |
 | upgrade path: `<scratch>/briefcase-e2e/apply-0047.py briefcase_upgrade migrations` (origin/main's 0001–0047, recorded in `_sqlx_migrations` with sqlx checksums), a legacy fixture (org `tos`, 2 members), then the new `briefcase-migrate` | 0048 applied; members intact (2); `tos.owner_account_uuid` NULL; no accounts rows |
 | boot validation: `.mig/boot-check.sh` (runs `briefcase-api` with 11 bad configurations) | each refused with its exact message, e.g. `required environment variable BRIEFCASE_APP_SECRET is missing`, `invalid environment variable ACCOUNTS_URL: uses plain http for a host that is not this machine; use https, or http only for localhost, 127.0.0.1 or ::1`, `… BRIEFCASE_PROOF_ISSUERS: \`briefcase.files.delete\` is not a Briefcase delegated scope; use one of …`, `… ACCOUNTS_URL: must use https in production` |
@@ -158,4 +158,14 @@ the Carbon at Silicon Accounts → `account.updated` applied; `interface` issued
 - The shared stack rate-limits verification codes (429); the e2e driver backs off 30 s and retries.
 - Accounts uuids are 3+ alphanumerics, so a bare word like `bob` is a valid uuid shape: resolution treats it as
   a uuid (and answers `unknown_account`), not as a malformed id.
-- Test fixture databases: `briefcase_mig` (unit/integration), `briefcase_e2e` (end-to-end). Both on 5460.
+- Test fixture databases on 5460: `briefcase_mig` (unit/integration, recreated after the 0048 amendment),
+  `briefcase_e2e` (end-to-end), `briefcase_upgrade` (0047 + legacy fixture, then 0048).
+- Migration 0048 was amended in `aee2e80` (adds `organizations.owner_account_uuid`) before anything outside these
+  local databases applied it. A database migrated at `eca8ed0`/`c966514` fails sqlx's checksum check: recreate it.
+- The migrator embeds migrations at compile time (`sqlx::migrate!`): rebuild `briefcase-migrate` after editing
+  a migration, or the old SQL is applied.
+- zsh does not word-split `$VAR`; run multi-word env or command strings through `bash`.
+- `<scratch>/briefcase-e2e/` holds `run-api.py` (starts the API with the stack's briefcase credentials from
+  `test-stack.json`, never printing them), `e2e.py` (the 19-step check, restores the webhook URL at the end) and
+  `apply-0047.py` (brings a database to origin/main's schema the way sqlx would, for upgrade tests).
+  `.mig/boot-check.sh` runs the boot-validation cases.
