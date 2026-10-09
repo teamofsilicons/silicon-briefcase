@@ -4,6 +4,8 @@
 
 Briefcase 3.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSON operation revisions change to 3.0.0, and the legacy raw upload returns 410. The route namespace remains `/api/v1`. Ordinary file operations and the capability-only byte transfer keep their previous revisions. Deploy matched consumers and service together; see the [migration guide](obo.md).
 
+Briefcase 4.0.0 authenticates with Silicon Accounts: every route takes a Silicon Accounts access token issued to `briefcase`, the delegated `/obo/` operations take a User verification proof (`Authorization: Proof sap_…`) whose scope is the operation's endpoint id, and `X-Org-ID` is no longer read (except as the transfer route's tenant selector). `/iam`, `/auth/*` and the testing-environment operations are removed; `/accounts` and `/me` are added. The route namespace remains `/api/v1`.
+
 ## Negotiation
 
 Before sending credentials, the official client requests `GET /api/version` with `Briefcase-Supported-API-Versions: v1`. It verifies the service identity, selected major and every known operation's exact ID, revision, method and path. A missing or changed required operation fails startup. Extra operation IDs are allowed; duplicate IDs are invalid.
@@ -12,8 +14,9 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 ## Compatibility matrix
 
-| API contract | Backend | Rust client / CLI | IAM SDK |
+| API contract | Backend | Rust client / CLI | Identity SDK |
 | --- | --- | --- | --- |
+| 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-accounts-client 0.4.0 |
 | 3.0.0 / v1 | 3.0.0 | 3.0.0 | silicon-iam-client 5.0.0 |
 | 2.1.0 / v1 | 2.1.0 | 2.1.0 | silicon-iam-client 4.0.0 |
 

@@ -163,6 +163,11 @@ at 1.0.0. Other per-operation revisions are left for part 3, which changes paths
 `tests/openapi_contract.rs::official_client_consumes_the_exact_published_operations` is ignored until the client
 stage updates `briefcase-client`.
 
+### S17a. Service version 4.0.0
+`docs/version-policy.md` pairs the backend version with the contract (3.0.0/3.0.0, 2.1.0/2.1.0), so the
+`silicon-briefcase` package moves to 4.0.0 with contract 4.0.0 (the brief: 1.x/2.x/3.x → next major). The
+compatibility matrix gains the 4.0.0 row; the client stage ships the matching 4.0.0 client and CLI.
+
 ### S18. Errors carry exact reasons
 New `AppError::Explained { status, code, message }` (constructors `unauthorized`, `refused`, `unprocessable`)
 returns the precise reason and what to do, e.g. `token_expired`, `token_wrong_audience`, `token_revoked`,

@@ -89,6 +89,9 @@ Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the test
   (`invite_tag` is `#[cfg(test)]`); reads and revocations of existing tag grants still work.
 - **Delegated uploads:** the NOT NULL `iam_organization_id/iam_principal_id/iam_membership_id` columns now hold
   `domain::account::storage_key` UUIDv8s derived from tenant/account/membership (no schema change).
+- **Versions:** the service package is 4.0.0 (the repo's policy pairs backend and contract versions);
+  `docs/version-policy.md` has the 4.0.0 row (`silicon-accounts-client` 0.4.0). The client and CLI versions are
+  the client stage's.
 - **OpenAPI** `info.version` and `CONTRACT_VERSION` 4.0.0, 49 operations, `bearerAuth` (JWT) and `proofAuth`
   (`Proof`), `x-proof-scope` on delegated operations, unused schemas dropped. Transformation script kept at
   `<scratch>/briefcase-openapi-part1.py` (text-level, idempotent enough to re-run on 3.0.0).
@@ -106,6 +109,7 @@ Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the test
 | end-to-end against the shared local Silicon Accounts stack: `python3 <scratch>/briefcase-e2e/e2e.py r3` with the API on 127.0.0.1:4101 (`<scratch>/briefcase-e2e/run-api.py`) | 19/19 steps passed (below); rerun as `r4` after the tenant owner guard on a fresh `briefcase_e2e`: 19/19, tenant `VHP` recorded with owner `VHP`, no warnings or errors in the log |
 | `briefcase-migrate` on a fresh database `briefcase_e2e` | 0001–0048 applied |
 | upgrade path: `<scratch>/briefcase-e2e/apply-0047.py briefcase_upgrade migrations` (origin/main's 0001–0047, recorded in `_sqlx_migrations` with sqlx checksums), a legacy fixture (org `tos`, 2 members), then the new `briefcase-migrate` | 0048 applied; members intact (2); `tos.owner_account_uuid` NULL; no accounts rows |
+| `cargo deny --offline check licenses sources bans` | same 7 errors as origin/main (checked on a `git archive` of origin/main): webpki CDLA-Permissive-2.0 licenses ×3, the space-station git source ×2, the crate's own "Proprietary" license, path/wildcard deps. No new finding; cargo-deny is not run in CI. |
 | boot validation: `.mig/boot-check.sh` (runs `briefcase-api` with 11 bad configurations) | each refused with its exact message, e.g. `required environment variable BRIEFCASE_APP_SECRET is missing`, `invalid environment variable ACCOUNTS_URL: uses plain http for a host that is not this machine; use https, or http only for localhost, 127.0.0.1 or ::1`, `… BRIEFCASE_PROOF_ISSUERS: \`briefcase.files.delete\` is not a Briefcase delegated scope; use one of …`, `… ACCOUNTS_URL: must use https in production` |
 
 98 baseline tests no longer exist and 36 are new. The removed ones are the deleted IAM, Honeycomb and
