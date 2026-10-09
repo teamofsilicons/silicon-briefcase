@@ -108,6 +108,13 @@ existing repository bootstraps that tenant like a first IAM login did, with the 
 org tenants are unreachable through the API until part 3's re-keying. `/org/{tenant}/{path}` resolves only the
 caller's own tenant; `/api/v1/public/{tenant}/{path}` accepts account uuids or legacy org handles.
 
+### S10a. An account never acts in a tenant it does not own
+Account uuids are short base62 strings, so a lowercase uuid can spell a pre-migration organization handle (`tos`
+is a valid uuid). Migration 0048 adds `organizations.owner_account_uuid`; a tenant created for an account records
+it, and an account whose tenant key names a tenant recorded for anyone else (legacy organizations have NULL) is
+refused with 404 and an `account_tenant_conflict` error log — it never becomes that organization's owner. Part 2's
+drive model can rely on this column as the drive owner.
+
 ### S11. Recipients and ids
 Callers name accounts by `c:`/`si:` id (trimmed, lowercased) or by uuid (3+ alphanumerics; a bare `bob` is
 therefore treated as a uuid). Public ids move between accounts, so an id is always resolved with `lookup_by_id`

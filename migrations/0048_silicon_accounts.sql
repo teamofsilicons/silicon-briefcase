@@ -84,6 +84,14 @@ CREATE INDEX accounts_webhook_receipts_account_idx
     ON briefcase.accounts_webhook_receipts (account_uuid, received_at DESC)
     WHERE account_uuid IS NOT NULL;
 
+-- A tenant created for a Silicon Accounts account records that account, so a
+-- uuid that happens to spell a pre-migration organization handle (`tos` is a
+-- valid uuid) can never act inside that organization's tenant. Existing rows
+-- keep NULL: they are legacy organizations until the cutover re-keys them.
+ALTER TABLE briefcase.organizations
+    ADD COLUMN owner_account_uuid text COLLATE "C"
+        CHECK (owner_account_uuid IS NULL OR owner_account_uuid ~ '^[A-Za-z0-9]{3,32}$');
+
 REVOKE ALL ON briefcase.accounts FROM PUBLIC;
 REVOKE ALL ON briefcase.account_id_history FROM PUBLIC;
 REVOKE ALL ON briefcase.accounts_webhook_receipts FROM PUBLIC;

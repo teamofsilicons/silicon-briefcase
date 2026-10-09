@@ -81,6 +81,9 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     // Share recipients resolved through Silicon Accounts become members of
     // the caller's tenant so grants can name them. They never execute this
     // request; the caller's RLS and audit context stay in force.
+    if !execution.directory_members().is_empty() {
+        ensure_tenant(&mut transaction, authorization).await?;
+    }
     for member in execution.directory_members() {
         if member.organization_id() != authorization.organization_id() {
             return Err(MetadataRepositoryError::NotFound);
@@ -117,20 +120,54 @@ pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     })
 }
 
+/// Creates the tenant row on first use, recording the account it belongs to,
+/// and refuses an account acting in a tenant it does not own.
+///
+/// Account uuids are short base62 strings, so one can spell a pre-migration
+/// organization handle (`tos`). Such a tenant has no recorded owner, and the
+/// account is refused there instead of becoming its owner.
+async fn ensure_tenant(
+    transaction: &mut Transaction<'_, Postgres>,
+    authorization: &crate::domain::actor::RequestAuthContext,
+) -> Result<()> {
+    let owner = authorization.account().map(|account| account.uuid.as_str());
+    sqlx::query(
+        "INSERT INTO briefcase.organizations \
+             (org_id, iam_version, lifecycle_status, owner_account_uuid) \
+         VALUES (briefcase.current_org_id(), 0, 'active', $1) \
+         ON CONFLICT (org_id) DO NOTHING",
+    )
+    .bind(owner)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sql)?;
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    let recorded = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT owner_account_uuid FROM briefcase.organizations \
+          WHERE org_id = briefcase.current_org_id()",
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sql)?
+    .flatten();
+    if recorded.as_deref() != Some(owner) {
+        tracing::error!(
+            event = "account_tenant_conflict",
+            "an account's tenant key names a tenant recorded for another owner; refusing"
+        );
+        return Err(MetadataRepositoryError::NotFound);
+    }
+    Ok(())
+}
+
 /// Adds a resolved share recipient to the current tenant as an active member,
 /// without changing an existing membership.
 async fn project_recipient(
     transaction: &mut Transaction<'_, Postgres>,
     recipient: &crate::domain::actor::RequestAuthContext,
 ) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO briefcase.organizations (org_id, iam_version, lifecycle_status) \
-         VALUES (briefcase.current_org_id(), 0, 'active') \
-         ON CONFLICT (org_id) DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
     let actor = recipient.actor();
     sqlx::query(
         "INSERT INTO briefcase.organization_members \
@@ -225,14 +262,7 @@ async fn refresh_caller_projection(
 ) -> Result<()> {
     let authorization = execution.authorization();
     let actor = authorization.actor();
-    sqlx::query(
-        "INSERT INTO briefcase.organizations (org_id, iam_version, lifecycle_status) \
-         VALUES (briefcase.current_org_id(), 0, 'active') \
-         ON CONFLICT (org_id) DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
+    ensure_tenant(transaction, authorization).await?;
     // Request authority is not a directory update. Only unsigned bootstrap
     // rows may be refreshed; a concurrent signed snapshot always wins.
     let is_obo = authorization

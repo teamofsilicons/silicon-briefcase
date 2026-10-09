@@ -57,6 +57,8 @@ Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the test
   **Added:** `GET /api/v1/accounts` (public discovery: app id, Accounts URL, delegated scopes) and
   `GET /api/v1/me` (verified account, profile refreshed from `userinfo` when stale, custodian).
   `X-Org-ID` is no longer read except as the untrusted tenant selector of the capability-only transfer route.
+- **Tenant owner guard:** `organizations.owner_account_uuid` (migration 0048) records the account a tenant was
+  created for; an account whose uuid spells a legacy org handle is refused there (decisions S10a).
 - **Interim tenancy bridge (until part 2):** `RequestAuthContext::for_account` makes the verified account act in
   its own tenant: tenant key = account uuid, represented actor = (kind, uuid), role `owner`, no tags. Existing
   repository code then bootstraps that tenant (organizations/members rows + legacy root layout
@@ -97,15 +99,16 @@ Commit `eca8ed0` "Authenticate with Silicon Accounts and retire IAM and the test
 |---|---|
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | clean |
-| `BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig cargo test --locked --all-targets --all-features -- --test-threads=1` | 203 passed, 0 failed, 2 ignored (after the resolution hardening commit) |
+| `BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig cargo test --locked --all-targets --all-features -- --test-threads=1` (fresh `briefcase_mig`) | 204 passed, 0 failed, 2 ignored |
 | `cd clients/rust && cargo test --locked --workspace --all-targets --all-features` | 177 passed, 0 failed, 2 ignored (unchanged; the client workspace is untouched) |
-| `cargo test --lib api::accounts_tests` (DB + wiremock Accounts) | 9 passed |
+| `cargo test --lib api::accounts_tests` (DB + wiremock Accounts) | 10 passed |
 | `cargo test --lib infrastructure::accounts` (wiremock Accounts) | 6 passed |
 | end-to-end against the shared local Silicon Accounts stack: `python3 <scratch>/briefcase-e2e/e2e.py r3` with the API on 127.0.0.1:4101 (`<scratch>/briefcase-e2e/run-api.py`) | 19/19 steps passed (below) |
 | `briefcase-migrate` on a fresh database `briefcase_e2e` | 0001–0048 applied |
+| upgrade path: `<scratch>/briefcase-e2e/apply-0047.py briefcase_upgrade migrations` (origin/main's 0001–0047, recorded in `_sqlx_migrations` with sqlx checksums), a legacy fixture (org `tos`, 2 members), then the new `briefcase-migrate` | 0048 applied; members intact (2); `tos.owner_account_uuid` NULL; no accounts rows |
 | boot validation: `.mig/boot-check.sh` (runs `briefcase-api` with 11 bad configurations) | each refused with its exact message, e.g. `required environment variable BRIEFCASE_APP_SECRET is missing`, `invalid environment variable ACCOUNTS_URL: uses plain http for a host that is not this machine; use https, or http only for localhost, 127.0.0.1 or ::1`, `… BRIEFCASE_PROOF_ISSUERS: \`briefcase.files.delete\` is not a Briefcase delegated scope; use one of …`, `… ACCOUNTS_URL: must use https in production` |
 
-98 baseline tests no longer exist and 35 are new. The removed ones are the deleted IAM, Honeycomb and
+98 baseline tests no longer exist and 36 are new. The removed ones are the deleted IAM, Honeycomb and
 testing-plane suites (`api::testing_auth_tests`, `infrastructure::iam::*`, `api::webhook::*` (IAM HMAC),
 `application::webhook::*`, `infrastructure::postgres::webhook::*`, `infrastructure::testing::*`,
 `tests/postgres_testing_environments.rs`, `postgres_honeycomb*.rs`, `postgres_database_identity.rs`,
@@ -113,7 +116,7 @@ testing-plane suites (`api::testing_auth_tests`, `infrastructure::iam::*`, `api:
 testing-contract checks) plus tests rewritten under new names for the new surface (`api::auth`, `api::tests`
 security/discovery/retired-route checks, the tenant-projection check, the contract-version check). Every other
 baseline test passes unchanged. New: `domain::account` (6), `domain::delegation` (1), `config::accounts` (4),
-`api::auth` (4), `infrastructure::accounts` (4) and `budget` (2), `api::accounts_tests` (9), `api::tests` (3),
+`api::auth` (4), `infrastructure::accounts` (4) and `budget` (2), `api::accounts_tests` (10), `api::tests` (3),
 contract and tenant checks (2).
 
 Marked in progress: `tests/openapi_contract.rs::official_client_consumes_the_exact_published_operations` is

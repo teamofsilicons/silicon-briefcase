@@ -990,3 +990,56 @@ async fn ids_resolve_at_silicon_accounts_and_fall_back_to_a_fresh_cache() -> any
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn an_account_never_acts_in_a_legacy_organization_its_uuid_spells() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    // A lowercase uuid is also a valid organization handle (`tos` is both).
+    let handle = format!("lg{}", &f.uuid("x")[1..]).to_ascii_lowercase();
+    sqlx::query(
+        "INSERT INTO briefcase.organizations (org_id, iam_version, lifecycle_status) \
+         VALUES ($1, 3, 'active')",
+    )
+    .bind(&handle)
+    .execute(&f.admin)
+    .await?;
+    let token = f.issuer.token(&handle, "carbon", &f.id("c:collider"));
+    for (method, uri, body) in [
+        (Method::GET, "/api/v1/entries".to_owned(), None),
+        (
+            Method::POST,
+            "/api/v1/entries".to_owned(),
+            Some(json!({ "name": "x", "parent_path": format!("private/{handle}") })),
+        ),
+    ] {
+        let (status, body) = f.bearer(method, &uri, &token, body).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+    }
+    let members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM briefcase.organization_members WHERE org_id = $1")
+            .bind(&handle)
+            .fetch_one(&f.admin)
+            .await?;
+    assert_eq!(
+        members, 0,
+        "the account never became a member of the legacy tenant"
+    );
+
+    // Its own, unclaimed key works and records the owner.
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let token = f.issuer.token(&ada, "carbon", &ada_id);
+    let (status, _) = f
+        .bearer(Method::GET, "/api/v1/entries", &token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner_account_uuid FROM briefcase.organizations WHERE org_id = $1",
+    )
+    .bind(&ada)
+    .fetch_one(&f.admin)
+    .await?;
+    assert_eq!(owner.as_deref(), Some(ada.as_str()));
+    Ok(())
+}
