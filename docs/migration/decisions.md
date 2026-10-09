@@ -110,8 +110,9 @@ caller's own tenant; `/api/v1/public/{tenant}/{path}` accepts account uuids or l
 
 ### S11. Recipients and ids
 Callers name accounts by `c:`/`si:` id (trimmed, lowercased) or by uuid (3+ alphanumerics; a bare `bob` is
-therefore treated as a uuid). Resolution: a cached row refreshed within the TTL, else `lookup_by_id` (local
-600/min token bucket, 429 upstream mapped to `rate_limited`). Errors are exact 422s: `invalid_account_id`,
+therefore treated as a uuid). Public ids move between accounts, so an id is always resolved with `lookup_by_id`
+(local 600/min token bucket, 429 upstream mapped to `rate_limited`); the cache answers only when Silicon Accounts
+is rate-limited or unreachable and it holds exactly one fresh account for that id (otherwise 503, never a guess). Errors are exact 422s: `invalid_account_id`,
 `unknown_account`, `account_inactive` (deleted, unclaimed or pending custodian), `principal_kind_mismatch`.
 Grants store the uuid. The `tag:` and `email:` recipient types are retired with exact 422s
 (`tag_recipients_retired`, `email_recipients_retired`), per D2 and the decision file. "Silicons are not open to
@@ -158,7 +159,8 @@ stage updates `briefcase-client`.
 ### S18. Errors carry exact reasons
 New `AppError::Explained { status, code, message }` (constructors `unauthorized`, `refused`, `unprocessable`)
 returns the precise reason and what to do, e.g. `token_expired`, `token_wrong_audience`, `token_revoked`,
-`account_deleted`, `proof_scope_missing`, `unknown_account`. The error envelope shape is unchanged.
+`account_deleted`, `proof_scope_missing`, `unknown_account`. Token rejections are reworded for the caller (the
+client library's hints address the verifying app). The error envelope shape is unchanged.
 
 ### S19. Uuids are text
 `AccountUuid` accepts 3–32 ASCII letters and digits (Silicon Accounts issues ≤ 12 today), is never lowercased or

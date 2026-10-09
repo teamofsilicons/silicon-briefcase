@@ -338,13 +338,39 @@ fn not_found_as_none(
     }
 }
 
+/// Describes a rejected access token to the caller (the client library's
+/// hints are written for the verifying app, not for the caller).
 fn token_error(error: ClientError) -> AccountsError {
-    match error {
-        ClientError::Token(token) => AccountsError::InvalidToken {
-            code: token.code(),
-            message: format!("{} {}", token.message(), token.hint()),
-        },
-        other => unavailable(&other),
+    let ClientError::Token(token) = error else {
+        return unavailable(&error);
+    };
+    let message = match &token {
+        TokenError::Malformed(_) => format!(
+            "{} Send the access_token from your Silicon Accounts sign-in, not a refresh token, short-lived token or proof.",
+            token.message()
+        ),
+        TokenError::MissingClaim(_) => format!(
+            "{} Sign in again with Silicon Accounts.",
+            token.message()
+        ),
+        TokenError::UnsupportedAlgorithm(_)
+        | TokenError::BadSignature
+        | TokenError::InvalidKey(_) => "The access token's signature does not verify with Silicon Accounts' published keys. Sign in again with Silicon Accounts.".to_owned(),
+        TokenError::UnknownKey { .. } => "The access token is signed with a key Silicon Accounts does not publish. Sign in again; a token that still fails was not issued by this Silicon Accounts.".to_owned(),
+        TokenError::Expired { .. } => format!(
+            "{} Refresh it with the refresh token and retry.",
+            token.message()
+        ),
+        TokenError::NotYetValid => "The access token is not valid yet (its nbf is in the future). Check the clock of the machine that obtained it, or retry in a few seconds.".to_owned(),
+        TokenError::WrongAudience { .. } => "The access token was issued to another app. Briefcase accepts only access tokens issued to briefcase; an app acting for an account sends a User verification proof to the /api/v1/obo/ routes instead.".to_owned(),
+        TokenError::WrongIssuer { expected } => format!(
+            "The access token was not issued by the Silicon Accounts Briefcase trusts ({expected}). Sign in at that Silicon Accounts."
+        ),
+        other => format!("{} Sign in again with Silicon Accounts.", other.message()),
+    };
+    AccountsError::InvalidToken {
+        code: token.code(),
+        message,
     }
 }
 

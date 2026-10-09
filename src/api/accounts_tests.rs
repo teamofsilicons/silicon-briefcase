@@ -950,3 +950,43 @@ async fn proofs_act_for_the_account_inside_the_issuing_apps_folder() -> anyhow::
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ids_resolve_at_silicon_accounts_and_fall_back_to_a_fresh_cache() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (bob, bob_id) = (f.uuid("Bob"), f.id("c:bob"));
+    let (cleo_id, dan_id) = (f.id("c:cleo"), f.id("c:dan"));
+    f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
+        .await;
+    for id in [&cleo_id, &dan_id] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/accounts/by-id/{id}")))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": { "code": "unavailable", "message": "maintenance" }
+            })))
+            .mount(&f.server)
+            .await;
+    }
+    let directory = &f.state.accounts;
+    assert_eq!(directory.resolve(&bob_id).await?.uuid, bob);
+
+    // Silicon Accounts unreachable: a fresh cached account still resolves...
+    let cleo = f.uuid("Cle");
+    sqlx::query(
+        "INSERT INTO briefcase.accounts (account_uuid, kind, public_id, public_id_observed_at) \
+         VALUES ($1, 'carbon', $2, clock_timestamp())",
+    )
+    .bind(&cleo)
+    .bind(&cleo_id)
+    .execute(&f.admin)
+    .await?;
+    assert_eq!(directory.resolve(&cleo_id).await?.uuid, cleo);
+    // ...and an id the cache does not know is a dependency failure, never a guess.
+    assert!(matches!(
+        directory.resolve(&dan_id).await,
+        Err(crate::error::AppError::DependencyUnavailable { .. })
+    ));
+    Ok(())
+}

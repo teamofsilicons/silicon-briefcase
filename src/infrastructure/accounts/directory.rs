@@ -14,7 +14,7 @@ use silicon_accounts_client::{
 };
 use time::OffsetDateTime;
 
-use super::{AccountsGateway, Introspection};
+use super::{AccountsError, AccountsGateway, Introspection};
 use crate::{
     config::{AccountsSettings, ProofIssuers},
     domain::{
@@ -385,18 +385,36 @@ impl AccountDirectory {
         Ok(record)
     }
 
+    /// Public ids move between accounts (an id given up can be taken by
+    /// someone else), so naming a recipient asks Silicon Accounts first. The
+    /// cache answers only when Silicon Accounts cannot (budget spent or
+    /// unreachable) and it holds exactly one fresh account for the id.
     async fn resolve_public_id(&self, id: &PublicId) -> Result<AccountRecord, AppError> {
-        let cached = self
-            .store
-            .find_by_public_id(id.as_str())
-            .await
-            .map_err(database_error)?;
-        if let [record] = cached.as_slice()
-            && self.is_fresh(record)
-        {
-            return Ok(record.clone());
-        }
-        match self.gateway.lookup_by_id(id.as_str()).await? {
+        let looked_up = match self.gateway.lookup_by_id(id.as_str()).await {
+            Ok(found) => found,
+            Err(
+                error @ (AccountsError::RateLimited { .. } | AccountsError::Unavailable { .. }),
+            ) => {
+                let cached = self
+                    .store
+                    .find_by_public_id(id.as_str())
+                    .await
+                    .map_err(database_error)?;
+                if let [record] = cached.as_slice()
+                    && self.is_fresh(record)
+                {
+                    tracing::warn!(
+                        event = "accounts_lookup_fell_back_to_cache",
+                        error = %error,
+                        "resolved an account id from the cache"
+                    );
+                    return Ok(record.clone());
+                }
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match looked_up {
             Some(summary) => {
                 require_active(&summary, id.as_str())?;
                 self.store
