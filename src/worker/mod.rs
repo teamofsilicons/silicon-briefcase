@@ -25,16 +25,11 @@ use crate::{
     infrastructure::{postgres, s3::S3ObjectStore},
 };
 
-// A sandbox's persisted tenant key is not its IAM organization handle. Use
-// the trusted organization projection to remove exactly that environment's
-// namespace, preserving the same STS identity used by the authenticated API.
-fn storage_external_id(org_id: &str, environment_id: Option<uuid::Uuid>) -> Option<String> {
-    let public_id = match environment_id {
-        Some(environment_id) => org_id.strip_prefix(&format!("{environment_id}:"))?,
-        None => org_id,
-    };
-    crate::domain::actor::is_canonical_iam_organization_id(public_id)
-        .then(|| crate::infrastructure::s3::organization_storage_external_id(public_id))
+// The STS External ID of a bring-your-own bucket is derived from the tenant
+// key, exactly as the authenticated API derives it when it writes.
+fn storage_external_id(org_id: &str) -> Option<String> {
+    crate::domain::actor::is_canonical_iam_organization_id(org_id)
+        .then(|| crate::infrastructure::s3::organization_storage_external_id(org_id))
 }
 
 /// Runs the durable worker until an interrupt or termination signal arrives.
@@ -53,23 +48,10 @@ pub async fn run(settings: WorkerProcessSettings) -> anyhow::Result<()> {
         .await
         .context("worker database connection failed")?;
     postgres::verify_cross_tenant_role(&pool).await?;
-    let test_pool = if let Some(database) = &settings.test_database {
-        let test_pool = postgres::connect(database, "silicon-briefcase-worker-test-plane")
-            .await
-            .context("test worker database connection failed")?;
-        postgres::verify_cross_tenant_role(&test_pool).await?;
-        postgres::verify_distinct_databases(&pool, &test_pool).await?;
-        Some(test_pool)
-    } else {
-        None
-    };
 
     let objects = S3ObjectStore::from_settings(&settings.s3).await;
     let runtime = WorkerRuntime::new(settings.worker, settings.s3.operation_timeout)?;
-    let result = Box::pin(runtime.run(&pool, test_pool.as_ref(), &objects)).await;
-    if let Some(test_pool) = test_pool {
-        test_pool.close().await;
-    }
+    let result = Box::pin(runtime.run(&pool, &objects)).await;
     pool.close().await;
     result
 }
@@ -107,12 +89,7 @@ impl WorkerRuntime {
         })
     }
 
-    async fn run<O>(
-        self,
-        pool: &PgPool,
-        test_pool: Option<&PgPool>,
-        objects: &O,
-    ) -> anyhow::Result<()>
+    async fn run<O>(self, pool: &PgPool, objects: &O) -> anyhow::Result<()>
     where
         O: ObjectStore + ?Sized,
     {
@@ -136,13 +113,10 @@ impl WorkerRuntime {
                 _ = poll_timer.tick() => {
                     // Lifetimes run on the fast tick: a self-destructing file
                     // should be gone within a poll interval of its deadline.
-                    Self::sweep_lifetimes(pool, self.batch_size, false).await;
-                    if let Some(test_pool) = test_pool {
-                        crate::telemetry::testing(Self::sweep_lifetimes(test_pool, self.batch_size, true)).await;
-                    }
+                    Self::sweep_lifetimes(pool, self.batch_size).await;
                     if let Err(error) = outbox::process_batch(
                         pool,
-                        &email, false,
+                        &email,
                         &self.settings,
                         self.batch_size,
                         self.lease_duration_millis,
@@ -153,56 +127,20 @@ impl WorkerRuntime {
                             "outbox batch failed"
                         );
                     }
-                    if let Some(test_pool) = test_pool
-                        && let Err(error) = crate::telemetry::testing(outbox::process_batch(
-                            test_pool,
-                            &email, true,
-                            &self.settings,
-                            self.batch_size,
-                            self.lease_duration_millis,
-                        )).await
-                    {
-                        error!(
-                            event = "test_outbox_batch_failed",
-                            error_code = error.code(),
-                            "test-plane outbox batch failed"
-                        );
-                    }
                 }
                 _ = maintenance.tick() => {
                     self.run_maintenance(pool, objects).await;
-                    if let Some(test_pool) = test_pool {
-                        crate::telemetry::testing(self.run_maintenance(test_pool, objects)).await;
-                        match crate::infrastructure::testing::maintain_testing_environments(
-                            pool,
-                            test_pool,
-                            objects,
-                        ).await {
-                            Ok((retired, purged)) => info!(
-                                event = "testing_environment_maintenance_completed",
-                                retired,
-                                purged,
-                                "testing-environment lifecycle maintenance completed"
-                            ),
-                            Err(error) => error!(
-                                event = "testing_environment_maintenance_failed",
-                                error = %error,
-                                "testing-environment lifecycle maintenance failed"
-                            ),
-                        }
-                    }
                 }
             }
         }
         Ok(())
     }
 
-    async fn sweep_lifetimes(pool: &PgPool, batch_size: i64, testing: bool) {
+    async fn sweep_lifetimes(pool: &PgPool, batch_size: i64) {
         match lifetimes::sweep(pool, batch_size).await {
             Ok(stats) if stats.is_empty() => {}
             Ok(stats) => info!(
                 event = "lifetime_sweep_completed",
-                testing,
                 self_destructed = stats.self_destructed,
                 expiring_shares_expired = stats.expiring_shares_expired,
                 expiring_links_expired = stats.expiring_links_expired,
@@ -210,7 +148,6 @@ impl WorkerRuntime {
             ),
             Err(_) => error!(
                 event = "lifetime_sweep_failed",
-                testing,
                 error_code = "lifetime_sweep_database_error",
                 "self-destruct and expiring expiry sweep failed"
             ),

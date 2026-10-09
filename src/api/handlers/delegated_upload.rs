@@ -1,4 +1,4 @@
-//! Fresh-proof upload control and narrowly capability-authorized byte transfer.
+//! Proof-authorized upload control and narrowly capability-authorized byte transfer.
 
 use axum::{
     Json,
@@ -13,15 +13,14 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::{
-    super::{auth, extract, state::AppState, upload},
+    super::{extract, state::AppState, upload},
     delegated::{authorize_json, destination_folder, require_operation_id},
 };
 use crate::{
-    application::{
-        context::TestingEnvironmentContext,
-        delegated_upload::{DelegatedUploadScope, DelegatedUploadStatus, ReserveDelegatedUpload},
+    application::delegated_upload::{
+        DelegatedUploadScope, DelegatedUploadStatus, ReserveDelegatedUpload,
     },
-    domain::entry::EntryName,
+    domain::{account::is_tenant_key, actor::OrganizationId, entry::EntryName},
     error::AppError,
     request_context,
 };
@@ -70,14 +69,8 @@ pub(crate) async fn reserve(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let (context, body): (_, ReserveRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        RESERVE_PATH,
-        "briefcase.uploads.reserve",
-    )
-    .await?;
+    let (context, body): (_, ReserveRequest) =
+        authorize_json(&state, &headers, &body, "briefcase.uploads.reserve").await?;
     require_operation_id(body.operation_id)?;
     if body.content_type.len() > 255 || body.content_type.parse::<mime::Mime>().is_err() {
         return Err(AppError::validation("invalid_content_type"));
@@ -130,14 +123,8 @@ pub(crate) async fn status(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DelegatedUploadStatus>, AppError> {
-    let (context, body): (_, OperationRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        STATUS_PATH,
-        "briefcase.uploads.status",
-    )
-    .await?;
+    let (context, body): (_, OperationRequest) =
+        authorize_json(&state, &headers, &body, "briefcase.uploads.status").await?;
     require_operation_id(body.operation_id)?;
     extract::scoped(
         &context,
@@ -152,14 +139,8 @@ pub(crate) async fn cancel(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DelegatedUploadStatus>, AppError> {
-    let (context, body): (_, OperationRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        CANCEL_PATH,
-        "briefcase.uploads.cancel",
-    )
-    .await?;
+    let (context, body): (_, OperationRequest) =
+        authorize_json(&state, &headers, &body, "briefcase.uploads.cancel").await?;
     require_operation_id(body.operation_id)?;
     extract::scoped(
         &context,
@@ -174,14 +155,8 @@ pub(crate) async fn commit(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DelegatedUploadStatus>, AppError> {
-    let (context, body): (_, CommitRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        COMMIT_PATH,
-        "briefcase.uploads.commit",
-    )
-    .await?;
+    let (context, body): (_, CommitRequest) =
+        authorize_json(&state, &headers, &body, "briefcase.uploads.commit").await?;
     require_operation_id(body.operation_id)?;
     if body.upload_id.is_nil() {
         return Err(AppError::validation("invalid_upload_id"));
@@ -202,16 +177,8 @@ pub(crate) async fn transfer(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<DelegatedUploadStatus>, AppError> {
-    // IAM credentials cannot broaden or substitute for this byte-only grant.
-    if [
-        header::AUTHORIZATION.as_str(),
-        "x-iam-obo-access-proof",
-        "x-iam-obo-access-token",
-        "x-app-id",
-    ]
-    .iter()
-    .any(|name| headers.contains_key(*name))
-    {
+    // Account credentials cannot broaden or substitute for this byte-only grant.
+    if headers.contains_key(header::AUTHORIZATION) {
         return Err(AppError::bad_request("ambiguous_authentication"));
     }
     if headers.contains_key(header::TRANSFER_ENCODING)
@@ -227,14 +194,17 @@ pub(crate) async fn transfer(
     let length: u64 = length
         .parse()
         .map_err(|_| AppError::bad_request("invalid_content_length"))?;
-    let organization_id = auth::optional_organization(&headers)?
-        .ok_or_else(|| AppError::bad_request("missing_org_id"))?;
-    let testing_access = extract::optional_testing_access(&state, &headers).await?;
+    // The tenant selector is untrusted: only the capability, checked against
+    // the reservation row inside that tenant, authorizes the bytes.
+    let tenant =
+        single_header(&headers, "x-org-id").map_err(|_| AppError::bad_request("missing_org_id"))?;
+    if !is_tenant_key(tenant) {
+        return Err(AppError::bad_request("invalid_org_id"));
+    }
+    let organization_id =
+        OrganizationId::new(tenant).map_err(|_| AppError::bad_request("invalid_org_id"))?;
     let scope = DelegatedUploadScope {
         organization_id,
-        testing_environment: testing_access.as_ref().map(|access| {
-            TestingEnvironmentContext::new(access.environment_id, access.control_version)
-        }),
         request_id: request_context::current_request_id().ok_or(AppError::Internal {
             category: "request_scope_missing",
         })?,
@@ -246,16 +216,6 @@ pub(crate) async fn transfer(
     if length != lease.size() {
         return Err(AppError::validation("delegated_upload_manifest_mismatch"));
     }
-    // The claim transaction owns its own fence; acquire this short activity
-    // fence only afterwards, so concurrent requests never hold one test-pool
-    // connection while waiting for another from the same bounded pool.
-    let fence = extract::testing_use_fence(&state, testing_access.as_ref()).await?;
-    extract::touch_testing_access(&state, testing_access.as_ref()).await?;
-    if let Some(fence) = fence {
-        fence.release().await?;
-    }
-    // No test-use fence survives this network stream. Each later database
-    // phase and provider-mutation CAS revalidates the exact generation.
     let staged = upload::stage_body(body, state.temporary_directory.clone(), length)
         .await
         .map_err(extract::map_staging_error)?;

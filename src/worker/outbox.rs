@@ -38,7 +38,6 @@ impl BatchError {
 pub(super) async fn process_batch(
     pool: &PgPool,
     email: &super::email::Sender,
-    testing: bool,
     settings: &WorkerSettings,
     batch_size: i64,
     lease_duration_millis: i64,
@@ -48,7 +47,7 @@ pub(super) async fn process_batch(
     // each lease while dispatching prevents duplicate sends during slow I/O.
     let events = claim(pool, batch_size.min(4), lease_token, lease_duration_millis).await?;
     let results=futures::future::join_all(events.iter().map(|event| async move {
-        let dispatch=process_event(pool,email,testing,settings,lease_token,event);
+        let dispatch=process_event(pool,email,settings,lease_token,event);
         tokio::pin!(dispatch);
         let interval=std::time::Duration::from_millis(u64::try_from((lease_duration_millis/3).max(1)).unwrap_or(1));
         loop {
@@ -109,14 +108,13 @@ async fn claim(
 async fn process_event(
     pool: &PgPool,
     email: &super::email::Sender,
-    testing: bool,
     settings: &WorkerSettings,
     lease_token: Uuid,
     event: &ClaimedEvent,
 ) -> Result<(), BatchError> {
     let failure = if event.topic == "briefcase.invitation-email.v1" {
         match email
-            .send(pool, &event.org_id, event.event_id, &event.payload, testing)
+            .send(pool, &event.org_id, event.event_id, &event.payload)
             .await
         {
             Ok(()) => {

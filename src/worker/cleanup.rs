@@ -64,7 +64,6 @@ struct CleanupSource {
 #[derive(Debug, sqlx::FromRow)]
 struct ClaimedCleanup {
     org_id: String,
-    testing_environment_id: Option<Uuid>,
     cleanup_id: Uuid,
     cleanup_kind: String,
     source_entry_id: Option<Uuid>,
@@ -332,9 +331,6 @@ async fn claim_one(
           WHERE cleanup.org_id = candidate.org_id \
             AND cleanup.cleanup_id = candidate.cleanup_id \
          RETURNING cleanup.org_id, \
-                   (SELECT organization.testing_environment_id \
-                      FROM briefcase.organizations AS organization \
-                     WHERE organization.org_id = cleanup.org_id) AS testing_environment_id, \
                    cleanup.cleanup_id, cleanup.cleanup_kind, \
                    cleanup.source_entry_id, cleanup.source_version_id, \
                    cleanup.source_upload_id, cleanup.storage_backend, \
@@ -513,10 +509,7 @@ fn cleanup_target(job: &ClaimedCleanup) -> Result<(StorageTarget, ObjectKey), &'
                 .ok_or("cleanup_descriptor_invalid")?;
             (
                 Some(role_arn),
-                Some(
-                    super::storage_external_id(&job.org_id, job.testing_environment_id)
-                        .ok_or("cleanup_descriptor_invalid")?,
-                ),
+                Some(super::storage_external_id(&job.org_id).ok_or("cleanup_descriptor_invalid")?),
             )
         }
         _ => return Err("cleanup_descriptor_invalid"),
@@ -1015,7 +1008,6 @@ mod tests {
     fn cleanup(backend: &str) -> ClaimedCleanup {
         ClaimedCleanup {
             org_id: "org-acme".to_owned(),
-            testing_environment_id: None,
             cleanup_id: uuid::Uuid::from_u128(1),
             cleanup_kind: CleanupKind::VersionDelete.as_str().to_owned(),
             source_entry_id: Some(uuid::Uuid::from_u128(2)),

@@ -5,7 +5,7 @@ use axum::{Json, extract::State, http::HeaderMap};
 use crate::error::AppError;
 
 use super::super::{
-    auth::IamAction, dto::NotificationInboxDto, extract, mapping::metadata_error, state::AppState,
+    auth::Action, dto::NotificationInboxDto, extract, mapping::metadata_error, state::AppState,
 };
 
 /// Returns the caller's twenty newest notifications and unread badge count.
@@ -13,14 +13,9 @@ pub(crate) async fn list_notifications(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<NotificationInboxDto>, AppError> {
-    let organization = extract::organization_resource(&headers)?;
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::ListNotifications,
-        &organization,
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::ListNotifications, "notifications").await?;
+    let organization = extract::tenant(&context);
     let inbox = extract::scoped(&context, state.metadata.notification_inbox(&context))
         .await
         .map_err(metadata_error)?;
@@ -32,14 +27,9 @@ pub(crate) async fn read_notifications(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<NotificationInboxDto>, AppError> {
-    let organization = extract::organization_resource(&headers)?;
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::ReadNotifications,
-        &organization,
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::ReadNotifications, "notifications").await?;
+    let organization = extract::tenant(&context);
     let metadata = extract::mutation(
         &headers,
         "mark_notifications_read",

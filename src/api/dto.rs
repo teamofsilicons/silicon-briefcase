@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-/// IAM principal kind accepted by the Briefcase API.
+/// Principal kind accepted by the Briefcase API.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorTypeDto {
@@ -20,13 +20,13 @@ pub enum ActorTypeDto {
     Application,
 }
 
-/// Public reference to an IAM principal.
+/// Public reference to a Carbon or Silicon.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ActorRefDto {
     /// Principal kind.
     #[serde(rename = "type")]
     pub actor_type: ActorTypeDto,
-    /// IAM principal identifier.
+    /// `c:`/`si:` id when naming an account; its uuid when Briefcase answers.
     pub id: String,
 }
 
@@ -239,8 +239,6 @@ pub enum DispositionDto {
 pub struct PathContentQuery {
     /// Omission returns entry metadata instead of content.
     pub disposition: Option<DispositionDto>,
-    /// Public sandbox routing ID. Authenticated requests must select the same sandbox.
-    pub test_environment: Option<Uuid>,
 }
 
 /// One right conveyed by an invitation or requested through the workflow.

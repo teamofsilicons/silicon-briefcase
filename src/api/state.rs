@@ -8,11 +8,9 @@ use crate::{
         delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
         ports::ObjectStore,
         service::MetadataService,
-        webhook::IamWebhookRepository,
     },
     config::WebhookSettings,
-    infrastructure::iam::IamClient,
-    infrastructure::testing::TestingEnvironmentStore,
+    infrastructure::accounts::AccountDirectory,
 };
 use sqlx::PgPool;
 
@@ -25,17 +23,15 @@ pub(crate) type DelegatedUploadUseCases =
 /// Immutable process dependencies cloned into Axum route services.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) iam: Arc<IamClient>,
+    pub(crate) accounts: Arc<AccountDirectory>,
     pub(crate) metadata: MetadataService,
     pub(crate) content: Arc<ContentUseCases>,
     pub(crate) content_adapter: Arc<crate::infrastructure::postgres::PostgresContentRepository>,
     pub(crate) objects: Arc<dyn ObjectStore>,
     pub(crate) delegated_uploads: Arc<DelegatedUploadUseCases>,
-    pub(crate) webhook_repository: Arc<dyn IamWebhookRepository>,
     pub(crate) database: PgPool,
     pub(crate) contract_database: Option<PgPool>,
     pub(crate) mapper: ResponseMapper,
     pub(crate) temporary_directory: PathBuf,
     pub(crate) webhook_settings: WebhookSettings,
-    pub(crate) testing: Option<Arc<TestingEnvironmentStore>>,
 }

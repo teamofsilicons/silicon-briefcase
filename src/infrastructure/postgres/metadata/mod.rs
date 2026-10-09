@@ -21,12 +21,12 @@ use crate::{
             ActivityEvent, AuthorizableEntry, CreateFolderMutation, ENTRY_ACTIVITY_HISTORY_SIZE,
             FileVersionView, GrantPermissionCommand, ListBinQuery, ListEntriesQuery,
             ListPermissionsQuery, ListVersionsQuery, MetadataRepository, MetadataRepositoryError,
-            MutationMetadata, Page, ProjectedIdentity, RevokePermissionCommand, SearchCandidate,
-            SearchQuery, UpdateEntryCommand,
+            MutationMetadata, Page, RevokePermissionCommand, SearchCandidate, SearchQuery,
+            UpdateEntryCommand,
         },
     },
     domain::{
-        actor::{ActorId, ActorRef, ApplicationId, OrganizationRole, TagName},
+        actor::{ActorRef, ApplicationId},
         entry::{EntryKind, EntryPath},
         filter::{FilterQuery, SortOrder},
         ids::{EntryId, GrantId, VersionId},
@@ -37,9 +37,7 @@ use crate::{
     },
 };
 
-use super::{
-    EntryRow, PermissionGrantRow, PostgresRepository, TenantContext, models::entry_columns, roots,
-};
+use super::{EntryRow, PermissionGrantRow, PostgresRepository, models::entry_columns, roots};
 use common::{
     IdempotencyClaim, OwnedAncestorPrincipal, Result, actor_kind, actor_ref, begin,
     boundary_columns, build_authorizable, claim_idempotency, complete_idempotency, current_member,
@@ -1521,79 +1519,6 @@ impl MetadataRepository for PostgresRepository {
             .ok_or_else(|| internal("restored entry disappeared"))?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(restored)
-    }
-
-    async fn project_token_authorization(
-        &self,
-        query: &crate::application::service::TokenAuthorizationQuery<'_>,
-    ) -> Result<Option<ProjectedIdentity>> {
-        #[derive(sqlx::FromRow)]
-        struct IdentityRow {
-            actor_id: String,
-            org_role: String,
-            tag_names: Vec<String>,
-        }
-
-        let context = TenantContext::for_token_projection(
-            query.organization_id.as_str(),
-            query.actor_kind,
-            query.principal_id,
-            query.request_id.to_owned(),
-            query.testing_environment,
-        );
-        let mut transaction = self.begin(&context).await.map_err(map_sql)?;
-        let row = sqlx::query_as::<_, IdentityRow>(
-            "SELECT member.actor_id, member.org_role, \
-                    COALESCE( \
-                        array_agg(tag.name ORDER BY tag.name COLLATE \"C\") \
-                            FILTER (WHERE tag.tag_id IS NOT NULL AND tag.lifecycle_status = 'active'), \
-                        ARRAY[]::text[] \
-                    ) AS tag_names \
-               FROM briefcase.organization_members AS member \
-               LEFT JOIN briefcase.organization_member_tags AS member_tag \
-                 ON member_tag.org_id = member.org_id \
-                AND member_tag.actor_type = member.actor_type \
-                AND member_tag.actor_id = member.actor_id \
-               LEFT JOIN briefcase.organization_tags AS tag \
-                 ON tag.org_id = member_tag.org_id AND tag.tag_id = member_tag.tag_id \
-              WHERE member.org_id = briefcase.current_org_id() \
-                AND member.actor_type = $1 \
-                AND member.principal_id = $2 \
-                AND member.membership_id = $3 \
-                AND member.authorization_epoch = $4 \
-                AND member.membership_status = 'active' \
-              GROUP BY member.actor_id, member.org_role",
-        )
-        .bind(actor_kind(query.actor_kind))
-        .bind(query.principal_id)
-        .bind(query.membership_id)
-        .bind(query.authorization_epoch)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_sql)?;
-        transaction.commit().await.map_err(map_sql)?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let role = match row.org_role.as_str() {
-            "owner" => OrganizationRole::Owner,
-            "admin" => OrganizationRole::Admin,
-            "member" => OrganizationRole::Member,
-            _ => return Err(internal("invalid persisted organization role")),
-        };
-        let actor_id = ActorId::new(row.actor_id)
-            .map_err(|_| internal("invalid persisted actor identifier"))?;
-        let tags = row
-            .tag_names
-            .into_iter()
-            .map(|tag| TagName::new(tag).map_err(internal_data))
-            .collect::<Result<_>>()?;
-        Ok(Some(ProjectedIdentity {
-            actor: ActorRef::new(query.actor_kind, actor_id),
-            role,
-            tags,
-        }))
     }
 
     async fn ensure_application_folder(

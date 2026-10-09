@@ -103,7 +103,6 @@ mod url_tests {
                         inherited_from,
                         expires_at: None,
                     },
-                    None,
                 )?;
                 let document = serde_json::to_value(result)?;
                 assert_eq!(document["enabled"], enabled);
@@ -144,34 +143,6 @@ mod url_tests {
                 name
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn sandbox_share_urls_carry_only_the_public_environment_id() -> anyhow::Result<()> {
-        let mapper = ResponseMapper::new(
-            &Url::parse("https://api.example/api/v1/")?,
-            Url::parse("https://site.example/")?,
-        );
-        let environment = uuid::Uuid::new_v4();
-        let result = mapper.link_access(
-            "tos",
-            &crate::infrastructure::postgres::sharing::LinkAccess {
-                path: EntryPath::new("public/shared.txt")?,
-                can_manage: true,
-                enabled: true,
-                effective: true,
-                inherited_from: None,
-                expires_at: None,
-            },
-            Some(environment),
-        )?;
-        assert_eq!(
-            result.url.map(|url| url.to_string()),
-            Some(format!(
-                "https://site.example/org/tos/public/shared.txt?test_environment={environment}"
-            ))
-        );
         Ok(())
     }
 }
@@ -291,16 +262,11 @@ impl ResponseMapper {
         &self,
         organization_id: &str,
         access: &crate::infrastructure::postgres::sharing::LinkAccess,
-        environment: Option<uuid::Uuid>,
     ) -> Result<super::dto::LinkAccessDto, AppError> {
-        let mut url = access
+        let url = access
             .effective
             .then(|| self.permanent_url(organization_id, &access.path))
             .transpose()?;
-        if let (Some(url), Some(environment)) = (&mut url, environment) {
-            url.query_pairs_mut()
-                .append_pair("test_environment", &environment.to_string());
-        }
         Ok(super::dto::LinkAccessDto {
             can_manage: access.can_manage,
             enabled: access.enabled,

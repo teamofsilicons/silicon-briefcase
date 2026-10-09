@@ -1,4 +1,4 @@
-//! Request-local correlation and IAM-verified authorization context.
+//! Request-local correlation and verified authorization context.
 
 use std::{future::Future, sync::Arc};
 
@@ -25,7 +25,7 @@ impl RequestContext {
         }
     }
 
-    /// Creates a request scope with facts established by online IAM verification.
+    /// Creates a request scope with facts established by credential verification.
     #[must_use]
     pub fn authenticated(
         request_id: impl Into<Arc<str>>,
@@ -43,7 +43,7 @@ impl RequestContext {
         &self.request_id
     }
 
-    /// Returns the trusted IAM authorization facts, when authentication succeeded.
+    /// Returns the trusted authorization facts, when authentication succeeded.
     #[must_use]
     pub fn authorization(&self) -> Option<&RequestAuthContext> {
         self.authorization.as_deref()
@@ -55,7 +55,7 @@ pub async fn scope<T>(request_id: String, future: impl Future<Output = T>) -> T 
     scope_context(RequestContext::unauthenticated(request_id), future).await
 }
 
-/// Runs a future with correlation and IAM-verified authorization facts.
+/// Runs a future with correlation and verified authorization facts.
 pub async fn scope_authenticated<T>(
     request_id: String,
     authorization: RequestAuthContext,
@@ -87,7 +87,7 @@ pub fn current_request_id() -> Option<String> {
         .ok()
 }
 
-/// Returns the IAM-verified authorization facts for the active scope.
+/// Returns the verified authorization facts for the active scope.
 #[must_use]
 pub fn current_authorization() -> Option<Arc<RequestAuthContext>> {
     CURRENT_CONTEXT

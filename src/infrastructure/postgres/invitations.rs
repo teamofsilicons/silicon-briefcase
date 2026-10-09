@@ -1,20 +1,21 @@
-//! Dynamic tag invitations and IAM-verified recipient contacts.
+//! Invitation listing, revocation and expiring-share changes, including legacy tag grants.
 use super::{
     PostgresRepository,
     metadata::common::{self, actor_kind, begin, load_entry, record_change},
     sharing::db,
 };
 use crate::domain::lifetime::LifetimeMinutes;
+#[cfg(test)]
+use crate::domain::permission::AccessRight;
 use crate::{
     application::{
         context::ExecutionContext,
         service::{MetadataRepository, MutationMetadata, RevokePermissionCommand},
     },
     domain::{
-        actor::ActorRef,
         entry::EntryKind,
         ids::{EntryId, GrantId},
-        permission::{AccessRight, Capability, GrantedAccess},
+        permission::{Capability, GrantedAccess},
     },
     error::AppError,
 };
@@ -26,38 +27,11 @@ fn repo_error(e: crate::application::service::MetadataRepositoryError) -> AppErr
 }
 
 impl PostgresRepository {
-    pub(crate) async fn record_self_contact(
-        &self,
-        context: &ExecutionContext,
-        email: &str,
-    ) -> Result<(), AppError> {
-        if !valid_email(email) {
-            return Err(AppError::validation("invalid_email"));
-        }
-        let mut r = begin(self, context).await.map_err(repo_error)?;
-        let actor = context.authorization().actor();
-        sqlx::query("INSERT INTO briefcase.member_contacts(org_id,actor_type,actor_id,email) VALUES(briefcase.current_org_id(),$1,$2,$3) ON CONFLICT(org_id,actor_type,actor_id) DO UPDATE SET email=EXCLUDED.email,verified_at=clock_timestamp()")
-            .bind(actor_kind(actor.kind())).bind(actor.id().as_str()).bind(email).execute(&mut *r.transaction).await.map_err(db)?;
-        r.transaction.commit().await.map_err(db)
-    }
-    pub(crate) async fn member_by_email(
-        &self,
-        context: &ExecutionContext,
-        email: &str,
-    ) -> Result<ActorRef, AppError> {
-        if !valid_email(email) {
-            return Err(AppError::validation("invalid_email"));
-        }
-        let mut r = begin(self, context).await.map_err(repo_error)?;
-        let rows:Vec<(String,String)>=sqlx::query_as("SELECT c.actor_type,c.actor_id FROM briefcase.member_contacts c JOIN briefcase.organization_members m USING(org_id,actor_type,actor_id) WHERE c.org_id=briefcase.current_org_id() AND lower(c.email)=lower($1) AND m.membership_status='active' LIMIT 2")
-            .bind(email).fetch_all(&mut *r.transaction).await.map_err(db)?;
-        if rows.len() != 1 {
-            return Err(AppError::validation("email_not_in_organization_directory"));
-        }
-        let actor = common::actor_ref(&rows[0].0, &rows[0].1).map_err(repo_error)?;
-        r.transaction.commit().await.map_err(db)?;
-        Ok(actor)
-    }
+    /// Grants a legacy tag. No route creates tag grants any more (tags do not
+    /// exist with Silicon Accounts); tests use this to seed pre-migration
+    /// rows so the legacy read and revoke paths stay covered until the
+    /// cutover turns tag grants into per-account shares.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invite_tag(
         &self,
@@ -488,19 +462,6 @@ async fn share_json(
 /// Live member and tag grants on one entry, rendered as invitation items.
 /// `$1` is the entry; `$2`, when not null, selects one grant.
 const INVITATION_JSON: &str = "SELECT jsonb_build_object('id',grant_id,'principal',jsonb_build_object('type',principal_type,'id',principal_id),'access',array_remove(ARRAY['read',CASE WHEN access_mask & 2 <> 0 THEN 'write' END,CASE WHEN access_mask & 4 <> 0 THEN 'update' END],NULL),'inherit',inherits_to_descendants,'expires_at',expires_at) FROM (SELECT grant_id,principal_type,principal_id,access_mask,inherits_to_descendants,expires_at FROM briefcase.permission_grants WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) UNION ALL SELECT grant_id,'tag',tag_id,access_mask,inherits_to_descendants,expires_at FROM briefcase.tag_permission_grants WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())) grants WHERE grant_id=$2";
-
-fn valid_email(email: &str) -> bool {
-    email.len() <= 254
-        && email.bytes().filter(|b| *b == b'@').count() == 1
-        && email
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-        && !email.bytes().any(|b| {
-            b.is_ascii_whitespace()
-                || b.is_ascii_control()
-                || matches!(b, b',' | b';' | b'<' | b'>')
-        })
-}
 
 /// Fanout is one transaction-local statement; the notification trigger queues mail.
 async fn notify_tag(

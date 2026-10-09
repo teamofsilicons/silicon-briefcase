@@ -1,20 +1,17 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 3.0.0
-  description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
-    access.
+  version: 4.0.0
+  description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
+    search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
 - url: https://backend.briefcase.teamofsilicons.com/api/v1
   description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead,
     always organization-scoped as https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
 security:
 - bearerAuth: []
-- bearerAuth: []
-  testingEnvironmentKey: []
 tags:
 - name: Authentication
-- name: Testing environments
 - name: Entries
 - name: Applications
 - name: Uploads
@@ -25,54 +22,6 @@ tags:
 - name: Bin
 - name: Storage
 paths:
-  /iam:
-    get:
-      tags:
-      - Authentication
-      operationId: readIamInfo
-      summary: Read the public IAM application ID before login
-      security: []
-      description: No member token or organization is required. An optional X-Briefcase-App-Secret selects the paired
-        test application's identity. Application secrets and environment keys are never returned.
-      parameters:
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      responses:
-        '200':
-          description: Public IAM configuration (Cache-Control no-store)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IamInfo'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /auth/status:
-    get:
-      tags:
-      - Authentication
-      operationId: readLoginStatus
-      summary: Verify the current Carbon or Silicon session with IAM
-      security:
-      - {}
-      - bearerAuth: []
-      - bearerAuth: []
-        testingEnvironmentKey: []
-      description: No organization selection is required. Missing, invalid, expired, or revoked member tokens return
-        authenticated false. Active tokens return their identity and currently granted organizations; an empty grant
-        list does not make an active session unauthenticated. IAM outages, malformed upstream responses, and invalid
-        test-plane credentials remain errors.
-      parameters:
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      responses:
-        '200':
-          description: Live authentication status (Cache-Control no-store)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LoginStatus'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
   /version:
     get:
       tags:
@@ -116,321 +65,44 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
-  /auth/slt:
-    post:
+  /accounts:
+    get:
       tags:
       - Authentication
-      operationId: exchangeShortLivedToken
-      summary: Exchange an IAM short-lived token for a Briefcase Application session
+      operationId: readAccountsInfo
+      summary: Describe how to sign in to Briefcase with Silicon Accounts
       security: []
-      description: In production, slt is the single-use code obtained from IAM's hosted Application login.
-        With X-Briefcase-App-Secret selecting a paired test environment, slt can be an IAM-issued test login code or an existing test Carbon ID
-        (alice) or Silicon ID (worker:tos). Briefcase exchanges it through IAM using only the mapped testing
-        key and test Application credential, and verifies the returned actor. IAM determines the actor's
-        current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key
-        and input when recovering an uncertain result.
-      parameters:
-      - $ref: '#/components/parameters/AuthIdempotencyKey'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ShortLivedTokenExchange'
+      description: Public, so a client can find Briefcase's app id and the Silicon Accounts origin before it holds a
+        token. Carbons sign in at Silicon Accounts (hosted pages for the web, the device flow for the CLI); Silicons
+        exchange a short-lived token from `silicon-accounts login --app briefcase`. Either way Briefcase receives a
+        Silicon Accounts access token whose audience is `briefcase`. The response also lists the scopes another app
+        can hold in a User verification proof to act for an account here.
       responses:
         '200':
-          description: Opaque access token, rotating refresh token, and the live organizations reachable by the
-            IAM session
-          headers:
-            Cache-Control:
-              schema:
-                const: no-store
+          description: Sign-in facts (Cache-Control no-store)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApplicationSessionTokens'
-        '400':
-          description: Missing or invalid idempotency key or request body
-        '401':
-          description: The production SLT or selected test actor is invalid, inactive, or belongs to another plane
-        '503':
-          description: IAM or the configured testing plane is unavailable
+                $ref: '#/components/schemas/AccountsInfo'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /auth/refresh:
-    post:
+      x-operation-version: 1.0.0
+  /me:
+    get:
       tags:
       - Authentication
-      operationId: refreshApplicationSession
-      summary: Rotate an IAM Application refresh token
-      security: []
-      description: A successful refresh consumes the presented token and returns its replacement. Serialize refreshes
-        per token family. Retry an uncertain result only with the exact same token, Idempotency-Key, and testing
-        environment selection; rejected refreshes are terminal.
-      parameters:
-      - $ref: '#/components/parameters/AuthIdempotencyKey'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApplicationSessionRefresh'
+      operationId: readAccount
+      summary: Read the signed-in Carbon or Silicon as Briefcase knows it
+      description: Verifies the access token and returns the account's uuid (the permanent key), its current public
+        id, kind, display name and photo, and a Silicon's custodian. A token issued before the account signed out,
+        removed Briefcase's access or was deleted answers 401 with the exact reason.
       responses:
         '200':
-          description: Rotated access and refresh tokens, including the live organizations reachable by the IAM
-            session
-          headers:
-            Cache-Control:
-              schema:
-                const: no-store
+          description: The signed-in account (Cache-Control no-store)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApplicationSessionTokens'
-        '400':
-          description: Missing or invalid idempotency key or request body
-        '401':
-          description: The refresh token is invalid, consumed, revoked, or belongs to another plane
-        '503':
-          description: IAM or the configured testing plane is unavailable
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    get:
-      tags:
-      - Testing environments
-      operationId: listTestingEnvironments
-      summary: List Briefcase testing environments owned by an organization
-      description: This lifecycle route always authenticates in production. The path organization must equal X-Org-ID.
-        Active environments are returned by default; status=deleted or status=all changes that selection.
-      parameters:
-      - name: status
-        in: query
-        schema:
-          type: string
-          enum:
-          - active
-          - deleted
-          - all
-          default: active
-      responses:
-        '200':
-          description: Matching environments; at most ten can be active
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TestingEnvironmentPage'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-    post:
-      tags:
-      - Testing environments
-      operationId: createTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    get:
-      tags:
-      - Testing environments
-      operationId: getTestingEnvironment
-      summary: Read one testing environment without revealing credentials
-      responses:
-        '200':
-          description: Environment metadata
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TestingEnvironment'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-    patch:
-      tags:
-      - Testing environments
-      operationId: updateTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-    delete:
-      tags:
-      - Testing environments
-      operationId: deleteTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/key:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    get:
-      tags:
-      - Testing environments
-      operationId: getTestingEnvironmentKey
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: replaceTestingEnvironmentIamPairing
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/cleanings:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: cleanTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/restorations:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: restoreTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /testing-environment:
-    get:
-      tags:
-      - Testing environments
-      operationId: describeCurrentTestingEnvironment
-      summary: Describe the environment selected by its IAM app secret
-      security:
-      - testingEnvironmentKey: []
-      responses:
-        '200':
-          description: Minimal environment metadata visible to a key holder
-          headers:
-            Cache-Control:
-              schema:
-                const: private, no-store
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TestingEnvironmentSelf'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /testing-environment/cleanings:
-    post:
-      tags:
-      - Testing environments
-      operationId: cleanCurrentTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/Account'
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -463,7 +135,6 @@ paths:
 
         Filtering only ever returns entries the caller can already see.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: parent_id
         in: query
         schema:
@@ -501,11 +172,10 @@ paths:
       - Entries
       operationId: createFolder
       description: Without a parent, creates a user folder at the organization base with the required root_type
-        access boundary (and IAM tag for type tag). The new folder is a sibling of the reserved containers, not
+        access boundary (and legacy tag for type tag). The new folder is a sibling of the reserved containers, not
         redirected into one. With parent_id or parent_path, creates inside that folder and inherits its boundary.
         Existing folders are not relocated. Sibling name collisions return 409 without exposing hidden entry metadata.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -525,7 +195,6 @@ paths:
       x-operation-version: 1.0.0
   /entries/{entry_id}:
     parameters:
-    - $ref: '#/components/parameters/OrgId'
     - $ref: '#/components/parameters/EntryId'
     get:
       tags:
@@ -588,11 +257,10 @@ paths:
       - Entries
       operationId: readEntryContent
       summary: Stream current file bytes for sandboxed in-place rendering
-      description: 'Briefcase relays the bytes itself, so the response is always bound to a current IAM identity
+      description: 'Briefcase relays the bytes itself, so the response is always bound to a current verified account
         and is never cacheable. Responses are sandboxed by Content-Security-Policy and served with `X-Content-Type-Options:
         nosniff`. Byte ranges are supported for media playback.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Range'
       responses:
@@ -610,7 +278,6 @@ paths:
       operationId: downloadEntry
       summary: Download current file bytes as an attachment
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Range'
       responses:
@@ -656,7 +323,6 @@ paths:
         `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, org admins and
         owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -699,7 +365,6 @@ paths:
       x-operation-version: 1.0.0
   /entries/{entry_id}/permissions:
     parameters:
-    - $ref: '#/components/parameters/OrgId'
     - $ref: '#/components/parameters/EntryId'
     get:
       tags:
@@ -746,7 +411,6 @@ paths:
       - Permissions
       operationId: revokePermission
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: grant_id
         in: path
@@ -768,8 +432,6 @@ paths:
       summary: Report what the caller may do on named files and folders
       description: Names up to 100 targets by identifier, path, or both. A target that does not exist and one the
         caller cannot read are both reported as unresolved, so the answer never confirms a hidden entry.
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
       requestBody:
         required: true
         content:
@@ -792,7 +454,6 @@ paths:
       - Search
       operationId: searchFiles
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: q
         in: query
         required: true
@@ -828,7 +489,7 @@ paths:
       x-operation-version: 1.0.0
       summary: Submit a bounded operational event
       security: []
-      description: Best-effort anonymous relay to Space Station. No table key or IAM credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
+      description: Best-effort anonymous relay to Space Station. No table key or credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
       requestBody:
         required: true
         content:
@@ -863,7 +524,6 @@ paths:
       summary: Submit a bug report with an optional proposed fix
       description: Stores the user-authored report in the selected organization and environment. No telemetry, credentials, or files are collected automatically. Test reports stay in the test database. Reuse the same idempotency key and body after an uncertain response.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -909,8 +569,6 @@ paths:
       summary: Read the central notification inbox
       description: Returns the twenty newest notifications for the authenticated Carbon or Silicon together with
         the unread count used for the badge.
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
       responses:
         '200':
           description: Newest notifications and unread badge count
@@ -927,8 +585,6 @@ paths:
       - Notifications
       operationId: readNotifications
       summary: Mark the entire notification inbox read
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
       responses:
         '200':
           description: Inbox after every notification was marked read
@@ -948,7 +604,6 @@ paths:
       description: Returns up to the last hundred recorded actions on the entry — who created, read, updated, downloaded,
         deleted, or restored it, and when.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -968,11 +623,11 @@ paths:
       deprecated: true
       summary: Retired raw delegated upload
       description: Returns HTTP 410 without reading upload bytes. Use the delegated reserve, capability transfer,
-        and commit operations with a reusable IAM OBO access token.
+        and commit operations with a Silicon Accounts User verification proof.
       security: []
       responses:
         '410':
-          description: Raw OBO uploads are retired; use reserve, transfer, and commit
+          description: Raw delegated uploads are retired; use reserve, transfer, and commit
           content:
             application/json:
               schema:
@@ -987,15 +642,9 @@ paths:
       - Uploads
       operationId: reserveDelegatedUpload
       summary: Reserve private upload storage with current member authority
-      description: Reserve private storage with an approved reusable OBO access token. The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
+      description: Reserve private storage for the account a User verification proof speaks for (scope briefcase.uploads.reserve). The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1015,6 +664,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.reserve
       x-operation-version: 3.0.0
   /obo/uploads/commit:
     post:
@@ -1023,15 +673,9 @@ paths:
       - Uploads
       operationId: commitDelegatedUpload
       summary: Publish previously staged bytes with fresh member authority
-      description: Publish staged bytes using a currently valid OBO access token. Verify live identity, membership, originating app, destination organization, test generation, resource permission and quota before atomic publication. Repeating an unchanged logical operation does not create another file version.
+      description: Publish staged bytes with a valid User verification proof (scope briefcase.uploads.commit). The proof's account, issuing app, destination, resource permission and quota are verified before atomic publication. Repeating an unchanged logical operation does not create another file version.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1051,6 +695,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.commit
       x-operation-version: 3.0.0
   /obo/uploads/status:
     post:
@@ -1058,16 +703,10 @@ paths:
       - Applications
       - Uploads
       operationId: getDelegatedUploadStatus
-      summary: Reconcile one logical upload with current OBO authority
-      description: Reconcile an upload with a valid OBO token for the same immutable member, originating app and plane. Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
+      summary: Reconcile one logical upload with a current proof
+      description: Reconcile an upload with a valid proof for the same account and issuing app (scope briefcase.uploads.status). Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1087,6 +726,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.status
       x-operation-version: 3.0.0
   /obo/uploads/cancel:
     post:
@@ -1095,15 +735,9 @@ paths:
       - Uploads
       operationId: cancelDelegatedUpload
       summary: Cancel unpublished private staging
-      description: Cancel unpublished content with a valid OBO token for the same immutable member, originating app and plane. Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
+      description: Cancel unpublished content with a valid proof for the same account and issuing app (scope briefcase.uploads.cancel). Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1123,6 +757,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.cancel
       x-operation-version: 3.0.0
   /obo/uploads/{upload_id}/content:
     put:
@@ -1131,17 +766,15 @@ paths:
       - Uploads
       operationId: transferDelegatedUpload
       summary: Transfer exact private bytes using a narrow upload capability
-      description: Sends only the capability issued by the fresh-authorized reservation, the organization selector
-        and the same test root when using a test plane. Do not send an IAM bearer, proof or application credential.
+      description: Sends only the capability issued by the reservation and the uuid of the account the reservation belongs to
+        (X-Org-ID). Do not send an access token or proof.
         Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider
-        writes. A successful transfer is private staging only, not file publication. Commit separately with a valid OBO token.
+        writes. A successful transfer is private staging only, not file publication. Commit separately with a valid proof.
         A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
       security:
       - uploadCapability: []
-      - uploadCapability: []
-        testingEnvironmentKey: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/UploadTenant'
       - name: upload_id
         in: path
         required: true
@@ -1184,15 +817,9 @@ paths:
       - Applications
       operationId: createFolderOnBehalfOfMember
       summary: Create a child folder for a represented member
-      description: Create a child folder using a reusable OBO token. An empty parent_path selects the represented member private app folder. Ordinary write permissions and the app namespace apply. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
+      description: Create a child folder with a User verification proof (scope briefcase.folders.create). An empty parent_path selects the account's folder for the issuing app. Ordinary write permissions and the app namespace apply. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1212,6 +839,7 @@ paths:
           description: Name or logical operation conflicts with existing state
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.folders.create
       x-operation-version: 3.0.0
   /obo/entries/list:
     post:
@@ -1219,15 +847,9 @@ paths:
       - Applications
       operationId: listEntriesOnBehalfOfMember
       summary: List the represented member's visible entries
-      description: List the ordinary privacy-filtered entry view with a reusable OBO token. Parent UUID and path are mutually exclusive. Each page is verified online and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
+      description: List the ordinary privacy-filtered entry view with a User verification proof (scope briefcase.entries.list). Parent UUID and path are mutually exclusive. Each page verifies the proof again and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1245,6 +867,7 @@ paths:
           description: Parent is absent or not visible
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.entries.list
       x-operation-version: 3.0.0
   /obo/files/read:
     post:
@@ -1252,15 +875,9 @@ paths:
       - Applications
       operationId: readFileOnBehalfOfMember
       summary: Stream a file for a represented member
-      description: Read a current file with a reusable OBO token and ordinary resource permissions. Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
+      description: Read a current file with a User verification proof (scope briefcase.files.read) and ordinary resource permissions. Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1278,6 +895,7 @@ paths:
           description: The bound byte range is unsatisfiable
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.files.read
       x-operation-version: 3.0.0
   /obo/entries/trash:
     post:
@@ -1285,15 +903,9 @@ paths:
       - Applications
       operationId: trashEntryOnBehalfOfMember
       summary: Move an application-created entry to the recoverable bin
-      description: Recoverably remove app-created content with a reusable OBO token. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
+      description: Recoverably remove app-created content with a User verification proof (scope briefcase.entries.trash). Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1309,6 +921,7 @@ paths:
           description: Logical operation or current entry state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.entries.trash
       x-operation-version: 3.0.0
   /entries/{entry_id}/versions:
     get:
@@ -1316,7 +929,6 @@ paths:
       - Versions
       operationId: listVersions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
@@ -1336,7 +948,6 @@ paths:
       - Versions
       operationId: restoreVersion
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: version_id
         in: path
@@ -1371,8 +982,6 @@ paths:
 
         Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and either may be raised or lowered
         per organization, so the figures reported here are the ones actually in force.'
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
       responses:
         '200':
           description: Consumption and limits
@@ -1390,7 +999,6 @@ paths:
       operationId: listBin
       summary: List recoverable entries, newest deletion first
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/ContentsLimit'
       responses:
@@ -1409,7 +1017,6 @@ paths:
       - Bin
       operationId: restoreEntry
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -1428,10 +1035,7 @@ paths:
       operationId: configureOrganizationBucket
       security:
       - bearerAuth: []
-      - bearerAuth: []
-        testingEnvironmentKey: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: Idempotency-Key
         in: header
         required: false
@@ -1466,16 +1070,9 @@ paths:
       operationId: resolvePermanentUrl
       summary: Resolve the clean permanent URL of an entry
       description: The path segment mirrors the folder structure exactly, for example `/org/tos/private/cos:tos/top_secret/this_secret.md`.
-        The organization segment must match `X-Org-ID`. Without `disposition` the entry and its effective access
+        The first segment must be the caller's own drive (its account uuid). Without `disposition` the entry and its effective access
         are returned; with `disposition` the file bytes are streamed. Anything the caller cannot read answers `404`.
       parameters:
-      - in: query
-        name: test_environment
-        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
-        schema:
-          type: string
-          format: uuid
-      - $ref: '#/components/parameters/OrgId'
       - name: org_id
         in: path
         required: true
@@ -1520,7 +1117,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: cursor
         in: query
@@ -1540,11 +1136,10 @@ paths:
       x-operation-version: 1.0.0
     post:
       operationId: createInvitation
-      summary: Invite a current member by ID, verified email, or IAM tag
+      summary: Share with a Carbon or Silicon named by id
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
@@ -1570,7 +1165,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - in: path
         name: grant_id
@@ -1595,7 +1189,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - in: path
         name: grant_id
@@ -1630,7 +1223,6 @@ paths:
       tags:
       - Entries
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '204':
@@ -1646,7 +1238,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -1664,7 +1255,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
@@ -1690,7 +1280,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
@@ -1711,12 +1300,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - in: query
-        name: test_environment
-        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
-        schema:
-          type: string
-          format: uuid
       - $ref: '#/components/parameters/OrgIdPath'
       - in: path
         name: path
@@ -1734,7 +1317,6 @@ paths:
           - attachment
           default: metadata
       - $ref: '#/components/parameters/Cursor'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
       responses:
         '200':
           description: Success
@@ -1759,11 +1341,9 @@ paths:
   /obo/invitations:
     post:
       operationId: inviteOnBehalfOfMember
-      summary: Critical IAM-approved operation inside the calling app subtree
+      summary: Share or link an entry for the account, inside the issuing app's folder
       tags:
       - Permissions
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
       responses:
         '200':
           description: Success
@@ -1780,23 +1360,16 @@ paths:
             schema:
               $ref: '#/components/schemas/DelegatedInvite'
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      x-iam-endpoint-id: briefcase.invitations.create
-      x-iam-critical: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary invitation permissions and logical idempotency.
+      - proofAuth: []
+      x-proof-scope: briefcase.invitations.create
+      description: Requires a User verification proof with scope briefcase.invitations.create from an app allowed for it. Ordinary invitation permissions and logical idempotency apply.
       x-operation-version: 3.0.0
   /obo/link-access:
     post:
       operationId: setLinkAccessOnBehalfOfMember
-      summary: Critical IAM-approved operation inside the calling app subtree
+      summary: Share or link an entry for the account, inside the issuing app's folder
       tags:
       - Permissions
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
       responses:
         '200':
           description: Success
@@ -1813,14 +1386,9 @@ paths:
             schema:
               $ref: '#/components/schemas/DelegatedLinkAccess'
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      x-iam-endpoint-id: briefcase.link_access.update
-      x-iam-critical: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      - proofAuth: []
+      x-proof-scope: briefcase.link_access.update
+      description: Requires a User verification proof with scope briefcase.link_access.update from an app allowed for it. Ordinary link-sharing permissions and logical idempotency apply.
       x-operation-version: 3.0.0
 components:
   securitySchemes:
@@ -1832,53 +1400,36 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: IAM access token
-    oboAccess:
-      type: apiKey
-      in: header
-      name: X-IAM-OBO-Access-Token
-      description: Reusable IAM OBO access token (oba_), verified online for the receiving endpoint
-    appId:
-      type: apiKey
-      in: header
-      name: X-App-ID
-      description: Originating application identifier required together with an OBO access token
-    testingEnvironmentKey:
-      type: apiKey
-      in: header
-      name: X-Briefcase-App-Secret
-      description: 'IAM test Application secret: ask_ followed by 43 URL-safe characters. Selects an already provisioned
-        and registered Briefcase testing environment.'
+      bearerFormat: JWT
+      description: A Silicon Accounts access token issued to Briefcase (EdDSA JWT, `aud` = `briefcase`, `iss` = the
+        Silicon Accounts URL), verified locally against the published keys. Sharing changes, deletion, version
+        restore, self-destruct keep and storage configuration also confirm the token with Silicon Accounts.
+    proofAuth:
+      type: http
+      scheme: Proof
+      description: '`Authorization: Proof sap_…` — a Silicon Accounts User verification proof whose receiving app
+        is `briefcase`, issued to an app allowed for the route''s scope (`x-proof-scope`). The request runs as the
+        account the proof speaks for, inside `apps/{issuing app}/`.'
   parameters:
-    OrgId:
+    UploadTenant:
       name: X-Org-ID
       in: header
       required: true
+      description: Uuid of the account the reservation belongs to (the user of the proof that reserved it). The
+        capability, not this value, authorizes the bytes.
       schema:
         type: string
-    OboOrgId:
-      name: X-Org-ID
-      in: header
-      required: false
-      schema:
-        type: string
-      description: Optional; IAM derives the organization and any supplied value must agree
+        pattern: ^[A-Za-z0-9]{3,32}$
     OrgIdPath:
       name: org_id
       in: path
       required: true
+      description: The drive the entry lives in (an account uuid).
       schema:
         type: string
-        pattern: ^[a-z0-9_-]{3,50}$
+        pattern: ^[A-Za-z0-9_-]{3,50}$
     EntryId:
       name: entry_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-    TestingEnvironmentIdPath:
-      name: environment_id
       in: path
       required: true
       schema:
@@ -1892,22 +1443,6 @@ components:
         type: string
         minLength: 8
         maxLength: 255
-    AuthIdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      description: Stable key for recovering the same IAM token exchange
-      schema:
-        type: string
-        minLength: 16
-        maxLength: 255
-    OptionalTestingEnvironmentKey:
-      name: X-Briefcase-App-Secret
-      in: header
-      required: false
-      description: Selects a Briefcase test plane; omission selects production
-      schema:
-        $ref: '#/components/schemas/TestingEnvironmentKeyValue'
     IfMatch:
       name: If-Match
       in: header
@@ -1995,6 +1530,69 @@ components:
             type: string
             format: binary
   schemas:
+    AccountsInfo:
+      type: object
+      additionalProperties: false
+      required:
+      - app_id
+      - accounts_url
+      - delegated_scopes
+      properties:
+        app_id:
+          type: string
+          description: Briefcase's app id at Silicon Accounts (the audience of its access tokens)
+        accounts_url:
+          type: string
+          format: uri
+          description: The Silicon Accounts URL, which is also the issuer of the access tokens
+        delegated_scopes:
+          type: array
+          description: Scopes another app may hold in a User verification proof to act for an account here
+          items:
+            type: string
+    Account:
+      type: object
+      additionalProperties: false
+      required:
+      - uuid
+      - kind
+      properties:
+        uuid:
+          type: string
+          description: Permanent, case-sensitive account identifier
+        id:
+          type:
+          - string
+          - 'null'
+          description: Current public id, such as c:ada or si:scout (it can change)
+        kind:
+          type: string
+          enum:
+          - carbon
+          - silicon
+        display_name:
+          type:
+          - string
+          - 'null'
+        pfp_url:
+          type:
+          - string
+          - 'null'
+        custodian:
+          description: A Silicon's custodian (a Carbon); null for Carbons
+          oneOf:
+          - type: 'null'
+          - type: object
+            additionalProperties: false
+            required:
+            - uuid
+            properties:
+              uuid:
+                type: string
+              id:
+                type:
+                - string
+                - 'null'
     DelegatedReserveUpload:
       type: object
       additionalProperties: false
@@ -2194,405 +1792,6 @@ components:
         entry_id:
           type: string
           format: uuid
-    ShortLivedTokenExchange:
-      type: object
-      additionalProperties: false
-      required:
-      - slt
-      properties:
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-          description: Selected organization. Required for a testing actor with more than one membership; must match an issued login code.
-        slt:
-          type: string
-          description: IAM-issued login code for the selected plane, or the existing Carbon/Silicon public ID when a test app secret is supplied.
-          oneOf:
-          - pattern: ^oac_[A-Za-z0-9_-]{43}$
-          - pattern: ^[a-z1-9_-]{3,30}$
-          - pattern: ^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$
-    ApplicationSessionRefresh:
-      type: object
-      additionalProperties: false
-      required:
-      - refresh_token
-      properties:
-        refresh_token:
-          type: string
-          pattern: ^ort_[A-Za-z0-9_-]{43}$
-    IamInfo:
-      type: object
-      additionalProperties: false
-      required:
-      - app_id
-      - test_environment_id
-      - iam_environment_id
-      properties:
-        app_id:
-          type: string
-        test_environment_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        iam_environment_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-    LoginStatus:
-      type: object
-      additionalProperties: false
-      required:
-      - authenticated
-      - actor
-      - organizations
-      - expires_at
-      properties:
-        authenticated:
-          type: boolean
-        actor:
-          oneOf:
-          - type: 'null'
-          - type: object
-            additionalProperties: false
-            required:
-            - principal_id
-            - type
-            - public_id
-            properties:
-              principal_id:
-                type: string
-                format: uuid
-              type:
-                type: string
-                enum:
-                - carbon
-                - silicon
-              public_id:
-                type:
-                - string
-                - 'null'
-                description: Public identity from active organization snapshots; otherwise null. The principal UUID
-                  is always available when authenticated.
-        organizations:
-          type: array
-          items:
-            type: string
-        expires_at:
-          type:
-          - integer
-          - 'null'
-          format: int64
-          description: Access-token expiry as a Unix timestamp.
-    ApplicationSessionActor:
-      type: object
-      additionalProperties: false
-      required:
-      - principal_id
-      - type
-      - public_id
-      properties:
-        principal_id:
-          type: string
-          format: uuid
-        type:
-          type: string
-          enum:
-          - carbon
-          - silicon
-        public_id:
-          type: string
-          minLength: 1
-          maxLength: 255
-    ApplicationSessionTokens:
-      type: object
-      additionalProperties: false
-      required:
-      - access_token
-      - refresh_token
-      - token_type
-      - expires_in
-      - scope
-      - actor
-      - org_id
-      - organizations
-      properties:
-        access_token:
-          type: string
-          pattern: ^oat_[A-Za-z0-9_-]{43}$
-        refresh_token:
-          type: string
-          pattern: ^ort_[A-Za-z0-9_-]{43}$
-        token_type:
-          type: string
-          const: Bearer
-        expires_in:
-          type: integer
-          const: 1800
-        scope:
-          type: string
-        actor:
-          $ref: '#/components/schemas/ApplicationSessionActor'
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-        organizations:
-          type: array
-          minItems: 1
-          maxItems: 1
-          description: The single organization selected for this account session.
-          items:
-            type: string
-            pattern: ^[a-z0-9_-]{3,50}$
-    TestingEnvironmentCreator:
-      type: object
-      additionalProperties: false
-      required:
-      - type
-      - id
-      properties:
-        type:
-          type: string
-          enum:
-          - carbon
-          - silicon
-        id:
-          type: string
-          minLength: 1
-          maxLength: 255
-    TestingEnvironment:
-      type: object
-      required:
-      - id
-      - org_id
-      - name
-      - description
-      - status
-      - iam_environment_id
-      - iam_app_id
-      - created_by
-      - key_generation
-      - key_rotated_at
-      - last_activity_at
-      - cleaned_at
-      - deleted_at
-      - purge_after
-      - version
-      - created_at
-      - updated_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        status:
-          type: string
-          enum:
-          - active
-          - deleted
-        iam_environment_id:
-          type: string
-          format: uuid
-        iam_app_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$
-        created_by:
-          $ref: '#/components/schemas/TestingEnvironmentCreator'
-        key_generation:
-          type: integer
-          minimum: 1
-        key_rotated_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        last_activity_at:
-          type: string
-          format: date-time
-        cleaned_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        deleted_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        purge_after:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        version:
-          type: integer
-          minimum: 1
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    TestingEnvironmentPage:
-      type: object
-      additionalProperties: false
-      required:
-      - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/TestingEnvironment'
-    TestingEnvironmentCreate:
-      type: object
-      additionalProperties: false
-      required:
-      - name
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        iam_test_key:
-          $ref: '#/components/schemas/IamTestingEnvironmentKeyValue'
-    TestingEnvironmentPatch:
-      type: object
-      additionalProperties: false
-      minProperties: 1
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-    TestingEnvironmentIamPairing:
-      type: object
-      additionalProperties: false
-      required:
-      - iam_environment_id
-      - iam_environment_key
-      - iam_app_id
-      - iam_app_secret
-      properties:
-        iam_environment_id:
-          type: string
-          format: uuid
-        iam_environment_key:
-          $ref: '#/components/schemas/IamTestingEnvironmentKeyValue'
-        iam_app_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$
-        iam_app_secret:
-          type: string
-          pattern: ^ask_[A-Za-z0-9_-]{43}$
-    TestingEnvironmentKeyValue:
-      type: string
-      pattern: ^ask_[A-Za-z0-9_-]{43}$
-      description: IAM testing Application secret selecting the paired Briefcase environment. Never use a production
-        secret.
-    IamTestingEnvironmentKeyValue:
-      type: string
-      pattern: ^[A-Za-z0-9]{32}$
-      description: Root key for the separately created IAM testing environment; stored encrypted and sent only to
-        IAM.
-    TestingEnvironmentWithKey:
-      allOf:
-      - $ref: '#/components/schemas/TestingEnvironment'
-      - type: object
-        required:
-        - key
-        properties:
-          key:
-            $ref: '#/components/schemas/TestingEnvironmentKeyValue'
-    TestingEnvironmentKey:
-      type: object
-      additionalProperties: false
-      required:
-      - environment_id
-      - key_generation
-      - key_rotated_at
-      - key
-      properties:
-        environment_id:
-          type: string
-          format: uuid
-        key_generation:
-          type: integer
-          minimum: 1
-        key_rotated_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        key:
-          $ref: '#/components/schemas/TestingEnvironmentKeyValue'
-    TestingEnvironmentSelf:
-      type: object
-      additionalProperties: false
-      required:
-      - id
-      - name
-      - description
-      - key_generation
-      - created_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        key_generation:
-          type: integer
-          minimum: 1
-        created_at:
-          type: string
-          format: date-time
-    TestingEnvironmentCleaning:
-      type: object
-      additionalProperties: false
-      required:
-      - environment_id
-      - erased_rows
-      - cleaned_at
-      properties:
-        environment_id:
-          type: string
-          format: uuid
-        erased_rows:
-          type: integer
-          minimum: 0
-          description: Database rows logically removed after provider cleanup was durably queued.
-        cleaned_at:
-          type: string
-          format: date-time
     ActorRef:
       type: object
       required:
@@ -2735,7 +1934,7 @@ components:
       - effective_access
       description: 'A `traversal` entry is a folder the caller reaches only because something inside it was shared.
         It can be opened and lists what was shared; its owner, timestamps, and effective access are withheld. The
-        reserved Public, Private, and tag containers carry no `owner`: they are structure IAM reconciliation maintains
+        reserved Public, Private, and tag containers carry no `owner`: they are structure Briefcase reconciliation maintains
         rather than any member''s property.'
       properties:
         id:
@@ -2867,27 +2066,6 @@ components:
           type:
           - string
           - 'null'
-    MultipartUpload:
-      type: object
-      required:
-      - upload_id
-      - part_size
-      - part_count
-      - expires_at
-      properties:
-        upload_id:
-          type: string
-        part_size:
-          type: integer
-          minimum: 8388608
-          maximum: 5368709120
-        part_count:
-          type: integer
-          minimum: 1
-          maximum: 10000
-        expires_at:
-          type: string
-          format: date-time
     AccessRight:
       type: string
       description: One independent right. `update` never implies `delete`, `write` never implies `update`, and every
@@ -3370,7 +2548,7 @@ components:
           - string
           - 'null'
           format: uri
-          description: Shareable file or folder website URL when effective is true; otherwise null. Testing URLs require the recipient to select the same testing environment.
+          description: Shareable file or folder website URL when effective is true; otherwise null.
         enabled:
           type: boolean
         effective:

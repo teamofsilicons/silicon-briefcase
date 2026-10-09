@@ -73,30 +73,11 @@ pub(crate) async fn authenticated<T>(
     context: &crate::application::context::ExecutionContext,
     future: impl std::future::Future<Output = T>,
 ) -> T {
-    let environment_id = context
-        .testing_environment()
-        .map(crate::application::context::TestingEnvironmentContext::id);
     let request = RequestContext {
         enabled: collector::REQUEST
             .try_with(|context| context.enabled)
             .unwrap_or(true),
-        testing: environment_id.is_some(),
-        environment_id,
         request_id: uuid::Uuid::parse_str(context.request_id()).ok(),
     };
     scope(request, future).await
-}
-
-/// Attributes background batches to the testing plane.
-pub(crate) async fn testing<T>(future: impl std::future::Future<Output = T>) -> T {
-    scope(
-        RequestContext {
-            enabled: true,
-            testing: true,
-            request_id: None,
-            environment_id: None,
-        },
-        future,
-    )
-    .await
 }

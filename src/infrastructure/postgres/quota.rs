@@ -15,7 +15,6 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use crate::{
-    application::testing::TESTING_ENVIRONMENT_STORAGE_LIMIT_BYTES,
     domain::quota::{OrganizationUsage, UploadLimit},
     error::AppError,
 };
@@ -27,29 +26,6 @@ macro_rules! utc_today {
     () => {
         "(clock_timestamp() AT TIME ZONE 'UTC')::date"
     };
-}
-
-/// Pins every sandbox organization to the product's exact storage ceiling.
-///
-/// Both webhook projection and online IAM reconciliation call this after the
-/// namespaced organization exists. That makes the limit independent of event
-/// delivery order and repairs any missing or stale sandbox usage row before a
-/// data-plane operation can spend storage.
-pub(super) async fn ensure_testing_environment_storage_limit(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(concat!(
-        "INSERT INTO briefcase.organization_usage (",
-        "org_id, daily_window, storage_limit_bytes) VALUES (",
-        "briefcase.current_org_id(), ",
-        utc_today!(),
-        ", $1) ON CONFLICT (org_id) DO UPDATE ",
-        "SET storage_limit_bytes = EXCLUDED.storage_limit_bytes"
-    ))
-    .bind(TESTING_ENVIRONMENT_STORAGE_LIMIT_BYTES)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
 }
 
 /// Reads what the organization currently consumes and the ceilings in force.
@@ -88,7 +64,7 @@ pub(super) async fn check_upload(
     let result = read_usage(transaction)
         .await?
         .admits_upload(with_pending(bytes, pending)?);
-    map_exhaustion(transaction, result).await
+    map_exhaustion(result)
 }
 
 /// Refuses bytes the organization has no room to store.
@@ -105,7 +81,7 @@ pub(super) async fn check_storage(
     let result = read_usage(transaction)
         .await?
         .admits_storage(with_pending(bytes, pending)?);
-    map_exhaustion(transaction, result).await
+    map_exhaustion(result)
 }
 
 /// Charges an upload against the daily allowance and the storage ceiling.
@@ -127,7 +103,7 @@ pub(super) async fn charge_upload(
     let result = usage
         .admits_upload(pending)
         .and_then(|()| usage.admits_storage(bytes.saturating_add(pending)));
-    map_exhaustion(transaction, result).await
+    map_exhaustion(result)
 }
 
 /// Claims storage for bytes that are copied rather than uploaded.
@@ -146,7 +122,7 @@ pub(super) async fn charge_storage(
     let usage = lock_usage(transaction, 0).await?;
     let pending = pending_delegated_bytes(transaction).await?;
     let result = usage.admits_storage(with_pending(bytes, pending)?);
-    map_exhaustion(transaction, result).await
+    map_exhaustion(result)
 }
 
 /// Reserves capacity under the same counter lock as normal publication.
@@ -161,7 +137,7 @@ pub(super) async fn reserve_delegated_upload(
     let usage = lock_usage(transaction, 0).await?;
     let pending = pending_delegated_bytes(transaction).await?;
     let result = usage.admits_upload(with_pending(bytes, pending)?);
-    map_exhaustion(transaction, result).await
+    map_exhaustion(result)
 }
 
 async fn pending_delegated_bytes(
@@ -254,25 +230,8 @@ fn exhausted(limit: UploadLimit) -> AppError {
     }
 }
 
-async fn map_exhaustion(
-    transaction: &mut Transaction<'_, Postgres>,
-    result: Result<(), UploadLimit>,
-) -> Result<(), AppError> {
-    let Err(limit) = result else {
-        return Ok(());
-    };
-    if limit == UploadLimit::Storage {
-        let testing = sqlx::query_scalar::<_, bool>(
-            "SELECT NULLIF(current_setting('briefcase.testing_environment_id', true), '') IS NOT NULL",
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(database_error)?;
-        if testing {
-            return Err(AppError::TestingEnvironmentStorageLimit);
-        }
-    }
-    Err(exhausted(limit))
+fn map_exhaustion(result: Result<(), UploadLimit>) -> Result<(), AppError> {
+    result.map_err(exhausted)
 }
 
 fn seconds_until_utc_midnight() -> u64 {

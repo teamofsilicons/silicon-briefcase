@@ -1,8 +1,9 @@
-//! Exact-request delegated folder, listing, content, and recoverable-trash calls.
+//! Delegated folder, listing, content, and recoverable-trash calls.
 //!
-//! Every operation consumes a fresh IAM proof for the exact JSON bytes. No
-//! destination, byte range, disposition, or mutation key comes from an unbound
-//! query or header, and the normal application services still enforce access.
+//! Every operation carries a Silicon Accounts User verification proof for the
+//! route's scope. No destination, byte range, disposition, or mutation key
+//! comes from a query or header, and the normal application services still
+//! enforce the account's access.
 
 use axum::{
     Json,
@@ -12,13 +13,12 @@ use axum::{
     response::Response,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
     application::{
         content::ContentIntent,
-        context::{ExecutionContext, TestingEnvironmentContext},
+        context::ExecutionContext,
         idempotency::IdempotencyKey,
         service::{
             CONTENTS_PAGE_SIZE, CreateFolderCommand, ListEntriesQuery as ServiceListEntriesQuery,
@@ -31,13 +31,11 @@ use crate::{
         ids::EntryId,
     },
     error::AppError,
-    infrastructure::iam::OboRequestBinding,
-    request_context,
 };
 
 use super::{
     super::{
-        auth, cursor,
+        cursor,
         dto::{EntryDto, EntryPageDto, ListEntriesQuery},
         extract,
         mapping::metadata_error,
@@ -49,22 +47,22 @@ use super::{
 
 /// Registered fixed path for delegated folder creation.
 pub(crate) const CREATE_FOLDER_PATH: &str = "/api/v1/obo/folders/create";
-/// IAM endpoint identifier for delegated folder creation.
-pub(crate) const CREATE_FOLDER_ENDPOINT_ID: &str = "briefcase.folders.create";
+/// Proof scope for delegated folder creation.
+pub(crate) const CREATE_FOLDER_ENDPOINT_ID: &str = crate::domain::delegation::FOLDERS_CREATE;
 /// Registered fixed path for delegated entry listing.
 pub(crate) const LIST_ENTRIES_PATH: &str = "/api/v1/obo/entries/list";
-/// IAM endpoint identifier for delegated entry listing.
-pub(crate) const LIST_ENTRIES_ENDPOINT_ID: &str = "briefcase.entries.list";
+/// Proof scope for delegated entry listing.
+pub(crate) const LIST_ENTRIES_ENDPOINT_ID: &str = crate::domain::delegation::ENTRIES_LIST;
 /// Registered fixed path for delegated file delivery.
 pub(crate) const READ_FILE_PATH: &str = "/api/v1/obo/files/read";
-/// IAM endpoint identifier for delegated file delivery.
-pub(crate) const READ_FILE_ENDPOINT_ID: &str = "briefcase.files.read";
+/// Proof scope for delegated file delivery.
+pub(crate) const READ_FILE_ENDPOINT_ID: &str = crate::domain::delegation::FILES_READ;
 /// Registered fixed path for delegated recoverable deletion.
 pub(crate) const TRASH_ENTRY_PATH: &str = "/api/v1/obo/entries/trash";
-/// IAM endpoint identifier for delegated recoverable deletion.
-pub(crate) const TRASH_ENTRY_ENDPOINT_ID: &str = "briefcase.entries.trash";
+/// Proof scope for delegated recoverable deletion.
+pub(crate) const TRASH_ENTRY_ENDPOINT_ID: &str = crate::domain::delegation::ENTRIES_TRASH;
 
-/// IAM-bound JSON for a logical folder creation.
+/// JSON for a logical folder creation.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateFolderRequest {
@@ -76,7 +74,7 @@ pub(crate) struct CreateFolderRequest {
     pub(crate) name: String,
 }
 
-/// IAM-bound JSON for one current file read.
+/// JSON for one current file read.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadFileRequest {
@@ -89,7 +87,7 @@ pub(crate) struct ReadFileRequest {
     pub(crate) download: bool,
 }
 
-/// IAM-bound JSON for a logical recoverable deletion.
+/// JSON for a logical recoverable deletion.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TrashEntryRequest {
@@ -99,69 +97,20 @@ pub(crate) struct TrashEntryRequest {
     pub(crate) entry_id: Uuid,
 }
 
-/// Authenticates the exact JSON request and returns its request-local authority.
+/// Authenticates an app acting for an account and parses its JSON request.
 ///
+/// The app must send `Authorization: Proof sap_…`: a Silicon Accounts User
+/// verification proof whose receiving app is Briefcase, carrying `scope` (the
+/// route's endpoint id), from an app allowed for that scope. The request then
+/// runs as the account the proof speaks for, confined to `apps/{issuing app}/`.
 /// The route must apply the normal JSON body limit before extracting `Bytes`.
-/// This binding is never stored or reused for a second request. The new IAM
-/// endpoint catalog entries have an empty metadata schema: every operation
-/// input belongs to the exact body digest instead.
 pub(super) async fn authorize_json<T: DeserializeOwned>(
     state: &AppState,
     headers: &HeaderMap,
     body: &Bytes,
-    path: &'static str,
-    endpoint_id: &'static str,
+    scope: &'static str,
 ) -> Result<(ExecutionContext, T), AppError> {
-    let (application, proof) = auth::obo_credentials(headers)?;
-    let declared_organization = auth::optional_organization(headers)?;
-    let testing_access = extract::optional_testing_access(state, headers).await?;
-    let iam_environment = testing_access
-        .as_ref()
-        .map(extract::iam_environment_credential)
-        .transpose()?;
-    let body_sha256 = hex::encode(Sha256::digest(body));
-    let fence = extract::testing_use_fence(state, testing_access.as_ref()).await?;
-    let verified = state
-        .iam
-        .verify_obo(
-            &proof,
-            &application,
-            declared_organization.as_ref(),
-            &OboRequestBinding {
-                method: "POST",
-                path,
-                body_sha256: &body_sha256,
-            },
-            iam_environment.as_ref(),
-        )
-        .await?;
-    if verified.endpoint_id != endpoint_id {
-        return Err(AppError::Forbidden);
-    }
-    if !verified
-        .metadata
-        .as_object()
-        .is_some_and(serde_json::Map::is_empty)
-    {
-        return Err(AppError::validation("invalid_obo_metadata"));
-    }
-    extract::touch_testing_access(state, testing_access.as_ref()).await?;
-    if let Some(fence) = fence {
-        fence.release().await?;
-    }
-
-    let request_id = request_context::current_request_id().ok_or(AppError::Internal {
-        category: "request_scope_missing",
-    })?;
-    let authorization = verified.authorization.ok_or(AppError::Forbidden)?;
-    let context = match testing_access {
-        Some(access) => ExecutionContext::in_testing_environment(
-            authorization,
-            request_id,
-            TestingEnvironmentContext::new(access.environment_id, access.control_version),
-        ),
-        None => ExecutionContext::new(authorization, request_id),
-    };
+    let context = extract::authenticate_proof(state, headers, scope).await?;
     let parsed = serde_json::from_slice(body).map_err(|_| AppError::bad_request("invalid_json"))?;
     Ok((context, parsed))
 }
@@ -172,14 +121,8 @@ pub(crate) async fn create_folder(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EntryDto>), AppError> {
-    let (context, body): (_, CreateFolderRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        CREATE_FOLDER_PATH,
-        CREATE_FOLDER_ENDPOINT_ID,
-    )
-    .await?;
+    let (context, body): (_, CreateFolderRequest) =
+        authorize_json(&state, &headers, &body, CREATE_FOLDER_ENDPOINT_ID).await?;
     require_operation_id(body.operation_id)?;
     let name = EntryName::new(&body.name).map_err(|_| AppError::validation("invalid_name"))?;
     let parent_id = destination_folder(&state, &context, &body.parent_path).await?;
@@ -206,14 +149,8 @@ pub(crate) async fn list_entries(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<EntryPageDto>, AppError> {
-    let (context, query): (_, ListEntriesQuery) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        LIST_ENTRIES_PATH,
-        LIST_ENTRIES_ENDPOINT_ID,
-    )
-    .await?;
+    let (context, query): (_, ListEntriesQuery) =
+        authorize_json(&state, &headers, &body, LIST_ENTRIES_ENDPOINT_ID).await?;
     extract::validation(validation::list_entries(&query))?;
     if let Some(cursor) = query.cursor.as_deref() {
         cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
@@ -270,14 +207,8 @@ pub(crate) async fn read_file(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let (context, body): (_, ReadFileRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        READ_FILE_PATH,
-        READ_FILE_ENDPOINT_ID,
-    )
-    .await?;
+    let (context, body): (_, ReadFileRequest) =
+        authorize_json(&state, &headers, &body, READ_FILE_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
     let intent = if body.download {
         ContentIntent::Download
@@ -299,14 +230,8 @@ pub(crate) async fn trash_entry(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    let (context, body): (_, TrashEntryRequest) = authorize_json(
-        &state,
-        &headers,
-        &body,
-        TRASH_ENTRY_PATH,
-        TRASH_ENTRY_ENDPOINT_ID,
-    )
-    .await?;
+    let (context, body): (_, TrashEntryRequest) =
+        authorize_json(&state, &headers, &body, TRASH_ENTRY_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
     let metadata = logical_mutation(
         TRASH_ENTRY_ENDPOINT_ID,

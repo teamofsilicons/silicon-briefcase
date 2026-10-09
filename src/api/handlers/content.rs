@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::super::{
-    auth::{self, IamAction},
+    auth::{self, Action},
     delivery,
     dto::{
         BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
@@ -76,8 +76,8 @@ async fn serve_entry_content(
 ) -> Result<Response, AppError> {
     let resource = entry_id.to_string();
     let action = match intent {
-        ContentIntent::Render => IamAction::ReadContent,
-        ContentIntent::Download => IamAction::DownloadFile,
+        ContentIntent::Render => Action::ReadContent,
+        ContentIntent::Download => Action::DownloadFile,
     };
     let context = extract::authenticate(state, headers, action, &resource).await?;
     serve(state, headers, &context, entry_id, intent).await
@@ -123,9 +123,7 @@ pub(crate) async fn upload(
     // Verify the credential shape before admitting a single byte of body.
     auth::require_bearer_shape(&headers)?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
-    let organization = extract::organization_resource(&headers)?;
-    let context =
-        extract::authenticate(&state, &headers, IamAction::UploadFile, &organization).await?;
+    let context = extract::authenticate(&state, &headers, Action::UploadFile, "uploads").await?;
     let parts = parse_upload(
         extract::multipart(multipart)?,
         state.temporary_directory.clone(),
@@ -174,8 +172,7 @@ pub(crate) async fn list_versions(
 ) -> Result<Json<FileVersionPageDto>, AppError> {
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::ListVersions, &resource).await?;
+    let context = extract::authenticate(&state, &headers, Action::ListVersions, &resource).await?;
     let page = extract::scoped(
         &context,
         state.metadata.list_versions(
@@ -205,7 +202,7 @@ pub(crate) async fn restore_version(
     let version_id = extract::version_id(&version_text)?;
     let resource = version_id.to_string();
     let context =
-        extract::authenticate(&state, &headers, IamAction::RestoreVersion, &resource).await?;
+        extract::authenticate(&state, &headers, Action::RestoreVersion, &resource).await?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
     let request_hash =
         extract::request_fingerprint("restore_version", &resource, &(entry_uuid, &version_text))?;
@@ -239,7 +236,7 @@ pub(crate) async fn configure_storage(
     let body = extract::json(body)?;
     extract::validation(validation::bucket_configuration(&body))?;
     let context =
-        extract::authenticate_bearer(&state, &headers, IamAction::ConfigureStorage).await?;
+        extract::authenticate(&state, &headers, Action::ConfigureStorage, "storage").await?;
     let resource = context.authorization().organization_id().as_str();
     let idempotency = extract::idempotency_key(&headers)?
         .map(|key| {

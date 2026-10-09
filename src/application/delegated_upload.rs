@@ -1,7 +1,7 @@
 //! Fresh-authorized publication of capability-scoped, durable staged uploads.
 //!
 //! A staging capability can write only one reserved byte stream. It is not an
-//! IAM authorization snapshot and cannot read files or publish an entry.
+//! verified authorization snapshot and cannot read files or publish an entry.
 
 use std::{future::Future, path::Path, sync::Arc, time::Duration};
 
@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         content::{map_object_error, sha256_file_range},
-        context::{ExecutionContext, TestingEnvironmentContext},
+        context::ExecutionContext,
         ports::{
             ObjectChecksum, ObjectChecksumAlgorithm, ObjectChecksumType, ObjectKey, ObjectStore,
             ObjectStoreError, StorageTarget, StoredObject, StoredPart, UploadPartRequest,
@@ -84,7 +84,7 @@ pub struct DelegatedUploadReservation {
 pub struct ReserveDelegatedUpload {
     /// Stable logical-operation key.
     pub operation_id: Uuid,
-    /// User-supplied path bound inside the IAM-authorized manifest.
+    /// User-supplied path bound inside the proof-authorized manifest.
     pub parent_path: String,
     /// Resolved destination; persistence freezes the first accepted UUID.
     pub parent_id: EntryId,
@@ -100,21 +100,18 @@ pub struct ReserveDelegatedUpload {
     pub request_hash: [u8; 32],
 }
 
-/// A non-IAM selector for the capability-only transfer path.
+/// The tenant selector for the capability-only transfer path.
 ///
-/// The organization is untrusted until the capability is checked against its
-/// row. The optional test selector is authenticated separately with its root.
+/// The tenant is untrusted until the capability is checked against its row.
 #[derive(Clone, Debug)]
 pub struct DelegatedUploadScope {
-    /// Public organization selector from x-org-id.
+    /// Tenant selector from the `x-org-id` header (the account's drive key).
     pub organization_id: OrganizationId,
-    /// Root-authenticated test-plane generation, or production.
-    pub testing_environment: Option<TestingEnvironmentContext>,
     /// Correlation only; never used as authority.
     pub request_id: String,
 }
 
-/// Frozen target and exact lease for one transfer, without cached IAM rights.
+/// Frozen target and exact lease for one transfer, without cached rights.
 #[derive(Clone, Debug)]
 pub struct DelegatedUploadTransfer {
     /// Capability-selected tenant and test generation.
@@ -142,7 +139,7 @@ pub struct DelegatedUploadTransfer {
 /// Immutable stored-object evidence required before fresh publication.
 #[derive(Clone, Debug)]
 pub struct DelegatedUploadCommit {
-    /// Status observed under current IAM authority.
+    /// Status observed under current proof authority.
     pub status: DelegatedUploadStatus,
     /// Frozen storage destination.
     pub target: StorageTarget,
@@ -327,7 +324,7 @@ where
         }
     }
 
-    /// Reserves an immutable manifest with fresh current IAM authority.
+    /// Reserves an immutable manifest with fresh current proof authority.
     ///
     /// # Errors
     /// Returns an authorization, quota, intent-conflict, or persistence error.
@@ -354,7 +351,7 @@ where
         Ok(DelegatedUploadReservation { status, capability })
     }
 
-    /// Returns current status after fresh IAM authority and immutable binding.
+    /// Returns current status after freshly verified authority and immutable binding.
     ///
     /// # Errors
     /// Returns an error if current authority, identity, or persistence fails.
@@ -404,7 +401,7 @@ where
 
     /// Stores one verified private tempfile under its one-write provider key.
     ///
-    /// No cached IAM proof or authorization snapshot participates in this path.
+    /// No cached proof or authorization snapshot participates in this path.
     ///
     /// # Errors
     /// Returns an error on integrity, lease, provider, or persistence failure.
@@ -596,7 +593,7 @@ where
         }
     }
 
-    /// Publishes the exact staged object only after a new IAM verification.
+    /// Publishes the exact staged object only after a new proof verification.
     ///
     /// # Errors
     /// Returns an error if current authority, immutable object evidence, quota,

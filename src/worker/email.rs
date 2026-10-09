@@ -42,12 +42,7 @@ impl Sender {
         org: &str,
         id: uuid::Uuid,
         payload: &Value,
-        test: bool,
     ) -> Result<(), &'static str> {
-        // Test environments exercise the outbox without contacting real inboxes.
-        if test {
-            return Ok(());
-        }
         let token = self.token.as_ref().ok_or("postmark_unconfigured")?;
         let recipient_type = payload["recipient_type"]
             .as_str()

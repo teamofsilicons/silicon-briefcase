@@ -1081,7 +1081,7 @@ where
     ///
     /// Briefcase proxies the bytes itself instead of handing out a signed
     /// provider URL, so a permanent URL never becomes a bearer capability and
-    /// every read stays bound to a current IAM identity.
+    /// every read stays bound to a currently verified account.
     ///
     /// # Errors
     ///

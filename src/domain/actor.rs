@@ -1,11 +1,13 @@
-//! Authenticated actors and organization request context.
+//! Authenticated actors and the tenant request context.
 
 use std::{collections::BTreeSet, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-/// Maximum UTF-8 byte length of any identifier supplied by IAM.
+use super::account::Actor;
+
+/// Maximum UTF-8 byte length of any identifier supplied by an external authority.
 pub const MAX_EXTERNAL_IDENTIFIER_BYTES: usize = 255;
 
 /// An invalid identifier received from an external authority.
@@ -114,23 +116,23 @@ macro_rules! external_identifier {
 }
 
 external_identifier!(
-    /// An IAM actor identifier.
+    /// An actor identifier (an account uuid, or a legacy public id in old rows).
     ActorId
 );
 external_identifier!(
-    /// An immutable IAM organization identifier.
+    /// A tenant key (an account uuid, or a legacy organization handle).
     OrganizationId
 );
 external_identifier!(
-    /// An IAM application identifier.
+    /// A Silicon Apps application identifier.
     ApplicationId
 );
 external_identifier!(
-    /// The exact IAM tag name used to derive tag-boundary access.
+    /// A legacy tag name kept only to read pre-migration rows.
     TagName
 );
 
-/// Returns whether a string is IAM's canonical public Application ID.
+/// Returns whether a string is a canonical bare application ID, such as `briefcase`.
 #[must_use]
 pub fn is_canonical_iam_application_id(value: &str) -> bool {
     (1..=80).contains(&value.len())
@@ -140,7 +142,7 @@ pub fn is_canonical_iam_application_id(value: &str) -> bool {
         })
 }
 
-/// Returns whether a string is IAM's canonical public organization handle.
+/// Returns whether a string is a legacy organization handle (lowercase, 3 to 50 characters).
 #[must_use]
 pub fn is_canonical_iam_organization_id(value: &str) -> bool {
     (3..=50).contains(&value.len())
@@ -167,7 +169,7 @@ pub struct ActorRef {
 }
 
 impl ActorRef {
-    /// Constructs an actor reference from trusted IAM identity data.
+    /// Constructs an actor reference from verified identity data.
     #[must_use]
     pub const fn new(kind: ActorKind, id: ActorId) -> Self {
         Self { kind, id }
@@ -179,14 +181,14 @@ impl ActorRef {
         self.kind
     }
 
-    /// Returns the IAM actor identifier.
+    /// Returns the actor identifier.
     #[must_use]
     pub const fn id(&self) -> &ActorId {
         &self.id
     }
 }
 
-/// The represented actor's current IAM organization role.
+/// The represented actor's role in the tenant.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrganizationRole {
@@ -206,21 +208,21 @@ impl OrganizationRole {
     }
 }
 
-/// How IAM authenticated the represented actor for this request.
+/// How the represented actor was authenticated for this request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum AuthenticationMode {
-    /// The actor called Briefcase with an IAM bearer token.
+    /// The actor called Briefcase with its own access token.
     Bearer,
-    /// An IAM-verified application is acting on behalf of the actor.
+    /// Another app is acting for the actor with a verified proof.
     OnBehalfOf {
-        /// The verified originating IAM application.
+        /// The verified issuing application.
         application_id: ApplicationId,
     },
 }
 
 impl AuthenticationMode {
-    /// Returns the verified originating application for an OBO request.
+    /// Returns the verified issuing application for a delegated request.
     #[must_use]
     pub const fn originating_application(&self) -> Option<&ApplicationId> {
         match self {
@@ -230,14 +232,18 @@ impl AuthenticationMode {
     }
 }
 
-/// Trusted authorization facts established through online IAM verification.
+/// Trusted authorization facts established by verifying the caller's credential.
 ///
-/// Constructing this value does not perform IAM verification. Only an IAM
-/// adapter that has already validated active membership, organization, role,
-/// disclosed tags, and any OBO proof should construct it.
+/// Constructing this value does not verify anything. Only the authentication
+/// boundary, after it verified a Silicon Accounts access token or proof,
+/// should construct it with [`RequestAuthContext::for_account`].
+///
+/// Until personal drives replace organizations, an account acts inside its
+/// own tenant: the tenant key is the account uuid, the represented actor is
+/// keyed by that uuid, and the account owns everything in it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuthContext {
-    iam_binding: Option<IamMembershipBinding>,
+    account: Option<Actor>,
     organization_id: OrganizationId,
     actor: ActorRef,
     role: OrganizationRole,
@@ -246,7 +252,7 @@ pub struct RequestAuthContext {
 }
 
 impl RequestAuthContext {
-    /// Constructs a request context from IAM-verified facts.
+    /// Constructs a request context from verified tenant-level facts.
     #[must_use]
     pub fn new(
         organization_id: OrganizationId,
@@ -256,7 +262,7 @@ impl RequestAuthContext {
         authentication: AuthenticationMode,
     ) -> Self {
         Self {
-            iam_binding: None,
+            account: None,
             organization_id,
             actor,
             role,
@@ -265,25 +271,41 @@ impl RequestAuthContext {
         }
     }
 
-    /// Attaches an online IAM snapshot already cross-validated
-    /// by the adapter. It is never reconstructed from cached authority.
-    #[must_use]
-    pub fn with_iam_binding(mut self, binding: IamMembershipBinding) -> Self {
-        self.tags = binding
-            .tags
-            .as_ref()
-            .map(|tags| tags.iter().map(|(_, name)| name.clone()).collect());
-        self.iam_binding = Some(binding);
-        self
+    /// Constructs the context of a verified Silicon Accounts actor acting in
+    /// its own drive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExternalIdentifierError`] when the uuid or the issuing app
+    /// cannot be represented as tenant identifiers (never for values that
+    /// passed Silicon Accounts verification).
+    pub fn for_account(account: Actor) -> Result<Self, ExternalIdentifierError> {
+        let organization_id = OrganizationId::new(account.uuid.as_str())?;
+        let actor = ActorRef::new(account.kind, ActorId::new(account.uuid.as_str())?);
+        let authentication = match account.issuing_app() {
+            Some(app) => AuthenticationMode::OnBehalfOf {
+                application_id: ApplicationId::new(app)?,
+            },
+            None => AuthenticationMode::Bearer,
+        };
+        Ok(Self {
+            account: Some(account),
+            organization_id,
+            actor,
+            role: OrganizationRole::Owner,
+            tags: Some(BTreeSet::new()),
+            authentication,
+        })
     }
 
-    /// Returns the online IAM membership version and canonical tag identities.
+    /// Returns the verified Silicon Accounts actor, when the request carried
+    /// a Silicon Accounts credential.
     #[must_use]
-    pub const fn iam_binding(&self) -> Option<&IamMembershipBinding> {
-        self.iam_binding.as_ref()
+    pub const fn account(&self) -> Option<&Actor> {
+        self.account.as_ref()
     }
 
-    /// Returns the verified organization.
+    /// Returns the verified tenant.
     #[must_use]
     pub const fn organization_id(&self) -> &OrganizationId {
         &self.organization_id
@@ -295,20 +317,20 @@ impl RequestAuthContext {
         &self.actor
     }
 
-    /// Returns the actor's current organization role.
+    /// Returns the actor's role in the tenant.
     #[must_use]
     pub const fn role(&self) -> OrganizationRole {
         self.role
     }
 
-    /// Returns disclosed IAM tags. `None` is unknown; `Some(empty)` is a
-    /// verified empty assignment. Cached tags never fill an undisclosed value.
+    /// Returns legacy tag assignments. `None` is unknown; `Some(empty)` is a
+    /// verified empty assignment.
     #[must_use]
     pub const fn tags(&self) -> Option<&BTreeSet<TagName>> {
         self.tags.as_ref()
     }
 
-    /// Returns whether IAM currently assigns the exact tag to the actor.
+    /// Returns whether the actor holds the exact legacy tag.
     #[must_use]
     pub fn has_tag(&self, tag: &TagName) -> bool {
         self.tags.as_ref().is_some_and(|tags| tags.contains(tag))
@@ -320,28 +342,11 @@ impl RequestAuthContext {
         &self.authentication
     }
 
-    /// Returns the verified originating application for an OBO request.
+    /// Returns the verified originating application for a delegated request.
     #[must_use]
     pub const fn originating_application(&self) -> Option<&ApplicationId> {
         self.authentication.originating_application()
     }
-}
-
-/// Membership facts from an online IAM authorization snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IamMembershipBinding {
-    /// Immutable IAM organization.
-    pub organization_id: uuid::Uuid,
-    /// Immutable IAM principal.
-    pub principal_id: uuid::Uuid,
-    /// Immutable organization membership.
-    pub membership_id: uuid::Uuid,
-    /// IAM membership aggregate version.
-    pub membership_version: i64,
-    /// Current authorization epoch.
-    pub authorization_epoch: i64,
-    /// Disclosed canonical tags. `None` must not replace directory assignments.
-    pub tags: Option<Vec<(uuid::Uuid, TagName)>>,
 }
 
 #[cfg(test)]

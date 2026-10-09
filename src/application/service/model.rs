@@ -1,15 +1,11 @@
 //! Commands, repository snapshots, and safe service views.
 
-use std::collections::BTreeSet;
-
 use time::OffsetDateTime;
 
 use crate::{
     application::idempotency::IdempotencyKey,
     domain::{
-        actor::{
-            ActorRef, ApplicationId, OrganizationId, OrganizationRole, RequestAuthContext, TagName,
-        },
+        actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         filter::FilterQuery,
         ids::{EntryId, GrantId, VersionId},
@@ -606,17 +602,6 @@ pub struct ListVersionsQuery {
     pub entry_id: EntryId,
     /// Cursor pagination across the complete version history.
     pub page: PageRequest,
-}
-
-/// Complete public identity and authority resolved from IAM's directory projection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectedIdentity {
-    /// Current public Carbon or Silicon reference.
-    pub actor: ActorRef,
-    /// Current organization role.
-    pub role: OrganizationRole,
-    /// Current IAM tags.
-    pub tags: BTreeSet<TagName>,
 }
 
 /// Number of history entries retained and returned for one entry.

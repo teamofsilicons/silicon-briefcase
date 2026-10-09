@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     super::{
-        auth::IamAction,
+        auth::Action,
         dto::{
             PermissionGrantCreateDto, PermissionGrantDto, PermissionGrantPageDto,
             PermissionInspectionDto, PermissionInspectionResultDto,
@@ -42,7 +42,7 @@ pub(crate) async fn list_permissions(
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
     let context =
-        extract::authenticate(&state, &headers, IamAction::ListPermissions, &resource).await?;
+        extract::authenticate(&state, &headers, Action::ListPermissions, &resource).await?;
     let page = extract::scoped(
         &context,
         state.metadata.list_permissions(
@@ -68,9 +68,8 @@ pub(crate) async fn inspect_permissions(
 ) -> Result<Json<PermissionInspectionResultDto>, AppError> {
     let body = extract::json(body)?;
     extract::validation(validation::inspect_permissions(&body))?;
-    let resource = extract::organization_resource(&headers)?;
     let context =
-        extract::authenticate(&state, &headers, IamAction::InspectPermissions, &resource).await?;
+        extract::authenticate(&state, &headers, Action::InspectPermissions, "permissions").await?;
     let entry_ids = body
         .entry_ids
         .iter()
@@ -106,22 +105,18 @@ pub(crate) async fn grant_permission(
     extract::validation(validation::grant_permission(&body))?;
     let resource = entry_id.to_string();
     let context =
-        extract::authenticate(&state, &headers, IamAction::GrantPermission, &resource).await?;
+        extract::authenticate(&state, &headers, Action::GrantPermission, &resource).await?;
     let metadata = extract::mutation(&headers, "grant_permission", &resource, &body, false)?;
+    let named = actor(body.principal)?;
+    let principal = extract::resolve_recipient(&state, named.kind(), named.id().as_str()).await?;
     let command = GrantPermissionCommand {
         entry_id,
-        principal: actor(body.principal)?,
+        principal,
         access: granted_access(&body.access)?,
         inherits_to_descendants: body.inherit,
         lifetime: body.expires_in_minutes,
     };
-    let context = extract::with_directory_recipients(
-        &state,
-        &headers,
-        context,
-        std::slice::from_ref(&command.principal),
-    )
-    .await?;
+    let context = extract::with_recipients(context, std::slice::from_ref(&command.principal));
     let grant = extract::scoped(
         &context,
         state
@@ -146,7 +141,7 @@ pub(crate) async fn revoke_permission(
     let grant_id = extract::grant_id(grant_uuid)?;
     let resource = entry_id.to_string();
     let context =
-        extract::authenticate(&state, &headers, IamAction::RevokePermission, &resource).await?;
+        extract::authenticate(&state, &headers, Action::RevokePermission, &resource).await?;
     let metadata = extract::mutation(&headers, "revoke_permission", &resource, &grant_uuid, false)?;
     extract::scoped(
         &context,

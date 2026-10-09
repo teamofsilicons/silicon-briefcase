@@ -25,7 +25,7 @@ use silicon_briefcase::{
             CreateFolderCommand, EntryListItem, GrantPermissionCommand, ListEntriesQuery,
             MetadataRepository, MetadataRepositoryError, MetadataService, MetadataServiceError,
             MutationMetadata, PageRequest, RestoreBinEntryCommand, RevokePermissionCommand,
-            SearchQuery, TokenAuthorizationQuery,
+            SearchQuery,
         },
     },
     config::DatabaseSettings,
@@ -502,48 +502,6 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         .await?;
     assert_eq!(batch.len(), 1, "one target resolved twice stays one row");
 
-    // A webhook snapshot adds IAM's immutable identifiers. Bearer authority is
-    // returned only for the exact principal, membership, and epoch tuple.
-    let principal_id = Uuid::now_v7();
-    let membership_id = Uuid::now_v7();
-    let updated = sqlx::query(
-        "UPDATE briefcase.organization_members \
-            SET principal_id = $3, membership_id = $4, authorization_epoch = 7 \
-          WHERE org_id = $1 AND actor_type = 'carbon' AND actor_id = $2",
-    )
-    .bind(&organization)
-    .bind(ACTOR_ID)
-    .bind(principal_id)
-    .bind(membership_id)
-    .execute(&pool)
-    .await?;
-    assert_eq!(updated.rows_affected(), 1);
-    let projection_query = TokenAuthorizationQuery {
-        organization_id: context.authorization().organization_id(),
-        actor_kind: ActorKind::Carbon,
-        principal_id,
-        membership_id,
-        authorization_epoch: 7,
-        request_id: "postgres-metadata-test",
-        testing_environment: None,
-    };
-    let projected = repository
-        .project_token_authorization(&projection_query)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the exact IAM identity tuple must resolve"))?;
-    assert_eq!(projected.actor.id().as_str(), ACTOR_ID);
-    assert_eq!(projected.role, OrganizationRole::Owner);
-    assert!(
-        repository
-            .project_token_authorization(&TokenAuthorizationQuery {
-                authorization_epoch: 8,
-                ..projection_query
-            })
-            .await?
-            .is_none(),
-        "a stale authorization epoch must fail closed"
-    );
-
     // An application request materializes its own folder under the actor.
     let tagged_owner = ExecutionContext::new(
         RequestAuthContext::new(
@@ -582,40 +540,6 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         .ensure_application_folder(&application_context)
         .await?;
     assert_eq!(again.entry.id, folder.entry.id);
-    let preserved = repository
-        .project_token_authorization(&projection_query)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("OBO must preserve signed identity"))?;
-    assert_eq!(
-        preserved.role,
-        OrganizationRole::Owner,
-        "OBO must not downgrade the owner's projection"
-    );
-    assert!(
-        preserved.tags.contains(&TagName::new("research")?),
-        "OBO must not erase projected tags"
-    );
-    // A request authenticated before a signed demotion must not overwrite the
-    // newer projection when its repository transaction begins afterward.
-    sqlx::query("UPDATE briefcase.organization_members SET org_role = 'member', iam_version = 2, authorization_epoch = 8 WHERE org_id = $1 AND actor_id = $2")
-        .bind(&organization).bind(ACTOR_ID).execute(&pool).await?;
-    repository
-        .find_active_entry_by_path(&context, &actor_path)
-        .await?;
-    let demoted = repository
-        .project_token_authorization(&TokenAuthorizationQuery {
-            authorization_epoch: 8,
-            ..projection_query
-        })
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("new signed identity must remain"))?;
-    assert_eq!(
-        demoted.role,
-        OrganizationRole::Member,
-        "stale bearer must not undo a signed demotion"
-    );
-    assert!(demoted.tags.contains(&TagName::new("research")?));
-
     // Loading activity is itself metadata access. It is committed before the
     // history query so the response contains the access that produced it.
     let metadata_reads_before = sqlx::query_scalar::<_, i64>(

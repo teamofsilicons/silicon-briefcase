@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "3.0.0";
+pub const CONTRACT_VERSION: &str = "4.0.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 62] = [
+pub const OPERATIONS: [OperationVersion; 49] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -75,82 +75,9 @@ pub const OPERATIONS: [OperationVersion; 62] = [
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
-    operation("readIamInfo", "2.0.0", "GET", "/iam"),
-    operation("readLoginStatus", "2.0.0", "GET", "/auth/status"),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
-    operation("exchangeShortLivedToken", "2.0.0", "POST", "/auth/slt"),
-    operation(
-        "refreshApplicationSession",
-        "2.0.0",
-        "POST",
-        "/auth/refresh",
-    ),
-    operation(
-        "listTestingEnvironments",
-        "2.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments",
-    ),
-    operation(
-        "createTestingEnvironment",
-        "2.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments",
-    ),
-    operation(
-        "getTestingEnvironment",
-        "2.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
-    ),
-    operation(
-        "updateTestingEnvironment",
-        "1.0.0",
-        "PATCH",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
-    ),
-    operation(
-        "deleteTestingEnvironment",
-        "1.0.0",
-        "DELETE",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
-    ),
-    operation(
-        "getTestingEnvironmentKey",
-        "1.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments/{environment_id}/key",
-    ),
-    operation(
-        "replaceTestingEnvironmentIamPairing",
-        "2.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
-    ),
-    operation(
-        "cleanTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
-    ),
-    operation(
-        "restoreTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
-    ),
-    operation(
-        "describeCurrentTestingEnvironment",
-        "2.0.0",
-        "GET",
-        "/testing-environment",
-    ),
-    operation(
-        "cleanCurrentTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/testing-environment/cleanings",
-    ),
+    operation("readAccountsInfo", "1.0.0", "GET", "/accounts"),
+    operation("readAccount", "1.0.0", "GET", "/me"),
     operation("listEntries", "1.0.0", "GET", "/entries"),
     operation("createFolder", "1.0.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),

@@ -130,7 +130,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
             &mutation()?,
         )
         .await?;
-    let tenant = TenantContext::for_control_service(&org, "anonymous-test");
+    let tenant = TenantContext::for_service(&org, "anonymous-test");
     assert!(matches!(
         repo.public_entry(&tenant, child.entry.path.as_str()).await,
         Err(AppError::NotFound)

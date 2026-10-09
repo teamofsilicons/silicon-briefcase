@@ -96,13 +96,7 @@ impl PostgresContentRepository {
             region: row.storage_region,
             prefix: row.storage_prefix,
             external_id: role.as_ref().map(|_| {
-                crate::infrastructure::s3::organization_storage_external_id(
-                    tenant
-                        .org_id()
-                        .rsplit_once(':')
-                        .filter(|_| tenant.testing_environment_id().is_some())
-                        .map_or(tenant.org_id(), |(_, org)| org),
-                )
+                crate::infrastructure::s3::organization_storage_external_id(tenant.org_id())
             }),
             role_arn: role,
             encryption: parse_encryption(&row.storage_encryption_mode)?,
@@ -1582,11 +1576,7 @@ async fn identify_storage_target<'a>(
 
 fn platform_target_for_context(platform: &S3Settings, context: &ExecutionContext) -> StorageTarget {
     let organization = context.authorization().organization_id().as_str();
-    let scope = context.testing_environment().map_or_else(
-        || organization.to_owned(),
-        |environment| format!("{}:{organization}", environment.id()),
-    );
-    crate::infrastructure::s3::platform_storage_target_for_scope(platform, &scope)
+    crate::infrastructure::s3::platform_storage_target_for_scope(platform, organization)
 }
 
 fn target_from_configuration(

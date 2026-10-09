@@ -2,12 +2,10 @@
 
 use async_trait::async_trait;
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::{
-    application::context::{ExecutionContext, TestingEnvironmentContext},
+    application::context::ExecutionContext,
     domain::{
-        actor::{ActorKind, OrganizationId},
         entry::{EntryBoundary, EntryPath},
         ids::{EntryId, GrantId},
         notification::NotificationInbox,
@@ -19,8 +17,8 @@ use crate::{
 use super::model::{
     ActivityEvent, AuthorizableEntry, CreateFolderMutation, FileVersionView,
     GrantPermissionCommand, ListBinQuery, ListEntriesQuery, ListPermissionsQuery,
-    ListVersionsQuery, MutationMetadata, Page, ProjectedIdentity, RevokePermissionCommand,
-    SearchCandidate, SearchQuery, UpdateEntryCommand,
+    ListVersionsQuery, MutationMetadata, Page, RevokePermissionCommand, SearchCandidate,
+    SearchQuery, UpdateEntryCommand,
 };
 
 /// Persistence failures classified without exposing SQL or tenant details.
@@ -43,33 +41,11 @@ pub enum MetadataRepositoryError {
     Internal(#[source] anyhow::Error),
 }
 
-/// IAM introspection facts used to resolve one webhook-projected identity.
-///
-/// Keeping the cross-bound identity tuple together makes it harder for an
-/// adapter to accidentally omit one of the values that must match.
-#[derive(Clone, Copy, Debug)]
-pub struct TokenAuthorizationQuery<'a> {
-    /// Organization selected and verified by IAM.
-    pub organization_id: &'a OrganizationId,
-    /// IAM actor namespace for the principal.
-    pub actor_kind: ActorKind,
-    /// Immutable IAM principal identifier.
-    pub principal_id: Uuid,
-    /// Current organization-membership identifier.
-    pub membership_id: Uuid,
-    /// Current authorization epoch carried by the token.
-    pub authorization_epoch: i64,
-    /// Correlation identifier for the database transaction.
-    pub request_id: &'a str,
-    /// Selected Briefcase sandbox, when the token came from an IAM test plane.
-    pub testing_environment: Option<TestingEnvironmentContext>,
-}
-
 /// Metadata persistence required by contracted application use cases.
 ///
 /// Mutation implementations must execute the state change, audit record,
 /// idempotency result, and outbox events atomically. They must lock and
-/// re-evaluate `required_capability` with the supplied current IAM context so a
+/// re-evaluate `required_capability` with the supplied current verified context so a
 /// permission change between the service read and write cannot authorize a
 /// stale mutation.
 #[async_trait]
@@ -215,13 +191,6 @@ pub trait MetadataRepository: Send + Sync {
         metadata: &MutationMetadata,
         required_capability: Capability,
     ) -> Result<AuthorizableEntry, MetadataRepositoryError>;
-
-    /// Resolves an introspected principal and membership UUID to its current
-    /// public actor identity, role, and tags from IAM webhook snapshots.
-    async fn project_token_authorization(
-        &self,
-        query: &TokenAuthorizationQuery<'_>,
-    ) -> Result<Option<ProjectedIdentity>, MetadataRepositoryError>;
 
     /// Materializes the calling application's folder for the represented actor.
     async fn ensure_application_folder(

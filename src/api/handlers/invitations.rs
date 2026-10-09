@@ -1,7 +1,7 @@
-//! Invitations to current members, verified email contacts, and dynamic IAM tags.
+//! Invitations: sharing an entry with a Carbon or Silicon named by id.
 
 use super::super::{
-    auth::{self, IamAction},
+    auth::Action,
     extract,
     mapping::{ResponseMapper, metadata_error},
     state::AppState,
@@ -10,7 +10,7 @@ use crate::domain::lifetime::LifetimeMinutes;
 use crate::{
     application::{context::ExecutionContext, service::GrantPermissionCommand},
     domain::{
-        actor::{ActorId, ActorKind, ActorRef},
+        actor::ActorKind,
         permission::{AccessRight, GrantedAccess},
     },
     error::AppError,
@@ -22,15 +22,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use time::OffsetDateTime;
+use serde_json::Value;
 use uuid::Uuid;
-
-fn rfc3339(instant: OffsetDateTime) -> String {
-    instant
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -65,23 +58,17 @@ pub(crate) async fn invite(
     Path(id): Path<Uuid>,
     Json(body): Json<InvitationRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::GrantPermission,
-        &id.to_string(),
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::GrantPermission, &id.to_string()).await?;
     let metadata = extract::mutation(&headers, "invite", &id.to_string(), &body, true)?;
-    perform(&state, Some(&headers), context, id, body, &metadata)
+    perform(&state, context, id, body, &metadata)
         .await
         .map(|value| (StatusCode::CREATED, Json(value)))
 }
 
 pub(super) async fn perform(
     state: &AppState,
-    headers: Option<&HeaderMap>,
-    mut context: ExecutionContext,
+    context: ExecutionContext,
     id: Uuid,
     body: InvitationRequest,
     metadata: &crate::application::service::MutationMetadata,
@@ -99,64 +86,25 @@ pub(super) async fn perform(
     }
     let entry_id = extract::entry_id(id)?;
     let access = GrantedAccess::new(body.access);
-    let repo = state.content_adapter.metadata_repository();
-    if body.principal.kind == "tag" {
-        if let Some(headers) = headers {
-            let testing = extract::optional_testing_access(state, headers).await?;
-            let credential = testing
-                .as_ref()
-                .map(extract::iam_environment_credential)
-                .transpose()?;
-            let token = auth::parse_bearer(auth::require_bearer_only(headers)?)?;
-            let members = state
-                .iam
-                .resolve_directory_recipients(
-                    &token,
-                    context.authorization(),
-                    &[],
-                    credential.as_ref(),
-                )
-                .await?
-                .ok_or(AppError::NotFound)?;
-            context = context.with_directory_members(members);
+    let kind = match body.principal.kind.as_str() {
+        "carbon" => ActorKind::Carbon,
+        "silicon" => ActorKind::Silicon,
+        "tag" => {
+            return Err(AppError::unprocessable(
+                "tag_recipients_retired",
+                "Tags no longer exist in Briefcase. Share with each Carbon or Silicon by id (type carbon with c:…, or type silicon with si:…).",
+            ));
         }
-        let (grant_id, expires_at) = repo
-            .invite_tag(
-                &context,
-                entry_id,
-                &body.principal.id,
-                access,
-                body.inherit,
-                body.expires_in_minutes,
-                metadata,
-            )
-            .await?;
-        return Ok(
-            json!({"id":grant_id,"principal":body.principal,"access":access.rights().collect::<Vec<_>>(),"inherit":body.inherit,"expires_at":expires_at.map(rfc3339)}),
-        );
-    }
-    let principal = match body.principal.kind.as_str() {
-        "email" => repo.member_by_email(&context, &body.principal.id).await?,
-        "carbon" | "silicon" => ActorRef::new(
-            if body.principal.kind == "carbon" {
-                ActorKind::Carbon
-            } else {
-                ActorKind::Silicon
-            },
-            ActorId::new(body.principal.id)
-                .map_err(|_| AppError::validation("invalid_principal"))?,
-        ),
+        "email" => {
+            return Err(AppError::unprocessable(
+                "email_recipients_retired",
+                "Briefcase shares with accounts, not email addresses. Name the Carbon or Silicon by id (type carbon with c:…, or type silicon with si:…).",
+            ));
+        }
         _ => return Err(AppError::validation("invalid_principal_type")),
     };
-    if let Some(headers) = headers {
-        context = extract::with_directory_recipients(
-            state,
-            headers,
-            context,
-            std::slice::from_ref(&principal),
-        )
-        .await?;
-    }
+    let principal = extract::resolve_recipient(state, kind, &body.principal.id).await?;
+    let context = extract::with_recipients(context, std::slice::from_ref(&principal));
     let grant = state
         .metadata
         .grant_permission(
@@ -183,13 +131,8 @@ pub(crate) async fn list(
     Path(id): Path<Uuid>,
     Query(query): Query<super::super::dto::PageQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::ListPermissions,
-        &id.to_string(),
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::ListPermissions, &id.to_string()).await?;
     Ok(Json(
         state
             .content_adapter
@@ -214,13 +157,8 @@ pub(crate) async fn revoke(
     headers: HeaderMap,
     Path((id, grant)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, AppError> {
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::RevokePermission,
-        &id.to_string(),
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::RevokePermission, &id.to_string()).await?;
     let metadata = extract::mutation(&headers, "revoke_invitation", &id.to_string(), &grant, true)?;
     state
         .content_adapter
@@ -259,13 +197,8 @@ pub(crate) async fn change(
     Json(body): Json<ExpiringShareChange>,
 ) -> Result<Json<Value>, AppError> {
     let lifetime = body.lifetime()?;
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::GrantPermission,
-        &id.to_string(),
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::GrantPermission, &id.to_string()).await?;
     let metadata = extract::mutation(
         &headers,
         "change_expiring_share",
@@ -297,14 +230,9 @@ pub(crate) async fn delegated_invite(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
-    let (context, body): (_, DelegatedInvite) = super::delegated::authorize_json(
-        &state,
-        &headers,
-        &body,
-        OBO_INVITE_PATH,
-        "briefcase.invitations.create",
-    )
-    .await?;
+    let (context, body): (_, DelegatedInvite) =
+        super::delegated::authorize_json(&state, &headers, &body, "briefcase.invitations.create")
+            .await?;
     let metadata = super::delegated::logical_mutation(
         "briefcase.invitations.create",
         &body.entry_id.to_string(),
@@ -312,15 +240,7 @@ pub(crate) async fn delegated_invite(
         &body,
     )?;
     Ok(Json(
-        perform(
-            &state,
-            None,
-            context,
-            body.entry_id,
-            body.invitation,
-            &metadata,
-        )
-        .await?,
+        perform(&state, context, body.entry_id, body.invitation, &metadata).await?,
     ))
 }
 #[derive(Deserialize, Serialize)]
@@ -337,14 +257,9 @@ pub(crate) async fn delegated_link(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<crate::api::dto::LinkAccessDto>, AppError> {
-    let (context, body): (_, DelegatedLink) = super::delegated::authorize_json(
-        &state,
-        &headers,
-        &body,
-        OBO_LINK_PATH,
-        "briefcase.link_access.update",
-    )
-    .await?;
+    let (context, body): (_, DelegatedLink) =
+        super::delegated::authorize_json(&state, &headers, &body, "briefcase.link_access.update")
+            .await?;
     let metadata = super::delegated::logical_mutation(
         "briefcase.link_access.update",
         &body.entry_id.to_string(),
@@ -362,13 +277,8 @@ pub(crate) async fn delegated_link(
             &metadata,
         )
         .await?;
-    Ok(Json(
-        state.mapper.link_access(
-            context.authorization().organization_id().as_str(),
-            &access,
-            context
-                .testing_environment()
-                .map(crate::application::context::TestingEnvironmentContext::id),
-        )?,
-    ))
+    Ok(Json(state.mapper.link_access(
+        context.authorization().organization_id().as_str(),
+        &access,
+    )?))
 }

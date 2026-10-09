@@ -620,7 +620,7 @@ async fn tag_and_link_expiring_shares_end_on_time() -> anyhow::Result<()> {
     assert!(!f.can_read(&designer, file).await?);
 
     // An expiring link opens the folder to anyone, then closes on time.
-    let tenant = TenantContext::for_control_service(&f.org, "anonymous-test");
+    let tenant = TenantContext::for_service(&f.org, "anonymous-test");
     let file_path = f.service.get_entry(&owner, file).await?.entry.path;
     let link = f
         .repo

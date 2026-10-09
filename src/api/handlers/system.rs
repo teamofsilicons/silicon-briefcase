@@ -1,24 +1,16 @@
-//! Liveness, readiness, build identity, and IAM webhook routes.
+//! Liveness, readiness and build identity routes.
 
 use axum::{
     Json,
-    body::Bytes,
-    extract::{State, rejection::BytesRejection},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::State,
+    http::{HeaderMap, HeaderValue},
     response::IntoResponse,
 };
 use serde::Serialize;
-use tracing::info;
 
-use crate::{
-    application::{context::TestingEnvironmentContext, webhook::WebhookApplyOutcome},
-    error::AppError,
-    infrastructure::postgres,
-};
+use crate::{error::AppError, infrastructure::postgres};
 
-use super::super::versioning;
-
-use super::super::{state::AppState, webhook};
+use super::super::{state::AppState, versioning};
 
 #[derive(Serialize)]
 pub(crate) struct StatusBody {
@@ -44,13 +36,6 @@ pub(crate) async fn ready(State(state): State<AppState>) -> Result<Json<StatusBo
     if !postgres::ready(&state.database).await {
         return Err(AppError::DependencyUnavailable {
             dependency: "database",
-        });
-    }
-    if let Some(testing) = &state.testing
-        && !postgres::ready(testing.test_pool()).await
-    {
-        return Err(AppError::DependencyUnavailable {
-            dependency: "testing_database",
         });
     }
     Ok(Json(StatusBody { status: "ready" }))
@@ -84,81 +69,4 @@ pub(crate) async fn version(headers: HeaderMap) -> Result<impl IntoResponse, App
         headers.insert(http::header::VARY, value);
     }
     Ok(response)
-}
-
-pub(crate) async fn iam_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
-) -> Result<impl IntoResponse, AppError> {
-    let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            AppError::PayloadTooLarge
-        } else {
-            AppError::bad_request("invalid_webhook_body")
-        }
-    })?;
-    let verified = webhook::verify(&headers, &body, &state.webhook_settings)?;
-    let testing_environment = if verified.is_testing() {
-        let testing = state
-            .testing
-            .as_ref()
-            .ok_or(AppError::DependencyUnavailable {
-                dependency: "testing_database",
-            })?;
-        let mut discovered = None;
-        for secret in testing.webhook_candidates().await? {
-            let current = match state.iam.discover_testing_environment(&secret).await {
-                Ok(current) => current,
-                Err(crate::infrastructure::iam::IamClientError::Rejected) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let digest = current
-                .webhook_key_digest
-                .as_deref()
-                .and_then(|value| hex::decode(value).ok())
-                .ok_or(AppError::Unauthenticated)?;
-            if verified.testing_key_digest_matches(&digest) {
-                if current
-                    .environment
-                    .as_ref()
-                    .and_then(|m| m.cleaned_at)
-                    .is_some_and(|cleaned| verified.event.occurred_at <= cleaned)
-                {
-                    return Ok(StatusCode::NO_CONTENT);
-                }
-                let access = testing.discover(&current, &secret).await?;
-                discovered = Some((
-                    TestingEnvironmentContext::new(access.environment_id, access.control_version),
-                    access.owner_org_id,
-                ));
-                break;
-            }
-        }
-        let matched = if discovered.is_some() {
-            discovered
-        } else {
-            testing
-                .resolve_iam_webhook(|candidate| verified.testing_key_matches(candidate))
-                .await?
-        };
-        Some(matched.ok_or(AppError::Unauthenticated)?.0)
-    } else {
-        None
-    };
-    let event_id = verified.event.event_id;
-    let outcome = state
-        .webhook_repository
-        .apply_iam_event(&verified, testing_environment)
-        .await?;
-    let testing_environment_id = testing_environment.map(TestingEnvironmentContext::id);
-    info!(%event_id, ?testing_environment_id, ?outcome, "IAM webhook processed");
-
-    let status = match outcome {
-        WebhookApplyOutcome::Applied
-        | WebhookApplyOutcome::Duplicate
-        | WebhookApplyOutcome::Stale
-        | WebhookApplyOutcome::Ignored => StatusCode::NO_CONTENT,
-    };
-    Ok(status)
 }

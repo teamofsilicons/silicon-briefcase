@@ -38,7 +38,6 @@ pub(super) struct ExtractionStats {
 #[derive(Debug, sqlx::FromRow)]
 struct PendingDocument {
     org_id: String,
-    testing_environment_id: Option<uuid::Uuid>,
     entry_id: uuid::Uuid,
     content_type: Option<String>,
     storage_backend: String,
@@ -69,7 +68,7 @@ where
     O: ObjectStore + ?Sized,
 {
     let pending = sqlx::query_as::<_, PendingDocument>(
-        "SELECT document.org_id, organization.testing_environment_id, \
+        "SELECT document.org_id, \
                 document.entry_id, entry.content_type, \
                 version.storage_backend, version.storage_config_id, version.bucket_name, \
                 version.storage_region, version.storage_prefix, \
@@ -77,8 +76,6 @@ where
                 storage_config.role_arn AS storage_role_arn, \
                 version.object_key, version.object_version_id \
            FROM briefcase.search_documents AS document \
-           JOIN briefcase.organizations AS organization \
-             ON organization.org_id = document.org_id \
            JOIN briefcase.entries AS entry \
              ON entry.org_id = document.org_id AND entry.entry_id = document.entry_id \
            JOIN briefcase.entry_versions AS version \
@@ -231,10 +228,7 @@ fn storage_location(document: &PendingDocument) -> Option<(StorageTarget, Object
         "platform" if document.storage_config_id.is_none() => (None, None),
         "organization" if document.storage_config_id.is_some() => (
             Some(document.storage_role_arn.clone()?),
-            Some(super::storage_external_id(
-                &document.org_id,
-                document.testing_environment_id,
-            )?),
+            Some(super::storage_external_id(&document.org_id)?),
         ),
         _ => return None,
     };
@@ -312,7 +306,6 @@ mod tests {
     fn document(backend: &str, config: Option<uuid::Uuid>, role: Option<&str>) -> PendingDocument {
         PendingDocument {
             org_id: "tos".to_owned(),
-            testing_environment_id: None,
             entry_id: uuid::Uuid::now_v7(),
             content_type: Some("text/plain".to_owned()),
             storage_backend: backend.to_owned(),
