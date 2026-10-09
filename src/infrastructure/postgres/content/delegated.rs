@@ -224,12 +224,8 @@ impl DelegatedUploadRepository for PostgresContentRepository {
         if expires_at <= now {
             return Err(AppError::validation("invalid_delegated_upload_expiration"));
         }
-        let (target, backend, configuration_id) = resolve_write_target(
-            &mut request.transaction,
-            context,
-            self.platform_target(context),
-        )
-        .await?;
+        let (target, backend, configuration_id) =
+            resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let upload_id = Uuid::now_v7();
         let proposed = EntryId::new();
         let key = object_key(format!("delegated/{upload_id}/object"))?;

@@ -82,23 +82,20 @@ impl PostgresContentRepository {
             .await?
             .ok_or(AppError::NotFound)?;
         let role = if let Some(id) = row.storage_config_id {
-            Some(
-                find_storage_configuration(&mut tx, id)
-                    .await?
-                    .ok_or_else(internal_integrity)?
-                    .role_arn,
-            )
+            let configuration = find_storage_configuration(&mut tx, id)
+                .await?
+                .ok_or_else(internal_integrity)?;
+            Some((configuration.role_arn, configuration.external_id))
         } else {
             None
         };
+        let (role_arn, external_id) = role.unzip();
         let target = StorageTarget {
             bucket: row.bucket_name,
             region: row.storage_region,
             prefix: row.storage_prefix,
-            external_id: role.as_ref().map(|_| {
-                crate::infrastructure::s3::organization_storage_external_id(tenant.org_id())
-            }),
-            role_arn: role,
+            external_id,
+            role_arn,
             encryption: parse_encryption(&row.storage_encryption_mode)?,
             kms_key_arn: row.storage_kms_key_arn,
         };
@@ -186,12 +183,8 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        let (target, _, _) = resolve_write_target(
-            &mut request.transaction,
-            context,
-            self.platform_target(context),
-        )
-        .await?;
+        let (target, _, _) =
+            resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let key = object_key(format!("entries/{entry_id}/versions/initial"))?;
         // Retain the parent lock until the idempotency reservation is committed.
         let _ = parent;
@@ -356,12 +349,8 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
-        let (target, _, _) = resolve_write_target(
-            &mut request.transaction,
-            context,
-            self.platform_target(context),
-        )
-        .await?;
+        let (target, _, _) =
+            resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let key = object_key(format!("multipart/{upload_id}/object"))?;
         request.transaction.commit().await.map_err(database_error)?;
         Ok(Prepared::Acquired(MultipartPreparation {
@@ -507,8 +496,7 @@ impl ContentRepository for PostgresContentRepository {
             &row.name,
         )
         .await?;
-        let target =
-            target_for_multipart(&mut request.transaction, context, &row, &self.platform).await?;
+        let target = target_for_multipart(&mut request.transaction, &row, &self.platform).await?;
         let result = MultipartPartTarget {
             plan,
             target,
@@ -650,8 +638,7 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("multipart_state"));
             }
         }
-        let target =
-            target_for_multipart(&mut request.transaction, context, &row, &self.platform).await?;
+        let target = target_for_multipart(&mut request.transaction, &row, &self.platform).await?;
         let result = MultipartCompletionPreparation {
             entry_id,
             plan,
@@ -692,8 +679,7 @@ impl ContentRepository for PostgresContentRepository {
             &command.request_hash,
         )
         .await?;
-        let target =
-            target_for_multipart(&mut request.transaction, context, &row, &self.platform).await?;
+        let target = target_for_multipart(&mut request.transaction, &row, &self.platform).await?;
         if target != preparation.target {
             return Err(conflict("storage_target_changed"));
         }
@@ -774,8 +760,7 @@ impl ContentRepository for PostgresContentRepository {
             }
             MultipartAbortDisposition::Abort => {}
         }
-        let target =
-            target_for_multipart(&mut request.transaction, context, &row, &self.platform).await?;
+        let target = target_for_multipart(&mut request.transaction, &row, &self.platform).await?;
         sqlx::query(
             "UPDATE briefcase.multipart_uploads \
                 SET status = 'aborted', aborted_at = clock_timestamp() \
@@ -833,8 +818,7 @@ impl ContentRepository for PostgresContentRepository {
         )
         .await?
         .ok_or(AppError::NotFound)?;
-        let target =
-            target_for_version(&mut request.transaction, context, &version, &self.platform).await?;
+        let target = target_for_version(&mut request.transaction, &version, &self.platform).await?;
         let result = DownloadTarget {
             entry_id,
             filename: entry.entry.name.as_str().to_owned(),
@@ -936,13 +920,9 @@ impl ContentRepository for PostgresContentRepository {
             IdempotencyClaim::Acquired(None) => return Err(conflict("idempotency_state")),
         };
         let source_target =
-            target_for_version(&mut request.transaction, context, &source, &self.platform).await?;
-        let (destination_target, _, _) = resolve_write_target(
-            &mut request.transaction,
-            context,
-            self.platform_target(context),
-        )
-        .await?;
+            target_for_version(&mut request.transaction, &source, &self.platform).await?;
+        let (destination_target, _, _) =
+            resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let destination_key = object_key(format!(
             "entries/{}/versions/{new_version_id}",
             command.entry_id
@@ -1169,9 +1149,9 @@ impl ContentRepository for PostgresContentRepository {
             "INSERT INTO briefcase.organization_storage_configs ( \
                     org_id, storage_config_id, status, bucket_name, region, role_arn, \
                     bucket_prefix, aws_account_id, encryption_mode, kms_key_arn, \
-                    created_by_type, created_by_id \
+                    created_by_type, created_by_id, external_id \
              ) VALUES (briefcase.current_org_id(), $1, 'validating', $2, $3, $4, $5, $6, \
-                       $7, $8, $9, $10) \
+                       $7, $8, $9, $10, $11) \
              ON CONFLICT (org_id, storage_config_id) DO NOTHING",
         )
         .bind(configuration_id.as_uuid())
@@ -1184,6 +1164,7 @@ impl ContentRepository for PostgresContentRepository {
         .bind(command.kms_key_arn.as_deref())
         .bind(actor_kind(actor.kind()))
         .bind(actor.id().as_str())
+        .bind(new_external_id(context))
         .execute(&mut *request.transaction)
         .await
         .map_err(database_error)?;
@@ -1205,7 +1186,7 @@ impl ContentRepository for PostgresContentRepository {
             return Err(conflict("idempotency_state"));
         }
         let expected_account_id = configuration.aws_account_id.clone();
-        let target = target_from_configuration(context, configuration)?;
+        let target = target_from_configuration(configuration)?;
         if inserted.rows_affected() == 1 {
             record_change(
                 &mut request.transaction,
@@ -1506,14 +1487,13 @@ async fn find_named_child(
 
 async fn resolve_write_target(
     transaction: &mut Transaction<'_, Postgres>,
-    context: &ExecutionContext,
     platform: StorageTarget,
 ) -> std::result::Result<(StorageTarget, &'static str, Option<Uuid>), AppError> {
     let configuration = sqlx::query_as::<_, OrganizationStorageConfigRow>(
         "SELECT org_id, storage_config_id, status, bucket_name, region, role_arn, \
                 bucket_prefix, aws_account_id, encryption_mode, kms_key_arn, validated_at, \
                 validation_failure_code, validation_failure_reason, created_by_type, \
-                created_by_id, created_at, updated_at \
+                created_by_id, created_at, updated_at, external_id \
            FROM briefcase.organization_storage_configs \
           WHERE org_id = briefcase.current_org_id() AND status = 'active' \
           ORDER BY validated_at DESC, storage_config_id DESC LIMIT 1",
@@ -1525,7 +1505,7 @@ async fn resolve_write_target(
         Some(configuration) => {
             let id = configuration.storage_config_id;
             Ok((
-                target_from_configuration(context, configuration)?,
+                target_from_configuration(configuration)?,
                 "organization",
                 Some(id),
             ))
@@ -1580,7 +1560,6 @@ fn platform_target_for_context(platform: &S3Settings, context: &ExecutionContext
 }
 
 fn target_from_configuration(
-    context: &ExecutionContext,
     configuration: OrganizationStorageConfigRow,
 ) -> std::result::Result<StorageTarget, AppError> {
     let encryption = parse_encryption(&configuration.encryption_mode)?;
@@ -1589,7 +1568,7 @@ fn target_from_configuration(
         region: configuration.region,
         prefix: configuration.bucket_prefix,
         role_arn: Some(configuration.role_arn),
-        external_id: Some(external_id(context)),
+        external_id: Some(configuration.external_id),
         encryption,
         kms_key_arn: configuration.kms_key_arn,
     })
@@ -1597,7 +1576,6 @@ fn target_from_configuration(
 
 async fn target_for_multipart(
     transaction: &mut Transaction<'_, Postgres>,
-    context: &ExecutionContext,
     row: &MultipartUploadRow,
     _platform: &S3Settings,
 ) -> std::result::Result<StorageTarget, AppError> {
@@ -1621,7 +1599,7 @@ async fn target_for_multipart(
                 region: row.storage_region.clone(),
                 prefix: row.storage_prefix.clone(),
                 role_arn: Some(configuration.role_arn),
-                external_id: Some(external_id(context)),
+                external_id: Some(configuration.external_id),
                 encryption: parse_encryption(&row.storage_encryption_mode)?,
                 kms_key_arn: row.storage_kms_key_arn.clone(),
             })
@@ -1632,7 +1610,6 @@ async fn target_for_multipart(
 
 async fn target_for_version(
     transaction: &mut Transaction<'_, Postgres>,
-    context: &ExecutionContext,
     row: &EntryVersionRow,
     _platform: &S3Settings,
 ) -> std::result::Result<StorageTarget, AppError> {
@@ -1656,7 +1633,7 @@ async fn target_for_version(
                 region: row.storage_region.clone(),
                 prefix: row.storage_prefix.clone(),
                 role_arn: Some(configuration.role_arn),
-                external_id: Some(external_id(context)),
+                external_id: Some(configuration.external_id),
                 encryption: parse_encryption(&row.storage_encryption_mode)?,
                 kms_key_arn: row.storage_kms_key_arn.clone(),
             })
@@ -1673,7 +1650,7 @@ async fn find_storage_configuration(
         "SELECT org_id, storage_config_id, status, bucket_name, region, role_arn, \
                 bucket_prefix, aws_account_id, encryption_mode, kms_key_arn, validated_at, \
                 validation_failure_code, validation_failure_reason, created_by_type, \
-                created_by_id, created_at, updated_at \
+                created_by_id, created_at, updated_at, external_id \
            FROM briefcase.organization_storage_configs \
           WHERE org_id = briefcase.current_org_id() AND storage_config_id = $1",
     )
@@ -2352,7 +2329,10 @@ fn parse_encryption(value: &str) -> std::result::Result<EncryptionMode, AppError
     }
 }
 
-fn external_id(context: &ExecutionContext) -> String {
+/// The STS External ID a new bring-your-own configuration records: derived
+/// from the drive key, then persisted with the configuration and never
+/// derived again.
+fn new_external_id(context: &ExecutionContext) -> String {
     crate::infrastructure::s3::organization_storage_external_id(
         context.authorization().organization_id().as_str(),
     )

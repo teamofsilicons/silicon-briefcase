@@ -25,13 +25,6 @@ use crate::{
     infrastructure::{postgres, s3::S3ObjectStore},
 };
 
-// The STS External ID of a bring-your-own bucket is derived from the tenant
-// key, exactly as the authenticated API derives it when it writes.
-fn storage_external_id(org_id: &str) -> Option<String> {
-    crate::domain::actor::is_canonical_iam_organization_id(org_id)
-        .then(|| crate::infrastructure::s3::organization_storage_external_id(org_id))
-}
-
 /// Runs the durable worker until an interrupt or termination signal arrives.
 ///
 /// The worker refuses to touch tenant tables unless its effective PostgreSQL

@@ -75,6 +75,8 @@ struct ClaimedCleanup {
     storage_region: String,
     storage_prefix: String,
     storage_role_arn: Option<String>,
+    /// The External ID persisted with the bring-your-own configuration.
+    storage_external_id: Option<String>,
     storage_encryption_mode: String,
     storage_kms_key_arn: Option<String>,
     object_key: String,
@@ -336,6 +338,11 @@ async fn claim_one(
                    cleanup.source_upload_id, cleanup.storage_backend, \
                    cleanup.storage_config_id, cleanup.bucket_name, cleanup.storage_region, \
                    cleanup.storage_prefix, cleanup.storage_role_arn, \
+                   (SELECT configuration.external_id \
+                      FROM briefcase.organization_storage_configs AS configuration \
+                     WHERE configuration.org_id = cleanup.org_id \
+                       AND configuration.storage_config_id = cleanup.storage_config_id \
+                   ) AS storage_external_id, \
                    cleanup.storage_encryption_mode, cleanup.storage_kms_key_arn, \
                    cleanup.object_key, cleanup.object_version_id, \
                    cleanup.provider_upload_id, cleanup.attempt_count",
@@ -509,7 +516,11 @@ fn cleanup_target(job: &ClaimedCleanup) -> Result<(StorageTarget, ObjectKey), &'
                 .ok_or("cleanup_descriptor_invalid")?;
             (
                 Some(role_arn),
-                Some(super::storage_external_id(&job.org_id).ok_or("cleanup_descriptor_invalid")?),
+                Some(
+                    job.storage_external_id
+                        .clone()
+                        .ok_or("cleanup_descriptor_invalid")?,
+                ),
             )
         }
         _ => return Err("cleanup_descriptor_invalid"),
@@ -1019,6 +1030,7 @@ mod tests {
             storage_region: "ap-south-1".to_owned(),
             storage_prefix: "tenant".to_owned(),
             storage_role_arn: None,
+            storage_external_id: None,
             storage_encryption_mode: "sse_s3".to_owned(),
             storage_kms_key_arn: None,
             object_key: "versions/object".to_owned(),
@@ -1044,10 +1056,16 @@ mod tests {
     }
 
     #[test]
-    fn organization_cleanup_derives_external_id_server_side() {
+    fn organization_cleanup_uses_the_persisted_external_id() {
         let mut job = cleanup("organization");
         job.storage_config_id = Some(uuid::Uuid::from_u128(4));
         job.storage_role_arn = Some("arn:aws:iam::123456789012:role/briefcase".to_owned());
+        assert_eq!(
+            cleanup_target(&job).err(),
+            Some("cleanup_descriptor_invalid"),
+            "a bring-your-own cleanup without its configuration's External ID never runs"
+        );
+        job.storage_external_id = Some("a".repeat(64));
         let Ok((target, _)) = cleanup_target(&job) else {
             panic!("organization target should be valid");
         };
@@ -1055,7 +1073,7 @@ mod tests {
             target.role_arn.as_deref(),
             Some("arn:aws:iam::123456789012:role/briefcase")
         );
-        assert!(target.external_id.is_some());
+        assert_eq!(target.external_id, Some("a".repeat(64)));
     }
 
     #[test]
