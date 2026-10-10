@@ -656,7 +656,7 @@ paths:
       operationId: submitReport
       x-operation-version: 1.0.0
       summary: Submit a bug report with an optional proposed fix
-      description: Stores the user-authored report in the selected organization and environment. No telemetry, credentials, or files are collected automatically. Test reports stay in the test database. Reuse the same idempotency key and body after an uncertain response.
+      description: Stores the account-authored report in the caller's drive. No telemetry, credentials, or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -1896,7 +1896,10 @@ components:
         root_id:
           type: string
           format: uuid
-          description: The drive's root folder; list its contents with `GET /entries?parent_id=`
+          description: The drive’s root folder.
+        storage_external_id:
+          type: string
+          description: Stable STS External ID for this drive, supplied in the storage role trust policy.
         permanent_url:
           type: string
           format: uri
@@ -2246,6 +2249,9 @@ components:
           - application
         id:
           type: string
+        public_id:
+          type: string
+          description: Optional current account label on invitation listings; id remains the immutable authority key.
     FolderCreate:
       type: object
       required:
@@ -3050,7 +3056,7 @@ components:
           type: string
           format: uuid
         principal:
-          $ref: '#/components/schemas/InvitationRecipient'
+          $ref: '#/components/schemas/ActorRef'
         access:
           type: array
           minItems: 1

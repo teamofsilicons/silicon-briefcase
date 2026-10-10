@@ -78,6 +78,7 @@ pub(crate) async fn list(
             "owner": account_json(&record),
             "relation": relation,
             "root_id": root.entry.id.as_uuid(),
+            "storage_external_id": crate::infrastructure::s3::organization_storage_external_id(&owner),
             "permanent_url": state
                 .mapper_for([owner.as_str()])
                 .await?

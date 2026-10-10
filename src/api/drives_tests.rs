@@ -239,6 +239,10 @@ async fn each_account_owns_one_drive_and_custodians_open_their_silicons_drives()
     let items = drives["items"].as_array().cloned().unwrap_or_default();
     assert_eq!(items.len(), 2, "{drives}");
     assert_eq!(items[0]["relation"], "own");
+    assert_eq!(
+        items[0]["storage_external_id"],
+        crate::infrastructure::s3::organization_storage_external_id(&w.ada.uuid)
+    );
     assert_eq!(items[0]["owner"]["uuid"], w.ada.uuid.as_str());
     assert_eq!(items[1]["relation"], "custodial");
     assert_eq!(items[1]["owner"]["id"], w.scout.id.as_str());
@@ -375,6 +379,32 @@ async fn shares_by_id_reach_across_drives_and_show_in_shared_with_me() -> anyhow
         .await?;
     assert_eq!(status, StatusCode::CREATED, "{grant}");
     assert_eq!(grant["principal"]["id"], w.bob.uuid.as_str());
+    let (status, invitations) = w
+        .call(
+            &w.ada,
+            Method::GET,
+            &format!("/api/v1/entries/{plans}/invitations"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        invitations["items"][0]["principal"]["id"],
+        w.bob.uuid.as_str()
+    );
+    assert_eq!(
+        invitations["items"][0]["principal"]["public_id"],
+        w.bob.id.as_str()
+    );
+    let (status, _) = w
+        .call(
+            &w.cat,
+            Method::GET,
+            &format!("/api/v1/entries/{plans}/invitations"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Bob opens it by id, in Ada's drive, and nothing else of hers.
     let (status, entry) = w

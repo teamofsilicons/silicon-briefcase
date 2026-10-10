@@ -135,23 +135,39 @@ pub(crate) async fn list(
     let context =
         extract::authenticate(&state, &headers, Action::ListPermissions, &id.to_string()).await?;
     let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
-    Ok(Json(
-        state
-            .content_adapter
-            .metadata_repository()
-            .invitations(
-                &context,
-                extract::entry_id(id)?,
-                query
-                    .cursor
-                    .map(|v| {
-                        v.parse()
-                            .map_err(|_| AppError::bad_request("invalid_cursor"))
-                    })
-                    .transpose()?,
-            )
-            .await?,
-    ))
+    let mut page = state
+        .content_adapter
+        .metadata_repository()
+        .invitations(
+            &context,
+            extract::entry_id(id)?,
+            query
+                .cursor
+                .map(|v| {
+                    v.parse()
+                        .map_err(|_| AppError::bad_request("invalid_cursor"))
+                })
+                .transpose()?,
+        )
+        .await?;
+    // Keep the immutable authority key and add the current public label only
+    // after permission to see this entry's recipients has been established.
+    if let Some(items) = page.get_mut("items").and_then(Value::as_array_mut) {
+        let keys: Vec<String> = items
+            .iter()
+            .filter_map(|item| item["principal"]["id"].as_str().map(str::to_owned))
+            .collect();
+        let labels = state.accounts.labels(&keys).await?;
+        for item in items {
+            if let Some(label) = item["principal"]["id"]
+                .as_str()
+                .and_then(|id| labels.get(id))
+            {
+                item["principal"]["public_id"] = Value::String(label.clone());
+            }
+        }
+    }
+    Ok(Json(page))
 }
 
 pub(crate) async fn revoke(
