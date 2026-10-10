@@ -49,14 +49,17 @@ def main():
         env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"}}
         home = directory / "home"
         home.mkdir()
-        env.update(HOME=str(home), USERPROFILE=str(home), SILICON_HOME=str(home), BRIEFCASE_TELEMETRY="off")
+        env.update(HOME=str(home), USERPROFILE=str(home), SILICON_HOME=str(home), BRIEFCASE_TELEMETRY="off", SILICON_APPS_NO_DAEMON="1")
         subprocess.run([str(destination), "--help"], env=env, stdout=subprocess.DEVNULL, check=True, timeout=15)
         for command, key, expected_value in [( ["accounts", "--json"], "app_id", "briefcase" ), (["login", "status", "--json"], "authenticated", False)]:
             output = subprocess.run([str(destination), *command], env=env, capture_output=True, text=True, check=True, timeout=15)
             if json.loads(output.stdout).get(key) != expected_value:
                 raise SystemExit(f"Discovery command {command} did not report {key}={expected_value!r}")
-        subprocess.run([args.apps, "validate", str(stage)], check=True)
-        subprocess.run([args.apps, "pack", str(stage), "--output", str(archive)], check=True)
+        apps_home = directory / "apps-home"
+        apps_home.mkdir()
+        packer = [args.apps, "--home", str(apps_home), "--server", "http://127.0.0.1:9"]
+        subprocess.run([*packer, "validate", str(stage)], env=env, check=True)
+        subprocess.run([*packer, "pack", str(stage), "--output", str(archive)], env=env, check=True)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(archive.suffix + ".sha256").write_text(f"{checksum}  {archive.name}\n")
     print(archive)

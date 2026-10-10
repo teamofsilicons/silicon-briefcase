@@ -521,3 +521,31 @@ Router coverage proves whole bytes, downloads, ranges, immediate share revocatio
 unshared siblings, wrong scope, outsiders and files outside the issuer's folder.
 Full service suite:236 passed,1 external integration ignored; strict clippy clean.
 Evidence: `.mig/shared-read-tests.log`, `.mig/shared-read-clippy.log`.
+
+## 2026-10-10 — Coordinated local UUID cutover and native candidate
+
+Applied the shared Accounts export of211 mappings after stopping the API, saving
+source dumps, draining94 local outbox rows to terminal failure with no email
+provider configured, and stopping the worker. Dry-run succeeded; replay reported
+zero changes. All94 historical delivery rows are sealed. Private backups and
+reports are in `.mig/uuid-cutover/`.
+
+The still-unexpired old JWT is rejected with401 `account_uuid_migrated`. Signing
+in with the same existing email returns its mapped canonical UUID and downloads
+the original89-byte file with identical SHA256, resource/version IDs and stored
+S3 metadata. Comparing the pre-cutover clone preserves all88 original entries,
+50 versions and12 delegated uploads apart from intended identity fields. All16
+original S3 objects (2,226,205 bytes) retain identical keys, ETags and hashes.
+Evidence: `old-token-after.json`, `after-proof.json`, `resource-retention.json`,
+`s3-after.json` in that private directory. Waveform also passed a fresh UUID
+sign-in, explicit proof reauthorization and genuine TTS→Briefcase→STT roundtrip
+while retaining its earlier jobs (`waveform-accounts-apps/.mig/cutover-verified.json`).
+
+Rebuilt the optimized macOS ARM64 CLI from current source and used Silicon Apps
+0.2 to validate and pack it. The packer now isolates its own home and credentials,
+disables its daemon and points its server at a closed loopback port. Extracted
+binary hash matches the build; empty-home help/accounts/login-status discovery
+passes. `dist/apps/briefcase-4.0.0-macos-aarch64.tar.gz`:3,412,862 bytes,
+SHA256 `de5b2d7cba5f870b1e0e7f74bacb2438a8a5f1ac4862eefc0fc6da6047e42a09`.
+Evidence: `.mig/uuid-cutover/client-release-{build,package}.log` and
+`client-release-proof.json`. No artifacts were published and production is untouched.
