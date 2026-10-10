@@ -511,3 +511,13 @@ full-schema PostgreSQL migration tests and one API byte-retention/token/proof
 regression. Log: `.mig/uuid-full-tests.log`. Operator sequence and preservation
 contract: `docs/migration/account-uuids.md`. This is local verification; production
 has not been migrated or deployed. Coordinated shared-local cutover remains next.
+
+## 2026-10-10 — Confined shared-file reads
+
+Fixed Extend's delegated screenshot read: an entry-addressed file read may resolve
+a foreign drive as a visitor, then applies the existing app-folder and read-grant
+policy. It carries no custodial powers; foreign listing/trash remain denied.
+Router coverage proves whole bytes, downloads, ranges, immediate share revocation,
+unshared siblings, wrong scope, outsiders and files outside the issuer's folder.
+Full service suite:236 passed,1 external integration ignored; strict clippy clean.
+Evidence: `.mig/shared-read-tests.log`, `.mig/shared-read-clippy.log`.

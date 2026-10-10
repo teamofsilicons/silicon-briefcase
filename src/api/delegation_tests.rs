@@ -303,3 +303,184 @@ async fn the_byte_transfer_finds_its_drive_from_the_reservation() -> anyhow::Res
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
+
+/// A device owner's Extend proof can read a Silicon's explicitly shared
+/// screenshot, without inheriting custody, listing siblings or reaching other apps.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn confined_file_read_honors_foreign_shares_without_custodial_powers() -> anyhow::Result<()> {
+    let store = super::memory_store::MemoryStore::default();
+    let issuers = "briefcase.files.read=extend briefcase.entries.list=extend \
+        briefcase.entries.trash=extend briefcase.folders.create=extend";
+    let Some(w) = World::build(issuers, "", Some(std::sync::Arc::new(store.clone()))).await? else {
+        return Ok(());
+    };
+    let scopes = [
+        "briefcase.files.read",
+        "briefcase.entries.list",
+        "briefcase.entries.trash",
+        "briefcase.folders.create",
+    ];
+    proof(
+        &w,
+        "sap_extend_scout",
+        "extend",
+        &w.scout,
+        "silicon",
+        &scopes,
+    )
+    .await;
+    proof(&w, "sap_extend_ada", "extend", &w.ada, "carbon", &scopes).await;
+    proof(&w, "sap_extend_bob", "extend", &w.bob, "carbon", &scopes).await;
+    proof(
+        &w,
+        "sap_extend_no_read",
+        "extend",
+        &w.ada,
+        "carbon",
+        &["briefcase.entries.list"],
+    )
+    .await;
+    let (status, folder) = delegated(
+        &w,
+        "sap_extend_scout",
+        "/api/v1/obo/folders/create",
+        json!({"operation_id": Uuid::now_v7(), "parent_path": "", "name": "screenshots"}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    let folder = folder["id"].as_str().unwrap_or_default();
+    let scout = in_drive(&w, &w.scout, &w.scout).await?;
+    let file = super::archive_tests::publish(
+        &w,
+        &store,
+        &scout,
+        folder,
+        "screenshot.txt",
+        "text/plain",
+        b"shared screenshot",
+    )
+    .await?;
+    let private = super::archive_tests::publish(
+        &w,
+        &store,
+        &scout,
+        folder,
+        "private.txt",
+        "text/plain",
+        b"private screenshot",
+    )
+    .await?;
+    let outside = w.folder(&w.scout, "outside", None, None).await?;
+    let outside_file = super::archive_tests::publish(
+        &w,
+        &store,
+        &scout,
+        &outside,
+        "other.txt",
+        "text/plain",
+        b"outside app folder",
+    )
+    .await?;
+
+    // Ada is Scout's custodian, but the confined proof has no inherited power.
+    let (status, _) = delegated(
+        &w,
+        "sap_extend_ada",
+        "/api/v1/obo/files/read",
+        json!({"entry_id": file}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, grant) = w
+        .share(&w.scout, &file, "carbon", &w.ada.id, &["read", "update"])
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{grant}");
+    let (status, _) = w
+        .share(&w.scout, &outside_file, "carbon", &w.ada.id, &["read"])
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Whole bytes, downloads and body-bound ranges all use the same share.
+    for (range, download, expected_status, expected) in [
+        (None, false, StatusCode::OK, b"shared screenshot".as_slice()),
+        (None, true, StatusCode::OK, b"shared screenshot".as_slice()),
+        (
+            Some("bytes=7-16"),
+            false,
+            StatusCode::PARTIAL_CONTENT,
+            b"screenshot".as_slice(),
+        ),
+    ] {
+        let response = w
+            .f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/obo/files/read")
+                    .header(header::AUTHORIZATION, "Proof sap_extend_ada")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"entry_id": file, "range": range, "download": download}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await?
+                .as_ref(),
+            expected
+        );
+    }
+    for (token, entry, expected) in [
+        ("sap_extend_ada", &private, StatusCode::NOT_FOUND),
+        ("sap_extend_ada", &outside_file, StatusCode::NOT_FOUND),
+        ("sap_extend_bob", &file, StatusCode::NOT_FOUND),
+        ("sap_extend_no_read", &file, StatusCode::FORBIDDEN),
+    ] {
+        let (status, body) = delegated(
+            &w,
+            token,
+            "/api/v1/obo/files/read",
+            json!({"entry_id": entry}),
+        )
+        .await?;
+        assert_eq!(status, expected, "{token}: {body}");
+    }
+    for (uri, body) in [
+        ("/api/v1/obo/entries/list", json!({"parent_id": folder})),
+        (
+            "/api/v1/obo/entries/trash",
+            json!({"entry_id": file, "operation_id": Uuid::now_v7()}),
+        ),
+    ] {
+        let (status, body) = delegated(&w, "sap_extend_ada", uri, body).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+    }
+    let grant = grant["id"].as_str().unwrap_or_default();
+    let (status, body) = w
+        .call(
+            &w.scout,
+            Method::DELETE,
+            &format!("/api/v1/entries/{file}/permissions/{grant}"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = delegated(
+        &w,
+        "sap_extend_ada",
+        "/api/v1/obo/files/read",
+        json!({"entry_id": file}),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "revocation must apply immediately: {body}"
+    );
+    Ok(())
+}

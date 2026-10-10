@@ -35,6 +35,26 @@ pub(crate) async fn for_entry(
     context: ExecutionContext,
     entry_id: EntryId,
 ) -> Result<ExecutionContext, AppError> {
+    for_entry_with_shared_read(state, context, entry_id, false).await
+}
+
+/// Resolves a delegated file read. A confined app may read an explicitly
+/// shared entry in another drive, still subject to its app-folder boundary.
+/// It never inherits the account's custodial powers there.
+pub(crate) async fn for_delegated_read(
+    state: &AppState,
+    context: ExecutionContext,
+    entry_id: EntryId,
+) -> Result<ExecutionContext, AppError> {
+    for_entry_with_shared_read(state, context, entry_id, true).await
+}
+
+async fn for_entry_with_shared_read(
+    state: &AppState,
+    context: ExecutionContext,
+    entry_id: EntryId,
+    shared_read: bool,
+) -> Result<ExecutionContext, AppError> {
     let drive = state
         .content_adapter
         .metadata_repository()
@@ -42,7 +62,7 @@ pub(crate) async fn for_entry(
         .await
         .map_err(database_error)?;
     match drive {
-        Some(drive) => enter(state, context, &drive).await,
+        Some(drive) => enter_with_shared_read(state, context, &drive, shared_read).await,
         None => own(state, context).await,
     }
 }
@@ -98,6 +118,15 @@ pub(crate) async fn enter(
     context: ExecutionContext,
     drive: &str,
 ) -> Result<ExecutionContext, AppError> {
+    enter_with_shared_read(state, context, drive, false).await
+}
+
+async fn enter_with_shared_read(
+    state: &AppState,
+    context: ExecutionContext,
+    drive: &str,
+    shared_read: bool,
+) -> Result<ExecutionContext, AppError> {
     let authorization = context.authorization();
     // Contexts built without a Silicon Accounts credential (internal callers
     // and tests) already name their drive.
@@ -113,10 +142,9 @@ pub(crate) async fn enter(
             .with_custodial_silicons(custodial);
         return Ok(context.with_authorization(moved));
     }
-    if account.confined_app().is_some() {
-        // An app acting for an account reaches only that account's own drive
-        // (and there only its own folder). First-party apps the operator
-        // lists reach everything the account can.
+    if account.confined_app().is_some() && !shared_read {
+        // Listing and mutations stay in the proof user's own drive. Only
+        // entry-addressed file reads may evaluate a foreign explicit share.
         return Err(AppError::NotFound);
     }
     let drive_uuid = AccountUuid::new(drive).map_err(|_| AppError::NotFound)?;
@@ -127,7 +155,10 @@ pub(crate) async fn enter(
         }
         Err(error) => return Err(error),
     };
-    let access = if account.kind == ActorKind::Carbon && is_custodian_of(&account.uuid, &facts) {
+    let access = if account.confined_app().is_none()
+        && account.kind == ActorKind::Carbon
+        && is_custodian_of(&account.uuid, &facts)
+    {
         DriveAccess::Custodian
     } else {
         DriveAccess::Visitor

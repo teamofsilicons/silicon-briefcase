@@ -63,7 +63,7 @@ impl World {
         Self::build("", "", Some(store)).await
     }
 
-    async fn build(
+    pub(super) async fn build(
         issuers: &str,
         first_party: &str,
         store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,

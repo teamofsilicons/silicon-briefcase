@@ -243,7 +243,7 @@ pub(crate) async fn read_file(
     let (context, body): (_, ReadFileRequest) =
         authorize_json(&state, &headers, &body, READ_FILE_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
-    let context = drives::for_entry(&state, context, entry_id).await?;
+    let context = drives::for_delegated_read(&state, context, entry_id).await?;
     let intent = if body.download {
         ContentIntent::Download
     } else {

@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// Publishes a file whose bytes the memory store then serves.
-async fn publish(
+pub(super) async fn publish(
     w: &World,
     store: &MemoryStore,
     context: &ExecutionContext,

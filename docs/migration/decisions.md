@@ -449,3 +449,14 @@ rights changes. 57 operations.
 Briefcase sends nothing through Ting (the survey found no Ting delivery; notifications are its own inbox and
 Postmark email), so there is no D4 adapter and no `BRIEFCASE_TING_URL`. Briefcase calls no other app either: it only
 receives proofs, so it issues and stores none (and has no proof refresh tokens to protect or revoke).
+
+### S50. Confined apps may read a shared file in another drive (refines S24/S39)
+
+An entry-addressed `POST /obo/files/read` may enter a foreign drive as a visitor.
+The existing `apps/{issuer}/` path restriction and the represented account's
+actual read permission still apply. This supports an Extend screenshot created
+by a Silicon and explicitly shared with the Carbon who owns the device. Confined
+proofs gain no custodial authority. Listing and mutation routes retain their
+own-drive restriction, and other issuers' folders remain hidden. Extend is not a
+first-party issuer. Revoking the share takes effect on the next read, including
+when the proof itself is cached.
