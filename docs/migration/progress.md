@@ -599,3 +599,38 @@ Ingress changes remain gated until coordinated Accounts/Apps/Browser completion.
 Focused verification: client library 31/31, Rust formatting, docs synchronization,
 and shell syntax pass. The previous source candidate passed CI and all six native
 CLI targets; new-origin assets are rebuilt from the updated release commit.
+
+### Parallel production live, 2026-10-10
+
+After the coordinated Accounts/Apps/Browser UUID release, opened the new Accounts
+API and Next.js website. The digest-pinned backend and web came from source
+`79611710cd803581558705458d4b5b80f7d2cba4`; the production installer publishes API
+port 8180 only on host loopback from its private Docker container. All three old
+IAM units and all three new units remain active. The old RDS stores, owners,
+identities, custody and `organizations/` S3 namespace remain unchanged. New
+Accounts drives use the fresh `briefcase_accounts` store and `accounts/` prefix.
+
+The existing IAM gateway stays on 4318 with its original cookies and sessions;
+new Next.js uses 4319 and separate cookies. Actual Nginx verification passed 20
+routing cases. Public post-switch checks passed nine cases: new readiness 200,
+new signed-out identity 401, landing 200, existing private-file content/resolve
+401, anonymous public-file probe 404, and ambiguous, missing-state and encoded
+callback-field requests 400. No authenticated IAM fixture was available; the
+preserved IAM runtime and anonymous authorization checks are verified, while a
+fresh authenticated legacy browser check remains unperformed.
+
+The current documentation site is deployed from its verified CI image, with the
+previous release symlink retained. All 447 legacy S3 objects (4,874,288,106 bytes)
+were saved privately and checked against recorded metadata and SHA-256; both RDS
+backups were restored locally. These are preflight snapshots while old writers
+remain live, not a claim that later IAM writes are included.
+
+Native CLI build run `38057590327` passed all six platforms. A second, bounded
+native run `38059432212` executed those exact existing archives without rebuilding
+and produced command stdout/stderr, runtime architecture, source/verifier SHAs,
+archive hashes and sizes for all six targets. Version is 4.0.0; verifier source is
+`68d918c`. Current backend/client CI also passed (`38059436609`). Private evidence
+lives in `.mig/production-release/`, including `parallel-public-proof.json`,
+`native-run-evidence.json`, `briefcase-native-proof/`, and `briefcase-native-release/`.
+Authenticated production product checks and central Apps publication are tracked
+separately; reaching the real Google verification screen is not a completed login.
