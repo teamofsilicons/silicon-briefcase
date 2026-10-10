@@ -571,3 +571,17 @@ log are adjacent. SHA256:
 Web verification:47 unit tests; typecheck/lint; production build; full postcutover
 browser suite28passed; added private-link/encoded-path regression plus setup2passed.
 Logs are `.mig/uuid-cutover/web-final-*` and `web-private-link-e2e.log`.
+
+## 2026-10-10 — Development shutdown and durable local storage
+
+After all cross-app and browser proofs, the web/API processes were stopped and a
+final database dump saved. The pinned Moto fixture's27 objects (2,409,625 bytes)
+were archived with keys, exact response metadata, checksums and tags. Restoration
+into a separate process reproduced every byte and metadata field exactly; both
+Moto instances were then stopped. Private recovery instructions and proof are in
+`.mig/uuid-cutover/RESTORE.md` and `s3-final-restore-proof.json`; final snapshots are
+`source-final.dump` and `s3-final.tar.gz`. S3 archive SHA256:
+`5a78d5f2b0ade15ab195d7c736a22d4e31cc283841ea65de60b406ae9ba8aadb`.
+The objects include the real Extend screenshot and Waveform audio, not stand-ins.
+All Briefcase development services are stopped; local database/files remain
+available for recovery. This proves local S3 compatibility, not real AWS integration.
