@@ -1,5 +1,5 @@
 /*
- * The landing page, after the developer site's home page (Arc's hero, feature, steps and CTA blocks): generous space,
+ * The landing page, after the developer site's home page (Silicon UI's hero, feature, steps and CTA blocks): generous space,
  * BDO Grotesk headlines, quiet squircle panels on the page colour, brand blue only where you act. The app's own colour
  * (--app-accent) tints the hero's wash and its mark, nothing else.
  */
@@ -57,7 +57,7 @@
 .step p { margin: 0; color: var(--text-secondary); line-height: 1.65; }
 .stepNumber { --sq-r: 10px; --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--sq-stroke); background: var(--sq-fill); color: var(--foreground); font-size: var(--text-sm); font-weight: 600; font-variant-numeric: tabular-nums; }
 
-/* Closing call to action: Arc's centered CTA. */
+/* Closing call to action: Silicon UI's centered CTA. */
 .closing { padding: clamp(64px, 9vw, 112px) var(--gutter); }
 .closingCard { --sq-r: var(--radius-surface); --sq-fill: var(--surface); --sq-stroke: var(--border); position: relative; display: grid; max-width: calc(var(--page-max) - 2 * var(--gutter)); justify-items: center; gap: var(--space-4); overflow: hidden; isolation: isolate; margin-inline: auto; border: 1px solid var(--sq-stroke); padding: clamp(48px, 6vw, 72px) var(--space-6); background: var(--sq-fill); text-align: center; }
 .closingCard::before { content: ""; position: absolute; inset: 0; z-index: -1; background: radial-gradient(70% 60% at 50% 0%, color-mix(in oklab, var(--app-accent) 10%, transparent), transparent 70%); }

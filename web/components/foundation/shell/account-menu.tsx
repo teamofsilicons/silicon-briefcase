@@ -1,12 +1,12 @@
 "use client";
 
 /**
- * The signed-in account's menu behind its photo (Arc's user menu): the profile photo from Silicon Accounts (`pfp_url`),
+ * The signed-in account's menu behind its photo (Silicon UI's user menu): the profile photo from Silicon Accounts (`pfp_url`),
  * the display name, the c: or si: id and whether it is a Carbon or a Silicon, the theme (light, dark or the device's),
  * the account's own page at Silicon Accounts, search, and sign out. Below 640 px it opens as a bottom sheet.
  */
 import { CircleUserRound, Search } from "lucide-react";
-import { UserMenu } from "@/components/arc/user-menu/user-menu";
+import { UserMenu } from "@/components/silicon-ui/user-menu/user-menu";
 import { useTheme, type ThemePreference } from "@/components/foundation/theme/use-theme";
 import type { SessionAccount } from "@/lib/account";
 import { kindNoun } from "@/lib/format";

@@ -6,7 +6,7 @@
  * React reads it through `useTheme()` (components/foundation/theme/use-theme.ts), a useSyncExternalStore over this
  * store, so the server snapshot ("light", "system") renders first and the client value follows after hydration.
  */
-import { motionTokens } from "@/components/arc/lib/motion-tokens";
+import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
 import { appConfig } from "@/lib/app.config";
 
 export type Theme = "light" | "dark";
@@ -122,7 +122,7 @@ function prefersReducedMotion(): boolean {
 }
 
 /**
- * Changes the theme with Arc's eclipse: the next appearance crosses the page as a disc travelling from the switch,
+ * Changes the theme with Silicon UI's eclipse: the next appearance crosses the page as a disc travelling from the switch,
  * like a moon passing. Runs inside a View Transition; browsers without view transitions, and anyone who prefers
  * reduced motion, get an instant change. `trigger` is the switch the person pressed (null: from the page's corner).
  */

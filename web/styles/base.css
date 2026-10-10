@@ -105,7 +105,7 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
  * Page changes inside the workspace (components/foundation/shell): React's <ViewTransition> tags the leaving page and
  * the arriving one with a class per direction along the navigation (page-forward / page-back) or page-fade. The
  * sidebar and the top bar are their own layer that never moves, so only the page slides.
- * The theme change is Arc's eclipse (lib/theme.ts): the next appearance crosses the page as a disc from the switch.
+ * The theme change is Silicon UI's eclipse (lib/theme.ts): the next appearance crosses the page as a disc from the switch.
  * ------------------------------------------------------------------------------------------------------------------ */
 ::view-transition { pointer-events: none; }
 

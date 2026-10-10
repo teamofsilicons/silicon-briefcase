@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@/components/arc/button/button";
-import { Input } from "@/components/arc/input/input";
-import { Select } from "@/components/arc/select/select";
+import { Button } from "@/components/silicon-ui/button/button";
+import { Input } from "@/components/silicon-ui/input/input";
+import { Select } from "@/components/silicon-ui/select/select";
 import { Page, PageHeader, Section } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";

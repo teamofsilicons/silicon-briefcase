@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { File, Folder } from "lucide-react";
-import { Button } from "@/components/arc/button/button";
+import { Button } from "@/components/silicon-ui/button/button";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { Preview } from "./preview";
 import { size, type Entry } from "@/lib/briefcase/types";

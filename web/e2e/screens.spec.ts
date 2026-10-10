@@ -14,6 +14,7 @@ for (const theme of ["light", "dark"] as const) for (const mobile of [false, tru
   }
   await page.goto("/files");await page.getByRole("button",{name:/^Welcome to Briefcase/}).click();
   await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCSS("opacity", "1");
   await page.screenshot({path:`screens/preview-${theme}-${mobile?"phone":"desktop"}.png`,fullPage:true});
   await page.getByRole("tab",{name:"Sharing",exact:true}).click();
   await page.screenshot({path:`screens/sharing-${theme}-${mobile?"phone":"desktop"}.png`,fullPage:true});

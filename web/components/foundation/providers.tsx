@@ -2,14 +2,14 @@
 
 /**
  * Everything the signed-in workspace shares, mounted once by its layout: the TanStack Query client (errors toast with
- * message and hint; a 401 ends the session), the Arc toast stack, the squircle runtime for browsers without
+ * message and hint; a 401 ends the session), the Silicon UI toast stack, the squircle runtime for browsers without
  * corner-shape, Motion's reduced-motion setting, and the session keeper started with what the server rendered.
  * The public pages (the landing page, sign-in) mount none of this.
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
-import { ToastStack, ToastStackProvider, useToastStack } from "@/components/arc/toast-stack/toast-stack";
+import { ToastStack, ToastStackProvider, useToastStack } from "@/components/silicon-ui/toast-stack/toast-stack";
 import { SquircleRuntime } from "@/components/foundation/squircle/squircle";
 import type { SessionView } from "@/lib/account";
 import { createQueryClient } from "@/lib/client/query";

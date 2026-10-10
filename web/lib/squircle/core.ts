@@ -413,7 +413,7 @@ function scan(node: Node, attach: boolean) {
 /**
  * Starts the document-wide runtime (fallback browsers only): every element with [data-sq] that is or becomes part of
  * the document is painted, and removed elements are released. Returns a stop function; nested starts share one
- * observer. Arc components only need the attribute, never a ref.
+ * observer. Silicon UI components only need the attribute, never a ref.
  */
 export function startSquircleRuntime(): () => void {
   if (!isBrowser || nativeSquircles() || typeof MutationObserver === "undefined") return () => undefined;

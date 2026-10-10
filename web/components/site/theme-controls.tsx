@@ -4,8 +4,8 @@
  * The public pages' two theme islands, the only script their header and footer carry. Both read and change the one
  * theme store (lib/theme.ts): light, dark or the system's.
  *
- * - ThemeToggle: the header's icon button (Arc's icon-only theme switch, without its motion library). It flips between
- *   light and dark with Arc's eclipse; the icon shown follows <html data-theme> in CSS, so the right one paints
+ * - ThemeToggle: the header's icon button (Silicon UI's icon-only theme switch, without its motion library). It flips between
+ *   light and dark with Silicon UI's eclipse; the icon shown follows <html data-theme> in CSS, so the right one paints
  *   before hydration.
  * - ThemePicker: the footer's three-way choice (System, Light, Dark), a group of pressed buttons.
  */

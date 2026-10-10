@@ -118,7 +118,7 @@ export async function apiFetch<T>(path: string, init: ApiFetchInit = {}): Promis
 export type ApiResult<T> = { data: T; error: null } | { data: null; error: ApiErrorInit };
 
 /**
- * apiFetch for a page that shows a failure inline (an Arc alert with the service's own words) instead of the error
+ * apiFetch for a page that shows a failure inline (a Silicon UI alert with the service's own words) instead of the error
  * page: production builds hide a thrown error's message from the page, so pass the failure on as data. Redirects
  * (signed out) and notFound() still happen.
  *

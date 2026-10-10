@@ -2,11 +2,11 @@
 
 /**
  * A page crashed while rendering: say so plainly, keep the digest for a report, and offer to try again. Plain elements
- * in Arc's button styles (no motion library): this boundary is part of every page's script, the public pages included.
+ * in Silicon UI's button styles (no motion library): this boundary is part of every page's script, the public pages included.
  */
 import { useEffect } from "react";
 import { RotateCcw } from "lucide-react";
-import buttonStyles from "@/components/arc/button/button.module.css";
+import buttonStyles from "@/components/silicon-ui/button/button.module.css";
 import { Problem } from "@/components/foundation/feedback/problem";
 import linkStyles from "@/components/foundation/button-link.module.css";
 

@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      web_only:
+        description: Build only the website candidate
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -12,13 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - component: backend
-            dockerfile: Dockerfile
-          - component: web
-            dockerfile: Dockerfile.browser
-          - component: docs
-            dockerfile: Dockerfile.docs
+        include: ${{ fromJSON(inputs.web_only && '[{"component":"web","dockerfile":"Dockerfile.browser"}]' || '[{"component":"backend","dockerfile":"Dockerfile"},{"component":"web","dockerfile":"Dockerfile.browser"},{"component":"docs","dockerfile":"Dockerfile.docs"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

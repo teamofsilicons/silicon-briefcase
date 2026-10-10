@@ -41,7 +41,7 @@
 .navLink:hover svg, .navLink:focus-visible svg { color: var(--foreground); }
 .navLink[aria-current="page"], .navLink[aria-current="true"] { --sq-fill: transparent; color: var(--foreground); }
 .navLink[aria-current] svg { color: var(--accent-ink); }
-/* The current section's surface glides from item to item (Motion layoutId), like Arc's dock highlight. */
+/* The current section's surface glides from item to item (Motion layoutId), like Silicon UI's dock highlight. */
 .navHighlight { --sq-r: 11px; --sq-fill: var(--surface); --sq-stroke: var(--border); position: absolute; inset: 0; z-index: -1; border: 1px solid var(--sq-stroke); background: var(--sq-fill); box-shadow: var(--shadow-resting); }
 .navLink[aria-current]:focus-visible .navHighlight { --sq-stroke: var(--accent); }
 .navLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -80,7 +80,7 @@
 .section span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobileBrand { display: none; }
 
-/* Icon buttons (the menu on phones): Arc's icon-only size, 38 px on a 12 px squircle. */
+/* Icon buttons (the menu on phones): Silicon UI's icon-only size, 38 px on a 12 px squircle. */
 .iconButton { --sq-r: 12px; --sq-fill: transparent; display: inline-grid; width: 38px; height: 38px; flex: none; place-items: center; border: 0; padding: 0; background: var(--sq-fill); color: var(--text-secondary); cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), transform var(--duration-instant) var(--ease-standard); }
 .iconButton:hover, .iconButton:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); outline: none; }
 .iconButton:active { transform: scale(.96); }

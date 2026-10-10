@@ -634,3 +634,39 @@ lives in `.mig/production-release/`, including `parallel-public-proof.json`,
 `native-run-evidence.json`, `briefcase-native-proof/`, and `briefcase-native-release/`.
 Authenticated production product checks and central Apps publication are tracked
 separately; reaching the real Google verification screen is not a completed login.
+
+
+## Silicon UI and genuine production acceptance — 2026-10-10
+
+Replaced the copied Arc tree with actual component source from the official
+`https://ui.teamofsilicons.com/r/{name}.json` registry. The local vendor lock
+records upstream response and source hashes, and preserves the MIT notices.
+App branding, numeric spacing/surface tokens, nested Escape, opener focus and
+server-only authentication remain integrated. The account menu's visible initials
+and idle confirmation overlay now satisfy accessible label checks.
+
+Type checking, lint, unit tests (47), production build, the real local
+Accounts/API browser suite (29 checks), and four-theme/viewport screenshots
+(five tests including setup) pass. The screens cover desktop and phone in light
+and dark; Remind phone cards keep the description above their status/actions.
+Private logs live in the Briefcase worktree's `.mig/production-release/` and
+screens in `web/screens/`.
+The CI workflow can build a website-only ARM64 candidate, keeping unchanged CLI
+archives and native verification provenance intact. Deployment is recorded after
+the candidate is verified.
+
+A genuine production c:saket sign-in through the Accounts CLI issued the Briefcase
+app session. Upload/download of a new 60-byte file passed against actual AWS S3
+in `accounts/`, with the byte hash verified. A genuine Android Extend capture
+was explicitly shared to that Carbon; the exact permanent URL downloaded an
+818756-byte PNG with SHA-256
+`1c8e12308687dcdbc4f7727daa331c253f30a1420b26c9355de7292322191aac`.
+The live website resolved the URL and rendered its 1080×2400 image without browser
+errors, using that genuine app session in the standard sealed BFF cookie. This
+preview check does not claim a second hosted sign-in. The temporary cross-app
+fixture is cleaned up by its owner after evidence capture.
+
+`briefcase-client` 4.0.0 passed the normal Cargo publication verification and is
+available on crates.io; the CLI remains `publish = false` and distributed through
+Silicon Apps/native archives. Six exact release archives and verification reports
+are consolidated for the central catalog publisher.

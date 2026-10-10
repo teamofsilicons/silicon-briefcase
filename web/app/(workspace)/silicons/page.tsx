@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Bot } from "lucide-react";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
-import { EmptyState } from "@/components/arc/empty-state/empty-state";
+import { EmptyState } from "@/components/silicon-ui/empty-state/empty-state";
 import { tryApiFetch } from "@/lib/server/rsc";
 import type { Drive } from "@/lib/briefcase/types";
 import styles from "@/components/briefcase/briefcase.module.css";

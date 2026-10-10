@@ -1,5 +1,5 @@
 /**
- * A placeholder block in the final layout's size (Arc: skeletons in the final layout, never a page spinner). Arc's
+ * A placeholder block in the final layout's size (Silicon UI: skeletons in the final layout, never a page spinner). Silicon UI's
  * own <Skeleton> draws text lines; this draws any box: a card, a heading, a tile.
  *
  *   <SkeletonBlock width="min(320px, 70%)" height="44px" radius="12px" />

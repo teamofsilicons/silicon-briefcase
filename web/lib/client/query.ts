@@ -4,7 +4,7 @@
  * - Errors are ApiError everywhere (`Register.defaultError`), with the service's message and hint.
  * - A failed mutation toasts "title + message + hint" unless it opts out with `meta: { toast: false }` (pages that show
  *   the failure inline, next to the field it is about). `meta.errorTitle` sets the toast's title.
- * - A failed query does not toast: pages render it inline with a retry (Arc: an alert next to the cause).
+ * - A failed query does not toast: pages render it inline with a retry (Silicon UI: an alert next to the cause).
  * - A 401 means the sign-in ended (the API proxy cleared it): the session keeper sends the Carbon to sign in again.
  * - Queries retry network blips and 5xx twice; mutations never retry on their own (send an Idempotency-Key and let the
  *   Carbon try again).

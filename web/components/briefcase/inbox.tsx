@@ -1,8 +1,8 @@
 "use client";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { Button } from "@/components/arc/button/button";
-import { EmptyState } from "@/components/arc/empty-state/empty-state";
+import { Button } from "@/components/silicon-ui/button/button";
+import { EmptyState } from "@/components/silicon-ui/empty-state/empty-state";
 import { Page, PageHeader } from "@/components/foundation/layout/layout";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";

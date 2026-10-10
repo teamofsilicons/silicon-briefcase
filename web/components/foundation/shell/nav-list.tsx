@@ -2,14 +2,14 @@
 
 /**
  * The workspace's sections (lib/app.config.ts `nav`) and the app's outside links, as the sidebar and the phone menu
- * sheet both show them. The current section's surface glides between items on Arc's morph spring (Motion layoutId);
+ * sheet both show them. The current section's surface glides between items on Silicon UI's morph spring (Motion layoutId);
  * page changes slide in the direction of travel down or up the list (lib/navigation.ts).
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LayoutGroup, motion } from "motion/react";
 import { ArrowUpRight, BookOpen, Store } from "lucide-react";
-import { motionTokens } from "@/components/arc/lib/motion-tokens";
+import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
 import { appConfig } from "@/lib/app.config";
 import { navigationType, navItemFor } from "@/lib/navigation";
 import styles from "./shell.module.css";

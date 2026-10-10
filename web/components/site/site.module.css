@@ -1,5 +1,5 @@
 /*
- * The public pages' header, menu and footer, after Arc's site-header and site-footer blocks (copied from the developer
+ * The public pages' header, menu and footer, after Silicon UI's site-header and site-footer blocks (copied from the developer
  * site): a calm sticky bar, a hover fill on links, brand-blue primary action, quiet footer columns. Every rounded
  * surface is a squircle.
  */
@@ -69,13 +69,13 @@
 }
 .navLink:hover, .navLink:focus-visible { --sq-fill: var(--surface-muted); color: var(--foreground); }
 .navLink[aria-current] { color: var(--foreground); }
-/* The current section: Arc's indicator line under the label. */
+/* The current section: Silicon UI's indicator line under the label. */
 .navLink[aria-current]::after { content: ""; position: absolute; right: 12px; bottom: 3px; left: 12px; height: 2px; border-radius: 2px; background: var(--accent); }
 
 .actions { display: flex; flex: none; align-items: center; gap: var(--space-2); margin-left: auto; }
 .account { flex: none; }
 
-/* Icon buttons (search, theme, menu): Arc's icon-only switch, 38 px on a 12 px squircle. */
+/* Icon buttons (search, theme, menu): Silicon UI's icon-only switch, 38 px on a 12 px squircle. */
 .iconButton {
   --sq-r: 12px;
   --sq-fill: transparent;
@@ -174,13 +174,13 @@
 .columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); }
 .column h2 { margin: 0 0 var(--space-3); color: var(--foreground); font-size: var(--text-sm); font-weight: 600; }
 .column ul { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.footerLink { display: inline-flex; align-items: center; gap: 3px; padding: 2px 0; color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }
+.footerLink { display: inline-flex; min-height: 24px; align-items: center; gap: 3px; padding: 2px 0; color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }
 .footerLink:hover, .footerLink:focus-visible { color: var(--foreground); text-decoration: underline; text-underline-offset: .22em; }
 .externalIcon { color: var(--text-muted); }
 .footerBottom { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-4) var(--space-6); margin-top: var(--space-10); border-top: 1px solid var(--border-subtle); padding-top: var(--space-5); }
 .copyright { margin: 0; color: var(--text-muted); font-size: var(--text-sm); }
 
-/* The theme choice: Arc's segmented control, three pressed buttons on one track. */
+/* The theme choice: Silicon UI's segmented control, three pressed buttons on one track. */
 .picker { --sq-r: 12px; --sq-fill: var(--surface-muted); display: inline-flex; gap: 2px; padding: 3px; background: var(--sq-fill); }
 .pickerOption {
   --sq-r: 9px;
@@ -202,7 +202,7 @@
 }
 .pickerOption:hover, .pickerOption:focus-visible { color: var(--foreground); }
 .pickerOption[aria-pressed="true"] { --sq-fill: var(--surface); color: var(--foreground); box-shadow: var(--shadow-resting); }
-/* Keyboard position (as Arc's segmented control here): an accent edge, and a soft fill on an option not chosen. */
+/* Keyboard position (as Silicon UI's segmented control here): an accent edge, and a soft fill on an option not chosen. */
 .pickerOption:focus-visible { --sq-stroke: var(--accent); outline: none; }
 .pickerOption:focus-visible:not([aria-pressed="true"]) { --sq-fill: color-mix(in oklab, var(--foreground) 6%, transparent); }
 

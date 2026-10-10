@@ -2,11 +2,11 @@
 import { useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, ExternalLink, Folder, RotateCcw } from "lucide-react";
-import { Button } from "@/components/arc/button/button";
-import { Input } from "@/components/arc/input/input";
-import { Select } from "@/components/arc/select/select";
-import { Dialog, DialogContent } from "@/components/arc/dialog/dialog";
-import { HoldToConfirm } from "@/components/arc/hold-to-confirm/hold-to-confirm";
+import { Button } from "@/components/silicon-ui/button/button";
+import { Input } from "@/components/silicon-ui/input/input";
+import { Select } from "@/components/silicon-ui/select/select";
+import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
+import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";

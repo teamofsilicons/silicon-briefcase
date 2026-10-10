@@ -1,5 +1,5 @@
 /*
- * The share field, in Arc's tag-input shape: one squircle control holding the account chips and the text field, a
+ * The share field, in Silicon UI's tag-input shape: one squircle control holding the account chips and the text field, a
  * strong edge while focused, a danger edge when what was typed is not an account id.
  */
 .field { display: grid; min-width: 0; gap: var(--space-2); }
