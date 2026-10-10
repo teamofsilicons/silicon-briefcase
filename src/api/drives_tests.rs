@@ -16,7 +16,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use super::accounts_tests::{Fixture, fixture_with};
+use super::accounts_tests::{Fixture, fixture_with_store};
 use crate::infrastructure::accounts::test_support::{carbon_summary, silicon_summary};
 
 /// One test world: Ada and Bob are Carbons, Cat is a Carbon nobody shares
@@ -53,7 +53,22 @@ impl World {
         issuers: &str,
         first_party: &str,
     ) -> anyhow::Result<Option<Self>> {
-        let Some(f) = fixture_with(issuers, first_party).await? else {
+        Self::build(issuers, first_party, None).await
+    }
+
+    /// The world with file bytes served from `store`.
+    pub(super) async fn with_store(
+        store: std::sync::Arc<dyn crate::application::ports::ObjectStore>,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::build("", "", Some(store)).await
+    }
+
+    async fn build(
+        issuers: &str,
+        first_party: &str,
+        store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(f) = fixture_with_store(issuers, first_party, store).await? else {
             return Ok(None);
         };
         let account = |prefix: &str, id: &str, kind: &str| Account {

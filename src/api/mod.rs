@@ -45,8 +45,9 @@ pub mod validation;
 pub mod versioning;
 
 use handlers::{
-    accounts, content, delegated, delegated_upload, drives as drive_handlers, entries, invitations,
-    locations, notifications, obo, permissions, reports, sharing, system, telemetry, usage,
+    accounts, archive_listing, content, delegated, delegated_upload, drives as drive_handlers,
+    entries, invitations, locations, notifications, obo, permissions, reports, sharing, system,
+    telemetry, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -180,6 +181,16 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
         upload_control_routes().layer(DefaultBodyLimit::max(server.max_json_body_bytes.get()));
     let upload_control = with_deadline(upload_control, server.upload_timeout);
 
+    // Listing an archive reads (up to bounded amounts of) its bytes before
+    // answering, so it has the upload deadline rather than the JSON one.
+    let archive_listing = with_deadline(
+        Router::new().route(
+            "/api/v1/entries/{entry_id}/archive",
+            get(archive_listing::list),
+        ),
+        server.upload_timeout,
+    );
+
     let restore = with_deadline(
         Router::new()
             .route(
@@ -216,6 +227,7 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
 
     ordinary
         .merge(upload_control)
+        .merge(archive_listing)
         .merge(restore)
         .merge(uploads)
         .merge(webhook)
@@ -412,6 +424,8 @@ async fn not_found() -> crate::error::AppError {
 #[cfg(test)]
 mod accounts_tests;
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod delegation_tests;
 #[cfg(test)]
 mod drive_access_tests;
@@ -419,5 +433,7 @@ mod drive_access_tests;
 mod drives_tests;
 #[cfg(test)]
 mod locations_tests;
+#[cfg(test)]
+mod memory_store;
 #[cfg(test)]
 pub(crate) mod tests;

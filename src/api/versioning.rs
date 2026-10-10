@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 54] = [
+pub const OPERATIONS: [OperationVersion; 57] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -71,7 +71,7 @@ pub const OPERATIONS: [OperationVersion; 54] = [
     ),
     operation(
         "transferDelegatedUpload",
-        "2.0.0",
+        "2.1.0",
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
@@ -117,9 +117,22 @@ pub const OPERATIONS: [OperationVersion; 54] = [
     ),
     operation(
         "resolvePermanentUrl",
-        "1.2.0",
+        "2.0.0",
+        "GET",
+        "/paths/{owner}/{path}",
+    ),
+    operation("resolveDriveTop", "1.0.0", "GET", "/paths/{owner}"),
+    operation(
+        "resolveLegacyPermanentUrl",
+        "1.0.0",
         "GET",
         "/org/{org_id}/{path}",
+    ),
+    operation(
+        "listArchiveContents",
+        "1.0.0",
+        "GET",
+        "/entries/{entry_id}/archive",
     ),
     operation("uploadFile", "1.1.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "3.0.0", "POST", "/obo/files"),
@@ -131,7 +144,7 @@ pub const OPERATIONS: [OperationVersion; 54] = [
     ),
     operation(
         "listEntriesOnBehalfOfMember",
-        "3.0.0",
+        "3.1.0",
         "POST",
         "/obo/entries/list",
     ),
@@ -143,7 +156,7 @@ pub const OPERATIONS: [OperationVersion; 54] = [
     ),
     operation(
         "trashEntryOnBehalfOfMember",
-        "3.0.0",
+        "3.1.0",
         "POST",
         "/obo/entries/trash",
     ),
@@ -246,7 +259,7 @@ pub const OPERATIONS: [OperationVersion; 54] = [
         "/entries/{entry_id}/link-access",
     ),
     operation("listEntryLogs", "2.0.0", "GET", "/entries/{entry_id}/logs"),
-    operation("readPublicEntry", "1.1.0", "GET", "/public/{org_id}/{path}"),
+    operation("readPublicEntry", "2.0.0", "GET", "/public/{owner}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
         "3.0.0",

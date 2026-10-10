@@ -239,12 +239,20 @@ mod tests {
     #[test]
     fn telemetry_uses_contract_names_for_catch_all_and_version_aliases() {
         assert_eq!(
-            super::operation_name("GET", "/api/v1/public/{org_id}/{*path}"),
+            super::operation_name("GET", "/api/v1/public/{owner}/{*path}"),
             "readPublicEntry"
         );
         assert_eq!(
-            super::operation_name("GET", "/org/{org_id}/{*path}"),
+            super::operation_name("GET", "/api/v1/paths/{owner}/{*path}"),
             "resolvePermanentUrl"
+        );
+        assert_eq!(
+            super::operation_name("GET", "/api/v1/paths/{owner}"),
+            "resolveDriveTop"
+        );
+        assert_eq!(
+            super::operation_name("GET", "/org/{org_id}/{*path}"),
+            "resolveLegacyPermanentUrl"
         );
         assert_eq!(
             super::operation_name("GET", "/api/version"),

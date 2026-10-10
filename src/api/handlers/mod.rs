@@ -2,6 +2,7 @@
 
 pub(crate) mod accounts;
 pub(crate) mod archive;
+pub(crate) mod archive_listing;
 pub(crate) mod content;
 pub(crate) mod delegated;
 pub(crate) mod delegated_upload;

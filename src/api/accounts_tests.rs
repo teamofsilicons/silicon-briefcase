@@ -24,7 +24,7 @@ use wiremock::{
 use super::{
     router,
     state::AppState,
-    tests::{TEST_WEBHOOK_SECRET, test_accounts_settings, test_state_with_accounts},
+    tests::{TEST_WEBHOOK_SECRET, test_accounts_settings, test_state_with_store},
 };
 use crate::infrastructure::accounts::test_support::{
     TestIssuer, carbon_summary, signed_delivery, silicon_summary, valid_proof,
@@ -49,6 +49,15 @@ pub(super) async fn fixture(proof_issuers: &str) -> anyhow::Result<Option<Fixtur
 pub(super) async fn fixture_with(
     proof_issuers: &str,
     first_party: &str,
+) -> anyhow::Result<Option<Fixture>> {
+    fixture_with_store(proof_issuers, first_party, None).await
+}
+
+/// [`fixture_with`] serving file bytes from `store`.
+pub(super) async fn fixture_with_store(
+    proof_issuers: &str,
+    first_party: &str,
+    store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,
 ) -> anyhow::Result<Option<Fixture>> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
         eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
@@ -85,7 +94,7 @@ pub(super) async fn fixture_with(
         .with_first_party(first_party)
         .map_err(|reason| anyhow::anyhow!(reason))?;
     let (state, server_settings, webhook) =
-        test_state_with_accounts(api, &settings, Some(issuer.jwks()))?;
+        test_state_with_store(api, &settings, Some(issuer.jwks()), store)?;
     let router = router(state.clone(), &server_settings, &webhook);
     Ok(Some(Fixture {
         server,

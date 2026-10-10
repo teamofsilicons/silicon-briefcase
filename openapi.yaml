@@ -6,9 +6,10 @@ info:
     search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
 - url: https://backend.briefcase.teamofsilicons.com/api/v1
-  description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead,
-    always drive-scoped as https://briefcase.teamofsilicons.com/org/{drive}/{path}, where the drive is its owner's
-    account uuid.
+  description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead
+    as https://briefcase.teamofsilicons.com/{owner}/{path}, where the owner is the drive owner's current `c:`/`si:` id
+    (for example `/c:ada/notes/plan.md`); `GET /paths/{owner}/{path}` resolves them. Addresses from before personal
+    drives (`/org/{org}/{path}`) keep resolving.
 security:
 - bearerAuth: []
 tags:
@@ -900,8 +901,8 @@ paths:
       - Uploads
       operationId: transferDelegatedUpload
       summary: Transfer exact private bytes using a narrow upload capability
-      description: Sends only the capability issued by the reservation and the uuid of the account the reservation belongs to
-        (X-Org-ID). Do not send an access token or proof.
+      description: Sends only the capability issued by the reservation. Do not send an access token or proof; the
+        drive is found from the reservation (older clients may still send X-Org-ID, which must then name it).
         Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider
         writes. A successful transfer is private staging only, not file publication. Commit separately with a valid proof.
         A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
@@ -940,18 +941,20 @@ paths:
           description: Invalid or revoked upload capability
         '409':
           description: Transfer cannot start in the current lifecycle state
+        '404':
+          description: No reservation has this upload id
         '413':
           description: Content exceeds the reservation or maximum size
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 2.1.0
   /obo/folders/create:
     post:
       tags:
       - Applications
       operationId: createFolderOnBehalfOfMember
       summary: Create a child folder for a represented member
-      description: Create a child folder with a User verification proof (scope briefcase.folders.create). An empty parent_path selects the account's folder for the issuing app. Ordinary write permissions and the app namespace apply. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
+      description: Create a child folder with a User verification proof (scope briefcase.folders.create). An empty parent_path selects the account's folder for the issuing app, `apps/{app}/`; a path names a folder in the account's own drive (inside `apps/{app}/` unless the app is first-party). Ordinary write permissions apply and the folder records the issuing app. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
       security:
       - proofAuth: []
       requestBody:
@@ -981,7 +984,7 @@ paths:
       - Applications
       operationId: listEntriesOnBehalfOfMember
       summary: List the represented member's visible entries
-      description: List the ordinary privacy-filtered entry view with a User verification proof (scope briefcase.entries.list). Parent UUID and path are mutually exclusive. Each page verifies the proof again and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
+      description: List the ordinary privacy-filtered entry view with a User verification proof (scope briefcase.entries.list). Parent UUID and path are mutually exclusive; with neither, the app's folder `apps/{app}/` is listed. Apps see only their folder in the account's own drive; a first-party app sees what the account sees and may name another drive with `drive` (others get 422 `drive_not_delegated`). Each page verifies the proof again and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
       security:
       - proofAuth: []
       requestBody:
@@ -1002,14 +1005,14 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-proof-scope: briefcase.entries.list
-      x-operation-version: 3.0.0
+      x-operation-version: 3.1.0
   /obo/files/read:
     post:
       tags:
       - Applications
       operationId: readFileOnBehalfOfMember
       summary: Stream a file for a represented member
-      description: Read a current file with a User verification proof (scope briefcase.files.read) and ordinary resource permissions. Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
+      description: Read a current file with a User verification proof (scope briefcase.files.read) and ordinary resource permissions (inside `apps/{app}/` of the account's drive unless the app is first-party). Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
       security:
       - proofAuth: []
       requestBody:
@@ -1037,7 +1040,7 @@ paths:
       - Applications
       operationId: trashEntryOnBehalfOfMember
       summary: Move an application-created entry to the recoverable bin
-      description: Recoverably remove app-created content with a User verification proof (scope briefcase.entries.trash). Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
+      description: Recoverably remove content the issuing app created with a User verification proof (scope briefcase.entries.trash). An entry another app (or the account itself) created answers 403 `not_created_by_app`. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
       security:
       - proofAuth: []
       requestBody:
@@ -1049,6 +1052,8 @@ paths:
       responses:
         '204':
           description: Entry moved to the bin or the same deletion was recognized
+        '403':
+          description: The issuing app did not create this entry (`not_created_by_app`)
         '404':
           description: Entry is absent or not visible
         '409':
@@ -1056,7 +1061,7 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-proof-scope: briefcase.entries.trash
-      x-operation-version: 3.0.0
+      x-operation-version: 3.1.0
   /entries/{entry_id}/versions:
     get:
       tags:
@@ -1208,24 +1213,23 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 2.0.0
-  /org/{org_id}/{path}:
-    servers:
-    - url: https://backend.briefcase.teamofsilicons.com
+  /paths/{owner}/{path}:
     get:
       tags:
       - Entries
       operationId: resolvePermanentUrl
-      summary: Resolve the clean permanent URL of an entry
-      description: The path mirrors the folder structure exactly, for example `/org/zQo/notes/2026/plan.md`. The first
-        segment is the drive (its owner's account uuid); the entry may be in any drive the caller reaches. Without
-        `disposition` the entry and its effective access are returned; with `disposition` the file bytes are streamed.
-        Anything the caller cannot read answers `404`.
+      summary: Resolve an entry's permanent address
+      description: The address mirrors the folder structure below the drive's owner, for example
+        `/paths/c:ada/notes/2026/plan.md` for https://briefcase.teamofsilicons.com/c:ada/notes/2026/plan.md. The owner
+        is a `c:`/`si:` id or the account's uuid (entries' `content_url` uses the uuid, so it survives id changes).
+        Without `disposition` the entry and the caller's effective access are returned; with it the file bytes are
+        streamed. Without `Authorization` only what anyone with the link may read is served. An id the owner gave up
+        answers `308` with the address under its current id. Anything the caller cannot read answers `404`.
+      security:
+      - bearerAuth: []
+      - {}
       parameters:
-      - name: org_id
-        in: path
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/Owner'
       - name: path
         in: path
         required: true
@@ -1255,9 +1259,119 @@ paths:
                 format: binary
         '206':
           $ref: '#/components/responses/PartialFileContent'
+        '308':
+          $ref: '#/components/responses/Moved'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.2.0
+      x-operation-version: 2.0.0
+  /paths/{owner}:
+    get:
+      tags:
+      - Entries
+      operationId: resolveDriveTop
+      summary: Resolve the top of a drive
+      description: The drive's own address (https://briefcase.teamofsilicons.com/c:ada). Its owner and the custodian of
+        a Silicon that owns it see the top folder; someone with a share inside sees a traversal entry; anyone else gets
+        `404`. The top of a drive never has a link, so this always takes an access token. An id the owner gave up
+        answers `308`.
+      parameters:
+      - $ref: '#/components/parameters/Owner'
+      responses:
+        '200':
+          description: The drive's top folder
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entry'
+        '308':
+          $ref: '#/components/responses/Moved'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /org/{org_id}/{path}:
+    servers:
+    - url: https://backend.briefcase.teamofsilicons.com
+    get:
+      tags:
+      - Entries
+      operationId: resolveLegacyPermanentUrl
+      deprecated: true
+      summary: Resolve an address from before personal drives
+      description: Addresses such as `/org/tos/public/handbook/guide.md` keep working after the move to personal
+        drives. They resolve through the aliases the cutover recorded when it moved each file (an address below a moved
+        folder resolves through the folder) and answer exactly like `GET /paths/{owner}/{path}` for the entry's current
+        place, whose `permanent_url` the response carries. Without `Authorization` only link-shared entries are served.
+      security:
+      - bearerAuth: []
+      - {}
+      parameters:
+      - name: org_id
+        in: path
+        required: true
+        description: The organization key the address used.
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9_-]{3,50}$
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 2048
+      - name: disposition
+        in: query
+        schema:
+          type: string
+          enum:
+          - inline
+          - attachment
+      - $ref: '#/components/parameters/Range'
+      responses:
+        '200':
+          description: Entry metadata, or complete file bytes when a disposition is requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entry'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          $ref: '#/components/responses/PartialFileContent'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /entries/{entry_id}/archive:
+    get:
+      tags:
+      - Entries
+      operationId: listArchiveContents
+      summary: List what an archive holds
+      description: Lists the entries of a zip, tar, tar.gz, tar.zst or 7z file without extracting anything, for
+        anyone who may read the file. Zip archives are listed from their central directory whatever their size; tar
+        archives are read as a stream (up to 1 GiB of archive); 7z archives up to 512 MiB. At most `limit` entries are
+        returned; `truncated` says when there are more. Any other file answers 422 `not_an_archive`; an unreadable or
+        encrypted archive answers 422 `archive_unreadable` or `archive_encrypted`.
+      parameters:
+      - $ref: '#/components/parameters/EntryId'
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 10000
+      responses:
+        '200':
+          description: The archive's entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArchiveListing'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
   /entries/{entry_id}/invitations:
     get:
       operationId: listInvitations
@@ -1450,14 +1564,24 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 2.0.0
-  /public/{org_id}/{path}:
+  /public/{owner}/{path}:
     get:
       operationId: readPublicEntry
       summary: Read or download a publicly shared file or folder
+      description: What anyone with the link may read, at `/public/{owner}/{path}`. The owner is a `c:`/`si:` id or
+        the account's uuid; an organization key from before personal drives also works, through the cutover's aliases.
+        An id the owner gave up answers `308` with the address under its current id.
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgIdPath'
+      - name: owner
+        in: path
+        required: true
+        description: The drive's owner (`c:`/`si:` id or account uuid), or an organization key from before personal
+          drives.
+        schema:
+          type: string
+          maxLength: 80
       - in: path
         name: path
         required: true
@@ -1491,10 +1615,12 @@ paths:
               schema:
                 type: string
                 format: binary
+        '308':
+          $ref: '#/components/responses/Moved'
         default:
           $ref: '#/components/responses/Error'
       security: []
-      x-operation-version: 1.1.0
+      x-operation-version: 2.0.0
   /obo/invitations:
     post:
       operationId: inviteOnBehalfOfMember
@@ -1565,8 +1691,11 @@ components:
       type: http
       scheme: Proof
       description: '`Authorization: Proof sap_…` — a Silicon Accounts User verification proof whose receiving app
-        is `briefcase`, issued to an app allowed for the route''s scope (`x-proof-scope`). The request runs as the
-        account the proof speaks for, inside `apps/{issuing app}/`.'
+        is `briefcase`, issued to an app the operator allows for the route''s scope (`x-proof-scope`,
+        `BRIEFCASE_PROOF_ISSUERS`). The request runs as the account the proof speaks for, and what it creates records
+        the issuing app. Apps reach only `apps/{issuing app}/` in that account''s own drive, except the first-party
+        apps the operator lists (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS`), which reach everything the account can
+        through these routes.'
   parameters:
     Drive:
       name: drive
@@ -1589,20 +1718,21 @@ components:
     UploadTenant:
       name: X-Org-ID
       in: header
-      required: true
-      description: Uuid of the account the reservation belongs to (the user of the proof that reserved it). The
-        capability, not this value, authorizes the bytes.
+      required: false
+      deprecated: true
+      description: Optional, for older clients. When sent, the uuid of the account the reservation belongs to; the
+        drive is otherwise found from the reservation. The capability, not this value, authorizes the bytes.
       schema:
         type: string
         pattern: ^[A-Za-z0-9]{3,32}$
-    OrgIdPath:
-      name: org_id
+    Owner:
+      name: owner
       in: path
       required: true
-      description: The drive the entry lives in (an account uuid).
+      description: The drive's owner, by `c:`/`si:` id (`c:ada`) or account uuid.
       schema:
         type: string
-        pattern: ^[A-Za-z0-9_-]{3,50}$
+        maxLength: 80
     EntryId:
       name: entry_id
       in: path
@@ -1704,6 +1834,18 @@ components:
           schema:
             type: string
             format: binary
+    Moved:
+      description: The owner gave up the id the address used; the same address under the owner's current id
+      headers:
+        Location:
+          schema:
+            type: string
+            format: uri
+          description: The API address under the current id, query kept
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Moved'
   schemas:
     AccountSummary:
       type: object
@@ -2034,6 +2176,13 @@ components:
           - 'null'
           minLength: 1
           description: Alternative parent path; must not be blank
+        drive:
+          type:
+          - string
+          - 'null'
+          maxLength: 80
+          description: First-party apps only. The drive to list or resolve `path` in, by its owner's `c:`/`si:` id
+            or uuid; the account's own by default. Ignored with `parent_id`.
         filter:
           type:
           - string
@@ -2306,7 +2455,8 @@ components:
         permanent_url:
           type: string
           format: uri
-          description: Clean permanent URL that shows the folder structure
+          description: Clean permanent URL that shows the folder structure below the drive owner's current id, such as
+            https://briefcase.teamofsilicons.com/c:ada/notes/plan.md
         content_url:
           type:
           - string
@@ -2560,6 +2710,91 @@ components:
         permanent_url:
           type: string
           format: uri
+    Moved:
+      type: object
+      required:
+      - moved_to
+      - permanent_url
+      - owner
+      properties:
+        moved_to:
+          type: string
+          format: uri
+          description: The same API address under the owner's current id
+        permanent_url:
+          type: string
+          format: uri
+          description: The matching permanent address on the application host
+        owner:
+          type: object
+          required:
+          - uuid
+          - id
+          properties:
+            uuid:
+              type: string
+            id:
+              type: string
+    ArchiveListing:
+      type: object
+      required:
+      - format
+      - entries
+      - truncated
+      properties:
+        format:
+          type: string
+          enum:
+          - zip
+          - tar
+          - tar.gz
+          - tar.zst
+          - 7z
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArchiveItem'
+        truncated:
+          type: boolean
+          description: Whether the archive holds more than is listed
+        truncated_because:
+          type: string
+          enum:
+          - entry_limit
+          - directory_limit
+          - read_limit
+          - unreadable_rest
+    ArchiveItem:
+      type: object
+      required:
+      - path
+      - type
+      - size
+      properties:
+        path:
+          type: string
+          description: The entry's path inside the archive, as the archive spells it
+        type:
+          type: string
+          enum:
+          - file
+          - folder
+          - link
+          - other
+        size:
+          type: integer
+          minimum: 0
+          description: Bytes once extracted
+        compressed_size:
+          type: integer
+          minimum: 0
+          description: Bytes inside the archive (zip only)
+        modified_at:
+          type: string
+          format: date-time
+        encrypted:
+          type: boolean
+          description: Present and true when the entry's content is encrypted
     Notification:
       type: object
       required:

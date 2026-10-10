@@ -37,7 +37,7 @@ pub(crate) const TEST_APP_SECRET: &str = "sa_app_briefcase_test_secret_012345678
 /// A well-formed webhook signing secret for tests.
 pub(crate) const TEST_WEBHOOK_SECRET: &str = "whsec_briefcase_test_signing_secret_0123456789";
 
-const CONTRACT: [(&str, &str, &str); 54] = [
+const CONTRACT: [(&str, &str, &str); 57] = [
     ("/version", "get", "200"),
     ("/accounts", "get", "200"),
     ("/me", "get", "200"),
@@ -48,7 +48,10 @@ const CONTRACT: [(&str, &str, &str); 54] = [
     ("/entries/{entry_id}", "delete", "204"),
     ("/entries/{entry_id}/content", "get", "200"),
     ("/entries/{entry_id}/download", "get", "200"),
+    ("/paths/{owner}/{path}", "get", "200"),
+    ("/paths/{owner}", "get", "200"),
     ("/org/{org_id}/{path}", "get", "200"),
+    ("/entries/{entry_id}/archive", "get", "200"),
     ("/uploads", "post", "201"),
     ("/obo/files", "post", "410"),
     ("/obo/uploads/reserve", "post", "200"),
@@ -96,7 +99,7 @@ const CONTRACT: [(&str, &str, &str); 54] = [
     ("/entries/{entry_id}/link-access", "get", "200"),
     ("/entries/{entry_id}/link-access", "put", "200"),
     ("/entries/{entry_id}/logs", "get", "200"),
-    ("/public/{org_id}/{path}", "get", "200"),
+    ("/public/{owner}/{path}", "get", "200"),
     ("/obo/invitations", "post", "200"),
     ("/obo/link-access", "post", "200"),
     ("/drives", "get", "200"),
@@ -262,13 +265,16 @@ async fn every_contracted_method_is_registered_by_the_runtime_router() -> anyhow
         let path = path
             .replace("{entry_id}", &identifier)
             .replace("{grant_id}", &identifier)
-            .replace("{org_id}", "zQo")
+            .replace("{org_id}", "tos")
+            .replace("{owner}", "zQo")
+            .replace("{path}", "notes/plan.md")
             .replace("{upload_id}", &identifier)
             .replace("{version_id}", &identifier);
         let path = match path.as_str() {
             "/search" => format!("/api/v1{path}?q=registered"),
-            // The permanent URL is served outside the versioned API base.
-            "/org/zQo/{path}" => "/org/zQo/private/zQo/notes.md".to_owned(),
+            // Addresses from before personal drives are served outside the
+            // versioned API base.
+            legacy if legacy.starts_with("/org/") => legacy.to_owned(),
             _ => format!("/api/v1{path}"),
         };
         let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())?;
@@ -491,6 +497,17 @@ pub(crate) fn test_state_with_accounts(
     accounts: &AccountsSettings,
     jwks: Option<silicon_accounts_client::Jwks>,
 ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
+    test_state_with_store(database, accounts, jwks, None)
+}
+
+/// [`test_state_with_accounts`] with an object store of the test's own
+/// (otherwise an S3 client without credentials that never reaches AWS).
+pub(crate) fn test_state_with_store(
+    database: sqlx::PgPool,
+    accounts: &AccountsSettings,
+    jwks: Option<silicon_accounts_client::Jwks>,
+    store: Option<Arc<dyn ObjectStore>>,
+) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
     let repository = PostgresRepository::new(database.clone());
     let s3 = S3Settings {
         region: "ap-south-1".to_owned(),
@@ -510,14 +527,16 @@ pub(crate) fn test_state_with_accounts(
     // configuration has: building the role-assuming client for a
     // bring-your-own bucket needs both. There are no credentials, so nothing
     // ever reaches AWS.
-    let object_store: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
-        aws_config::SdkConfig::builder()
-            .behavior_version(aws_config::BehaviorVersion::latest())
-            .time_source(aws_smithy_async::time::SystemTimeSource::new())
-            .build(),
-        None,
-        false,
-    ));
+    let object_store: Arc<dyn ObjectStore> = store.unwrap_or_else(|| {
+        Arc::new(S3ObjectStore::new(
+            aws_config::SdkConfig::builder()
+                .behavior_version(aws_config::BehaviorVersion::latest())
+                .time_source(aws_smithy_async::time::SystemTimeSource::new())
+                .build(),
+            None,
+            false,
+        ))
+    });
     let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
         content_repository,
         Arc::clone(&object_store),

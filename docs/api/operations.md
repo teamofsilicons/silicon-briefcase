@@ -6,13 +6,17 @@ id, method, path and revision there before its first call.
 
 - **bearer**: a Silicon Accounts access token issued to `briefcase` (`Authorization: Bearer …`).
 - **proof**: a User verification proof from another app (`Authorization: Proof sap_…`) carrying the operation's
-  scope; the app acts for the account inside its own folder `apps/{app}/` of that account's drive.
+  scope. The app acts for the account inside its own folder `apps/{app}/` of that account's drive; first-party apps
+  the operator lists reach everything the account can, through these routes only.
 - **upload capability**: the one-time capability a reservation returned (`X-Briefcase-Upload-Capability`), and no
   `Authorization` header.
 - **none**: public (discovery, version, anyone-with-the-link reads, telemetry).
 
 Every account has one drive. Operations on an entry act in the drive that holds it; listings, uploads, the bin,
 usage and storage settings take `drive` (the owner's `c:`/`si:` id or uuid) and default to the caller's own.
+Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}` and resolve at
+`GET /paths/{owner}/{path}`; an id the owner gave up answers `308`, and addresses from before personal drives
+(`/org/{org}/{path}`) keep resolving.
 
 | Operation | Method and path | Revision | Credential |
 | --- | --- | --- | --- |
@@ -47,18 +51,21 @@ usage and storage settings take `drive` (the owner's `c:`/`si:` id or uuid) and 
 | `commitDelegatedUpload` | `POST /obo/uploads/commit` | 3.0.0 | proof |
 | `getDelegatedUploadStatus` | `POST /obo/uploads/status` | 3.0.0 | proof |
 | `cancelDelegatedUpload` | `POST /obo/uploads/cancel` | 3.0.0 | proof |
-| `transferDelegatedUpload` | `PUT /obo/uploads/{upload_id}/content` | 2.0.0 | upload capability |
+| `transferDelegatedUpload` | `PUT /obo/uploads/{upload_id}/content` | 2.1.0 | upload capability |
 | `createFolderOnBehalfOfMember` | `POST /obo/folders/create` | 3.0.0 | proof |
-| `listEntriesOnBehalfOfMember` | `POST /obo/entries/list` | 3.0.0 | proof |
+| `listEntriesOnBehalfOfMember` | `POST /obo/entries/list` | 3.1.0 | proof |
 | `readFileOnBehalfOfMember` | `POST /obo/files/read` | 3.0.0 | proof |
-| `trashEntryOnBehalfOfMember` | `POST /obo/entries/trash` | 3.0.0 | proof |
+| `trashEntryOnBehalfOfMember` | `POST /obo/entries/trash` | 3.1.0 | proof |
 | `listVersions` | `GET /entries/{entry_id}/versions` | 1.0.0 | bearer |
 | `restoreVersion` | `POST /entries/{entry_id}/versions/{version_id}/restore` | 1.0.0 | bearer |
 | `readOrganizationUsage` | `GET /usage` | 2.0.0 | bearer |
 | `listBin` | `GET /bin` | 1.1.0 | bearer |
 | `restoreEntry` | `POST /bin/{entry_id}/restore` | 1.0.0 | bearer |
 | `configureOrganizationBucket` | `PUT /storage/configuration` | 2.0.0 | bearer |
-| `resolvePermanentUrl` | `GET /org/{org_id}/{path}` | 1.2.0 | bearer |
+| `resolvePermanentUrl` | `GET /paths/{owner}/{path}` | 2.0.0 | bearer, or none for link-shared entries |
+| `resolveDriveTop` | `GET /paths/{owner}` | 1.0.0 | bearer |
+| `resolveLegacyPermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 | bearer, or none for link-shared entries (deprecated) |
+| `listArchiveContents` | `GET /entries/{entry_id}/archive` | 1.0.0 | bearer |
 | `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 | bearer |
 | `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.0.0 | bearer |
 | `changeExpiringShare` | `PATCH /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
@@ -67,6 +74,6 @@ usage and storage settings take `drive` (the owner's `c:`/`si:` id or uuid) and 
 | `readLinkAccess` | `GET /entries/{entry_id}/link-access` | 1.1.0 | bearer |
 | `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.2.0 | bearer |
 | `listEntryLogs` | `GET /entries/{entry_id}/logs` | 2.0.0 | bearer |
-| `readPublicEntry` | `GET /public/{org_id}/{path}` | 1.1.0 | none |
+| `readPublicEntry` | `GET /public/{owner}/{path}` | 2.0.0 | none |
 | `inviteOnBehalfOfMember` | `POST /obo/invitations` | 3.0.0 | proof |
 | `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 3.0.0 | proof |
