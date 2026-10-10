@@ -21,24 +21,30 @@ use crate::infrastructure::accounts::test_support::{carbon_summary, silicon_summ
 
 /// One test world: Ada and Bob are Carbons, Cat is a Carbon nobody shares
 /// with, Scout is a Silicon Ada looks after, Rover a Silicon Bob looks after.
-struct World {
-    f: Fixture,
-    ada: Account,
-    bob: Account,
-    cat: Account,
-    scout: Account,
-    rover: Account,
+pub(super) struct World {
+    pub(super) f: Fixture,
+    pub(super) ada: Account,
+    pub(super) bob: Account,
+    pub(super) cat: Account,
+    pub(super) scout: Account,
+    pub(super) rover: Account,
 }
 
-struct Account {
-    uuid: String,
-    id: String,
-    token: String,
+pub(super) struct Account {
+    pub(super) uuid: String,
+    pub(super) id: String,
+    pub(super) token: String,
 }
 
 impl World {
-    async fn new() -> anyhow::Result<Option<Self>> {
-        let Some(f) = fixture("").await? else {
+    pub(super) async fn new() -> anyhow::Result<Option<Self>> {
+        Self::with_issuers("").await
+    }
+
+    /// The same world with apps allowed to act through proofs, in
+    /// `BRIEFCASE_PROOF_ISSUERS` form.
+    pub(super) async fn with_issuers(issuers: &str) -> anyhow::Result<Option<Self>> {
+        let Some(f) = fixture(issuers).await? else {
             return Ok(None);
         };
         let account = |prefix: &str, id: &str, kind: &str| Account {
@@ -100,7 +106,7 @@ impl World {
         Ok(Some(world))
     }
 
-    async fn call(
+    pub(super) async fn call(
         &self,
         who: &Account,
         method: Method,
@@ -111,7 +117,7 @@ impl World {
     }
 
     /// Creates a folder (top of `drive`, or in `parent`) and returns its id.
-    async fn folder(
+    pub(super) async fn folder(
         &self,
         who: &Account,
         name: &str,
@@ -132,7 +138,7 @@ impl World {
         Ok(created["id"].as_str().unwrap_or_default().to_owned())
     }
 
-    async fn share(
+    pub(super) async fn share(
         &self,
         who: &Account,
         entry: &str,
@@ -154,11 +160,11 @@ impl World {
     }
 }
 
-fn code(body: &Value) -> &str {
+pub(super) fn code(body: &Value) -> &str {
     body["error"]["code"].as_str().unwrap_or_default()
 }
 
-fn names(listing: &Value) -> Vec<String> {
+pub(super) fn names(listing: &Value) -> Vec<String> {
     listing["items"]
         .as_array()
         .map(|items| {

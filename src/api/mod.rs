@@ -403,6 +403,8 @@ async fn not_found() -> crate::error::AppError {
 #[cfg(test)]
 mod accounts_tests;
 #[cfg(test)]
+mod drive_access_tests;
+#[cfg(test)]
 mod drives_tests;
 #[cfg(test)]
 pub(crate) mod tests;

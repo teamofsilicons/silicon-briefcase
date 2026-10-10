@@ -493,8 +493,15 @@ pub(crate) fn test_state_with_accounts(
     let concrete_content = Arc::new(PostgresContentRepository::new(repository, s3.clone()));
     let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
     let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content.clone();
+    // A behavior version and a real clock, as a loaded production
+    // configuration has: building the role-assuming client for a
+    // bring-your-own bucket needs both. There are no credentials, so nothing
+    // ever reaches AWS.
     let object_store: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
-        aws_config::SdkConfig::builder().build(),
+        aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .time_source(aws_smithy_async::time::SystemTimeSource::new())
+            .build(),
         None,
         false,
     ));

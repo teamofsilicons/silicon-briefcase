@@ -3224,6 +3224,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "aws-sdk-sts",
+ "aws-smithy-async",
  "aws-smithy-types",
  "axum",
  "base64 0.22.1",
