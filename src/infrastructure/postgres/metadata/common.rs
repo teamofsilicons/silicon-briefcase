@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::anyhow;
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder, Transaction};
@@ -15,9 +13,7 @@ use crate::{
         },
     },
     domain::{
-        actor::{
-            ActorId, ActorKind, ActorRef, ApplicationId, OrganizationId, OrganizationRole, TagName,
-        },
+        actor::{ActorId, ActorKind, ActorRef, ApplicationId, OrganizationId, TagName},
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, SystemEntryKind},
         ids::{EntryId, GrantId, VersionId},
         permission::{GrantedAccess, PermissionGrant, PermissionGrantParts, PermissionInheritance},
@@ -34,12 +30,10 @@ pub(in crate::infrastructure::postgres) type Result<T> =
 /// Trusted actor expression used by the shared owned-ancestor SQL predicate.
 #[derive(Clone, Copy)]
 pub(in crate::infrastructure::postgres) enum OwnedAncestorPrincipal<'a> {
-    /// Bind a concrete actor, optionally matching either principal kind.
-    Bound {
-        kind: Option<ActorKind>,
-        id: &'a str,
-    },
-    /// Correlate with the `reader` membership alias used by `accessible-to`.
+    /// The caller's creator identities: itself and the Silicons it looks after.
+    Creators(&'a [String]),
+    /// Correlate with the `reader` account alias used by `accessible-to`: the
+    /// reader and the Silicons it looks after.
     Reader,
 }
 
@@ -62,306 +56,23 @@ struct IdempotencyState {
     locked_until: OffsetDateTime,
 }
 
-#[derive(Clone, Debug, sqlx::FromRow)]
-struct ProjectedCaller {
-    org_role: String,
-    membership_status: String,
-    tag_names: Vec<String>,
-}
-
 pub(in crate::infrastructure::postgres) async fn begin<'pool>(
     repository: &'pool PostgresRepository,
     execution: &ExecutionContext,
 ) -> Result<RequestTransaction<'pool>> {
     let context = TenantContext::from_execution(execution);
     let mut transaction = repository.begin(&context).await.map_err(map_sql)?;
-    let authorization = execution.authorization();
-    let actor = authorization.actor();
-    let caller = (actor_kind(actor.kind()), actor.id().as_str());
-    // Share recipients resolved through Silicon Accounts become members of
-    // the caller's tenant so grants can name them. They never execute this
-    // request; the caller's RLS and audit context stay in force.
-    if !execution.directory_members().is_empty() {
-        ensure_tenant(&mut transaction, authorization).await?;
-    }
-    for member in execution.directory_members() {
-        if member.organization_id() != authorization.organization_id() {
-            return Err(MetadataRepositoryError::NotFound);
-        }
-        project_recipient(&mut transaction, member).await?;
-    }
-    let caller_is_current = caller_projection_is_current(&mut transaction, authorization).await?;
-    let roots_are_consistent = caller_is_current
-        && super::super::roots::system_roots_are_consistent(&mut transaction, caller)
-            .await
-            .map_err(map_sql)?;
-    if !caller_is_current || !roots_are_consistent {
-        super::super::roots::lock_organization_reconciliation(&mut transaction)
-            .await
-            .map_err(map_sql)?;
-        let caller_is_current =
-            caller_projection_is_current(&mut transaction, authorization).await?;
-        let roots_are_consistent = caller_is_current
-            && super::super::roots::system_roots_are_consistent(&mut transaction, caller)
-                .await
-                .map_err(map_sql)?;
-        if !caller_is_current {
-            refresh_caller_projection(&mut transaction, execution).await?;
-        }
-        if !caller_is_current || !roots_are_consistent {
-            super::super::roots::reconcile_system_roots(&mut transaction, Some(caller))
-                .await
-                .map_err(map_sql)?;
-        }
+    super::super::drives::ensure_participation(&mut transaction, execution.authorization()).await?;
+    // Accounts a share names become participants of the drive so the grant
+    // can name them. They never execute this request; the caller's row
+    // security and audit context stay in force.
+    for recipient in execution.share_recipients() {
+        super::super::drives::add_share_recipient(&mut transaction, recipient).await?;
     }
     Ok(RequestTransaction {
         context,
         transaction,
     })
-}
-
-/// Creates the tenant row on first use, recording the account it belongs to,
-/// and refuses an account acting in a tenant it does not own.
-///
-/// Account uuids are short base62 strings, so one can spell a pre-migration
-/// organization handle (`tos`). Such a tenant has no recorded owner, and the
-/// account is refused there instead of becoming its owner.
-async fn ensure_tenant(
-    transaction: &mut Transaction<'_, Postgres>,
-    authorization: &crate::domain::actor::RequestAuthContext,
-) -> Result<()> {
-    let owner = authorization.account().map(|account| account.uuid.as_str());
-    sqlx::query(
-        "INSERT INTO briefcase.organizations \
-             (org_id, iam_version, lifecycle_status, owner_account_uuid) \
-         VALUES (briefcase.current_org_id(), 0, 'active', $1) \
-         ON CONFLICT (org_id) DO NOTHING",
-    )
-    .bind(owner)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-    let Some(owner) = owner else {
-        return Ok(());
-    };
-    let recorded = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT owner_account_uuid FROM briefcase.organizations \
-          WHERE org_id = briefcase.current_org_id()",
-    )
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?
-    .flatten();
-    if recorded.as_deref() != Some(owner) {
-        tracing::error!(
-            event = "account_tenant_conflict",
-            "an account's tenant key names a tenant recorded for another owner; refusing"
-        );
-        return Err(MetadataRepositoryError::NotFound);
-    }
-    Ok(())
-}
-
-/// Adds a resolved share recipient to the current tenant as an active member,
-/// without changing an existing membership.
-async fn project_recipient(
-    transaction: &mut Transaction<'_, Postgres>,
-    recipient: &crate::domain::actor::RequestAuthContext,
-) -> Result<()> {
-    let actor = recipient.actor();
-    sqlx::query(
-        "INSERT INTO briefcase.organization_members \
-             (org_id, actor_type, actor_id, org_role, membership_status, iam_version) \
-         VALUES (briefcase.current_org_id(), $1, $2, 'member', 'active', 0) \
-         ON CONFLICT (org_id, actor_type, actor_id) DO NOTHING",
-    )
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-    Ok(())
-}
-
-async fn caller_projection_is_current(
-    transaction: &mut Transaction<'_, Postgres>,
-    authorization: &crate::domain::actor::RequestAuthContext,
-) -> Result<bool> {
-    let actor = authorization.actor();
-    let projected = sqlx::query_as::<_, ProjectedCaller>(
-        "SELECT member.org_role, member.membership_status, \
-                COALESCE( \
-                    array_agg(tag.name ORDER BY tag.name COLLATE \"C\") \
-                        FILTER ( \
-                            WHERE tag.tag_id IS NOT NULL \
-                              AND tag.lifecycle_status = 'active' \
-                        ), \
-                    ARRAY[]::text[] \
-                ) AS tag_names \
-           FROM briefcase.organization_members AS member \
-           LEFT JOIN briefcase.organization_member_tags AS member_tag \
-             ON member_tag.org_id = member.org_id \
-            AND member_tag.actor_type = member.actor_type \
-            AND member_tag.actor_id = member.actor_id \
-           LEFT JOIN briefcase.organization_tags AS tag \
-             ON tag.org_id = member_tag.org_id AND tag.tag_id = member_tag.tag_id \
-          WHERE member.org_id = briefcase.current_org_id() \
-            AND member.actor_type = $1 AND member.actor_id = $2 \
-          GROUP BY member.org_role, member.membership_status",
-    )
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-
-    Ok(projected.as_ref().is_some_and(|projected| {
-        // OBO carries deliberately attenuated role/tag authority, not a new
-        // directory snapshot. Its request must never downgrade that snapshot.
-        if authorization
-            .authentication()
-            .originating_application()
-            .is_some()
-        {
-            projected.membership_status == "active"
-        } else {
-            caller_projection_matches(projected, authorization.role(), authorization.tags())
-        }
-    }))
-}
-
-fn caller_projection_matches(
-    projected: &ProjectedCaller,
-    current_role: OrganizationRole,
-    current_tags: Option<&BTreeSet<TagName>>,
-) -> bool {
-    if projected.membership_status != "active"
-        || projected.org_role != organization_role(current_role)
-    {
-        return false;
-    }
-
-    let Some(current_tags) = current_tags else {
-        return true;
-    };
-    let projected_tags = projected
-        .tag_names
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let current_tags = current_tags
-        .iter()
-        .map(TagName::as_str)
-        .collect::<BTreeSet<_>>();
-    projected_tags == current_tags
-}
-
-async fn refresh_caller_projection(
-    transaction: &mut Transaction<'_, Postgres>,
-    execution: &ExecutionContext,
-) -> Result<()> {
-    let authorization = execution.authorization();
-    let actor = authorization.actor();
-    ensure_tenant(transaction, authorization).await?;
-    // Request authority is not a directory update. Only unsigned bootstrap
-    // rows may be refreshed; a concurrent signed snapshot always wins.
-    let is_obo = authorization
-        .authentication()
-        .originating_application()
-        .is_some();
-    let member_version = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO briefcase.organization_members ( \
-                org_id, actor_type, actor_id, org_role, membership_status, iam_version \
-         ) VALUES (briefcase.current_org_id(), $1, $2, $3, 'active', 0) \
-         ON CONFLICT (org_id, actor_type, actor_id) DO UPDATE \
-             SET org_role = EXCLUDED.org_role, membership_status = 'active' \
-             WHERE NOT $4 AND organization_members.iam_version = 0 \
-         RETURNING iam_version",
-    )
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .bind(organization_role(authorization.role()))
-    .bind(is_obo)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-
-    // Insert a baseline only for a previously unseen represented actor. In
-    // particular, preserve a webhook arriving between the read and insert.
-    if is_obo || authorization.tags().is_none() {
-        return Ok(());
-    }
-    let Some(member_version) = member_version else {
-        return Ok(());
-    };
-
-    let mut tag_ids = BTreeSet::new();
-    for tag in authorization.tags().into_iter().flatten() {
-        tag_ids.insert(ensure_online_tag(transaction, tag.as_str()).await?);
-    }
-    sqlx::query(
-        "DELETE FROM briefcase.organization_member_tags \
-          WHERE org_id = briefcase.current_org_id() \
-            AND actor_type = $1 AND actor_id = $2",
-    )
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sql)?;
-    for tag_id in tag_ids {
-        sqlx::query(
-            "INSERT INTO briefcase.organization_member_tags ( \
-                    org_id, actor_type, actor_id, tag_id, iam_version \
-             ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4)",
-        )
-        .bind(actor_kind(actor.kind()))
-        .bind(actor.id().as_str())
-        .bind(tag_id)
-        .bind(member_version)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_sql)?;
-    }
-    Ok(())
-}
-
-async fn ensure_online_tag(
-    transaction: &mut Transaction<'_, Postgres>,
-    tag_name: &str,
-) -> Result<String> {
-    // Name is the only tag identity carried by online IAM. Prefer a projected
-    // canonical row and preserve its webhook version and stable tag ID.
-    if let Some(tag_id) = sqlx::query_scalar::<_, String>(
-        "UPDATE briefcase.organization_tags \
-            SET lifecycle_status = 'active' \
-          WHERE org_id = briefcase.current_org_id() AND name = $1 \
-         RETURNING tag_id",
-    )
-    .bind(tag_name)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?
-    {
-        return Ok(tag_id);
-    }
-
-    // A missing online name is projected at version zero. A same-ID row already
-    // owned by a webhook version cannot be safely reidentified and fails closed.
-    sqlx::query_scalar::<_, String>(
-        "INSERT INTO briefcase.organization_tags ( \
-                org_id, tag_id, name, lifecycle_status, iam_version \
-         ) VALUES (briefcase.current_org_id(), $1, $1, 'active', 0) \
-         ON CONFLICT (org_id, tag_id) DO UPDATE \
-             SET name = EXCLUDED.name, lifecycle_status = 'active' \
-           WHERE organization_tags.iam_version = 0 \
-         RETURNING tag_id",
-    )
-    .bind(tag_name)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?
-    .ok_or(MetadataRepositoryError::Conflict)
 }
 
 pub(in crate::infrastructure::postgres) async fn load_entry(
@@ -424,26 +135,20 @@ pub(in crate::infrastructure::postgres) async fn build_authorizable(
     })
 }
 
-/// Reports whether the caller owns a folder the entry sits inside.
+/// Reports whether the caller (or a Silicon it looks after) created a folder
+/// the entry sits inside.
 ///
-/// The reserved Public, Private, and Tag containers are excluded: their owner
-/// column names the member whose request first materialized them, which is a
-/// persistence custodian rather than a proprietor. A member's own actor folder
-/// is included, because everything below `private/{actor}` really is theirs.
+/// System folders are excluded: a drive's root and its apps folders belong to
+/// the drive, whose rights come from the drive itself, and the legacy
+/// organization containers name whoever first materialized them.
 async fn owns_containing_folder(
     transaction: &mut Transaction<'_, Postgres>,
     execution: &ExecutionContext,
     entry_id: Uuid,
 ) -> Result<bool> {
-    let actor = execution.authorization().actor();
+    let creators = execution.authorization().creator_ids();
     let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
-    push_owned_ancestor_access(
-        &mut builder,
-        OwnedAncestorPrincipal::Bound {
-            kind: Some(actor.kind()),
-            id: actor.id().as_str(),
-        },
-    );
+    push_owned_ancestor_access(&mut builder, OwnedAncestorPrincipal::Creators(&creators));
     // The shared predicate is correlated on `entry`; provide the target row
     // exactly as the listing/search queries do.
     builder.push(" FROM briefcase.entries AS entry WHERE entry.org_id = briefcase.current_org_id() AND entry.entry_id = ");
@@ -476,27 +181,26 @@ pub(in crate::infrastructure::postgres) fn push_owned_ancestor_access(
                 AND owned_path.descendant_id = entry.entry_id \
                 AND owned_path.depth > 0 \
                 AND owned_ancestor.entry_type = 'folder' \
-                AND owned_ancestor.owner_id = ",
+                AND owned_ancestor.system_kind IS NULL \
+                AND ",
     );
     match principal {
-        OwnedAncestorPrincipal::Bound { kind, id } => {
-            builder.push_bind(id.to_owned());
-            if let Some(kind) = kind {
-                builder.push(" AND owned_ancestor.owner_type = ");
-                builder.push_bind(actor_kind(kind));
-            }
+        OwnedAncestorPrincipal::Creators(ids) => {
+            builder.push("owned_ancestor.owner_id = ANY(");
+            builder.push_bind(ids.to_vec());
+            builder.push(")");
         }
         OwnedAncestorPrincipal::Reader => {
-            builder.push("reader.actor_id AND owned_ancestor.owner_type = reader.actor_type");
+            builder.push(
+                "(owned_ancestor.owner_id = reader.account_uuid \
+                  OR EXISTS (SELECT 1 FROM briefcase.accounts AS ancestor_creator \
+                              WHERE ancestor_creator.account_uuid = owned_ancestor.owner_id \
+                                AND ancestor_creator.kind = 'silicon' \
+                                AND ancestor_creator.custodian_uuid = reader.account_uuid))",
+            );
         }
     }
-    builder.push(
-        " AND ( \
-                    owned_ancestor.system_kind IS NULL \
-                    OR owned_ancestor.system_kind IN ('actor_root', 'app_actor') \
-                ) \
-         )",
-    );
+    builder.push(")");
 }
 
 async fn load_relevant_grants(
@@ -582,32 +286,22 @@ async fn has_visible_descendant(
     execution: &ExecutionContext,
     entry_id: Uuid,
 ) -> Result<bool> {
-    if execution.authorization().role().has_administrative_access() {
+    let authorization = execution.authorization();
+    if authorization.has_owner_rights() {
         return Ok(false);
     }
-    let actor = execution.authorization().actor();
-    let tags: Vec<&str> = execution
-        .authorization()
-        .tags()
-        .into_iter()
-        .flatten()
-        .map(TagName::as_str)
-        .collect();
+    let actor = authorization.actor();
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS ( \
              SELECT 1 \
                FROM briefcase.entry_closure AS subtree \
                JOIN briefcase.entries AS child \
                  ON child.org_id = subtree.org_id AND child.entry_id = subtree.descendant_id \
-          LEFT JOIN briefcase.organization_tags AS tag \
-                 ON tag.org_id = child.org_id AND tag.tag_id = child.tag_id \
               WHERE subtree.org_id = briefcase.current_org_id() \
                 AND subtree.ancestor_id = $1 AND subtree.depth > 0 \
                 AND child.deleted_at IS NULL \
                 AND ( \
-                    (child.owner_type = $2 AND child.owner_id = $3) \
-                    OR child.root_type = 'public' \
-                    OR (child.root_type = 'tag' AND tag.name = ANY($4)) \
+                    (child.system_kind IS NULL AND child.owner_id = ANY($4)) \
                     OR EXISTS ( \
                         SELECT 1 \
                           FROM briefcase.entry_closure AS grant_path \
@@ -626,7 +320,7 @@ async fn has_visible_descendant(
     .bind(entry_id)
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
-    .bind(tags)
+    .bind(authorization.creator_ids())
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sql)
@@ -647,12 +341,17 @@ pub(in crate::infrastructure::postgres) fn entry_view(
         },
         _ => return Err(internal("invalid entry root type")),
     };
+    let path = if row.system_kind.as_deref() == Some("drive_root") {
+        EntryPath::drive_root()
+    } else {
+        EntryPath::new(&row.path).map_err(invalid_data)?
+    };
     Ok(EntryView {
         id: EntryId::from_uuid(row.entry_id).map_err(invalid_data)?,
         organization_id,
         kind: entry_kind(&row.entry_type)?,
         name: EntryName::new(&row.name).map_err(invalid_data)?,
-        path: EntryPath::new(&row.path).map_err(invalid_data)?,
+        path,
         parent_id: row
             .parent_id
             .map(EntryId::from_uuid)
@@ -739,16 +438,6 @@ pub(in crate::infrastructure::postgres) const fn actor_kind(kind: ActorKind) -> 
     }
 }
 
-pub(in crate::infrastructure::postgres) const fn organization_role(
-    role: OrganizationRole,
-) -> &'static str {
-    match role {
-        OrganizationRole::Member => "member",
-        OrganizationRole::Admin => "admin",
-        OrganizationRole::Owner => "owner",
-    }
-}
-
 pub(in crate::infrastructure::postgres) const fn encode_access(access: GrantedAccess) -> i16 {
     access.bits() as i16
 }
@@ -773,13 +462,15 @@ pub(in crate::infrastructure::postgres) fn system_kind(
 ) -> Result<Option<SystemEntryKind>> {
     match value {
         None => Ok(None),
+        Some("drive_root") => Ok(Some(SystemEntryKind::DriveRoot)),
+        Some("apps_root") => Ok(Some(SystemEntryKind::ApplicationContainer)),
+        Some("app_root") => Ok(Some(SystemEntryKind::ApplicationFolder)),
         Some("public_root" | "app_public") => Ok(Some(SystemEntryKind::PublicContainer)),
         Some("private_root" | "app_private") => Ok(Some(SystemEntryKind::PrivateContainer)),
         Some("tag_root") => Ok(Some(SystemEntryKind::TagRoot)),
         Some("actor_root" | "app_container" | "app_actor") => {
             Ok(Some(SystemEntryKind::PrivateActorFolder))
         }
-        Some("apps_root" | "app_root") => Ok(Some(SystemEntryKind::ApplicationContainer)),
         Some(_) => Err(internal("invalid persisted system entry kind")),
     }
 }
@@ -1039,94 +730,34 @@ fn invalid_data(error: impl std::error::Error + Send + Sync + 'static) -> Metada
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use uuid::Uuid;
 
     use crate::{
         application::context::ExecutionContext,
         domain::actor::{
-            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
-            RequestAuthContext, TagName,
+            ActorId, ActorKind, ActorRef, AuthenticationMode, DriveAccess, OrganizationId,
+            RequestAuthContext,
         },
     };
 
-    use super::{ProjectedCaller, caller_projection_matches, public_organization_id};
-
-    fn tag(value: &str) -> TagName {
-        match TagName::new(value) {
-            Ok(tag) => tag,
-            Err(error) => panic!("test tag must be valid: {error}"),
-        }
-    }
+    use super::public_organization_id;
 
     #[test]
-    fn caller_projection_tag_comparison_is_order_independent() {
-        let projected = ProjectedCaller {
-            org_role: "admin".to_owned(),
-            membership_status: "active".to_owned(),
-            tag_names: vec!["research".to_owned(), "finance".to_owned()],
-        };
-        let current = [tag("finance"), tag("research")]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-
-        assert!(caller_projection_matches(
-            &projected,
-            OrganizationRole::Admin,
-            Some(&current)
-        ));
-    }
-
-    #[test]
-    fn caller_projection_requires_active_role_and_exact_tag_set() {
-        let projected = ProjectedCaller {
-            org_role: "member".to_owned(),
-            membership_status: "removed".to_owned(),
-            tag_names: vec!["finance".to_owned()],
-        };
-        let duplicate_input = [tag("finance"), tag("finance")]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(duplicate_input.len(), 1);
-        assert!(!caller_projection_matches(
-            &projected,
-            OrganizationRole::Member,
-            Some(&duplicate_input)
-        ));
-
-        let active = ProjectedCaller {
-            membership_status: "active".to_owned(),
-            ..projected
-        };
-        assert!(!caller_projection_matches(
-            &active,
-            OrganizationRole::Owner,
-            Some(&duplicate_input)
-        ));
-        assert!(!caller_projection_matches(
-            &active,
-            OrganizationRole::Member,
-            Some(&[tag("finance"), tag("research")].into_iter().collect())
-        ));
-    }
-
-    #[test]
-    fn storage_tenant_projection_returns_the_tenant_and_rejects_mismatches() -> anyhow::Result<()> {
-        let tenant = OrganizationId::new("test-org")?;
-        let authorization = RequestAuthContext::new(
-            tenant.clone(),
-            ActorRef::new(ActorKind::Carbon, ActorId::new("tester")?),
-            OrganizationRole::Member,
-            Vec::new(),
+    fn storage_tenant_projection_returns_the_drive_and_rejects_mismatches() -> anyhow::Result<()> {
+        let owner = ActorRef::new(ActorKind::Carbon, ActorId::new("Ada1")?);
+        let authorization = RequestAuthContext::for_drive(
+            owner.clone(),
+            owner,
+            DriveAccess::Owner,
             AuthenticationMode::Bearer,
-        );
+        )?;
         let execution = ExecutionContext::new(authorization, "storage-tenant-projection-test");
-        assert_eq!(public_organization_id("test-org", &execution)?, tenant);
-        assert!(public_organization_id("another-tenant", &execution).is_err());
-        assert!(
-            public_organization_id(&format!("{}:test-org", Uuid::now_v7()), &execution).is_err()
+        assert_eq!(
+            public_organization_id("Ada1", &execution)?,
+            OrganizationId::new("Ada1")?
         );
+        assert!(public_organization_id("ada1", &execution).is_err());
+        assert!(public_organization_id(&format!("{}:Ada1", Uuid::now_v7()), &execution).is_err());
         Ok(())
     }
 }

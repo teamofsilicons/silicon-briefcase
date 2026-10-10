@@ -69,6 +69,14 @@ pub enum Action {
     ReadUsage,
     /// Read the caller's own account.
     ReadAccount,
+    /// List the drives the caller may open (its own and its Silicons').
+    ListDrives,
+    /// List what other accounts shared with the caller.
+    ListShared,
+    /// Read who may share with a Silicon.
+    ReadShareAllowances,
+    /// Change who may share with a Silicon.
+    ManageShareAllowances,
 }
 
 impl Action {
@@ -101,6 +109,10 @@ impl Action {
             Self::ConfigureStorage => "briefcase.storage.configure",
             Self::ReadUsage => "briefcase.usage.read",
             Self::ReadAccount => "briefcase.account.read",
+            Self::ListDrives => "briefcase.drives.list",
+            Self::ListShared => "briefcase.shared.list",
+            Self::ReadShareAllowances => "briefcase.share_allowances.read",
+            Self::ManageShareAllowances => "briefcase.share_allowances.manage",
         }
     }
 
@@ -121,6 +133,7 @@ impl Action {
                 | Self::KeepEntry
                 | Self::RestoreVersion
                 | Self::ConfigureStorage
+                | Self::ManageShareAllowances
         )
     }
 }

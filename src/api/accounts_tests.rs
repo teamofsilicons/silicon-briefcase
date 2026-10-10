@@ -296,24 +296,24 @@ async fn an_access_token_works_in_the_accounts_own_drive() -> anyhow::Result<()>
     };
     let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
     let token = f.issuer.token(&ada, "carbon", &ada_id);
-    let home = format!("private/{ada}");
+    // Without a parent a folder goes at the top of the caller's own drive.
     let (status, body) = f
         .bearer(
             Method::POST,
             "/api/v1/entries",
             &token,
-            Some(json!({ "name": "notes", "parent_path": home })),
+            Some(json!({ "name": "notes" })),
         )
         .await?;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["path"], format!("{home}/notes"));
+    assert_eq!(body["path"], "notes");
+    assert_eq!(
+        body["org_id"],
+        ada.as_str(),
+        "the drive key is the owner's uuid"
+    );
     let (status, listing) = f
-        .bearer(
-            Method::GET,
-            &format!("/api/v1/entries?path={home}"),
-            &token,
-            None,
-        )
+        .bearer(Method::GET, "/api/v1/entries", &token, None)
         .await?;
     assert_eq!(status, StatusCode::OK, "{listing}");
     assert!(
@@ -321,13 +321,18 @@ async fn an_access_token_works_in_the_accounts_own_drive() -> anyhow::Result<()>
             .as_array()
             .is_some_and(|items| items.iter().any(|item| item["name"] == "notes"))
     );
-    // The tenant is the account itself: another account never sees it.
+    // Another account never sees it: not in its own drive, and not when it
+    // names Ada's drive.
     let bob = f.uuid("Bob");
     let other = f.issuer.token(&bob, "carbon", &f.id("c:bob"));
     let (status, _) = f
+        .bearer(Method::GET, "/api/v1/entries?path=notes", &other, None)
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = f
         .bearer(
             Method::GET,
-            &format!("/api/v1/entries?path={home}/notes"),
+            &format!("/api/v1/entries?drive={ada}&path=notes"),
             &other,
             None,
         )
@@ -360,7 +365,7 @@ async fn sharing_resolves_ids_through_accounts_and_sensitive_changes_introspect(
             Method::POST,
             "/api/v1/entries",
             &token,
-            Some(json!({ "name": "shared", "parent_path": format!("private/{ada}") })),
+            Some(json!({ "name": "shared" })),
         )
         .await?;
     assert_eq!(status, StatusCode::CREATED, "{folder}");

@@ -67,6 +67,16 @@ fn encode_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT).to_string()
 }
 
+/// The path shown for an entry: drive-relative, and empty for the drive's
+/// root folder.
+fn presented_path(path: EntryPath) -> String {
+    if path.is_drive_root() {
+        String::new()
+    } else {
+        path.into_inner()
+    }
+}
+
 #[cfg(test)]
 mod url_tests {
     use super::*;
@@ -191,7 +201,7 @@ impl ResponseMapper {
             entry_type: entry_kind(entry.kind),
             visibility: EntryVisibilityDto::Full,
             name: entry.name.into_inner(),
-            path: entry.path.into_inner(),
+            path: presented_path(entry.path),
             parent_id: entry.parent_id.map(crate::domain::ids::EntryId::as_uuid),
             root_type: root_type(entry.boundary.root_type()),
             tag: entry.boundary.tag().map(|tag| tag.as_str().to_owned()),
@@ -239,7 +249,7 @@ impl ResponseMapper {
             visibility: EntryVisibilityDto::Traversal,
             name: view.name.into_inner(),
             permanent_url: self.permanent_url(organization_id, &view.path)?,
-            path: view.path.into_inner(),
+            path: presented_path(view.path),
             parent_id: view.parent_id.map(EntryId::as_uuid),
             root_type: root_type(view.root_type),
             tag: None,
@@ -291,13 +301,18 @@ impl ResponseMapper {
     }
 
     fn entry_url(base: &Url, organization_id: &str, path: &EntryPath) -> Result<Url, AppError> {
-        // Every Briefcase URL is scoped to an organization: the base is
-        // effectively `{host}/org/{org_id}/`, and the entry path continues it.
+        // Every Briefcase URL is scoped to a drive: the base is effectively
+        // `{host}/org/{drive}/`, and the entry path continues it. A drive's
+        // root is the drive's own URL.
         let mut target = String::from("org/");
         target.push_str(&encode_segment(organization_id));
-        for segment in path.segments() {
+        if path.is_drive_root() {
             target.push('/');
-            target.push_str(&encode_segment(segment));
+        } else {
+            for segment in path.segments() {
+                target.push('/');
+                target.push_str(&encode_segment(segment));
+            }
         }
         base.join(&target).map_err(|_| AppError::Internal {
             category: "permanent_entry_url",
@@ -377,11 +392,13 @@ impl ResponseMapper {
         let subject = notification
             .subject
             .map(|subject| -> Result<NotificationSubjectDto, AppError> {
+                let drive = subject.drive.as_deref().unwrap_or(organization_id);
                 Ok(NotificationSubjectDto {
                     entry_id: subject.entry_id.as_uuid(),
+                    permanent_url: self.permanent_url(drive, &subject.path)?,
+                    drive: subject.drive.clone(),
                     name: subject.name,
                     entry_type: entry_kind(subject.kind),
-                    permanent_url: self.permanent_url(organization_id, &subject.path)?,
                     path: subject.path.into_inner(),
                 })
             })
@@ -530,6 +547,9 @@ impl ResponseMapper {
 
 pub(crate) fn metadata_error(error: MetadataServiceError) -> AppError {
     match error {
+        MetadataServiceError::Validation(validation) if validation.field == "reserved_name" => {
+            AppError::unprocessable("reserved_name", validation.message)
+        }
         MetadataServiceError::Validation(validation) => {
             AppError::validation(format!("invalid_{}", validation.field))
         }

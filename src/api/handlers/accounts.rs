@@ -169,7 +169,7 @@ fn optional_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a
     value.to_str().ok()
 }
 
-fn private_json(body: Value) -> Response {
+pub(super) fn private_json(body: Value) -> Response {
     let mut response = Json(body).into_response();
     response
         .headers_mut()

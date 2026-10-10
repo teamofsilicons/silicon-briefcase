@@ -27,7 +27,6 @@ use crate::{
     },
     domain::{
         entry::{EntryName, EntryPath},
-        filter::FilterQuery,
         ids::EntryId,
     },
     error::AppError,
@@ -35,7 +34,7 @@ use crate::{
 
 use super::{
     super::{
-        cursor,
+        cursor, drives,
         dto::{EntryDto, EntryPageDto, ListEntriesQuery},
         extract,
         mapping::metadata_error,
@@ -132,7 +131,7 @@ pub(crate) async fn create_folder(
         body.operation_id,
         &body,
     )?;
-    let command = CreateFolderCommand::new(name, Some(parent_id), None, Vec::new())
+    let command = CreateFolderCommand::new(name, Some(parent_id), Vec::new())
         .map_err(|_| AppError::validation("invalid_folder"))?;
     let created = extract::scoped(
         &context,
@@ -155,12 +154,14 @@ pub(crate) async fn list_entries(
     if let Some(cursor) = query.cursor.as_deref() {
         cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
     }
-    let filter = query
-        .filter
-        .as_deref()
-        .map(FilterQuery::parse)
-        .transpose()
-        .map_err(|_| AppError::validation("invalid_filter"))?;
+    if query.drive.is_some() {
+        return Err(AppError::validation("drive_not_delegated"));
+    }
+    let filter = super::entries::filter_query(&state, query.filter.as_deref()).await?;
+    let context = match query.parent_id {
+        Some(id) => drives::for_entry(&state, context, extract::entry_id(id)?).await?,
+        None => context,
+    };
     let parent_id = match (query.parent_id, query.path.as_deref()) {
         (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
         (Some(id), None) => Some(extract::entry_id(id)?),
@@ -210,6 +211,7 @@ pub(crate) async fn read_file(
     let (context, body): (_, ReadFileRequest) =
         authorize_json(&state, &headers, &body, READ_FILE_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let intent = if body.download {
         ContentIntent::Download
     } else {
@@ -233,6 +235,7 @@ pub(crate) async fn trash_entry(
     let (context, body): (_, TrashEntryRequest) =
         authorize_json(&state, &headers, &body, TRASH_ENTRY_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = logical_mutation(
         TRASH_ENTRY_ENDPOINT_ID,
         &entry_id.to_string(),

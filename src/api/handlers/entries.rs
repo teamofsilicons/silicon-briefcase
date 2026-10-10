@@ -21,8 +21,9 @@ use crate::{
         },
     },
     domain::{
-        actor::{ActorId, ActorKind, ActorRef, TagName},
-        entry::{EntryBoundary, EntryName, EntryPath},
+        account::is_account_uuid,
+        actor::{ActorId, ActorKind, ActorRef},
+        entry::{EntryName, EntryPath},
         filter::FilterQuery,
         ids::EntryId,
         permission::{AccessRight, GrantedAccess},
@@ -33,10 +34,10 @@ use crate::{
 use super::{
     super::{
         auth::Action,
-        cursor,
+        cursor, drives,
         dto::{
-            ActivityPageDto, ActorRefDto, ActorTypeDto, DispositionDto, EntryDto, EntryPageDto,
-            EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery, PageQuery,
+            ActivityPageDto, ActorRefDto, ActorTypeDto, DispositionDto, DrivePageQuery, EntryDto,
+            EntryPageDto, EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery,
             PathContentQuery, PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
         },
         extract,
@@ -47,11 +48,12 @@ use super::{
     content,
 };
 
-/// Lists folder contents, or the filtered organization view.
+/// Lists folder contents, the top of a drive, or a filtered view of a drive.
 ///
 /// The default page is the hundred most recently changed entries. A `filter`
-/// without a parent searches everything the caller may reach, which is how a
-/// `location:` predicate selects a subtree.
+/// without a parent searches everything in the drive the caller may reach,
+/// which is how a `location:` predicate selects a subtree. `drive` names
+/// another account's drive (default: the caller's own).
 pub(crate) async fn list_entries(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -63,13 +65,14 @@ pub(crate) async fn list_entries(
         cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
     }
     let context = extract::authenticate(&state, &headers, Action::ListEntries, "entries").await?;
+    let context = match query.parent_id {
+        Some(parent_id) => {
+            drives::for_entry(&state, context, extract::entry_id(parent_id)?).await?
+        }
+        None => drives::named(&state, context, query.drive.as_deref()).await?,
+    };
     let resource = extract::tenant(&context);
-    let filter = query
-        .filter
-        .as_deref()
-        .map(FilterQuery::parse)
-        .transpose()
-        .map_err(|_| AppError::validation("invalid_filter"))?;
+    let filter = filter_query(&state, query.filter.as_deref()).await?;
     let parent_id = match (query.parent_id, query.path.as_deref()) {
         (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
         (Some(parent_id), None) => Some(extract::entry_id(parent_id)?),
@@ -123,10 +126,17 @@ pub(crate) async fn create_folder(
 ) -> Result<(StatusCode, Json<EntryDto>), AppError> {
     let body = extract::json(body)?;
     extract::validation(validation::create_folder(&body))?;
+    refuse_retired_spaces(&body)?;
     let context = extract::authenticate(&state, &headers, Action::CreateFolder, "entries").await?;
+    let context = match body.parent_id {
+        Some(parent_id) => {
+            drives::for_entry(&state, context, extract::entry_id(parent_id)?).await?
+        }
+        None => drives::named(&state, context, body.drive.as_deref()).await?,
+    };
     let organization = extract::tenant(&context);
-    // A parent may be addressed by identifier or by path; omitting both means
-    // the organization base, where only a typed root may be created.
+    // A parent may be addressed by identifier or by path; omitting both
+    // creates the folder at the top of the drive.
     let parent_id = match (body.parent_id, body.parent_path.as_deref()) {
         (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
         (Some(parent_id), None) => Some(extract::entry_id(parent_id)?),
@@ -152,7 +162,7 @@ pub(crate) async fn create_folder(
             invitee.principal.kind(),
             invitee.principal.id().as_str().to_owned(),
         );
-        invitee.principal = extract::resolve_recipient(&state, kind, &id).await?;
+        invitee.principal = extract::resolve_recipient(&state, &context, kind, &id).await?;
         recipients.push(invitee.principal.clone());
     }
     let context = extract::with_recipients(context, &recipients);
@@ -173,6 +183,7 @@ pub(crate) async fn get_entry(
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::ReadEntry, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let organization = extract::tenant(&context);
     let entry = extract::scoped(&context, state.metadata.visible_entry(&context, entry_id))
         .await
@@ -180,12 +191,12 @@ pub(crate) async fn get_entry(
     Ok(Json(state.mapper.entry_item(&organization, entry)?))
 }
 
-/// Serves the contracted clean permanent URL `/org/{org_id}/{path}`.
+/// Serves the permanent URL `/org/{drive}/{path}`, where `drive` is the
+/// drive owner's account uuid.
 ///
-/// The organization segment must match the authenticated tenant header, and an
-/// entry the caller cannot read is reported exactly like a missing one. The
-/// same URL returns the entry with its effective access by default, and the
-/// sandboxed bytes when a disposition is requested.
+/// An entry the caller cannot read is reported exactly like a missing one.
+/// The same URL returns the entry with its effective access by default, and
+/// the sandboxed bytes when a disposition is requested.
 pub(crate) async fn resolve_path(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -217,6 +228,10 @@ pub(crate) async fn resolve_path(
         ContentIntent::Download => Action::DownloadFile,
     });
     let context = extract::authenticate(&state, &headers, action, &resource).await?;
+    if !is_account_uuid(&location.0) {
+        return Err(AppError::NotFound);
+    }
+    let context = drives::enter(&state, context, &location.0).await?;
     let (organization, entry_path) = extract::entry_location(location, &context)?;
     let entry = extract::scoped(
         &context,
@@ -249,6 +264,7 @@ pub(crate) async fn entry_activity(
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::ListActivity, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let events = extract::scoped(&context, state.metadata.entry_activity(&context, entry_id))
         .await
         .map_err(metadata_error)?;
@@ -268,6 +284,7 @@ pub(crate) async fn update_entry(
     extract::validation(validation::patch_entry(&body))?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::UpdateEntry, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = extract::mutation(&headers, "update_entry", &resource, &body, true)?;
     let command = UpdateEntryCommand::new(
         entry_id,
@@ -296,6 +313,7 @@ pub(crate) async fn delete_entry(
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::DeleteEntry, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = extract::mutation(&headers, "delete_entry", &resource, &(), false)?;
     extract::scoped(
         &context,
@@ -317,6 +335,7 @@ pub(crate) async fn make_permanent(
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::KeepEntry, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = extract::mutation(&headers, "make_permanent", &resource, &(), false)?;
     state
         .content_adapter
@@ -326,18 +345,21 @@ pub(crate) async fn make_permanent(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Lists recoverable entries, newest deletion first, one page at a time.
+/// Lists a drive's recoverable entries, newest deletion first, one page at a
+/// time: everything for the drive's owner (and the custodian of a Silicon
+/// that owns it), and what they created for anyone else.
 pub(crate) async fn list_bin(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<Query<DrivePageQuery>, QueryRejection>,
 ) -> Result<Json<EntryPageDto>, AppError> {
     let query = extract::query(query)?;
-    extract::validation(validation::page(&query))?;
+    extract::validation(validation::drive_page(&query))?;
     if let Some(cursor) = query.cursor.as_deref() {
         cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
     }
     let context = extract::authenticate(&state, &headers, Action::ListBin, "bin").await?;
+    let context = drives::named(&state, context, query.drive.as_deref()).await?;
     let page = PageRequest::new(query.cursor, query.limit.unwrap_or(CONTENTS_PAGE_SIZE))
         .map_err(|_| AppError::validation("invalid_pagination"))?;
     let result = extract::scoped(
@@ -349,6 +371,9 @@ pub(crate) async fn list_bin(
     Ok(Json(state.mapper.entry_page(result)?))
 }
 
+/// Searches everything the caller can reach: its own drive, the drives of
+/// the Silicons it looks after, and the drives where others shared something
+/// with it (the most recently shared first, up to a bound).
 pub(crate) async fn search(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -359,10 +384,62 @@ pub(crate) async fn search(
     let context = extract::authenticate(&state, &headers, Action::Search, "search").await?;
     let query = SearchQuery::new(query.q, query.limit.unwrap_or(20))
         .map_err(|_| AppError::validation("invalid_search"))?;
-    let results = extract::scoped(&context, state.metadata.search(&context, &query))
+    let contexts = search_scope(&state, context.clone()).await?;
+    let results = extract::scoped(&context, state.metadata.search_drives(&contexts, &query))
         .await
         .map_err(metadata_error)?;
     Ok(Json(state.mapper.search(results)?))
+}
+
+/// How many drives besides the caller's own and its Silicons' one search
+/// covers: the drives with the most recent shares to the caller.
+const MAX_SHARED_DRIVES_SEARCHED: i32 = 50;
+
+async fn search_scope(
+    state: &AppState,
+    context: crate::application::context::ExecutionContext,
+) -> Result<Vec<crate::application::context::ExecutionContext>, AppError> {
+    let own = drives::own(state, context.clone()).await?;
+    let mut keys = vec![own.authorization().organization_id().as_str().to_owned()];
+    let mut contexts = vec![own];
+    let Some(account) = context.authorization().account().cloned() else {
+        return Ok(contexts);
+    };
+    let mut candidates = Vec::new();
+    if account.kind == ActorKind::Carbon {
+        candidates.extend(
+            state
+                .accounts
+                .custodial_silicons(&account.uuid)
+                .await?
+                .into_iter()
+                .map(|record| record.uuid),
+        );
+    }
+    candidates.extend(
+        state
+            .content_adapter
+            .metadata_repository()
+            .shared_drives(context.authorization().actor(), MAX_SHARED_DRIVES_SEARCHED)
+            .await
+            .map_err(|_| AppError::Internal {
+                category: "drive_lookup",
+            })?,
+    );
+    for drive in candidates {
+        if keys.contains(&drive) {
+            continue;
+        }
+        match drives::enter(state, context.clone(), &drive).await {
+            Ok(entered) => {
+                keys.push(drive);
+                contexts.push(entered);
+            }
+            Err(AppError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(contexts)
 }
 
 pub(crate) async fn restore_bin_entry(
@@ -374,6 +451,7 @@ pub(crate) async fn restore_bin_entry(
     let resource = entry_id.to_string();
     let context =
         extract::authenticate(&state, &headers, Action::RestoreBinEntry, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = extract::mutation(&headers, "restore_bin_entry", &resource, &(), false)?;
     let restored = extract::scoped(
         &context,
@@ -386,26 +464,55 @@ pub(crate) async fn restore_bin_entry(
     Ok(Json(state.mapper.entry(restored)?))
 }
 
+/// Folders used to be created in a Public space or a tag's space. Personal
+/// drives have neither; say exactly what to do instead.
+fn refuse_retired_spaces(body: &FolderCreateDto) -> Result<(), AppError> {
+    if body.tag.is_some() || body.root_type == Some(RootTypeDto::Tag) {
+        return Err(AppError::unprocessable(
+            "tags_retired",
+            "Tags no longer exist in Briefcase. Create the folder, then share it with each Carbon or Silicon by id.",
+        ));
+    }
+    if body.root_type == Some(RootTypeDto::Public) {
+        return Err(AppError::unprocessable(
+            "public_space_retired",
+            "There is no Public space: every drive is private to its owner. Create the folder, then share it with each Carbon or Silicon by id, or turn on link access so anyone with the link can view it.",
+        ));
+    }
+    Ok(())
+}
+
+/// Parses a listing filter and names the accounts it mentions by uuid:
+/// `from:@c:ada` means the account `c:ada` is now, resolved at Silicon
+/// Accounts, because public ids can change hands.
+pub(crate) async fn filter_query(
+    state: &AppState,
+    filter: Option<&str>,
+) -> Result<Option<FilterQuery>, AppError> {
+    let Some(filter) = filter else {
+        return Ok(None);
+    };
+    let mut filter =
+        FilterQuery::parse(filter).map_err(|_| AppError::validation("invalid_filter"))?;
+    for selector in filter.actor_selectors_mut() {
+        let record = state.accounts.resolve(&selector.id).await?;
+        selector.kind = Some(record.kind);
+        selector.id = record.uuid;
+    }
+    Ok(Some(filter))
+}
+
 fn folder_command(
     body: FolderCreateDto,
     parent_id: Option<EntryId>,
 ) -> Result<CreateFolderCommand, AppError> {
     let name = EntryName::new(&body.name).map_err(|_| AppError::validation("invalid_name"))?;
-    let root_boundary = match body.root_type {
-        Some(RootTypeDto::Public) => Some(EntryBoundary::Public),
-        Some(RootTypeDto::Private) => Some(EntryBoundary::Private),
-        Some(RootTypeDto::Tag) => Some(EntryBoundary::Tag {
-            tag: TagName::new(body.tag.unwrap_or_default())
-                .map_err(|_| AppError::validation("invalid_tag"))?,
-        }),
-        None => None,
-    };
     let invitees = body
         .invitees
         .into_iter()
         .map(initial_permission)
         .collect::<Result<_, _>>()?;
-    CreateFolderCommand::new(name, parent_id, root_boundary, invitees)
+    CreateFolderCommand::new(name, parent_id, invitees)
         .map_err(|_| AppError::validation("invalid_folder"))
 }
 

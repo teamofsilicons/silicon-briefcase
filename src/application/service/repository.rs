@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{
     application::context::ExecutionContext,
     domain::{
-        entry::{EntryBoundary, EntryPath},
+        entry::EntryPath,
         ids::{EntryId, GrantId},
         notification::NotificationInbox,
         permission::{Capability, PermissionGrant},
@@ -24,7 +24,7 @@ use super::model::{
 /// Persistence failures classified without exposing SQL or tenant details.
 #[derive(Debug, Error)]
 pub enum MetadataRepositoryError {
-    /// Target is absent in the current organization.
+    /// Target is absent in the drive the request acts in.
     #[error("metadata resource not found")]
     NotFound,
     /// Uniqueness, state, or optimistic authorization changed concurrently.
@@ -57,19 +57,14 @@ pub trait MetadataRepository: Send + Sync {
         entry_id: EntryId,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
-    /// Loads the reserved container used to check typed-root creation authority.
-    ///
-    /// Public and Tag resolve to their own container; Private resolves to the
-    /// caller's own folder inside it, never to the shared Private container.
-    /// This container is not the new root's parent. The caller evaluates policy,
-    /// is what keeps a tag the caller does not carry out of reach.
-    async fn find_boundary_container(
+    /// Loads the root folder of the drive the request acts in, creating the
+    /// drive on its owner's first request.
+    async fn find_drive_root(
         &self,
         context: &ExecutionContext,
-        boundary: &EntryBoundary,
     ) -> Result<Option<AuthorizableEntry>, MetadataRepositoryError>;
 
-    /// Loads an active entry addressed by its organization-relative path.
+    /// Loads an active entry addressed by its drive-relative path.
     ///
     /// Path resolution is a lookup, not an authorization decision: the caller
     /// still evaluates domain policy and answers not-found for a hidden entry.
@@ -211,7 +206,7 @@ pub trait MetadataRepository: Send + Sync {
         context: &ExecutionContext,
     ) -> Result<NotificationInbox, MetadataRepositoryError>;
 
-    /// Reads what the organization consumes and the limits it consumes against.
+    /// Reads what the drive consumes and the limits it consumes against.
     async fn load_organization_usage(
         &self,
         context: &ExecutionContext,
@@ -231,7 +226,8 @@ pub trait MetadataRepository: Send + Sync {
         entry_ids: &[EntryId],
     ) -> Result<(), MetadataRepositoryError>;
 
-    /// Confirms that a target principal is a current member of the organization.
+    /// Confirms that a share recipient is a participant of the drive (the
+    /// request names it, and the transaction recorded it).
     async fn is_current_member(
         &self,
         context: &ExecutionContext,

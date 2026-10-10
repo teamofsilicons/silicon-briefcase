@@ -283,6 +283,32 @@ pub struct FilterQuery {
 }
 
 impl FilterQuery {
+    /// Returns every account selector (`from:`, `to:`, `for:`) in the
+    /// expression, so the caller can name each account by its uuid before
+    /// the filter runs.
+    pub fn actor_selectors_mut(&mut self) -> Vec<&mut ActorSelector> {
+        fn collect<'a>(expression: &'a mut FilterExpression, out: &mut Vec<&'a mut ActorSelector>) {
+            match expression {
+                FilterExpression::All(children) | FilterExpression::Any(children) => {
+                    for child in children {
+                        collect(child, out);
+                    }
+                }
+                FilterExpression::Not(inner) => collect(inner, out),
+                FilterExpression::Predicate(
+                    FilterPredicate::CreatedBy(selector)
+                    | FilterPredicate::SharedWith(selector)
+                    | FilterPredicate::AccessibleTo(selector),
+                ) => out.push(selector),
+                FilterExpression::Predicate(_) => {}
+            }
+        }
+        let mut selectors = Vec::new();
+        if let Some(expression) = self.expression.as_mut() {
+            collect(expression, &mut selectors);
+        }
+        selectors
+    }
     /// Parses one filter expression.
     ///
     /// # Errors

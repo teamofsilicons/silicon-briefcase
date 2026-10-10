@@ -155,9 +155,9 @@ pub fn is_canonical_iam_organization_id(value: &str) -> bool {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
-    /// A human account.
+    /// A Carbon's account (`c:` ids).
     Carbon,
-    /// An AI-agent account.
+    /// A Silicon's account (`si:` ids); it always has one custodian Carbon.
     Silicon,
 }
 
@@ -188,23 +188,30 @@ impl ActorRef {
     }
 }
 
-/// The represented actor's role in the tenant.
+/// How the caller relates to the drive a request acts in.
+///
+/// Every account owns one drive. Its owner, and the custodian of a Silicon
+/// that owns it, hold the owner's rights over everything in it; anyone else
+/// reaches only what was shared with them and what they (or the Silicons they
+/// look after) created there.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OrganizationRole {
-    /// A regular organization member.
-    Member,
-    /// An organization administrator.
-    Admin,
-    /// The organization owner.
+pub enum DriveAccess {
+    /// The drive is the caller's own.
     Owner,
+    /// The caller is the custodian of the Silicon that owns the drive: it sees
+    /// and manages the Silicon's files, but never acts as the Silicon.
+    Custodian,
+    /// Anyone else.
+    Visitor,
 }
 
-impl OrganizationRole {
-    /// Returns whether the role receives Briefcase administrative access.
+impl DriveAccess {
+    /// Returns whether the caller holds the drive owner's rights over the
+    /// drive's content.
     #[must_use]
-    pub const fn has_administrative_access(self) -> bool {
-        matches!(self, Self::Admin | Self::Owner)
+    pub const fn has_owner_rights(self) -> bool {
+        matches!(self, Self::Owner | Self::Custodian)
     }
 }
 
@@ -232,43 +239,51 @@ impl AuthenticationMode {
     }
 }
 
-/// Trusted authorization facts established by verifying the caller's credential.
+/// Trusted authorization facts for one request: who is calling, the drive the
+/// request acts in, and the caller's rights there.
 ///
-/// Constructing this value does not verify anything. Only the authentication
-/// boundary, after it verified a Silicon Accounts access token or proof,
-/// should construct it with [`RequestAuthContext::for_account`].
-///
-/// Until personal drives replace organizations, an account acts inside its
-/// own tenant: the tenant key is the account uuid, the represented actor is
-/// keyed by that uuid, and the account owns everything in it.
+/// Constructing this value does not verify anything. The authentication
+/// boundary builds it with [`RequestAuthContext::for_account`] after it
+/// verified a Silicon Accounts access token or proof (the caller's own drive),
+/// and the drive resolution moves it into another drive with
+/// [`RequestAuthContext::in_drive`] once it established the caller's relation
+/// to that drive's owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestAuthContext {
     account: Option<Actor>,
     organization_id: OrganizationId,
+    drive_owner: ActorRef,
     actor: ActorRef,
-    role: OrganizationRole,
-    tags: Option<BTreeSet<TagName>>,
+    access: DriveAccess,
+    creators: BTreeSet<ActorId>,
     authentication: AuthenticationMode,
 }
 
 impl RequestAuthContext {
-    /// Constructs a request context from verified tenant-level facts.
-    #[must_use]
-    pub fn new(
-        organization_id: OrganizationId,
+    /// Constructs the context of `actor` acting in the drive of
+    /// `drive_owner`, whose account uuid is the drive key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExternalIdentifierError`] when the owner's id cannot be a
+    /// drive key.
+    pub fn for_drive(
+        drive_owner: ActorRef,
         actor: ActorRef,
-        role: OrganizationRole,
-        tags: impl IntoIterator<Item = TagName>,
+        access: DriveAccess,
         authentication: AuthenticationMode,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ExternalIdentifierError> {
+        let organization_id = OrganizationId::new(drive_owner.id().as_str())?;
+        let creators = BTreeSet::from([actor.id().clone()]);
+        Ok(Self {
             account: None,
             organization_id,
+            drive_owner,
             actor,
-            role,
-            tags: Some(tags.into_iter().collect()),
+            access,
+            creators,
             authentication,
-        }
+        })
     }
 
     /// Constructs the context of a verified Silicon Accounts actor acting in
@@ -277,10 +292,9 @@ impl RequestAuthContext {
     /// # Errors
     ///
     /// Returns [`ExternalIdentifierError`] when the uuid or the issuing app
-    /// cannot be represented as tenant identifiers (never for values that
-    /// passed Silicon Accounts verification).
+    /// cannot be represented as identifiers (never for values that passed
+    /// Silicon Accounts verification).
     pub fn for_account(account: Actor) -> Result<Self, ExternalIdentifierError> {
-        let organization_id = OrganizationId::new(account.uuid.as_str())?;
         let actor = ActorRef::new(account.kind, ActorId::new(account.uuid.as_str())?);
         let authentication = match account.issuing_app() {
             Some(app) => AuthenticationMode::OnBehalfOf {
@@ -288,14 +302,39 @@ impl RequestAuthContext {
             },
             None => AuthenticationMode::Bearer,
         };
+        let mut context =
+            Self::for_drive(actor.clone(), actor, DriveAccess::Owner, authentication)?;
+        context.account = Some(account);
+        Ok(context)
+    }
+
+    /// Moves the same caller into the drive of `drive_owner`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExternalIdentifierError`] when the owner's id cannot be a
+    /// drive key.
+    pub fn in_drive(
+        &self,
+        drive_owner: ActorRef,
+        access: DriveAccess,
+    ) -> Result<Self, ExternalIdentifierError> {
+        let organization_id = OrganizationId::new(drive_owner.id().as_str())?;
         Ok(Self {
-            account: Some(account),
             organization_id,
-            actor,
-            role: OrganizationRole::Owner,
-            tags: Some(BTreeSet::new()),
-            authentication,
+            drive_owner,
+            access,
+            ..self.clone()
         })
+    }
+
+    /// Adds the Silicons the caller looks after. Whatever they created, in
+    /// any drive, carries creator rights for the caller too: the custodian
+    /// rule.
+    #[must_use]
+    pub fn with_custodial_silicons(mut self, silicons: impl IntoIterator<Item = ActorId>) -> Self {
+        self.creators.extend(silicons);
+        self
     }
 
     /// Returns the verified Silicon Accounts actor, when the request carried
@@ -305,10 +344,16 @@ impl RequestAuthContext {
         self.account.as_ref()
     }
 
-    /// Returns the verified tenant.
+    /// Returns the drive the request acts in (its owner's uuid).
     #[must_use]
     pub const fn organization_id(&self) -> &OrganizationId {
         &self.organization_id
+    }
+
+    /// Returns the account that owns the drive the request acts in.
+    #[must_use]
+    pub const fn drive_owner(&self) -> &ActorRef {
+        &self.drive_owner
     }
 
     /// Returns the represented actor.
@@ -317,23 +362,37 @@ impl RequestAuthContext {
         &self.actor
     }
 
-    /// Returns the actor's role in the tenant.
+    /// Returns how the caller relates to the drive.
     #[must_use]
-    pub const fn role(&self) -> OrganizationRole {
-        self.role
+    pub const fn access(&self) -> DriveAccess {
+        self.access
     }
 
-    /// Returns legacy tag assignments. `None` is unknown; `Some(empty)` is a
-    /// verified empty assignment.
+    /// Returns whether the caller holds the drive owner's rights here.
     #[must_use]
-    pub const fn tags(&self) -> Option<&BTreeSet<TagName>> {
-        self.tags.as_ref()
+    pub const fn has_owner_rights(&self) -> bool {
+        self.access.has_owner_rights()
     }
 
-    /// Returns whether the actor holds the exact legacy tag.
+    /// Returns whether the caller holds creator rights over what `owner`
+    /// created: its own entries and those of the Silicons it looks after.
     #[must_use]
-    pub fn has_tag(&self, tag: &TagName) -> bool {
-        self.tags.as_ref().is_some_and(|tags| tags.contains(tag))
+    pub fn is_creator(&self, owner: &ActorRef) -> bool {
+        self.creators.contains(owner.id())
+    }
+
+    /// Returns the accounts whose entries carry creator rights for the caller,
+    /// the caller first.
+    #[must_use]
+    pub fn creator_ids(&self) -> Vec<String> {
+        let mut ids = vec![self.actor.id().as_str().to_owned()];
+        ids.extend(
+            self.creators
+                .iter()
+                .filter(|id| *id != self.actor.id())
+                .map(|id| id.as_str().to_owned()),
+        );
+        ids
     }
 
     /// Returns the verified authentication mode.
@@ -352,9 +411,9 @@ impl RequestAuthContext {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActorId, ApplicationId, ExternalIdentifierError, MAX_EXTERNAL_IDENTIFIER_BYTES,
-        OrganizationId, OrganizationRole, TagName, is_canonical_iam_application_id,
-        is_canonical_iam_organization_id,
+        ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, DriveAccess,
+        ExternalIdentifierError, MAX_EXTERNAL_IDENTIFIER_BYTES, OrganizationId, RequestAuthContext,
+        TagName, is_canonical_iam_application_id, is_canonical_iam_organization_id,
     };
 
     #[test]
@@ -420,9 +479,34 @@ mod tests {
     }
 
     #[test]
-    fn only_administrative_roles_are_elevated() {
-        assert!(!OrganizationRole::Member.has_administrative_access());
-        assert!(OrganizationRole::Admin.has_administrative_access());
-        assert!(OrganizationRole::Owner.has_administrative_access());
+    fn only_owners_and_custodians_hold_owner_rights() {
+        assert!(DriveAccess::Owner.has_owner_rights());
+        assert!(DriveAccess::Custodian.has_owner_rights());
+        assert!(!DriveAccess::Visitor.has_owner_rights());
+    }
+
+    #[test]
+    fn a_caller_moves_between_drives_keeping_its_creator_rights() -> anyhow::Result<()> {
+        let ada = ActorRef::new(ActorKind::Carbon, ActorId::new("Ada1")?);
+        let scout = ActorRef::new(ActorKind::Silicon, ActorId::new("Sc1")?);
+        let bob = ActorRef::new(ActorKind::Carbon, ActorId::new("Bob1")?);
+        let own = RequestAuthContext::for_drive(
+            ada.clone(),
+            ada.clone(),
+            DriveAccess::Owner,
+            AuthenticationMode::Bearer,
+        )?
+        .with_custodial_silicons([scout.id().clone()]);
+        assert_eq!(own.organization_id().as_str(), "Ada1");
+        assert!(own.is_creator(&ada) && own.is_creator(&scout) && !own.is_creator(&bob));
+        assert_eq!(own.creator_ids(), vec!["Ada1".to_owned(), "Sc1".to_owned()]);
+
+        let visiting = own.in_drive(bob.clone(), DriveAccess::Visitor)?;
+        assert_eq!(visiting.organization_id().as_str(), "Bob1");
+        assert_eq!(visiting.drive_owner(), &bob);
+        assert_eq!(visiting.actor(), &ada);
+        assert!(!visiting.has_owner_rights());
+        assert!(visiting.is_creator(&scout));
+        Ok(())
     }
 }

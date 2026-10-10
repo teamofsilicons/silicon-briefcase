@@ -5,8 +5,6 @@ use super::{
     sharing::db,
 };
 use crate::domain::lifetime::LifetimeMinutes;
-#[cfg(test)]
-use crate::domain::permission::AccessRight;
 use crate::{
     application::{
         context::ExecutionContext,
@@ -27,108 +25,6 @@ fn repo_error(e: crate::application::service::MetadataRepositoryError) -> AppErr
 }
 
 impl PostgresRepository {
-    /// Grants a legacy tag. No route creates tag grants any more (tags do not
-    /// exist with Silicon Accounts); tests use this to seed pre-migration
-    /// rows so the legacy read and revoke paths stay covered until the
-    /// cutover turns tag grants into per-account shares.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invite_tag(
-        &self,
-        context: &ExecutionContext,
-        id: EntryId,
-        tag: &str,
-        access: GrantedAccess,
-        inherit: bool,
-        lifetime: Option<LifetimeMinutes>,
-        metadata: &MutationMetadata,
-    ) -> Result<(Uuid, Option<OffsetDateTime>), AppError> {
-        let mut r = begin(self, context).await.map_err(repo_error)?;
-        let entry = load_entry(&mut r.transaction, context, id, false, true)
-            .await
-            .map_err(repo_error)?
-            .ok_or(AppError::NotFound)?;
-        let auth = entry.authorization(context.authorization());
-        if !auth.allows(Capability::Read) {
-            return Err(AppError::NotFound);
-        }
-        if !auth.allows(Capability::ManagePermissions) {
-            return Err(AppError::Forbidden);
-        }
-        if access.contains(AccessRight::Delete)
-            || (entry.entry.kind == EntryKind::File && access.contains(AccessRight::Write))
-        {
-            return Err(AppError::validation("invalid_invitation_rights"));
-        }
-        if lifetime.is_some() && access.rights().any(|right| right != AccessRight::Read) {
-            return Err(AppError::validation("expiring_share_is_read_only"));
-        }
-        let tag_id:String=sqlx::query_scalar("SELECT tag_id FROM briefcase.organization_tags WHERE org_id=briefcase.current_org_id() AND (tag_id=$1 OR name=$1) AND lifecycle_status='active' ORDER BY (tag_id=$1) DESC LIMIT 1")
-            .bind(tag).fetch_optional(&mut *r.transaction).await.map_err(db)?.ok_or_else(||AppError::validation("invalid_tag"))?;
-        let claim = common::claim_idempotency(
-            &mut r.transaction,
-            &r.context,
-            "invite_tag",
-            metadata,
-            Some(Uuid::now_v7()),
-        )
-        .await
-        .map_err(repo_error)?;
-        let proposed = match claim {
-            common::IdempotencyClaim::Replay(Some(id)) => {
-                let expires_at: Option<OffsetDateTime> = sqlx::query_scalar("SELECT expires_at FROM briefcase.tag_permission_grants WHERE org_id=briefcase.current_org_id() AND grant_id=$1")
-                    .bind(id).fetch_optional(&mut *r.transaction).await.map_err(db)?.flatten();
-                r.transaction.commit().await.map_err(db)?;
-                return Ok((id, expires_at));
-            }
-            common::IdempotencyClaim::Acquired(Some(id)) => id,
-            _ => return Err(AppError::conflict("invalid_invitation_state")),
-        };
-        let actor = context.authorization().actor();
-        // An expiring share is its own row; only a permanent grant amends in place.
-        let (grant, expires_at): (Uuid, Option<OffsetDateTime>) = if let Some(lifetime) = lifetime {
-            sqlx::query_as("INSERT INTO briefcase.tag_permission_grants(org_id,entry_id,grant_id,tag_id,access_mask,inherits_to_descendants,granted_by_type,granted_by_id,expires_at) VALUES(briefcase.current_org_id(),$1,$2,$3,$4,$5,$6,$7,clock_timestamp()+make_interval(mins=>$8)) RETURNING grant_id,expires_at")
-                .bind(id.as_uuid()).bind(proposed).bind(&tag_id).bind(common::encode_access(access)).bind(inherit).bind(actor_kind(actor.kind())).bind(actor.id().as_str()).bind(lifetime.as_i32()).fetch_one(&mut *r.transaction).await.map_err(db)?
-        } else {
-            sqlx::query_as("INSERT INTO briefcase.tag_permission_grants(org_id,entry_id,grant_id,tag_id,access_mask,inherits_to_descendants,granted_by_type,granted_by_id) VALUES(briefcase.current_org_id(),$1,$2,$3,$4,$5,$6,$7) ON CONFLICT(org_id,entry_id,tag_id) WHERE revoked_at IS NULL AND expires_at IS NULL DO UPDATE SET access_mask=EXCLUDED.access_mask,inherits_to_descendants=EXCLUDED.inherits_to_descendants RETURNING grant_id,expires_at")
-                .bind(id.as_uuid()).bind(proposed).bind(&tag_id).bind(common::encode_access(access)).bind(inherit).bind(actor_kind(actor.kind())).bind(actor.id().as_str()).fetch_one(&mut *r.transaction).await.map_err(db)?
-        };
-        record_change(
-            &mut r.transaction,
-            &r.context,
-            Some(id.as_uuid()),
-            if expires_at.is_some() {
-                "permission.tag_expiring_share_granted.v1"
-            } else {
-                "permission.tag_granted.v1"
-            },
-            "entry",
-            &id.to_string(),
-            json!({"grant_id":grant,"tag_id":tag_id,"access":access.rights().collect::<Vec<_>>(),"inherit":inherit,"expires_at":expires_at.map(common::rfc3339)}),
-        )
-        .await
-        .map_err(repo_error)?;
-        notify_tag(
-            &mut r.transaction,
-            context,
-            &entry.entry,
-            &tag_id,
-            "access_granted",
-            Some(access),
-        )
-        .await?;
-        common::complete_idempotency(
-            &mut r.transaction,
-            &r.context,
-            "invite_tag",
-            metadata,
-            Some(grant),
-        )
-        .await
-        .map_err(repo_error)?;
-        r.transaction.commit().await.map_err(db)?;
-        Ok((grant, expires_at))
-    }
     pub(crate) async fn invitations(
         &self,
         context: &ExecutionContext,

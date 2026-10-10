@@ -37,7 +37,7 @@ use crate::{
     },
 };
 
-use super::{EntryRow, PermissionGrantRow, PostgresRepository, models::entry_columns, roots};
+use super::{EntryRow, PermissionGrantRow, PostgresRepository, drives, models::entry_columns};
 use common::{
     IdempotencyClaim, OwnedAncestorPrincipal, Result, actor_kind, actor_ref, begin,
     boundary_columns, build_authorizable, claim_idempotency, complete_idempotency, current_member,
@@ -45,35 +45,19 @@ use common::{
     push_owned_ancestor_access, record_change, resolve_tag_id, retention_deadline, rfc3339,
 };
 
-async fn load_boundary_container(
+/// Loads the request drive's root folder with the caller's authorization.
+async fn load_drive_root(
     transaction: &mut Transaction<'_, Postgres>,
     context: &ExecutionContext,
-    boundary: &crate::domain::entry::EntryBoundary,
 ) -> Result<Option<AuthorizableEntry>> {
-    let actor = context.authorization().actor();
-    let (root_type, tag) = boundary_columns(boundary);
     let row = sqlx::query_as::<_, EntryRow>(concat!(
         "SELECT ",
         entry_columns!(),
         " FROM briefcase.entries \
           WHERE org_id = briefcase.current_org_id() \
-            AND deleted_at IS NULL \
-            AND ( \
-                ($1 = 'public' AND system_kind = 'public_root') \
-                OR ($1 = 'private' AND system_kind = 'actor_root' \
-                    AND owner_type = $3 AND owner_id = $4) \
-                OR ($1 = 'tag' AND system_kind = 'tag_root' AND tag_id IN ( \
-                        SELECT tag_id FROM briefcase.organization_tags \
-                         WHERE org_id = briefcase.current_org_id() \
-                           AND name = $2 AND lifecycle_status = 'active' \
-                    )) \
-            ) \
-          LIMIT 1 FOR SHARE",
+            AND system_kind = 'drive_root' AND deleted_at IS NULL \
+          FOR SHARE",
     ))
-    .bind(root_type)
-    .bind(tag)
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sql)?;
@@ -133,13 +117,12 @@ impl MetadataRepository for PostgresRepository {
         Ok(entry)
     }
 
-    async fn find_boundary_container(
+    async fn find_drive_root(
         &self,
         context: &ExecutionContext,
-        boundary: &crate::domain::entry::EntryBoundary,
     ) -> Result<Option<AuthorizableEntry>> {
         let mut request = begin(self, context).await?;
-        let entry = load_boundary_container(&mut request.transaction, context, boundary).await?;
+        let entry = load_drive_root(&mut request.transaction, context).await?;
         request.transaction.commit().await.map_err(map_sql)?;
         Ok(entry)
     }
@@ -213,10 +196,12 @@ impl MetadataRepository for PostgresRepository {
         let cursor = decode_optional::<ChangeCursor>(query.page.cursor.as_deref())?;
         let page_size = query.page.limit;
         let actor = context.authorization().actor();
+        let creators = context.authorization().creator_ids();
         let caller = filter_sql::FilterCaller {
             kind: actor_kind(actor.kind()),
             id: actor.id().as_str(),
-            administrator: context.authorization().role().has_administrative_access(),
+            creators: &creators,
+            owner_rights: context.authorization().has_owner_rights(),
         };
         let mut builder = QueryBuilder::<Postgres>::new(concat!("SELECT ", entry_columns!()));
         let policy_expression = filter
@@ -234,14 +219,22 @@ impl MetadataRepository for PostgresRepository {
               WHERE entry.org_id = briefcase.current_org_id() \
                 AND entry.deleted_at IS NULL",
         );
-        // Without a filter the listing browses one level. With one, an
-        // unspecified parent widens the scan to the whole organization so a
-        // `location:` predicate can reach anywhere the caller may look.
+        // Without a filter the listing browses one level: the top of the
+        // drive, or a folder. With one, an unspecified parent widens the scan
+        // to the whole drive so a `location:` predicate can reach anywhere the
+        // caller may look.
         if let Some(parent_id) = query.parent_id {
             builder.push(" AND entry.parent_id = ");
             builder.push_bind(parent_id.as_uuid());
         } else if filter.is_none() {
-            builder.push(" AND entry.parent_id IS NULL");
+            builder.push(
+                " AND entry.parent_id = ( \
+                     SELECT root.entry_id FROM briefcase.entries AS root \
+                      WHERE root.org_id = briefcase.current_org_id() \
+                        AND root.system_kind = 'drive_root' AND root.deleted_at IS NULL)",
+            );
+        } else {
+            builder.push(" AND entry.system_kind IS DISTINCT FROM 'drive_root'");
         }
         if let Some(cursor) = cursor {
             builder.push(" AND (entry.updated_at, entry.entry_id) ");
@@ -306,12 +299,11 @@ impl MetadataRepository for PostgresRepository {
         required_parent_capability: Option<Capability>,
     ) -> Result<AuthorizableEntry> {
         const OPERATION: &str = "create_folder";
+        let parent_id = mutation
+            .command
+            .parent_id
+            .ok_or(MetadataRepositoryError::Conflict)?;
         let mut request = begin(self, context).await?;
-        if mutation.command.parent_id.is_none() {
-            roots::lock_organization_reconciliation(&mut request.transaction)
-                .await
-                .map_err(map_sql)?;
-        }
         let entry_id = match claim_idempotency(
             &mut request.transaction,
             &request.context,
@@ -341,27 +333,14 @@ impl MetadataRepository for PostgresRepository {
         if &mutation.owner != actor {
             return Err(MetadataRepositoryError::Conflict);
         }
-        if let Some(parent_id) = mutation.command.parent_id {
-            let parent = load_entry(&mut request.transaction, context, parent_id, false, true)
-                .await?
-                .ok_or(MetadataRepositoryError::NotFound)?;
-            if parent.entry.kind != EntryKind::Folder || parent.entry.boundary != mutation.boundary
-            {
-                return Err(MetadataRepositoryError::Conflict);
-            }
-            let capability = required_parent_capability.ok_or(MetadataRepositoryError::Conflict)?;
-            require_capability(&parent, context, capability)?;
-        } else if required_parent_capability.is_some() {
+        let parent = load_entry(&mut request.transaction, context, parent_id, false, true)
+            .await?
+            .ok_or(MetadataRepositoryError::NotFound)?;
+        if parent.entry.kind != EntryKind::Folder || parent.entry.boundary != mutation.boundary {
             return Err(MetadataRepositoryError::Conflict);
-        } else {
-            // Recheck root-creation authority inside the write transaction.
-            // The reserved container is an authority source, not the parent.
-            let container =
-                load_boundary_container(&mut request.transaction, context, &mutation.boundary)
-                    .await?
-                    .ok_or(MetadataRepositoryError::NotFound)?;
-            require_capability(&container, context, Capability::CreateChild)?;
         }
+        let capability = required_parent_capability.ok_or(MetadataRepositoryError::Conflict)?;
+        require_capability(&parent, context, capability)?;
 
         let (root_type, tag_name) = boundary_columns(&mutation.boundary);
         let tag_id = resolve_tag_id(&mut request.transaction, tag_name).await?;
@@ -374,7 +353,7 @@ impl MetadataRepository for PostgresRepository {
                        $6, $7, $8, $6, $7, $6, $7)",
         )
         .bind(entry_id.as_uuid())
-        .bind(mutation.command.parent_id.map(EntryId::as_uuid))
+        .bind(parent_id.as_uuid())
         .bind(mutation.command.name.as_str())
         .bind(root_type)
         .bind(tag_id.as_deref())
@@ -464,11 +443,6 @@ impl MetadataRepository for PostgresRepository {
     ) -> Result<AuthorizableEntry> {
         const OPERATION: &str = "update_entry";
         let mut request = begin(self, context).await?;
-        // A rename can target an organization-root entry. Serialize metadata
-        // mutations with system-root name reconciliation before taking row locks.
-        roots::lock_organization_reconciliation(&mut request.transaction)
-            .await
-            .map_err(map_sql)?;
         let current = load_entry(
             &mut request.transaction,
             context,
@@ -586,9 +560,6 @@ impl MetadataRepository for PostgresRepository {
     ) -> Result<()> {
         const OPERATION: &str = "soft_delete_entry";
         let mut request = begin(self, context).await?;
-        roots::lock_organization_reconciliation(&mut request.transaction)
-            .await
-            .map_err(map_sql)?;
         let entry = load_entry(
             &mut request.transaction,
             context,
@@ -1064,12 +1035,7 @@ impl MetadataRepository for PostgresRepository {
         let mut request = begin(self, context).await?;
         let authorization = context.authorization();
         let actor = authorization.actor();
-        let tags: Vec<String> = authorization
-            .tags()
-            .into_iter()
-            .flatten()
-            .map(|tag| tag.as_str().to_owned())
-            .collect();
+        let creators = authorization.creator_ids();
         // Both sides are normalized by the same function, so a term inside a
         // filename matches the name it belongs to. Visibility is narrowed
         // before LIMIT, using the same owned-ancestor predicate as policy and
@@ -1113,24 +1079,16 @@ impl MetadataRepository for PostgresRepository {
                       FROM unnest(document.content_search) AS word \
                      WHERE word.lexeme = ANY(search_query.lexemes) \
                  ) AS content \
-          LEFT JOIN briefcase.organization_tags AS tag \
-                 ON tag.org_id = entry.org_id AND tag.tag_id = entry.tag_id \
               WHERE document.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
                 AND (document.filename_search @@ search_query.value \
                      OR document.content_search @@ search_query.value) \
                 AND (",
         );
-        builder.push_bind(authorization.role().has_administrative_access());
-        builder.push(" OR (entry.owner_type = ");
-        builder.push_bind(actor_kind(actor.kind()));
-        builder.push(" AND entry.owner_id = ");
-        builder.push_bind(actor.id().as_str().to_owned());
+        builder.push_bind(authorization.has_owner_rights());
+        builder.push(" OR entry.owner_id = ANY(");
+        builder.push_bind(creators.clone());
         builder.push(
-            ") OR entry.root_type = 'public' OR (entry.root_type = 'tag' AND tag.name = ANY(",
-        );
-        builder.push_bind(tags);
-        builder.push(
-            ")) OR EXISTS ( \
+            ") OR EXISTS ( \
                  SELECT 1 FROM briefcase.entry_closure AS path \
                    JOIN briefcase.effective_permission_grants AS access_grant \
                      ON access_grant.org_id = path.org_id \
@@ -1147,13 +1105,7 @@ impl MetadataRepository for PostgresRepository {
                     AND (path.depth = 0 OR access_grant.inherits_to_descendants) \
              ) OR ",
         );
-        push_owned_ancestor_access(
-            &mut builder,
-            OwnedAncestorPrincipal::Bound {
-                kind: Some(actor.kind()),
-                id: actor.id().as_str(),
-            },
-        );
+        push_owned_ancestor_access(&mut builder, OwnedAncestorPrincipal::Creators(&creators));
         builder.push(") ORDER BY filename_match DESC, content_hits DESC, score DESC, document.entry_id LIMIT ");
         builder.push_bind(i64::from(query.limit));
         let rows = builder
@@ -1283,7 +1235,7 @@ impl MetadataRepository for PostgresRepository {
                 ) \
                 AND ($1 = '' OR entry.origin_app_id = $1) \
                 AND ( \
-                    $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
+                    $2 OR entry.owner_id = ANY($8) \
                     OR EXISTS ( \
                         SELECT 1 FROM briefcase.entry_closure AS path \
                         JOIN briefcase.effective_permission_grants AS access_grant \
@@ -1299,12 +1251,13 @@ impl MetadataRepository for PostgresRepository {
               ORDER BY entry.deleted_at DESC, entry.entry_id DESC LIMIT $7",
         ))
         .bind(origin)
-        .bind(authorization.role().has_administrative_access())
+        .bind(authorization.has_owner_rights())
         .bind(actor_kind(actor.kind()))
         .bind(actor.id().as_str())
         .bind(cursor.map(|value| value.deleted_at))
         .bind(cursor.map_or(Uuid::max(), |value| value.id))
         .bind(i64::from(query.page.limit) + 1)
+        .bind(authorization.creator_ids())
         .fetch_all(&mut *request.transaction)
         .await
         .map_err(map_sql)?;
@@ -1373,9 +1326,6 @@ impl MetadataRepository for PostgresRepository {
     ) -> Result<AuthorizableEntry> {
         const OPERATION: &str = "restore_bin_entry";
         let mut request = begin(self, context).await?;
-        roots::lock_organization_reconciliation(&mut request.transaction)
-            .await
-            .map_err(map_sql)?;
         let entry = load_entry(&mut request.transaction, context, entry_id, true, true)
             .await?
             .ok_or(MetadataRepositoryError::NotFound)?;
@@ -1531,15 +1481,13 @@ impl MetadataRepository for PostgresRepository {
             .ok_or_else(|| internal("application folder requires an OBO request"))?
             .as_str()
             .to_owned();
-        let actor = context.authorization().actor().clone();
         let mut request = begin(self, context).await?;
-        let entry_id = roots::ensure_application_container(
+        let entry_id = drives::ensure_application_folder(
             &mut request.transaction,
-            (actor_kind(actor.kind()), actor.id().as_str()),
+            context.authorization(),
             &application_id,
         )
-        .await
-        .map_err(map_sql)?;
+        .await?;
         let entry_id = EntryId::from_uuid(entry_id).map_err(internal_data)?;
         let entry = load_entry(&mut request.transaction, context, entry_id, false, false)
             .await?
@@ -1821,7 +1769,7 @@ async fn lock_and_require_subtree_capability(
                     entry.system_kind IS NULL \
                     AND ($5::text IS NULL OR entry.origin_app_id = $5) \
                     AND ( \
-                        $2 OR (entry.owner_type = $3 AND entry.owner_id = $4) \
+                        $2 OR entry.owner_id = ANY($6) \
                         OR EXISTS ( \
                             SELECT 1 FROM briefcase.entry_closure AS grant_path \
                             JOIN briefcase.effective_permission_grants AS access_grant \
@@ -1842,10 +1790,11 @@ async fn lock_and_require_subtree_capability(
           WHERE subtree.org_id = briefcase.current_org_id() AND subtree.ancestor_id = $1",
     )
     .bind(root_id.as_uuid())
-    .bind(authorization.role().has_administrative_access())
+    .bind(authorization.has_owner_rights())
     .bind(actor_kind(actor.kind()))
     .bind(actor.id().as_str())
     .bind(origin)
+    .bind(authorization.creator_ids())
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_sql)?;
@@ -1875,47 +1824,17 @@ async fn resolve_restore_parent(
         return Ok(None);
     }
 
-    let actor = context.authorization().actor();
-    let tag_name = entry
-        .entry
-        .boundary
-        .tag()
-        .map(crate::domain::actor::TagName::as_str);
-    let fallback = sqlx::query_scalar::<_, Uuid>(
-        "SELECT entry.entry_id \
-           FROM briefcase.entries AS entry \
-      LEFT JOIN briefcase.organization_tags AS tag \
-             ON tag.org_id = entry.org_id AND tag.tag_id = entry.tag_id \
-          WHERE entry.org_id = briefcase.current_org_id() AND entry.deleted_at IS NULL \
-            AND ( \
-                ($1 = 'public' AND entry.system_kind = 'public_root') \
-                OR ($1 = 'tag' AND entry.system_kind = 'tag_root' AND tag.name = $2) \
-                OR ($1 = 'private' AND ( \
-                    (entry.system_kind = 'actor_root' AND entry.owner_type = $3 AND entry.owner_id = $4) \
-                    OR entry.system_kind = 'private_root' \
-                )) \
-            ) \
-          ORDER BY CASE WHEN entry.system_kind = 'actor_root' THEN 0 ELSE 1 END \
-          LIMIT 1 FOR UPDATE OF entry",
-    )
-    .bind(match entry.entry.boundary.root_type() {
-        crate::domain::entry::RootType::Public => "public",
-        crate::domain::entry::RootType::Private => "private",
-        crate::domain::entry::RootType::Tag => "tag",
-    })
-    .bind(tag_name)
-    .bind(actor_kind(actor.kind()))
-    .bind(actor.id().as_str())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sql)?
-    .ok_or(MetadataRepositoryError::Conflict)?;
-    let fallback_id = EntryId::from_uuid(fallback).map_err(internal_data)?;
-    let fallback_entry = load_entry(transaction, context, fallback_id, false, false)
+    // The original folder is gone or closed to the caller: the entry comes
+    // back at the top of the drive, which only the drive's owner (or the
+    // custodian of the Silicon that owns it) may add to.
+    let root = load_drive_root(transaction, context)
         .await?
-        .ok_or_else(|| internal("restore fallback disappeared"))?;
-    require_capability(&fallback_entry, context, Capability::CreateChild)?;
-    Ok(Some(fallback_id))
+        .ok_or(MetadataRepositoryError::Conflict)?;
+    if root.entry.boundary != entry.entry.boundary {
+        return Err(MetadataRepositoryError::Conflict);
+    }
+    require_capability(&root, context, Capability::CreateChild)?;
+    Ok(Some(root.entry.id))
 }
 
 async fn available_restore_name(

@@ -2,6 +2,8 @@
 
 pub mod accounts;
 mod content;
+mod drives;
+pub use drives::SharedEntry;
 mod invitations;
 mod metadata;
 mod models;
@@ -9,7 +11,6 @@ mod quota;
 mod reports;
 mod repository;
 pub use reports::ReportReceipt;
-mod roots;
 mod self_destruct;
 pub(crate) mod sharing;
 

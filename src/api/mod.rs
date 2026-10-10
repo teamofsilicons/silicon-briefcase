@@ -33,6 +33,7 @@ use crate::{
 mod auth;
 pub mod cursor;
 mod delivery;
+mod drives;
 pub mod dto;
 mod extract;
 mod handlers;
@@ -44,8 +45,8 @@ pub mod validation;
 pub mod versioning;
 
 use handlers::{
-    accounts, content, delegated, delegated_upload, entries, invitations, notifications, obo,
-    permissions, reports, sharing, system, telemetry, usage,
+    accounts, content, delegated, delegated_upload, drives as drive_handlers, entries, invitations,
+    notifications, obo, permissions, reports, sharing, system, telemetry, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -261,9 +262,26 @@ fn sharing_routes() -> Router<AppState> {
         .route("/api/v1/public/{org_id}/{*path}", get(sharing::public_path))
 }
 
+/// The drives a caller opens, what was shared with it, and who may share
+/// with a Silicon.
+fn drive_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/drives", get(drive_handlers::list))
+        .route("/api/v1/shared", get(drive_handlers::shared))
+        .route(
+            "/api/v1/silicons/{silicon}/allowed-accounts",
+            get(drive_handlers::allowances),
+        )
+        .route(
+            "/api/v1/silicons/{silicon}/allowed-accounts/{account}",
+            put(drive_handlers::allow).delete(drive_handlers::disallow),
+        )
+}
+
 fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .merge(sharing_routes())
+        .merge(drive_routes())
         .route(
             delegated_upload::RESERVE_PATH,
             post(delegated_upload::reserve),
@@ -384,5 +402,7 @@ async fn not_found() -> crate::error::AppError {
 
 #[cfg(test)]
 mod accounts_tests;
+#[cfg(test)]
+mod drives_tests;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -23,9 +23,7 @@ use crate::{
     },
     domain::{
         account::Actor,
-        actor::{
-            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationRole, RequestAuthContext,
-        },
+        actor::{ActorId, ActorKind, ActorRef, RequestAuthContext},
         entry::EntryPath,
         ids::{EntryId, GrantId, VersionId},
     },
@@ -108,9 +106,16 @@ fn execution_context(actor: Actor) -> Result<ExecutionContext, AppError> {
 }
 
 /// Resolves a share recipient the caller named by `c:`/`si:` id (or uuid) to
-/// the account it is now, keyed by its uuid.
+/// the account it is now, keyed by its uuid, and checks the caller may share
+/// with it.
+///
+/// Carbons can be reached by anyone signed in to Briefcase. Silicons are not
+/// open to the world: a share reaches a Silicon only from its custodian, the
+/// other Silicons its custodian looks after, or an account the Silicon (or its
+/// custodian) allowed first.
 pub(crate) async fn resolve_recipient(
     state: &AppState,
+    context: &ExecutionContext,
     kind: ActorKind,
     id: &str,
 ) -> Result<ActorRef, AppError> {
@@ -122,6 +127,17 @@ pub(crate) async fn resolve_recipient(
             format!(
                 "{id} is a {actual}, not a {expected}; name it with type {}.",
                 record_kind_name(record.kind)
+            ),
+        ));
+    }
+    if let Some(sharer) = context.authorization().account()
+        && !state.accounts.may_share_with(&sharer.uuid, &record).await?
+    {
+        let shown = record.public_id.as_deref().unwrap_or(id);
+        return Err(AppError::refused(
+            "silicon_not_open",
+            format!(
+                "{shown} accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it allowed. Ask {shown} or its custodian to allow you first."
             ),
         ));
     }
@@ -137,23 +153,7 @@ pub(crate) fn with_recipients(
     context: ExecutionContext,
     recipients: &[ActorRef],
 ) -> ExecutionContext {
-    if recipients.is_empty() {
-        return context;
-    }
-    let tenant = context.authorization().organization_id().clone();
-    let members = recipients
-        .iter()
-        .map(|recipient| {
-            RequestAuthContext::new(
-                tenant.clone(),
-                recipient.clone(),
-                OrganizationRole::Member,
-                Vec::new(),
-                AuthenticationMode::Bearer,
-            )
-        })
-        .collect();
-    context.with_directory_members(members)
+    context.with_share_recipients(recipients.to_vec())
 }
 
 const fn kind_title(kind: ActorKind) -> &'static str {
@@ -184,7 +184,8 @@ pub(crate) fn scoped<T>(
     )
 }
 
-/// The caller's tenant key, used in permanent URLs and request fingerprints.
+/// The drive the request acts in (its owner's uuid), used in permanent URLs
+/// and request fingerprints.
 pub(crate) fn tenant(context: &ExecutionContext) -> String {
     context
         .authorization()
@@ -276,9 +277,9 @@ where
     Ok(bytes_fingerprint(operation, &canonical))
 }
 
-/// Validates a permanent-URL location against the caller's tenant.
+/// Validates a permanent-URL location against the drive the request acts in.
 ///
-/// A different tenant or an unparsable path is reported as not found: the
+/// A different drive or an unparsable path is reported as not found: the
 /// permanent URL must never confirm that an inaccessible entry exists.
 pub(crate) fn entry_location(
     (organization, path): (String, String),

@@ -1109,7 +1109,7 @@ impl ContentRepository for PostgresContentRepository {
         Prepared<StorageConfigurationPreparation, StorageConfigurationResult>,
         AppError,
     > {
-        require_administrator(context)?;
+        require_drive_owner_rights(context)?;
         let mut request = content_begin(&self.repository, context).await?;
         let proposed_configuration_id = StorageConfigurationId::new();
         let configuration_id = if let Some((key, hash)) = &command.idempotency {
@@ -1215,7 +1215,7 @@ impl ContentRepository for PostgresContentRepository {
         preparation: &StorageConfigurationPreparation,
         tested_at: OffsetDateTime,
     ) -> std::result::Result<StorageConfigurationResult, AppError> {
-        require_administrator(context)?;
+        require_drive_owner_rights(context)?;
         let mut request = content_begin(&self.repository, context).await?;
         if let Some((key, hash)) = &command.idempotency {
             ensure_idempotency_in_progress(
@@ -1296,7 +1296,7 @@ impl ContentRepository for PostgresContentRepository {
         tested_at: OffsetDateTime,
         reason: &'static str,
     ) -> std::result::Result<StorageConfigurationResult, AppError> {
-        require_administrator(context)?;
+        require_drive_owner_rights(context)?;
         let mut request = content_begin(&self.repository, context).await?;
         if let Some((key, hash)) = &command.idempotency {
             ensure_idempotency_in_progress(
@@ -1436,8 +1436,10 @@ fn require_entry_capability(
     }
 }
 
-fn require_administrator(context: &ExecutionContext) -> std::result::Result<(), AppError> {
-    if context.authorization().role().has_administrative_access() {
+/// Storage settings belong to the drive: its owner, or the custodian of the
+/// Silicon that owns it, may change them.
+fn require_drive_owner_rights(context: &ExecutionContext) -> std::result::Result<(), AppError> {
+    if context.authorization().has_owner_rights() {
         Ok(())
     } else {
         Err(AppError::Forbidden)

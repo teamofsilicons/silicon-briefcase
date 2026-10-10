@@ -2,7 +2,7 @@
 
 use super::super::{
     auth::Action,
-    extract,
+    drives, extract,
     mapping::{ResponseMapper, metadata_error},
     state::AppState,
 };
@@ -85,6 +85,7 @@ pub(super) async fn perform(
         return Err(AppError::validation("expiring_share_is_read_only"));
     }
     let entry_id = extract::entry_id(id)?;
+    let context = drives::for_entry(state, context, entry_id).await?;
     let access = GrantedAccess::new(body.access);
     let kind = match body.principal.kind.as_str() {
         "carbon" => ActorKind::Carbon,
@@ -103,7 +104,7 @@ pub(super) async fn perform(
         }
         _ => return Err(AppError::validation("invalid_principal_type")),
     };
-    let principal = extract::resolve_recipient(state, kind, &body.principal.id).await?;
+    let principal = extract::resolve_recipient(state, &context, kind, &body.principal.id).await?;
     let context = extract::with_recipients(context, std::slice::from_ref(&principal));
     let grant = state
         .metadata
@@ -133,6 +134,7 @@ pub(crate) async fn list(
 ) -> Result<Json<Value>, AppError> {
     let context =
         extract::authenticate(&state, &headers, Action::ListPermissions, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     Ok(Json(
         state
             .content_adapter
@@ -159,6 +161,7 @@ pub(crate) async fn revoke(
 ) -> Result<StatusCode, AppError> {
     let context =
         extract::authenticate(&state, &headers, Action::RevokePermission, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let metadata = extract::mutation(&headers, "revoke_invitation", &id.to_string(), &grant, true)?;
     state
         .content_adapter
@@ -199,6 +202,7 @@ pub(crate) async fn change(
     let lifetime = body.lifetime()?;
     let context =
         extract::authenticate(&state, &headers, Action::GrantPermission, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let metadata = extract::mutation(
         &headers,
         "change_expiring_share",
@@ -266,6 +270,7 @@ pub(crate) async fn delegated_link(
         body.operation_id,
         &body,
     )?;
+    let context = drives::for_entry(&state, context, extract::entry_id(body.entry_id)?).await?;
     let access = state
         .content_adapter
         .metadata_repository()

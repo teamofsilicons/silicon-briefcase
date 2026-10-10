@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::domain::filter::MAX_FILTER_LENGTH;
 
 use super::dto::{
-    ActorTypeDto, BucketConfigurationDto, EncryptionModeDto, EntryPatchDto, FolderCreateDto,
-    GrantAccessDto, ListEntriesQuery, PageQuery, PermissionGrantCreateDto, PermissionInspectionDto,
-    RootTypeDto, SearchQueryDto,
+    ActorTypeDto, BucketConfigurationDto, DrivePageQuery, EncryptionModeDto, EntryPatchDto,
+    FolderCreateDto, GrantAccessDto, ListEntriesQuery, PageQuery, PermissionGrantCreateDto,
+    PermissionInspectionDto, SearchQueryDto,
 };
 
 const MAXIMUM_CURSOR_LENGTH: usize = 2_048;
@@ -19,6 +19,8 @@ const MAXIMUM_INVITEES: usize = 100;
 const MAXIMUM_INSPECTED_TARGETS: usize = 100;
 const MAXIMUM_EXTERNAL_IDENTIFIER_BYTES: usize = 255;
 const MAXIMUM_ARN_BYTES: usize = 2_048;
+/// Longest drive selector: `si:` plus a 64-byte handle, or a uuid.
+const MAXIMUM_DRIVE_BYTES: usize = 80;
 
 /// Stable field-oriented validation details returned to the API error layer.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -50,6 +52,12 @@ impl ValidationErrors {
     fn finish(self) -> Result<(), Self> {
         if self.is_empty() { Ok(()) } else { Err(self) }
     }
+
+    fn extend(&mut self, other: Self) {
+        for (field, messages) in other.fields {
+            self.fields.entry(field).or_default().extend(messages);
+        }
+    }
 }
 
 /// Validates entry-list pagination.
@@ -71,6 +79,13 @@ pub fn list_entries(query: &ListEntriesQuery) -> Result<(), ValidationErrors> {
         .is_some_and(|path| path.trim().is_empty())
     {
         errors.push("path", "must not be blank when provided");
+    }
+    if query
+        .drive
+        .as_ref()
+        .is_some_and(|drive| drive.trim().is_empty() || drive.len() > MAXIMUM_DRIVE_BYTES)
+    {
+        errors.push("drive", "must be an account id or uuid when provided");
     }
     if let Some(filter) = query.filter.as_deref() {
         if filter.trim().is_empty() {
@@ -110,6 +125,40 @@ pub fn page(query: &PageQuery) -> Result<(), ValidationErrors> {
     errors.finish()
 }
 
+/// Validates a paginated listing of one drive.
+///
+/// # Errors
+///
+/// Returns every invalid paging or drive field.
+pub fn drive_page(query: &DrivePageQuery) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    if let Err(page_errors) = page(&PageQuery {
+        cursor: query.cursor.clone(),
+        limit: query.limit,
+    }) {
+        errors.extend(page_errors);
+    }
+    validate_drive(query.drive.as_deref(), &mut errors);
+    errors.finish()
+}
+
+/// Validates an optional drive selector.
+///
+/// # Errors
+///
+/// Returns the invalid drive field.
+pub fn drive(drive: Option<&str>) -> Result<(), ValidationErrors> {
+    let mut errors = ValidationErrors::default();
+    validate_drive(drive, &mut errors);
+    errors.finish()
+}
+
+fn validate_drive(drive: Option<&str>, errors: &mut ValidationErrors) {
+    if drive.is_some_and(|drive| drive.trim().is_empty() || drive.len() > MAXIMUM_DRIVE_BYTES) {
+        errors.push("drive", "must be an account id or uuid when provided");
+    }
+}
+
 /// Validates a folder creation request before domain conversion.
 ///
 /// # Errors
@@ -129,28 +178,18 @@ pub fn create_folder(request: &FolderCreateDto) -> Result<(), ValidationErrors> 
     {
         errors.push("parent_path", "must not be blank when provided");
     }
-    let parent = request
-        .parent_id
-        .map(|_| ())
-        .or_else(|| request.parent_path.as_ref().map(|_| ()));
-    match (parent, request.root_type, request.tag.as_deref()) {
-        (None, None, _) => errors.push("root_type", "is required when no parent is named"),
-        (Some(()), Some(_), _) => {
-            errors.push("root_type", "must be omitted when creating below a parent");
-        }
-        (Some(()), None, Some(_)) => {
-            errors.push("tag", "must be omitted when creating below a parent");
-        }
-        (_, Some(RootTypeDto::Tag), None) => {
-            errors.push("tag", "is required for a tag root");
-        }
-        (_, Some(RootTypeDto::Tag), Some(tag)) if !valid_external_identifier(tag) => {
-            errors.push("tag", "must be a valid IAM tag identifier");
-        }
-        (_, Some(RootTypeDto::Public | RootTypeDto::Private), Some(_)) => {
-            errors.push("tag", "is allowed only for a tag root");
-        }
-        _ => {}
+    if request.parent_id.is_some() && request.drive.is_some() {
+        errors.push(
+            "drive",
+            "is not used with parent_id: the parent names its drive",
+        );
+    }
+    if request
+        .drive
+        .as_ref()
+        .is_some_and(|drive| drive.trim().is_empty() || drive.len() > MAXIMUM_DRIVE_BYTES)
+    {
+        errors.push("drive", "must be an account id or uuid when provided");
     }
 
     if request.invitees.len() > MAXIMUM_INVITEES {
@@ -394,39 +433,33 @@ fn valid_kms_key_arn(value: &str, region: &str, account_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{bucket_configuration, create_folder};
-    use crate::api::dto::{
-        BucketConfigurationDto, EncryptionModeDto, FolderCreateDto, RootTypeDto,
-    };
+    use crate::api::dto::{BucketConfigurationDto, EncryptionModeDto, FolderCreateDto};
 
-    #[test]
-    fn tag_root_requires_a_tag() {
-        let result = create_folder(&FolderCreateDto {
+    fn folder(parent: Option<uuid::Uuid>, drive: Option<&str>) -> FolderCreateDto {
+        FolderCreateDto {
             parent_path: None,
             name: "Engineering".to_owned(),
-            parent_id: None,
-            root_type: Some(RootTypeDto::Tag),
+            parent_id: parent,
+            drive: drive.map(ToOwned::to_owned),
+            root_type: None,
             tag: None,
             invitees: Vec::new(),
-        });
-        assert!(result.is_err());
+        }
     }
 
     #[test]
-    fn inherited_folder_rejects_an_ignored_tag() {
-        let result = create_folder(&FolderCreateDto {
-            parent_path: None,
-            name: "Engineering".to_owned(),
-            parent_id: Some(uuid::Uuid::now_v7()),
-            root_type: None,
-            tag: Some("engineering".to_owned()),
-            invitees: Vec::new(),
-        });
-        assert!(result.is_err());
+    fn a_folder_names_its_place_once() {
+        assert!(create_folder(&folder(None, None)).is_ok());
+        assert!(create_folder(&folder(None, Some("c:ada"))).is_ok());
+        assert!(create_folder(&folder(Some(uuid::Uuid::now_v7()), None)).is_ok());
+        assert!(create_folder(&folder(Some(uuid::Uuid::now_v7()), Some("c:ada"))).is_err());
+        assert!(create_folder(&folder(None, Some("  "))).is_err());
     }
 
     #[test]
     fn kms_configuration_requires_a_key() {
         let result = bucket_configuration(&BucketConfigurationDto {
+            drive: None,
             bucket_name: "example-briefcase".to_owned(),
             region: "ap-south-1".to_owned(),
             role_arn: "arn:aws:iam::123456789012:role/briefcase".to_owned(),
@@ -441,6 +474,7 @@ mod tests {
     #[test]
     fn bucket_prefix_must_be_a_canonical_relative_namespace() {
         let result = bucket_configuration(&BucketConfigurationDto {
+            drive: None,
             bucket_name: "example-briefcase".to_owned(),
             region: "ap-south-1".to_owned(),
             role_arn: "arn:aws:iam::123456789012:role/briefcase".to_owned(),

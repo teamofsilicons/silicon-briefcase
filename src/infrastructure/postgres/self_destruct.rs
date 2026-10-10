@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::{
     PostgresRepository,
-    metadata::common::{self, actor_kind, begin, load_entry, record_change},
+    metadata::common::{self, begin, load_entry, record_change},
     sharing::db,
 };
 use crate::{
@@ -41,7 +41,6 @@ impl PostgresRepository {
         {
             return Err(AppError::NotFound);
         }
-        let actor = context.authorization().actor();
         let creator: (String, String) = sqlx::query_as(
             "SELECT created_by_type, created_by_id FROM briefcase.entries \
               WHERE org_id = briefcase.current_org_id() AND entry_id = $1",
@@ -50,8 +49,13 @@ impl PostgresRepository {
         .fetch_one(&mut *request.transaction)
         .await
         .map_err(db)?;
-        let is_creator = creator.0 == actor_kind(actor.kind()) && creator.1 == actor.id().as_str();
-        if !(is_creator || context.authorization().role().has_administrative_access()) {
+        // The creator (or the custodian of a Silicon that created it) keeps
+        // the file, and so do the drive's owner and the custodian of a
+        // Silicon that owns the drive.
+        let authorization = context.authorization();
+        let is_creator = common::actor_ref(&creator.0, &creator.1)
+            .is_ok_and(|creator| authorization.is_creator(&creator));
+        if !(is_creator || authorization.has_owner_rights()) {
             return Err(AppError::Forbidden);
         }
         if let common::IdempotencyClaim::Replay(_) = common::claim_idempotency(

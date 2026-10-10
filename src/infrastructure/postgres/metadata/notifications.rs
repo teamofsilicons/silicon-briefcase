@@ -50,6 +50,8 @@ pub(in crate::infrastructure::postgres) struct NewNotification<'a> {
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct NotificationDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    drive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -81,18 +83,27 @@ pub(in crate::infrastructure::postgres) fn snapshot(
 ) -> EntrySnapshot {
     EntrySnapshot {
         entry_id: entry.id,
+        drive: Some(entry.organization_id.as_str().to_owned()),
         name: entry.name.as_str().to_owned(),
         path: entry.path.clone(),
         kind: entry.kind,
     }
 }
 
-/// Writes one notification into a recipient's inbox.
+/// Writes one notification into the recipient's own inbox, which lives in the
+/// recipient's drive, in the transaction of the change that caused it.
+///
+/// A recipient whose uuid happens to name a pre-migration organization has no
+/// inbox Briefcase may write into; the change goes ahead without the
+/// notification and the skip is logged.
 pub(in crate::infrastructure::postgres) async fn insert(
     transaction: &mut Transaction<'_, Postgres>,
     notification: &NewNotification<'_>,
 ) -> Result<()> {
     let details = NotificationDetails {
+        drive: notification
+            .subject
+            .and_then(|subject| subject.drive.clone()),
         name: notification.subject.map(|subject| subject.name.clone()),
         path: notification
             .subject
@@ -107,13 +118,9 @@ pub(in crate::infrastructure::postgres) async fn insert(
     let details = serde_json::to_value(&details)
         .map_err(|_| internal("notification details cannot be encoded"))?;
 
-    sqlx::query(
-        "INSERT INTO briefcase.notifications ( \
-                org_id, notification_id, recipient_type, recipient_id, kind, \
-                actor_type, actor_id, entry_id, details \
-         ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8)",
+    let delivered = sqlx::query_scalar::<_, bool>(
+        "SELECT briefcase.deliver_notification($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(NotificationId::new().as_uuid())
     .bind(actor_kind(notification.recipient.kind()))
     .bind(notification.recipient.id().as_str())
     .bind(encode_kind(notification.kind))
@@ -125,9 +132,15 @@ pub(in crate::infrastructure::postgres) async fn insert(
             .map(|subject| subject.entry_id.as_uuid()),
     )
     .bind(details)
-    .execute(&mut **transaction)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(map_sql)?;
+    if !delivered {
+        tracing::warn!(
+            event = "notification_skipped",
+            "a recipient's uuid names a pre-migration organization; its notification was not written"
+        );
+    }
     Ok(())
 }
 
@@ -209,6 +222,7 @@ fn notification(row: NotificationRow) -> Result<Notification> {
         (Some(entry_id), Some(name), Some(path), Some(kind)) => Some(EntrySnapshot {
             entry_id: EntryId::from_uuid(entry_id)
                 .map_err(|_| internal("invalid persisted notification entry identifier"))?,
+            drive: details.drive,
             name,
             path: EntryPath::new(path)
                 .map_err(|_| internal("invalid persisted notification path"))?,

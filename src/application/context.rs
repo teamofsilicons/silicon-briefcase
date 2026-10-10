@@ -1,13 +1,13 @@
 //! Trusted execution context shared by application use cases.
 
-use crate::domain::actor::RequestAuthContext;
+use crate::domain::actor::{ActorRef, RequestAuthContext};
 
 /// Verified authorization facts plus request correlation for one use case.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionContext {
     authorization: RequestAuthContext,
     request_id: String,
-    directory_members: Vec<RequestAuthContext>,
+    share_recipients: Vec<ActorRef>,
 }
 
 impl ExecutionContext {
@@ -17,7 +17,7 @@ impl ExecutionContext {
         Self {
             authorization,
             request_id: request_id.into(),
-            directory_members: Vec::new(),
+            share_recipients: Vec::new(),
         }
     }
 
@@ -33,13 +33,26 @@ impl ExecutionContext {
         &self.request_id
     }
 
-    /// Attaches directory projections of share recipients, never caller authentication.
-    pub(crate) fn with_directory_members(mut self, members: Vec<RequestAuthContext>) -> Self {
-        self.directory_members = members;
+    /// Replaces the authorization facts, keeping the request correlation, for
+    /// a request moved into the drive it acts on.
+    #[must_use]
+    pub fn with_authorization(mut self, authorization: RequestAuthContext) -> Self {
+        self.authorization = authorization;
         self
     }
 
-    pub(crate) fn directory_members(&self) -> &[RequestAuthContext] {
-        &self.directory_members
+    /// Attaches accounts a share names, resolved at Silicon Accounts. They
+    /// become participants of the drive so grants can name them; they never
+    /// act in this request.
+    #[must_use]
+    pub fn with_share_recipients(mut self, recipients: Vec<ActorRef>) -> Self {
+        self.share_recipients = recipients;
+        self
+    }
+
+    /// Returns the accounts a share in this request names.
+    #[must_use]
+    pub fn share_recipients(&self) -> &[ActorRef] {
+        &self.share_recipients
     }
 }

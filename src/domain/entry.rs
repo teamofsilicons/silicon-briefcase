@@ -76,23 +76,27 @@ impl EntryBoundary {
     }
 }
 
-/// Internal classification for reconciled system folders.
+/// Internal classification for system folders.
 ///
 /// System entries are never serialized as a separate v1 API kind. They are
-/// reserved and cannot be renamed, moved, deleted, or granted directly.
+/// structure: nobody renames, moves, deletes, or shares them.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemEntryKind {
-    /// The organization's canonical Public container.
-    PublicContainer,
-    /// The organization's canonical Private container.
-    PrivateContainer,
-    /// A canonical folder for one current IAM tag.
-    TagRoot,
-    /// A canonical private folder for one current member.
-    PrivateActorFolder,
-    /// Reserved Apps index or application namespace; navigation only.
+    /// The top of an account's drive ("My files").
+    DriveRoot,
+    /// `apps/` at the top of a drive: one folder per app, created by Briefcase.
     ApplicationContainer,
+    /// `apps/{app}/`: where that app keeps what it stores for the account.
+    ApplicationFolder,
+    /// Pre-migration organization Public container (legacy rows only).
+    PublicContainer,
+    /// Pre-migration organization Private container (legacy rows only).
+    PrivateContainer,
+    /// Pre-migration organization tag folder (legacy rows only).
+    TagRoot,
+    /// Pre-migration per-member private folder (legacy rows only).
+    PrivateActorFolder,
 }
 
 impl SystemEntryKind {
@@ -100,8 +104,12 @@ impl SystemEntryKind {
     #[must_use]
     pub const fn root_type(self) -> RootType {
         match self {
-            Self::PublicContainer | Self::ApplicationContainer => RootType::Public,
-            Self::PrivateContainer | Self::PrivateActorFolder => RootType::Private,
+            Self::PublicContainer => RootType::Public,
+            Self::DriveRoot
+            | Self::ApplicationContainer
+            | Self::ApplicationFolder
+            | Self::PrivateContainer
+            | Self::PrivateActorFolder => RootType::Private,
             Self::TagRoot => RootType::Tag,
         }
     }
@@ -193,8 +201,12 @@ impl<'de> Deserialize<'de> for EntryName {
     }
 }
 
-/// Maximum UTF-8 byte length of an organization-relative entry path.
+/// Maximum UTF-8 byte length of a drive-relative entry path.
 pub const MAX_ENTRY_PATH_BYTES: usize = 2_048;
+
+/// The stored path of a drive's root folder. No file or folder name can be
+/// `.`, so it never collides with the path of anything inside the drive.
+pub const DRIVE_ROOT_PATH: &str = ".";
 
 /// A normalized organization-relative path such as `private/cos:tos/q3.md`.
 ///
@@ -239,6 +251,19 @@ impl EntryPath {
         Ok(Self(normalized))
     }
 
+    /// The path of a drive's root folder. Its children's paths start fresh
+    /// (`notes`, not `./notes`), so the root itself is never part of a path.
+    #[must_use]
+    pub fn drive_root() -> Self {
+        Self(DRIVE_ROOT_PATH.to_owned())
+    }
+
+    /// Returns whether this is a drive root's path.
+    #[must_use]
+    pub fn is_drive_root(&self) -> bool {
+        self.0 == DRIVE_ROOT_PATH
+    }
+
     /// Builds the path of a direct child of this folder.
     ///
     /// # Errors
@@ -246,6 +271,9 @@ impl EntryPath {
     /// Returns [`EntryPathError::TooLong`] when the child path would exceed
     /// [`MAX_ENTRY_PATH_BYTES`].
     pub fn join(&self, name: &EntryName) -> Result<Self, EntryPathError> {
+        if self.is_drive_root() {
+            return Ok(Self(name.as_str().to_owned()));
+        }
         let mut child = String::with_capacity(self.0.len() + 1 + name.as_str().len());
         child.push_str(&self.0);
         child.push('/');
@@ -433,6 +461,20 @@ mod tests {
             path.parent().map(EntryPath::into_inner),
             Some("private/cos:tos/top_secret".to_owned())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_drive_roots_children_start_fresh() -> Result<(), EntryPathError> {
+        let root = EntryPath::drive_root();
+        assert!(root.is_drive_root());
+        assert!(
+            EntryPath::new(".").is_err(),
+            "nobody can address the root by path"
+        );
+        let child = root.join(&EntryName::new("notes").map_err(EntryPathError::Segment)?)?;
+        assert_eq!(child.as_str(), "notes");
+        assert!(!child.is_drive_root());
         Ok(())
     }
 

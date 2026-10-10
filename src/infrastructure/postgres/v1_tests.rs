@@ -1,20 +1,23 @@
-//! Behavior checks against a real database, including the live permission view.
+//! Drive behavior against a real database, as the API's own role (row
+//! security on), including the live permission view and the cross-drive
+//! functions.
 use super::{PostgresRepository, TenantContext};
 use crate::{
     application::{
         context::ExecutionContext,
         idempotency::IdempotencyKey,
         service::{
-            CreateFolderCommand, MetadataRepository, MetadataService, MutationMetadata,
-            UpdateEntryCommand,
+            CreateFolderCommand, GrantPermissionCommand, MetadataRepository, MetadataService,
+            MetadataServiceError, MutationMetadata, RevokePermissionCommand, UpdateEntryCommand,
         },
     },
     domain::{
         actor::{
-            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
+            ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, DriveAccess,
             RequestAuthContext,
         },
         entry::{EntryName, EntryPath},
+        notification::NotificationKind,
         permission::{AccessRight, Capability, GrantedAccess},
     },
     error::AppError,
@@ -22,23 +25,26 @@ use crate::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn context(
-    org: &str,
-    actor: &str,
-    role: OrganizationRole,
+fn account_uuid(prefix: &str) -> String {
+    format!("{prefix}{}", &Uuid::now_v7().simple().to_string()[12..])
+}
+
+fn carbon(uuid: &str) -> anyhow::Result<ActorRef> {
+    Ok(ActorRef::new(ActorKind::Carbon, ActorId::new(uuid)?))
+}
+
+fn in_drive(
+    owner: &ActorRef,
+    caller: &ActorRef,
+    access: DriveAccess,
     mode: AuthenticationMode,
 ) -> anyhow::Result<ExecutionContext> {
     Ok(ExecutionContext::new(
-        RequestAuthContext::new(
-            OrganizationId::new(org)?,
-            ActorRef::new(ActorKind::Carbon, ActorId::new(actor)?),
-            role,
-            vec![],
-            mode,
-        ),
+        RequestAuthContext::for_drive(owner.clone(), caller.clone(), access, mode)?,
         "v1-integration",
     ))
 }
+
 fn mutation() -> anyhow::Result<MutationMetadata> {
     Ok(MutationMetadata::new(
         Some(IdempotencyKey::new(Uuid::new_v4().to_string())?),
@@ -46,11 +52,9 @@ fn mutation() -> anyhow::Result<MutationMetadata> {
     ))
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Result<()> {
+async fn pools() -> anyhow::Result<Option<(sqlx::PgPool, sqlx::PgPool)>> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
-        return Ok(());
+        return Ok(None);
     };
     let pool = sqlx::PgPool::connect_with(
         url.parse::<sqlx::postgres::PgConnectOptions>()?
@@ -70,67 +74,81 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
         })
         .connect_with((*pool.connect_options()).clone())
         .await?;
+    Ok(Some((pool, api_pool)))
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn drive_roots_links_and_complete_logs() -> anyhow::Result<()> {
+    let Some((pool, api_pool)) = pools().await? else {
+        return Ok(());
+    };
     let repo = Arc::new(PostgresRepository::new(api_pool.clone()));
     let service = MetadataService::new(repo.clone());
-    let org = format!("v1-{}", Uuid::new_v4().simple());
-    let owner = context(
-        &org,
-        "owner:tos",
-        OrganizationRole::Owner,
-        AuthenticationMode::Bearer,
-    )?;
-    let viewer = context(
-        &org,
-        "viewer:tos",
-        OrganizationRole::Member,
-        AuthenticationMode::Bearer,
-    )?;
-    let public_root = service
-        .get_entry_by_path(&owner, &EntryPath::new("public")?)
-        .await?;
-    assert!(repo.link_access(&owner, public_root.id()).await?.can_manage);
+    let ada = carbon(&account_uuid("Ada"))?;
+    let bob = carbon(&account_uuid("Bob"))?;
+    let owner = in_drive(&ada, &ada, DriveAccess::Owner, AuthenticationMode::Bearer)?;
+    let viewer = in_drive(&ada, &bob, DriveAccess::Visitor, AuthenticationMode::Bearer)?;
+
+    // The first request creates the drive and its root folder.
+    let root = service.drive_root(&owner).await?;
+    assert!(root.entry.path.is_drive_root());
+    assert_eq!(root.entry.parent_id, None);
     assert!(
-        !repo
-            .link_access(&viewer, public_root.id())
-            .await?
-            .can_manage
+        matches!(
+            service.drive_root(&viewer).await,
+            Err(MetadataServiceError::NotFound)
+        ),
+        "only the drive's owner rights reach its root"
     );
-    let private = service
-        .get_entry_by_path(&owner, &EntryPath::new("private/owner:tos")?)
-        .await?;
+    // The top of a drive never gets a link.
+    assert!(!repo.link_access(&owner, root.entry.id).await?.can_manage);
     assert!(
-        repo.set_link_access(&owner, private.id(), true, None, &mutation()?)
+        repo.set_link_access(&owner, root.entry.id, true, None, &mutation()?)
             .await
             .is_err()
     );
-    let container = service
-        .get_entry_by_path(&owner, &EntryPath::new("private")?)
-        .await?;
+    // `apps` at the top is kept for apps.
     assert!(
-        repo.set_link_access(&owner, container.id(), true, None, &mutation()?)
+        service
+            .create_folder(
+                &owner,
+                CreateFolderCommand::new(EntryName::new("apps")?, None, vec![])?,
+                &mutation()?,
+            )
             .await
             .is_err()
     );
+    // A visitor cannot add to someone else's drive top.
+    assert!(
+        service
+            .create_folder(
+                &viewer,
+                CreateFolderCommand::new(EntryName::new("intrusion")?, None, vec![])?,
+                &mutation()?,
+            )
+            .await
+            .is_err()
+    );
+
     let folder = service
         .create_folder(
             &owner,
-            CreateFolderCommand::new(EntryName::new("shared")?, Some(private.id()), None, vec![])?,
+            CreateFolderCommand::new(EntryName::new("shared")?, None, vec![])?,
             &mutation()?,
         )
         .await?;
+    assert_eq!(folder.entry.path.as_str(), "shared");
+    assert_eq!(folder.entry.parent_id, Some(root.entry.id));
     let child = service
         .create_folder(
             &owner,
-            CreateFolderCommand::new(
-                EntryName::new("nested")?,
-                Some(folder.entry.id),
-                None,
-                vec![],
-            )?,
+            CreateFolderCommand::new(EntryName::new("nested")?, Some(folder.entry.id), vec![])?,
             &mutation()?,
         )
         .await?;
-    let tenant = TenantContext::for_service(&org, "anonymous-test");
+    assert_eq!(child.entry.path.as_str(), "shared/nested");
+    let tenant = TenantContext::for_service(ada.id().as_str(), "anonymous-test");
     assert!(matches!(
         repo.public_entry(&tenant, child.entry.path.as_str()).await,
         Err(AppError::NotFound)
@@ -164,7 +182,7 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
             .get_entry_by_path(&viewer, &child.entry.path)
             .await
             .is_err(),
-        "anonymous permission does not widen authenticated member grants"
+        "a public link does not widen what a signed-in visitor sees"
     );
     assert!(
         repo.set_link_access(&viewer, folder.entry.id, false, None, &mutation()?)
@@ -203,13 +221,15 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
             .len()
             <= 100
     );
-    service
+    // Moving to the top of the drive is a move to its root folder.
+    let moved_up = service
         .update_entry(
             &owner,
-            &UpdateEntryCommand::new(child.entry.id, None, Some(private.id()))?,
+            &UpdateEntryCommand::new(child.entry.id, None, Some(root.entry.id))?,
             &mutation()?,
         )
         .await?;
+    assert_eq!(moved_up.entry.path.as_str(), "nested");
     let moved = repo.logs(&owner, folder.entry.id, None, 100).await?;
     assert!(
         moved
@@ -226,206 +246,212 @@ async fn public_inheritance_protected_roots_and_complete_logs() -> anyhow::Resul
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn delegated_namespace_and_tag_permissions_are_live() -> anyhow::Result<()> {
-    use crate::domain::actor::ApplicationId;
-    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+async fn app_folders_and_shares_across_drives_are_live() -> anyhow::Result<()> {
+    let Some((pool, api_pool)) = pools().await? else {
         return Ok(());
     };
-    let pool = sqlx::PgPool::connect_with(
-        url.parse::<sqlx::postgres::PgConnectOptions>()?
-            .options([("search_path", "public")]),
-    )
-    .await?;
-    super::migrate(&pool).await?;
-    let api_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .after_connect(|connection, _| {
-            Box::pin(async move {
-                sqlx::query("SET ROLE briefcase_api")
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with((*pool.connect_options()).clone())
-        .await?;
     let repo = Arc::new(PostgresRepository::new(api_pool.clone()));
     let service = MetadataService::new(repo.clone());
-    let org = format!("v1-{}", Uuid::new_v4().simple());
-    let owner = context(
-        &org,
-        "owner:tos",
-        OrganizationRole::Owner,
-        AuthenticationMode::Bearer,
-    )?;
-    let app_mode = AuthenticationMode::OnBehalfOf {
-        application_id: ApplicationId::new("notes")?,
+    let ada = carbon(&account_uuid("Ada"))?;
+    let bob = carbon(&account_uuid("Bob"))?;
+    let owner = in_drive(&ada, &ada, DriveAccess::Owner, AuthenticationMode::Bearer)?;
+    let notes = || -> anyhow::Result<AuthenticationMode> {
+        Ok(AuthenticationMode::OnBehalfOf {
+            application_id: ApplicationId::new("notes")?,
+        })
     };
-    let app = context(&org, "owner:tos", OrganizationRole::Owner, app_mode)?;
-    let app_root = service.application_folder(&app).await?;
-    assert_eq!(app_root.entry.path.as_str(), "apps/notes/private/owner:tos");
+    let app = in_drive(&ada, &ada, DriveAccess::Owner, notes()?)?;
+    let app_folder = service.application_folder(&app).await?;
+    assert_eq!(app_folder.entry.path.as_str(), "apps/notes");
     assert_eq!(
         service.application_folder(&app).await?.entry.id,
-        app_root.entry.id,
-        "an existing namespace is reused"
+        app_folder.entry.id,
+        "an existing app folder is reused"
     );
-    assert!(
-        service
-            .get_entry_by_path(&app, &EntryPath::new("private/owner:tos")?)
-            .await
-            .is_err(),
-        "even an OBO owner stays inside the calling app"
-    );
-    let public = service
-        .get_entry_by_path(&app, &EntryPath::new("apps/notes/public")?)
-        .await?;
-    let shared = service
+    let private = service
         .create_folder(
             &owner,
-            CreateFolderCommand::new(
-                EntryName::new("tag-shared")?,
-                Some(public.id()),
-                None,
-                vec![],
-            )?,
+            CreateFolderCommand::new(EntryName::new("private-notes")?, None, vec![])?,
             &mutation()?,
         )
         .await?;
-    // Seed authoritative directory facts; the SQL view must follow revocation
-    // without materializing a permanent grant for the recipient.
-    let viewer = context(
-        &org,
-        "viewer:tos",
-        OrganizationRole::Member,
-        AuthenticationMode::Bearer,
-    )?;
-    service
-        .get_entry_by_path(&viewer, &EntryPath::new("public")?)
-        .await?;
-    let viewer_app = context(
-        &org,
-        "viewer:tos",
-        OrganizationRole::Member,
-        AuthenticationMode::OnBehalfOf {
-            application_id: ApplicationId::new("notes")?,
-        },
-    )?;
-    assert_eq!(
+    assert!(
         service
-            .application_folder(&viewer_app)
-            .await?
-            .entry
-            .path
-            .as_str(),
-        "apps/notes/private/viewer:tos"
+            .get_entry_by_path(&app, &EntryPath::new("private-notes")?)
+            .await
+            .is_err(),
+        "an app stays inside its own folder"
     );
     assert!(
         service
-            .get_entry_by_path(&viewer_app, &app_root.entry.path)
+            .get_entry_by_path(&app, &EntryPath::new("apps")?)
             .await
             .is_err(),
-        "the app cannot read another member's private root"
+        "an app does not see the apps container itself"
     );
-    let mut tx = repo.begin(&TenantContext::from_execution(&owner)).await?;
-    sqlx::query("INSERT INTO briefcase.organization_tags(org_id,tag_id,name) VALUES($1,'research-id','research')").bind(&org).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO briefcase.organization_member_tags(org_id,actor_type,actor_id,tag_id) VALUES($1,'carbon','viewer:tos','research-id')").bind(&org).execute(&mut *tx).await?;
-    tx.commit().await?;
-    repo.invite_tag(
-        &owner,
-        shared.entry.id,
-        "research-id",
-        GrantedAccess::new([AccessRight::Update]),
-        true,
-        None,
-        &mutation()?,
-    )
-    .await?;
-    let tagged = ExecutionContext::new(
-        RequestAuthContext::new(
-            OrganizationId::new(&org)?,
-            viewer.authorization().actor().clone(),
-            OrganizationRole::Member,
-            vec![crate::domain::actor::TagName::new("research")?],
-            AuthenticationMode::Bearer,
-        ),
-        "v1-tagged-member",
+
+    // Bob's app folder lives in Bob's drive; Ada's drive stays out of reach.
+    let bob_app = in_drive(&bob, &bob, DriveAccess::Owner, notes()?)?;
+    let bob_folder = service.application_folder(&bob_app).await?;
+    assert_eq!(bob_folder.entry.path.as_str(), "apps/notes");
+    assert_ne!(bob_folder.entry.id, app_folder.entry.id);
+    assert!(
+        repo.find_active_entry(&bob_app, app_folder.entry.id)
+            .await?
+            .is_none(),
+        "row security keeps Ada's drive out of Bob's"
     );
+
+    // Ada shares a folder with Bob, who acts on it inside Ada's drive.
+    let visitor = in_drive(&ada, &bob, DriveAccess::Visitor, AuthenticationMode::Bearer)?;
+    let bob_home = in_drive(&bob, &bob, DriveAccess::Owner, AuthenticationMode::Bearer)?;
+    assert!(
+        repo.find_active_entry(&visitor, private.entry.id)
+            .await?
+            .is_some_and(
+                |entry| entry.authorization(visitor.authorization()).visibility()
+                    == crate::domain::permission::EntryVisibility::Hidden
+            ),
+        "nothing is visible before a share"
+    );
+    let sharing = owner.clone().with_share_recipients(vec![bob.clone()]);
+    let grant = service
+        .grant_permission(
+            &sharing,
+            &GrantPermissionCommand {
+                entry_id: private.entry.id,
+                principal: bob.clone(),
+                access: GrantedAccess::new([AccessRight::Update]),
+                inherits_to_descendants: true,
+                lifetime: None,
+            },
+            &mutation()?,
+        )
+        .await?;
     let authorized = repo
-        .find_active_entry(&tagged, shared.entry.id)
+        .find_active_entry(&visitor, private.entry.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("missing shared entry"))?;
     assert!(
         authorized
-            .authorization(tagged.authorization())
+            .authorization(visitor.authorization())
             .allows(Capability::UpdateMetadata)
     );
     assert!(
         !authorized
-            .authorization(tagged.authorization())
-            .allows(Capability::Delete)
+            .authorization(visitor.authorization())
+            .allows(Capability::Delete),
+        "delete is never shared"
     );
-    let listed = repo.invitations(&owner, shared.entry.id, None).await?;
-    let grant = listed["items"][0]["id"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing grant"))?
-        .parse()?;
+    // The share is found from Bob's side through the cross-drive lookup.
+    let shared_with_bob = repo.shared_with(&bob, None, 10).await?;
+    assert_eq!(shared_with_bob.len(), 1);
+    assert_eq!(shared_with_bob[0].drive, ada.id().as_str());
+    assert_eq!(shared_with_bob[0].entry_id, private.entry.id.as_uuid());
+    assert_eq!(
+        repo.shared_drives(&bob, 10).await?,
+        vec![ada.id().as_str().to_owned()]
+    );
+    assert_eq!(
+        repo.entry_drive(private.entry.id.as_uuid())
+            .await?
+            .as_deref(),
+        Some(ada.id().as_str())
+    );
+    assert_eq!(repo.entry_drive(Uuid::now_v7()).await?, None);
+
+    // The notification reached Bob's own inbox, naming Ada's drive.
+    let inbox = repo.load_notification_inbox(&bob_home).await?;
+    let granted = inbox
+        .items
+        .iter()
+        .find(|item| item.kind == NotificationKind::AccessGranted)
+        .ok_or_else(|| anyhow::anyhow!("missing share notification"))?;
+    let subject = granted
+        .subject
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing notification subject"))?;
+    assert_eq!(subject.drive.as_deref(), Some(ada.id().as_str()));
+    assert_eq!(subject.path.as_str(), "private-notes");
+    assert!(
+        repo.load_notification_inbox(&owner).await?.items.is_empty(),
+        "nothing landed in Ada's inbox"
+    );
+
+    // Revoking is idempotent under its key and notifies once.
     let revoke_key = mutation()?;
-    repo.revoke_tag_or_member(&owner, shared.entry.id, grant, &revoke_key)
+    repo.revoke_tag_or_member(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
         .await?;
-    repo.revoke_tag_or_member(&owner, shared.entry.id, grant, &revoke_key)
+    repo.revoke_tag_or_member(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
         .await?;
-    let inbox = repo.load_notification_inbox(&tagged).await?;
+    let inbox = repo.load_notification_inbox(&bob_home).await?;
     assert_eq!(
         inbox
             .items
             .iter()
-            .filter(|n| n.kind == crate::domain::notification::NotificationKind::AccessRevoked)
+            .filter(|n| n.kind == NotificationKind::AccessRevoked)
             .count(),
         1,
-        "an idempotent revocation notifies each member once"
+        "an idempotent revocation notifies once"
     );
-    repo.invite_tag(
-        &owner,
-        shared.entry.id,
-        "research-id",
-        GrantedAccess::new([AccessRight::Update]),
-        true,
-        None,
-        &mutation()?,
-    )
-    .await?;
+    assert!(repo.shared_with(&bob, None, 10).await?.is_empty());
+    let revoked = repo
+        .find_active_entry(&visitor, private.entry.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing entry"))?;
+    assert!(
+        !revoked
+            .authorization(visitor.authorization())
+            .allows(Capability::Read)
+    );
+    assert!(matches!(
+        service
+            .revoke_permission(
+                &owner,
+                RevokePermissionCommand {
+                    entry_id: private.entry.id,
+                    grant_id: grant.id(),
+                },
+                &mutation()?,
+            )
+            .await,
+        Err(MetadataServiceError::NotFound)
+    ));
+
+    // Share listings page through every live grant.
+    let suffix = account_uuid("P");
     let mut tx = repo.begin(&TenantContext::from_execution(&owner)).await?;
-    sqlx::query("INSERT INTO briefcase.organization_tags(org_id,tag_id,name) SELECT $1,'page-'||n,'page-'||n FROM generate_series(1,105) n").bind(&org).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO briefcase.tag_permission_grants(org_id,entry_id,grant_id,tag_id,access_mask,inherits_to_descendants,granted_by_type,granted_by_id) SELECT $1,$2,gen_random_uuid(),'page-'||n,1,true,'carbon','owner:tos' FROM generate_series(1,105) n").bind(&org).bind(shared.entry.id.as_uuid()).execute(&mut *tx).await?;
+    sqlx::query(
+        "INSERT INTO briefcase.organization_members (org_id, actor_type, actor_id) \
+         SELECT $1, 'carbon', left($2, 20) || n FROM generate_series(1, 105) n",
+    )
+    .bind(ada.id().as_str())
+    .bind(&suffix)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO briefcase.permission_grants (org_id, entry_id, grant_id, principal_type, \
+                principal_id, access_mask, inherits_to_descendants, granted_by_type, granted_by_id) \
+         SELECT $1, $2, gen_random_uuid(), 'carbon', left($3, 20) || n, 1, true, 'carbon', $1 \
+           FROM generate_series(1, 105) n",
+    )
+    .bind(ada.id().as_str())
+    .bind(private.entry.id.as_uuid())
+    .bind(&suffix)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
-    let page = repo.invitations(&owner, shared.entry.id, None).await?;
+    let page = repo.invitations(&owner, private.entry.id, None).await?;
     assert_eq!(page["items"].as_array().map(Vec::len), Some(100));
     let cursor = page["next_cursor"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing page cursor"))?
         .parse()?;
     let last = repo
-        .invitations(&owner, shared.entry.id, Some(cursor))
+        .invitations(&owner, private.entry.id, Some(cursor))
         .await?;
-    assert_eq!(last["items"].as_array().map(Vec::len), Some(6));
+    assert_eq!(last["items"].as_array().map(Vec::len), Some(5));
     assert!(last["next_cursor"].is_null());
-    let mut tx = repo.begin(&TenantContext::from_execution(&owner)).await?;
-    sqlx::query(
-        "DELETE FROM briefcase.organization_member_tags WHERE org_id=$1 AND actor_id='viewer:tos'",
-    )
-    .bind(&org)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    let revoked = repo
-        .find_active_entry(&viewer, shared.entry.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing public entry"))?;
-    assert!(
-        !revoked
-            .authorization(viewer.authorization())
-            .allows(Capability::UpdateMetadata)
-    );
     api_pool.close().await;
     pool.close().await;
     Ok(())

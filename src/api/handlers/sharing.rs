@@ -2,7 +2,7 @@
 
 use super::super::{
     auth::Action,
-    delivery,
+    delivery, drives,
     dto::{LinkAccessDto, PageQuery},
     extract,
     state::AppState,
@@ -43,6 +43,7 @@ pub(crate) async fn link_access(
 ) -> Result<Json<LinkAccessDto>, AppError> {
     let context =
         extract::authenticate(&state, &headers, Action::ReadEntry, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let access = state
         .content_adapter
         .metadata_repository()
@@ -62,6 +63,7 @@ pub(crate) async fn set_link_access(
 ) -> Result<Json<LinkAccessDto>, AppError> {
     let context =
         extract::authenticate(&state, &headers, Action::GrantPermission, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let metadata = extract::mutation(&headers, "set_link_access", &id.to_string(), &body, true)?;
     let access = state
         .content_adapter
@@ -88,6 +90,7 @@ pub(crate) async fn logs(
 ) -> Result<Json<LogPage>, AppError> {
     let context =
         extract::authenticate(&state, &headers, Action::ListActivity, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let cursor = query
         .cursor
         .map(|v| {

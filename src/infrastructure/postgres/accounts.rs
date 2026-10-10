@@ -392,6 +392,101 @@ impl AccountStore {
         Ok(record)
     }
 
+    /// Returns whether a Silicon (or its custodian) allowed `account` to share
+    /// with it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn share_allowed(&self, silicon: &str, account: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM briefcase.silicon_share_allowances \
+                             WHERE silicon_uuid = $1 AND allowed_uuid = $2)",
+        )
+        .bind(silicon)
+        .bind(account)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    /// Lets `account` share with a Silicon. Returns whether it was new.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn allow_sharer(
+        &self,
+        silicon: &str,
+        account: &str,
+        allowed_by: &str,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query(
+            "INSERT INTO briefcase.silicon_share_allowances \
+                 (silicon_uuid, allowed_uuid, allowed_by_uuid) \
+             VALUES ($1, $2, $3) ON CONFLICT (silicon_uuid, allowed_uuid) DO NOTHING",
+        )
+        .bind(silicon)
+        .bind(account)
+        .bind(allowed_by)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Stops letting `account` share with a Silicon. Returns whether it had
+    /// been allowed. Shares it already made stay.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn disallow_sharer(&self, silicon: &str, account: &str) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query(
+            "DELETE FROM briefcase.silicon_share_allowances \
+              WHERE silicon_uuid = $1 AND allowed_uuid = $2",
+        )
+        .bind(silicon)
+        .bind(account)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Lists the accounts a Silicon lets share with it, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn allowed_sharers(
+        &self,
+        silicon: &str,
+    ) -> Result<Vec<(AccountRecord, OffsetDateTime)>, sqlx::Error> {
+        #[derive(sqlx::FromRow)]
+        struct AllowedRow {
+            #[sqlx(flatten)]
+            account: AccountRow,
+            allowed_at: OffsetDateTime,
+        }
+        sqlx::query_as::<_, AllowedRow>(
+            "SELECT account.account_uuid, account.kind, account.public_id, \
+                    account.public_id_observed_at, account.display_name, account.pfp_url, \
+                    account.email, account.custodian_uuid, account.status, \
+                    account.revoked_before, account.refreshed_at, \
+                    allowance.created_at AS allowed_at \
+               FROM briefcase.silicon_share_allowances AS allowance \
+               JOIN briefcase.accounts AS account ON account.account_uuid = allowance.allowed_uuid \
+              WHERE allowance.silicon_uuid = $1 \
+              ORDER BY allowance.created_at, account.account_uuid",
+        )
+        .bind(silicon)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| Ok((AccountRecord::try_from(row.account)?, row.allowed_at)))
+        .collect()
+    }
+
     /// Applies one webhook delivery exactly once.
     ///
     /// # Errors
@@ -560,7 +655,11 @@ async fn apply_change(
             let kind = load(transaction, uuid)
                 .await?
                 .map_or(ActorKind::Carbon, |record| record.kind);
-            mark_deleted(transaction, uuid, kind, at).await?
+            let changed = mark_deleted(transaction, uuid, kind, at).await?;
+            // Idempotent, and run for a repeated deletion too, in the same
+            // transaction as the receipt: a failure is retried as a whole.
+            erase_deleted_account(transaction, uuid, kind, &delivery.event_id).await?;
+            changed
         }
     };
     Ok(if changed > 0 {
@@ -603,8 +702,52 @@ async fn revoke(
     .rows_affected())
 }
 
-/// Marks an account deleted and forgets what identified it. Its files are
-/// handled by the account-deletion process, not here.
+/// `account.deleted`: everything in the account's own drive is deleted
+/// permanently (the worker purges it, objects in a bring-your-own bucket
+/// included), every live share to it ends in every drive, and it leaves every
+/// Silicon allow-list. What it created in other accounts' drives belongs to
+/// those drives and stays.
+async fn erase_deleted_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    uuid: &str,
+    kind: ActorKind,
+    event_id: &str,
+) -> Result<(), sqlx::Error> {
+    let request_id = format!(
+        "accounts-webhook:{}",
+        event_id.chars().take(200).collect::<String>()
+    );
+    let erased =
+        sqlx::query_scalar::<_, i64>("SELECT briefcase.erase_deleted_account_drive($1, $2)")
+            .bind(uuid)
+            .bind(&request_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    let revoked =
+        sqlx::query_scalar::<_, i64>("SELECT briefcase.revoke_deleted_account_shares($1, $2, $3)")
+            .bind(kind_name(kind))
+            .bind(uuid)
+            .bind(&request_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    sqlx::query(
+        "DELETE FROM briefcase.silicon_share_allowances \
+          WHERE silicon_uuid = $1 OR allowed_uuid = $1",
+    )
+    .bind(uuid)
+    .execute(&mut **transaction)
+    .await?;
+    tracing::info!(
+        event = "deleted_account_erased",
+        entries = erased,
+        shares_ended = revoked,
+        "a deleted account's drive was erased and its shares ended"
+    );
+    Ok(())
+}
+
+/// Marks an account deleted and forgets what identified it. Its drive is
+/// erased by [`erase_deleted_account`] in the same transaction.
 async fn mark_deleted(
     transaction: &mut Transaction<'_, Postgres>,
     uuid: &str,

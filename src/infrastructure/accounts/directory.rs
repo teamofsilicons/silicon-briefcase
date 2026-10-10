@@ -356,6 +356,101 @@ impl AccountDirectory {
             .map_err(database_error)
     }
 
+    /// Returns whether `sharer` may share with `recipient`.
+    ///
+    /// Carbons can be reached by anyone signed in to Briefcase. Silicons are
+    /// not open to the world: a share reaches a Silicon only from its circle
+    /// (its custodian and the custodian's other Silicons) or from an account
+    /// the Silicon or its custodian allowed first.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`AccountDirectory::custody`] and database errors.
+    pub async fn may_share_with(
+        &self,
+        sharer: &AccountUuid,
+        recipient: &AccountRecord,
+    ) -> Result<bool, AppError> {
+        if recipient.kind == ActorKind::Carbon || recipient.uuid == sharer.as_str() {
+            return Ok(true);
+        }
+        let silicon = AccountUuid::new(recipient.uuid.clone())
+            .map_err(|error| AppError::unprocessable("invalid_account_id", error.to_string()))?;
+        if self.same_circle(sharer, &silicon).await? {
+            return Ok(true);
+        }
+        self.store
+            .share_allowed(silicon.as_str(), sharer.as_str())
+            .await
+            .map_err(database_error)
+    }
+
+    /// Returns whether `caller` manages `silicon`'s allow-list: the Silicon
+    /// itself, or its custodian.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`AccountDirectory::custody`] errors.
+    pub async fn manages_silicon(
+        &self,
+        caller: &AccountUuid,
+        silicon: &AccountUuid,
+    ) -> Result<bool, AppError> {
+        if caller == silicon {
+            return Ok(true);
+        }
+        Ok(is_custodian_of(caller, &self.custody(silicon).await?))
+    }
+
+    /// The accounts a Silicon lets share with it, with when they were allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn allowed_sharers(
+        &self,
+        silicon: &AccountUuid,
+    ) -> Result<Vec<(AccountRecord, OffsetDateTime)>, AppError> {
+        self.store
+            .allowed_sharers(silicon.as_str())
+            .await
+            .map_err(database_error)
+    }
+
+    /// Lets `account` share with `silicon`. Returns whether it was new.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn allow_sharer(
+        &self,
+        silicon: &AccountUuid,
+        account: &AccountUuid,
+        allowed_by: &AccountUuid,
+    ) -> Result<bool, AppError> {
+        self.store
+            .allow_sharer(silicon.as_str(), account.as_str(), allowed_by.as_str())
+            .await
+            .map_err(database_error)
+    }
+
+    /// Stops letting `account` share with `silicon`. Returns whether it had
+    /// been allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn disallow_sharer(
+        &self,
+        silicon: &AccountUuid,
+        account: &AccountUuid,
+    ) -> Result<bool, AppError> {
+        self.store
+            .disallow_sharer(silicon.as_str(), account.as_str())
+            .await
+            .map_err(database_error)
+    }
+
     /// Resolves a `c:`/`si:` id (or a uuid) a caller named to an active
     /// account.
     ///

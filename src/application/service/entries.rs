@@ -26,7 +26,7 @@ use super::{
 const MAX_PAGE_REFILLS: usize = 8;
 
 impl MetadataService {
-    /// Lists visible or traversal-safe children of an organization root or folder.
+    /// Lists visible or traversal-safe children of the drive's top or a folder.
     ///
     /// # Errors
     ///
@@ -175,12 +175,12 @@ impl MetadataService {
         Ok(())
     }
 
-    /// Creates a user folder after applying root or parent policy.
+    /// Creates a folder in a parent, or at the top of the drive.
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataServiceError`] when validation fails, root or parent
-    /// authority is absent, an invitee is not a current member, or persistence
+    /// Returns [`MetadataServiceError`] when validation fails, the caller may
+    /// not add to the parent, an invitee was not resolved, or persistence
     /// fails.
     pub async fn create_folder(
         &self,
@@ -191,40 +191,26 @@ impl MetadataService {
         validate_context(context)?;
         metadata.require_key()?;
 
-        let (boundary, parent_id) = if let Some(parent_id) = command.parent_id {
-            let parent = self
-                .repository
-                .find_active_entry(context, parent_id)
-                .await?
-                .ok_or(MetadataServiceError::NotFound)?;
-            if parent.entry.kind != EntryKind::Folder {
-                return Err(MetadataServiceError::NotFound);
+        // Without a parent the folder goes at the top of the drive, which only
+        // the drive's owner (or the custodian of the Silicon that owns it) may
+        // add to; the root folder carries exactly that rule.
+        let parent = match command.parent_id {
+            Some(parent_id) => {
+                self.repository
+                    .find_active_entry(context, parent_id)
+                    .await?
             }
-            require_capability(&parent, context, Capability::CreateChild)?;
-            (parent.entry.boundary, Some(parent_id))
-        } else {
-            // A typed user folder is a sibling of the reserved containers,
-            // not content silently redirected into one of them. The canonical
-            // container establishes current authority for that boundary only.
-            let boundary =
-                command
-                    .root_boundary
-                    .clone()
-                    .ok_or(MetadataServiceError::Validation(super::ValidationError {
-                        field: "root_boundary",
-                        message: "is required for a user root",
-                    }))?;
-            let container = self
-                .repository
-                .find_boundary_container(context, &boundary)
-                .await?
-                .ok_or(MetadataServiceError::NotFound)?;
-            // A tag folder the caller does not carry is not visible to them,
-            // so this reports it exactly as a container that is not there.
-            require_capability(&container, context, Capability::CreateChild)?;
-            (container.entry.boundary.clone(), None)
-        };
-        let required_parent_capability = parent_id.map(|_| Capability::CreateChild);
+            None => self.repository.find_drive_root(context).await?,
+        }
+        .ok_or(MetadataServiceError::NotFound)?;
+        if parent.entry.kind != EntryKind::Folder {
+            return Err(MetadataServiceError::NotFound);
+        }
+        require_capability(&parent, context, Capability::CreateChild)?;
+        refuse_reserved_top_name(parent.system_kind, &command.name)?;
+        let boundary = parent.entry.boundary.clone();
+        let mut command = command;
+        command.parent_id = Some(parent.entry.id);
 
         for invitee in &command.invitees {
             if !self
@@ -234,7 +220,7 @@ impl MetadataService {
             {
                 return Err(MetadataServiceError::Validation(super::ValidationError {
                     field: "invitees",
-                    message: "every invitee must be a current organization member",
+                    message: "every invitee must be resolved before the folder is created",
                 }));
             }
         }
@@ -248,10 +234,31 @@ impl MetadataService {
         };
         let created = self
             .repository
-            .create_folder(context, &mutation, metadata, required_parent_capability)
+            .create_folder(context, &mutation, metadata, Some(Capability::CreateChild))
             .await?;
         let authorization = created.authorization(context.authorization());
         created.into_full_view(authorization)
+    }
+
+    /// Returns the root folder of the drive the request acts in. Only the
+    /// drive's owner (and the custodian of a Silicon that owns it) can see it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataServiceError::NotFound`] for anyone else, and
+    /// repository errors.
+    pub async fn drive_root(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<AuthorizedEntryView, MetadataServiceError> {
+        validate_context(context)?;
+        let root = self
+            .repository
+            .find_drive_root(context)
+            .await?
+            .ok_or(MetadataServiceError::NotFound)?;
+        let authorization = root.authorization(context.authorization());
+        root.into_full_view(authorization)
     }
 
     /// Returns complete metadata for one directly readable active entry.
@@ -408,6 +415,16 @@ impl MetadataService {
             if destination.entry.boundary != source.entry.boundary {
                 return Err(MetadataServiceError::Conflict);
             }
+            refuse_reserved_top_name(
+                destination.system_kind,
+                command.name.as_ref().unwrap_or(&source.entry.name),
+            )?;
+        } else if let Some(name) = command.name.as_ref()
+            && name.as_str() == RESERVED_TOP_NAME
+            && let Some(root) = self.repository.find_drive_root(context).await?
+            && source.entry.parent_id == Some(root.entry.id)
+        {
+            refuse_reserved_top_name(root.system_kind, name)?;
         }
 
         let updated = self
@@ -450,6 +467,25 @@ impl MetadataService {
             .await?;
         Ok(())
     }
+}
+
+/// The name of the folder at the top of every drive that holds what apps
+/// store for the account.
+const RESERVED_TOP_NAME: &str = "apps";
+
+fn refuse_reserved_top_name(
+    parent: Option<crate::domain::entry::SystemEntryKind>,
+    name: &crate::domain::entry::EntryName,
+) -> Result<(), MetadataServiceError> {
+    if parent == Some(crate::domain::entry::SystemEntryKind::DriveRoot)
+        && name.as_str() == RESERVED_TOP_NAME
+    {
+        return Err(MetadataServiceError::Validation(super::ValidationError {
+            field: "reserved_name",
+            message: "`apps` at the top of a drive holds what apps store for you; choose another name.",
+        }));
+    }
+    Ok(())
 }
 
 async fn record_then_list_activity<RecordFuture, List, ListFuture>(
