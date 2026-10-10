@@ -670,3 +670,29 @@ fixture is cleaned up by its owner after evidence capture.
 available on crates.io; the CLI remains `publish = false` and distributed through
 Silicon Apps/native archives. Six exact release archives and verification reports
 are consolidated for the central catalog publisher.
+
+
+## Production release completion — 2026-10-10
+
+The Silicon UI website is deployed from `2148066011c6b98212e2ba426566fba82c833686`, verified ARM64 candidate run
+`38061201873`, immutable image `sha256:833d96ca9498d91a2558c2e8542588da82f4514c2f14c9b4edc8a5d514f5f585`. Public website, signed-in workspace,
+account menu, light/dark themes and phone/desktop layouts were checked against the
+actual production service. The CLI-issued genuine Carbon session is wrapped in
+the production BFF cookie format for isolated browser checks; these checks do not
+claim another hosted sign-in. Existing IAM backends and data remain live.
+
+The migration PR merged after all its CI jobs passed as `4c76f2565bf2feba848e844f1268bd5ab0cefa41`. GitHub release
+[v4.0.0](https://github.com/teamofsilicons/silicon-briefcase/releases/tag/v4.0.0)
+is public with the exact six native archives, SHA256SUMS, provenance and native
+command reports. GitHub asset digests match the verified bytes. The version tag
+points at the original binary source recorded above, independently of the website
+revision. The public crates listed above are confirmed available.
+
+All owned local app/API/worker/receiver processes, Moto4102, backup PostgreSQL4104,
+and the shared Accounts9589/9590 + PostgreSQL5460 fixture are stopped after final
+regressions. The latest private Moto snapshot retains63objects/2,412,160bytes,
+SHA-256 `e77f63b01ea5ce608534cd487bc289d1380abd8dbfd26d0df62efc02c8c997ad`;
+matching database dumps and exact restart instructions are retained privately.
+Central Apps catalog publication and managed installation are coordinated by the
+root release owner. Final structured evidence is in the workspace-level
+`.migration/live/parallel/briefcase/release-record.json`.
