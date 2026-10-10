@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 49] = [
+pub const OPERATIONS: [OperationVersion; 54] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -78,10 +78,30 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("readAccountsInfo", "1.0.0", "GET", "/accounts"),
     operation("readAccount", "1.0.0", "GET", "/me"),
-    operation("listEntries", "1.0.0", "GET", "/entries"),
-    operation("createFolder", "1.0.0", "POST", "/entries"),
+    operation("listDrives", "1.0.0", "GET", "/drives"),
+    operation("listSharedWithMe", "1.0.0", "GET", "/shared"),
+    operation(
+        "listSiliconAllowedAccounts",
+        "1.0.0",
+        "GET",
+        "/silicons/{silicon}/allowed-accounts",
+    ),
+    operation(
+        "allowAccountToShareWithSilicon",
+        "1.0.0",
+        "PUT",
+        "/silicons/{silicon}/allowed-accounts/{account}",
+    ),
+    operation(
+        "disallowAccountToShareWithSilicon",
+        "1.0.0",
+        "DELETE",
+        "/silicons/{silicon}/allowed-accounts/{account}",
+    ),
+    operation("listEntries", "2.0.0", "GET", "/entries"),
+    operation("createFolder", "2.0.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
-    operation("updateEntry", "1.0.0", "PATCH", "/entries/{entry_id}"),
+    operation("updateEntry", "1.1.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
     operation(
         "readEntryContent",
@@ -97,11 +117,11 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     ),
     operation(
         "resolvePermanentUrl",
-        "1.1.0",
+        "1.2.0",
         "GET",
         "/org/{org_id}/{path}",
     ),
-    operation("uploadFile", "1.0.0", "POST", "/uploads"),
+    operation("uploadFile", "1.1.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "3.0.0", "POST", "/obo/files"),
     operation(
         "createFolderOnBehalfOfMember",
@@ -135,7 +155,7 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     ),
     operation(
         "grantPermission",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
@@ -147,14 +167,14 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     ),
     operation(
         "inspectEffectivePermissions",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/permissions/effective",
     ),
     operation("searchFiles", "1.0.0", "GET", "/search"),
     operation("submitTelemetry", "1.0.0", "POST", "/telemetry"),
     operation("submitReport", "1.0.0", "POST", "/reports"),
-    operation("listNotifications", "1.0.0", "GET", "/notifications"),
+    operation("listNotifications", "1.1.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
     operation(
         "listEntryActivity",
@@ -174,12 +194,12 @@ pub const OPERATIONS: [OperationVersion; 49] = [
         "POST",
         "/entries/{entry_id}/versions/{version_id}/restore",
     ),
-    operation("readOrganizationUsage", "1.0.0", "GET", "/usage"),
-    operation("listBin", "1.0.0", "GET", "/bin"),
+    operation("readOrganizationUsage", "2.0.0", "GET", "/usage"),
+    operation("listBin", "1.1.0", "GET", "/bin"),
     operation("restoreEntry", "1.0.0", "POST", "/bin/{entry_id}/restore"),
     operation(
         "configureOrganizationBucket",
-        "1.0.0",
+        "2.0.0",
         "PUT",
         "/storage/configuration",
     ),
@@ -191,7 +211,7 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     ),
     operation(
         "createInvitation",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),
@@ -221,7 +241,7 @@ pub const OPERATIONS: [OperationVersion; 49] = [
     ),
     operation(
         "setLinkAccess",
-        "1.1.0",
+        "1.2.0",
         "PUT",
         "/entries/{entry_id}/link-access",
     ),

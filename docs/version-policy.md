@@ -6,6 +6,8 @@ Briefcase 3.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSO
 
 Briefcase 4.0.0 authenticates with Silicon Accounts: every route takes a Silicon Accounts access token issued to `briefcase`, the delegated `/obo/` operations take a User verification proof (`Authorization: Proof sap_…`) whose scope is the operation's endpoint id, and `X-Org-ID` is no longer read (except as the transfer route's tenant selector). `/iam`, `/auth/*` and the testing-environment operations are removed; `/accounts` and `/me` are added. The route namespace remains `/api/v1`.
 
+Contract 4.0.0 also makes every account's drive the unit of storage and sharing. `/drives`, `/shared` and the Silicon allow-list (`/silicons/{silicon}/allowed-accounts`) are added; listings, uploads, the bin, usage and storage settings take `drive` (an owner's `c:`/`si:` id or uuid). Operations whose request, response or refusals changed carry new revisions: `listEntries`, `createFolder`, `createInvitation`, `readOrganizationUsage` and `configureOrganizationBucket` 2.0.0; `updateEntry`, `uploadFile`, `grantPermission`, `inspectEffectivePermissions`, `listNotifications` and `listBin` 1.1.0; `setLinkAccess` and `resolvePermanentUrl` 1.2.0.
+
 ## Negotiation
 
 Before sending credentials, the official client requests `GET /api/version` with `Briefcase-Supported-API-Versions: v1`. It verifies the service identity, selected major and every known operation's exact ID, revision, method and path. A missing or changed required operation fails startup. Extra operation IDs are allowed; duplicate IDs are invalid.

@@ -7,11 +7,13 @@ info:
 servers:
 - url: https://backend.briefcase.teamofsilicons.com/api/v1
   description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead,
-    always organization-scoped as https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
+    always drive-scoped as https://briefcase.teamofsilicons.com/org/{drive}/{path}, where the drive is its owner's
+    account uuid.
 security:
 - bearerAuth: []
 tags:
 - name: Authentication
+- name: Drives
 - name: Entries
 - name: Applications
 - name: Uploads
@@ -106,16 +108,120 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
+  /drives:
+    get:
+      tags:
+      - Drives
+      operationId: listDrives
+      summary: List the drives the caller opens with the owner's rights
+      description: Every Carbon and Silicon has one drive. The list holds the caller's own drive and, for a Carbon,
+        the drive of every Silicon it looks after, where it holds the owner's rights (it never acts as the Silicon).
+        Each item names the owner, how the caller relates to it (`own` or `custodial`), the drive's root folder and
+        its permanent URL. What others shared with the caller is listed by `GET /shared`.
+      responses:
+        '200':
+          description: The caller's drives (Cache-Control no-store)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriveList'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /shared:
+    get:
+      tags:
+      - Drives
+      operationId: listSharedWithMe
+      summary: List what other accounts shared with the caller
+      description: Newest share first, one item per shared entry, each with the account whose drive holds it so a
+        client can group by owner. Only live shares on entries the caller can still see are listed. A shared entry
+        opens by its id like any other.
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/ContentsLimit'
+      responses:
+        '200':
+          description: Entries shared with the caller (Cache-Control no-store)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedPage'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /silicons/{silicon}/allowed-accounts:
+    parameters:
+    - $ref: '#/components/parameters/Silicon'
+    get:
+      tags:
+      - Drives
+      operationId: listSiliconAllowedAccounts
+      summary: List who may share with a Silicon besides its custodian and the custodian's other Silicons
+      description: A Silicon acts on what it receives, so it accepts shares only from its custodian, the other
+        Silicons its custodian looks after, and the accounts listed here. Only the Silicon itself and its custodian
+        may read the list (403 `not_silicons_custodian`); naming a Carbon is 422 `not_a_silicon`.
+      responses:
+        '200':
+          description: The accounts allowed to share with the Silicon, oldest first (Cache-Control no-store)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllowedAccounts'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /silicons/{silicon}/allowed-accounts/{account}:
+    parameters:
+    - $ref: '#/components/parameters/Silicon'
+    - name: account
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 80
+      description: The account, by `c:`/`si:` id or uuid
+    put:
+      tags:
+      - Drives
+      operationId: allowAccountToShareWithSilicon
+      summary: Let an account share with a Silicon
+      description: Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the
+        Silicon itself is 422 `allowance_self`.
+      responses:
+        '201':
+          description: The account may now share with the Silicon
+        '204':
+          description: The account was already allowed; nothing changed
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+    delete:
+      tags:
+      - Drives
+      operationId: disallowAccountToShareWithSilicon
+      summary: Stop letting an account share with a Silicon
+      description: Shares the account already made stay; the Silicon or its custodian can revoke them one by one.
+        404 when the account was not allowed.
+      responses:
+        '204':
+          description: The account may no longer share with the Silicon
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
   /entries:
     get:
       tags:
       - Entries
       operationId: listEntries
-      summary: List folder contents, or filter everything the caller can reach
-      description: 'Returns the hundred most recently changed visible entries per page, newest first. Without `filter`,
-        the listing browses one level: the organization roots, or the contents of `parent_id`/`path`. With `filter`
-        and no parent, it searches every entry the caller may reach, which is how a `location:` predicate selects
-        a subtree.
+      summary: List folder contents, the top of a drive, or a filtered view of a drive
+      description: 'Returns the hundred most recently changed visible entries per page, newest first. Every Carbon
+        and Silicon has one drive; `drive` names which (its owner''s `c:`/`si:` id or uuid), defaulting to the
+        caller''s own, and is ignored with `parent_id` because a folder names its drive. Without `filter`, the listing
+        browses one level: the top of the drive, or the contents of `parent_id`/`path`. With `filter` and no parent,
+        it searches every entry in the drive the caller may reach, which is how a `location:` predicate selects a
+        subtree. In another account''s drive the caller sees only what was shared with it and what it (or a Silicon
+        it looks after) created there.
 
 
         The filter language combines freely. Terms are ANDed; `or` introduces an alternative; `not` or a leading
@@ -124,10 +230,11 @@ paths:
 
         `last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest`
         order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both
-        days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@{carbon:id}` matches the
-        creator; `to:@{silicon:id}` matches an explicit share; `for:@{id}` matches what that member can reach; `contains:''term''`
+        days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@c:ada` matches the creator;
+        `to:@si:scout` matches an explicit share; `for:@c:ada` matches what that account can reach (ids are resolved
+        at Silicon Accounts to the account they name now; an unknown id is 422 `unknown_account`); `contains:''term''`
         matches names and extracted content, with `*` as a wildcard; `has:''term''` matches extracted content only;
-        `name:''term''` matches names only; `location:''private/cos:tos''` matches a path prefix; `is:` takes `file`,
+        `name:''term''` matches names only; `location:''notes/2026''` matches a path prefix; `is:` takes `file`,
         `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`,
         `unsupported`), or an extension such as `md`; `permissions:` takes `read`, `write`, `update`, `delete`,
         or `manage_permissions` and matches the caller''s effective access. A bare word is shorthand for `contains:`.
@@ -140,19 +247,20 @@ paths:
         schema:
           type: string
           format: uuid
-        description: Omit for the organization root
+        description: Omit for the top of the drive
       - name: path
         in: query
         schema:
           type: string
           maxLength: 2048
-        description: Parent folder addressed by path instead of identifier
+        description: Parent folder addressed by its path within the drive instead of identifier
+      - $ref: '#/components/parameters/Drive'
       - name: filter
         in: query
         schema:
           type: string
           maxLength: 1024
-        description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat')
+        description: Filter expression, for example "last:5 location:'notes' (contains:'apple' or contains:'cat')
           is:md". `is:expiring` matches entries with a live expiring share that gave the caller access or that the caller
           manages; `is:self-destruct` matches files whose self-destruct timer is running.
       - $ref: '#/components/parameters/Cursor'
@@ -166,15 +274,19 @@ paths:
                 $ref: '#/components/schemas/EntryPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     post:
       tags:
       - Entries
       operationId: createFolder
-      description: Without a parent, creates a user folder at the organization base with the required root_type
-        access boundary (and legacy tag for type tag). The new folder is a sibling of the reserved containers, not
-        redirected into one. With parent_id or parent_path, creates inside that folder and inherits its boundary.
-        Existing folders are not relocated. Sibling name collisions return 409 without exposing hidden entry metadata.
+      description: Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when neither is given.
+        `drive` names the drive for `parent_path` or the top (its owner's `c:`/`si:` id or uuid; the caller's own by
+        default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns
+        it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422
+        `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than
+        `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. `invitees` follow the
+        sharing rules of `POST /entries/{entry_id}/invitations`. Sibling name collisions return 409 without exposing
+        hidden entry metadata.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -192,7 +304,7 @@ paths:
                 $ref: '#/components/schemas/Entry'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /entries/{entry_id}:
     parameters:
     - $ref: '#/components/parameters/EntryId'
@@ -214,6 +326,9 @@ paths:
       tags:
       - Entries
       operationId: updateEntry
+      description: Renames an entry and/or moves it to another folder of the same drive. Entries move only within the
+        drive that holds them; a destination folder the caller can see in another drive is 422 `cross_drive_move`
+        (download and upload instead), and one it cannot see answers 404.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -240,11 +355,13 @@ paths:
                 $ref: '#/components/schemas/Entry'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
     delete:
       tags:
       - Entries
       operationId: moveEntryToBin
+      description: The entry's creator, the drive's owner, and the custodian of either may move an entry to the bin.
+        Delete is never shared.
       responses:
         '204':
           description: Entry moved to the 45-day bin
@@ -301,8 +418,10 @@ paths:
         to 5 TiB are accepted; operators size the upload deadline and temporary disk for the sizes they expect.
 
 
-        The destination folder is named either by `parent_id` or by `path`, never both. A path is resolved from
-        the organization base, so `private/cos:tos/reports` addresses the same folder its permanent URL shows.
+        The destination folder is named either by `parent_id` or by `path`, never both; with neither, the file goes
+        at the top of the drive. A path is resolved within the drive `drive` names (its owner''s `c:`/`si:` id or
+        uuid; the caller''s own by default), so `reports/q3` addresses the same folder its permanent URL shows.
+        `drive` is refused with `parent_id`, because a folder names its drive.
 
 
         Uploading a name that an active file already carries is how a file is updated: the bytes become that file''s
@@ -311,17 +430,18 @@ paths:
         same name is a conflict.
 
 
-        Two organization limits apply: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts
-        uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting
-        content returns capacity once the bytes are gone. Either limit may be configured per organization. An upload
-        that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
+        Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of uploads per UTC day, and 1
+        PiB of storage. The daily figure counts uploaded bytes and returns at midnight UTC; the storage figure counts
+        what is currently kept, so deleting content returns capacity once the bytes are gone. Either limit may be
+        configured per drive. An upload that does not fit is refused before its bytes are stored, and `GET /usage`
+        reports both.
 
 
         `self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload
         finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is
         permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with
-        `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, org admins and
-        owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
+        `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, the drive''s
+        owner, and the custodian of either can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -340,7 +460,12 @@ paths:
                 path:
                   type: string
                   maxLength: 2048
-                  description: Destination folder path, as an alternative to parent_id
+                  description: Destination folder path within the drive, as an alternative to parent_id
+                drive:
+                  type: string
+                  maxLength: 80
+                  description: The drive for path or for the top of a drive (its owner's `c:`/`si:` id or uuid); refused
+                    with parent_id
                 self_destruct_minutes:
                   $ref: '#/components/schemas/LifetimeMinutes'
                 file:
@@ -356,13 +481,13 @@ paths:
         '413':
           description: The file exceeds the 5 TiB maximum
         '429':
-          description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it
-            resets at 00:00 UTC
+          description: The drive's daily upload allowance is spent; Retry-After gives the seconds until it resets
+            at 00:00 UTC
         '507':
-          description: The organization has no storage capacity left
+          description: The drive has no storage capacity left
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/permissions:
     parameters:
     - $ref: '#/components/parameters/EntryId'
@@ -389,6 +514,12 @@ paths:
       tags:
       - Permissions
       operationId: grantPermission
+      description: Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian,
+        the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT
+        /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only
+        the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
+        `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
+        by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
       requestBody:
         required: true
         content:
@@ -404,7 +535,7 @@ paths:
                 $ref: '#/components/schemas/PermissionGrant'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/permissions/{grant_id}:
     delete:
       tags:
@@ -430,8 +561,10 @@ paths:
       - Permissions
       operationId: inspectEffectivePermissions
       summary: Report what the caller may do on named files and folders
-      description: Names up to 100 targets by identifier, path, or both. A target that does not exist and one the
-        caller cannot read are both reported as unresolved, so the answer never confirms a hidden entry.
+      description: Names up to 100 targets by identifier, path, or both. Identifiers may name entries in any drive;
+        each is answered inside its own drive. Paths are resolved within `drive` (its owner's `c:`/`si:` id or uuid;
+        the caller's own by default). A target that does not exist and one the caller cannot read are both reported
+        as unresolved, so the answer never confirms a hidden entry.
       requestBody:
         required: true
         content:
@@ -447,7 +580,7 @@ paths:
                 $ref: '#/components/schemas/PermissionInspectionResult'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /search:
     get:
       tags:
@@ -568,7 +701,8 @@ paths:
       operationId: listNotifications
       summary: Read the central notification inbox
       description: Returns the twenty newest notifications for the authenticated Carbon or Silicon together with
-        the unread count used for the badge.
+        the unread count used for the badge. The inbox is the account's own; each subject names the drive that holds
+        its entry, usually someone else's.
       responses:
         '200':
           description: Newest notifications and unread badge count
@@ -578,7 +712,7 @@ paths:
                 $ref: '#/components/schemas/NotificationInbox'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /notifications/read:
     post:
       tags:
@@ -970,9 +1104,10 @@ paths:
       tags:
       - Storage
       operationId: readOrganizationUsage
-      summary: Report the organization's consumption and limits, in bytes
-      description: 'Answers how much space the organization is actually consuming — exact byte counts, never percentages,
-        so a client renders whichever unit or proportion it prefers.
+      summary: Report a drive's consumption and limits, in bytes
+      description: 'Answers how much space a drive is actually consuming — exact byte counts, never percentages, so
+        a client renders whichever unit or proportion it prefers. The drive is the caller''s own, or with `drive` that
+        of a Silicon it looks after; only the drive''s owner and that custodian may read it (404 otherwise).
 
 
         `storage.used_bytes` is what every retained version currently weighs, including versions of entries sitting
@@ -981,7 +1116,10 @@ paths:
 
 
         Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and either may be raised or lowered
-        per organization, so the figures reported here are the ones actually in force.'
+        per drive, so the figures reported here are the ones actually in force. Uploads are charged to the drive
+        they land in, whoever uploads them.'
+      parameters:
+      - $ref: '#/components/parameters/Drive'
       responses:
         '200':
           description: Consumption and limits
@@ -991,16 +1129,20 @@ paths:
                 $ref: '#/components/schemas/OrganizationUsage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /bin:
     get:
       tags:
       - Bin
       operationId: listBin
-      summary: List recoverable entries, newest deletion first
+      summary: List a drive's recoverable entries, newest deletion first
+      description: The drive is the caller's own unless `drive` names another. Its owner and the custodian of a
+        Silicon that owns it see everything in its bin; anyone else sees what they created there and what was shared
+        with them.
       parameters:
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/ContentsLimit'
+      - $ref: '#/components/parameters/Drive'
       responses:
         '200':
           description: Deleted entries visible to the actor
@@ -1010,7 +1152,7 @@ paths:
                 $ref: '#/components/schemas/EntryPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /bin/{entry_id}/restore:
     post:
       tags:
@@ -1033,6 +1175,11 @@ paths:
       tags:
       - Storage
       operationId: configureOrganizationBucket
+      summary: Configure a drive's bring-your-own S3 bucket
+      description: Configures storage for the caller's own drive, or with `drive` for a Silicon it looks after. Only
+        the drive's owner and that custodian may (403 otherwise). Briefcase checks the bucket with a test upload,
+        read, update and delete before it is used. The STS External ID Briefcase presents when it assumes the role is
+        derived from the drive and stored with the configuration; name it in the role's trust policy.
       security:
       - bearerAuth: []
       parameters:
@@ -1060,7 +1207,7 @@ paths:
                 $ref: '#/components/schemas/BucketConfigurationStatus'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /org/{org_id}/{path}:
     servers:
     - url: https://backend.briefcase.teamofsilicons.com
@@ -1069,9 +1216,10 @@ paths:
       - Entries
       operationId: resolvePermanentUrl
       summary: Resolve the clean permanent URL of an entry
-      description: The path segment mirrors the folder structure exactly, for example `/org/tos/private/cos:tos/top_secret/this_secret.md`.
-        The first segment must be the caller's own drive (its account uuid). Without `disposition` the entry and its effective access
-        are returned; with `disposition` the file bytes are streamed. Anything the caller cannot read answers `404`.
+      description: The path mirrors the folder structure exactly, for example `/org/zQo/notes/2026/plan.md`. The first
+        segment is the drive (its owner's account uuid); the entry may be in any drive the caller reaches. Without
+        `disposition` the entry and its effective access are returned; with `disposition` the file bytes are streamed.
+        Anything the caller cannot read answers `404`.
       parameters:
       - name: org_id
         in: path
@@ -1084,7 +1232,7 @@ paths:
         schema:
           type: string
           maxLength: 2048
-        description: Organization-relative entry path
+        description: Drive-relative entry path
       - name: disposition
         in: query
         schema:
@@ -1109,11 +1257,11 @@ paths:
           $ref: '#/components/responses/PartialFileContent'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.1.0
+      x-operation-version: 1.2.0
   /entries/{entry_id}/invitations:
     get:
       operationId: listInvitations
-      summary: List current member and dynamic tag invitations
+      summary: List the live shares on an entry
       tags:
       - Permissions
       parameters:
@@ -1137,6 +1285,13 @@ paths:
     post:
       operationId: createInvitation
       summary: Share with a Carbon or Silicon named by id
+      description: Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian,
+        the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT
+        /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only
+        the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
+        `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
+        by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are
+        retired (422 `email_recipients_retired`, `tag_recipients_retired`).
       tags:
       - Permissions
       parameters:
@@ -1157,11 +1312,11 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/InvitationCreate'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /entries/{entry_id}/invitations/{grant_id}:
     delete:
       operationId: revokeInvitation
-      summary: Revoke a member or tag invitation
+      summary: Revoke a share (including one made to a tag before personal drives)
       tags:
       - Permissions
       parameters:
@@ -1217,8 +1372,8 @@ paths:
     delete:
       operationId: makeEntryPermanent
       summary: Keep a self-destructing file
-      description: Stops the file's self-destruct timer. Only the file's creator, org admins and org owners may;
-        anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing`
+      description: Stops the file's self-destruct timer. Only the file's creator, the drive's owner, and the
+        custodian of either may; anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing`
         (409).
       tags:
       - Entries
@@ -1252,6 +1407,8 @@ paths:
     put:
       operationId: setLinkAccess
       summary: Set anyone-with-link read/download access
+      description: Managed by the entry's creator, the drive's owner, and the custodian of either. The top of a drive
+        and its apps folders never get a link (422 `protected_folder`); anything inside them can.
       tags:
       - Permissions
       parameters:
@@ -1272,7 +1429,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/LinkAccessUpdate'
-      x-operation-version: 1.1.0
+      x-operation-version: 1.2.0
   /entries/{entry_id}/logs:
     get:
       operationId: listEntryLogs
@@ -1411,6 +1568,24 @@ components:
         is `briefcase`, issued to an app allowed for the route''s scope (`x-proof-scope`). The request runs as the
         account the proof speaks for, inside `apps/{issuing app}/`.'
   parameters:
+    Drive:
+      name: drive
+      in: query
+      schema:
+        type: string
+        maxLength: 80
+      description: The drive to act in, named by its owner's `c:`/`si:` id or account uuid; the caller's own by
+        default. In another account's drive the caller reaches only what was shared with it and what it (or a
+        Silicon it looks after) created there; a Carbon holds the owner's rights in the drives of the Silicons it
+        looks after.
+    Silicon:
+      name: silicon
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 80
+      description: The Silicon, by `si:` id or uuid
     UploadTenant:
       name: X-Org-ID
       in: header
@@ -1530,6 +1705,121 @@ components:
             type: string
             format: binary
   schemas:
+    AccountSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - uuid
+      - kind
+      properties:
+        uuid:
+          type: string
+          description: Permanent, case-sensitive account identifier
+        id:
+          type:
+          - string
+          - 'null'
+          description: Current public id, such as c:ada or si:scout (it can change)
+        kind:
+          type: string
+          enum:
+          - carbon
+          - silicon
+        display_name:
+          type:
+          - string
+          - 'null'
+        pfp_url:
+          type:
+          - string
+          - 'null'
+    Drive:
+      type: object
+      additionalProperties: false
+      required:
+      - owner
+      - relation
+      - root_id
+      - permanent_url
+      properties:
+        owner:
+          $ref: '#/components/schemas/AccountSummary'
+        relation:
+          type: string
+          enum:
+          - own
+          - custodial
+          description: '`own` for the caller''s drive; `custodial` for the drive of a Silicon the caller looks after'
+        root_id:
+          type: string
+          format: uuid
+          description: The drive's root folder; list its contents with `GET /entries?parent_id=`
+        permanent_url:
+          type: string
+          format: uri
+    DriveList:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Drive'
+    SharedEntry:
+      type: object
+      additionalProperties: false
+      required:
+      - owner
+      - shared_at
+      - entry
+      properties:
+        owner:
+          $ref: '#/components/schemas/AccountSummary'
+        shared_at:
+          type: string
+          format: date-time
+          description: When the newest live share on the entry was made
+        entry:
+          $ref: '#/components/schemas/Entry'
+    SharedPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SharedEntry'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    AllowedAccounts:
+      type: object
+      additionalProperties: false
+      required:
+      - silicon
+      - items
+      properties:
+        silicon:
+          $ref: '#/components/schemas/AccountSummary'
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - account
+            - allowed_at
+            properties:
+              account:
+                $ref: '#/components/schemas/AccountSummary'
+              allowed_at:
+                type: string
+                format: date-time
     AccountsInfo:
       type: object
       additionalProperties: false
@@ -1820,16 +2110,32 @@ components:
           - string
           - 'null'
           format: uuid
+        parent_path:
+          type:
+          - string
+          - 'null'
+          maxLength: 2048
+          description: Destination folder path within the drive, as an alternative to parent_id
+        drive:
+          type:
+          - string
+          - 'null'
+          maxLength: 80
+          description: The drive for parent_path or the top-level folder (its owner's `c:`/`si:` id or uuid); refused with
+            parent_id
         root_type:
           type: string
           enum:
           - public
           - private
           - tag
-          description: Required only when creating at organization root
+          deprecated: true
+          description: Accepted for compatibility with `private` only; every drive is private. `public` and `tag` are
+            refused.
         tag:
           type: string
-          description: Required for a tag root
+          deprecated: true
+          description: Retired; tags no longer exist (refused with tags_retired)
         invitees:
           type: array
           items:
@@ -2097,6 +2403,10 @@ components:
           items:
             type: string
             maxLength: 2048
+        drive:
+          type: string
+          maxLength: 80
+          description: The drive the paths are in (its owner's `c:`/`si:` id or uuid); the caller's own by default
     EffectivePermission:
       type: object
       required:
@@ -2234,6 +2544,10 @@ components:
         entry_id:
           type: string
           format: uuid
+        drive:
+          type: string
+          description: The drive holding the entry (its owner's account uuid); absent on notifications from before
+            personal drives
         name:
           type: string
         path:
@@ -2373,6 +2687,10 @@ components:
       - aws_account_id
       - encryption_mode
       properties:
+        drive:
+          type: string
+          maxLength: 80
+          description: The drive to configure (its owner's `c:`/`si:` id or uuid); the caller's own by default
         bucket_name:
           type: string
         region:
