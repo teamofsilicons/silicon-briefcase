@@ -46,7 +46,7 @@ pub mod versioning;
 
 use handlers::{
     accounts, content, delegated, delegated_upload, drives as drive_handlers, entries, invitations,
-    notifications, obo, permissions, reports, sharing, system, telemetry, usage,
+    locations, notifications, obo, permissions, reports, sharing, system, telemetry, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -259,7 +259,16 @@ fn sharing_routes() -> Router<AppState> {
             get(sharing::link_access).put(sharing::set_link_access),
         )
         .route("/api/v1/entries/{entry_id}/logs", get(sharing::logs))
-        .route("/api/v1/public/{org_id}/{*path}", get(sharing::public_path))
+        .route("/api/v1/public/{owner}/{*path}", get(locations::public))
+}
+
+/// Permanent addresses: an entry by its drive owner's id and path, and the
+/// addresses from before personal drives.
+fn location_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/paths/{owner}", get(locations::resolve_root))
+        .route("/api/v1/paths/{owner}/{*path}", get(locations::resolve))
+        .route("/org/{org_id}/{*path}", get(locations::resolve_legacy))
 }
 
 /// The drives a caller opens, what was shared with it, and who may share
@@ -282,6 +291,7 @@ fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .merge(sharing_routes())
         .merge(drive_routes())
+        .merge(location_routes())
         .route(
             delegated_upload::RESERVE_PATH,
             post(delegated_upload::reserve),
@@ -352,7 +362,6 @@ fn ordinary_routes() -> Router<AppState> {
             "/api/v1/entries/{entry_id}/download",
             get(content::download_content),
         )
-        .route("/org/{org_id}/{*path}", get(entries::resolve_path))
         .route(
             "/api/v1/entries/{entry_id}/activity",
             get(entries::entry_activity),
@@ -403,8 +412,12 @@ async fn not_found() -> crate::error::AppError {
 #[cfg(test)]
 mod accounts_tests;
 #[cfg(test)]
+mod delegation_tests;
+#[cfg(test)]
 mod drive_access_tests;
 #[cfg(test)]
 mod drives_tests;
+#[cfg(test)]
+mod locations_tests;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -7,6 +7,7 @@ pub(crate) mod delegated;
 pub(crate) mod delegated_upload;
 pub(crate) mod drives;
 pub(crate) mod entries;
+pub(crate) mod locations;
 pub(crate) mod notifications;
 pub(crate) mod obo;
 pub(crate) mod permissions;

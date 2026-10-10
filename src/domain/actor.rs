@@ -221,8 +221,17 @@ impl DriveAccess {
 pub enum AuthenticationMode {
     /// The actor called Briefcase with its own access token.
     Bearer,
-    /// Another app is acting for the actor with a verified proof.
+    /// Another app is acting for the actor with a verified proof. It reaches
+    /// only its own folder, `apps/{app}/`, in the actor's own drive.
     OnBehalfOf {
+        /// The verified issuing application.
+        application_id: ApplicationId,
+    },
+    /// A first-party app the operator lists is acting for the actor with a
+    /// verified proof. It reaches everything the actor can (its own drive,
+    /// what was shared with it, the drives of the Silicons it looks after),
+    /// still only through the delegated routes its proof's scopes name.
+    FirstPartyOnBehalfOf {
         /// The verified issuing application.
         application_id: ApplicationId,
     },
@@ -234,7 +243,19 @@ impl AuthenticationMode {
     pub const fn originating_application(&self) -> Option<&ApplicationId> {
         match self {
             Self::Bearer => None,
+            Self::OnBehalfOf { application_id } | Self::FirstPartyOnBehalfOf { application_id } => {
+                Some(application_id)
+            }
+        }
+    }
+
+    /// Returns the issuing application when it is confined to its own
+    /// `apps/{app}/` folder.
+    #[must_use]
+    pub const fn confined_application(&self) -> Option<&ApplicationId> {
+        match self {
             Self::OnBehalfOf { application_id } => Some(application_id),
+            Self::Bearer | Self::FirstPartyOnBehalfOf { .. } => None,
         }
     }
 }
@@ -296,11 +317,14 @@ impl RequestAuthContext {
     /// Silicon Accounts verification).
     pub fn for_account(account: Actor) -> Result<Self, ExternalIdentifierError> {
         let actor = ActorRef::new(account.kind, ActorId::new(account.uuid.as_str())?);
-        let authentication = match account.issuing_app() {
-            Some(app) => AuthenticationMode::OnBehalfOf {
+        let authentication = match (account.issuing_app(), account.confined_app()) {
+            (Some(app), Some(_)) => AuthenticationMode::OnBehalfOf {
                 application_id: ApplicationId::new(app)?,
             },
-            None => AuthenticationMode::Bearer,
+            (Some(app), None) => AuthenticationMode::FirstPartyOnBehalfOf {
+                application_id: ApplicationId::new(app)?,
+            },
+            (None, _) => AuthenticationMode::Bearer,
         };
         let mut context =
             Self::for_drive(actor.clone(), actor, DriveAccess::Owner, authentication)?;
@@ -405,6 +429,13 @@ impl RequestAuthContext {
     #[must_use]
     pub const fn originating_application(&self) -> Option<&ApplicationId> {
         self.authentication.originating_application()
+    }
+
+    /// Returns the originating application when it is confined to its own
+    /// `apps/{app}/` folder (every issuer but the listed first-party ones).
+    #[must_use]
+    pub const fn confined_application(&self) -> Option<&ApplicationId> {
+        self.authentication.confined_application()
     }
 }
 

@@ -282,8 +282,11 @@ pub(crate) async fn delegated_link(
             &metadata,
         )
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    let drive = context.authorization().organization_id().as_str();
+    Ok(Json(
+        state
+            .mapper_for([drive])
+            .await?
+            .link_access(drive, &access)?,
+    ))
 }

@@ -194,7 +194,7 @@ impl AuthorizableEntry {
     /// Evaluates shared domain policy against this repository snapshot.
     #[must_use]
     pub fn authorization(&self, context: &RequestAuthContext) -> EffectiveAuthorization {
-        if let Some(app) = context.originating_application() {
+        if let Some(app) = context.confined_application() {
             let mut segments = self.entry.path.segments();
             if segments.next() != Some("apps") || segments.next() != Some(app.as_str()) {
                 return EffectiveAuthorization::hidden();

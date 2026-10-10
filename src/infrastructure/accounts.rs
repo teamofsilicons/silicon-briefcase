@@ -29,7 +29,7 @@ mod jwks;
 pub(crate) mod test_support;
 
 pub use budget::{ExpiringMap, LOOKUPS_PER_MINUTE, TokenBucket};
-pub use directory::AccountDirectory;
+pub use directory::{AccountDirectory, DriveOwner};
 pub use jwks::{JwksCache, MAX_AGE as JWKS_MAX_AGE, UNKNOWN_KEY_REFETCH_INTERVAL};
 
 /// How long an introspection answer is reused.

@@ -194,15 +194,32 @@ pub(crate) async fn transfer(
     let length: u64 = length
         .parse()
         .map_err(|_| AppError::bad_request("invalid_content_length"))?;
-    // The tenant selector is untrusted: only the capability, checked against
-    // the reservation row inside that tenant, authorizes the bytes.
-    let tenant =
-        single_header(&headers, "x-org-id").map_err(|_| AppError::bad_request("missing_org_id"))?;
-    if !is_tenant_key(tenant) {
-        return Err(AppError::bad_request("invalid_org_id"));
-    }
+    // The drive is found from the reservation; an `X-Org-ID` older clients
+    // still send must name that same drive. Either way only the capability,
+    // checked against the reservation row inside the drive, authorizes the
+    // bytes.
+    let drive = match optional_header(&headers, "x-org-id")? {
+        Some(tenant) => {
+            if !is_tenant_key(tenant) {
+                return Err(AppError::bad_request("invalid_org_id"));
+            }
+            tenant.to_owned()
+        }
+        None => state
+            .content_adapter
+            .metadata_repository()
+            .delegated_upload_drive(upload_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(event = "upload_drive_lookup_failed", error = %error, "delegated upload drive lookup failed");
+                AppError::Internal {
+                    category: "upload_drive_lookup",
+                }
+            })?
+            .ok_or(AppError::NotFound)?,
+    };
     let organization_id =
-        OrganizationId::new(tenant).map_err(|_| AppError::bad_request("invalid_org_id"))?;
+        OrganizationId::new(drive).map_err(|_| AppError::bad_request("invalid_org_id"))?;
     let scope = DelegatedUploadScope {
         organization_id,
         request_id: request_context::current_request_id().ok_or(AppError::Internal {
@@ -224,6 +241,17 @@ pub(crate) async fn transfer(
         .store(lease, staged.path(), staged.size(), *staged.sha256())
         .await
         .map(Json)
+}
+
+fn optional_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a str>, AppError> {
+    if headers.contains_key(name) {
+        single_header(headers, name).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn single_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str, AppError> {

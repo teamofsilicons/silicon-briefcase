@@ -42,6 +42,14 @@ pub(super) struct Fixture {
 /// Builds the API against the test database and a Silicon Accounts stand-in,
 /// or returns `None` when `BRIEFCASE_TEST_DATABASE_URL` is unset.
 pub(super) async fn fixture(proof_issuers: &str) -> anyhow::Result<Option<Fixture>> {
+    fixture_with(proof_issuers, "").await
+}
+
+/// [`fixture`] with first-party apps (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS`).
+pub(super) async fn fixture_with(
+    proof_issuers: &str,
+    first_party: &str,
+) -> anyhow::Result<Option<Fixture>> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
         eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
         return Ok(None);
@@ -71,7 +79,11 @@ pub(super) async fn fixture(proof_issuers: &str) -> anyhow::Result<Option<Fixtur
         .respond_with(ResponseTemplate::new(200).set_body_json(issuer.jwks_json()))
         .mount(&server)
         .await;
-    let settings = test_accounts_settings(&server.uri(), proof_issuers)?;
+    let mut settings = test_accounts_settings(&server.uri(), proof_issuers)?;
+    settings.proof_issuers = settings
+        .proof_issuers
+        .with_first_party(first_party)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
     let (state, server_settings, webhook) =
         test_state_with_accounts(api, &settings, Some(issuer.jwks()))?;
     let router = router(state.clone(), &server_settings, &webhook);

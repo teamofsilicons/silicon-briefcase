@@ -28,8 +28,8 @@ use super::state::AppState;
 ///
 /// # Errors
 ///
-/// Returns 404 for an app (proof) request about another account's drive, and
-/// database or Silicon Accounts errors.
+/// Returns 404 for a confined app's (proof) request about another account's
+/// drive, and database or Silicon Accounts errors.
 pub(crate) async fn for_entry(
     state: &AppState,
     context: ExecutionContext,
@@ -90,9 +90,9 @@ pub(crate) async fn own(
 ///
 /// # Errors
 ///
-/// Returns 404 for an app (proof) request about another account's drive or a
-/// drive whose owner Silicon Accounts does not know, and database or Silicon
-/// Accounts errors.
+/// Returns 404 for a confined app's (proof) request about another account's
+/// drive or a drive whose owner Silicon Accounts does not know, and database
+/// or Silicon Accounts errors.
 pub(crate) async fn enter(
     state: &AppState,
     context: ExecutionContext,
@@ -113,8 +113,10 @@ pub(crate) async fn enter(
             .with_custodial_silicons(custodial);
         return Ok(context.with_authorization(moved));
     }
-    if account.issuing_app().is_some() {
-        // An app acting for an account reaches only that account's own drive.
+    if account.confined_app().is_some() {
+        // An app acting for an account reaches only that account's own drive
+        // (and there only its own folder). First-party apps the operator
+        // lists reach everything the account can.
         return Err(AppError::NotFound);
     }
     let drive_uuid = AccountUuid::new(drive).map_err(|_| AppError::NotFound)?;
@@ -142,10 +144,11 @@ pub(crate) async fn enter(
 }
 
 /// The Silicons a Carbon looks after: what they create anywhere carries
-/// creator rights for their custodian. An app acting for an account never
-/// carries the account's custodial powers.
+/// creator rights for their custodian. An app confined to its own folder
+/// never carries the account's custodial powers; a first-party app acts with
+/// everything the account can do.
 async fn custodial_silicons(state: &AppState, account: &Actor) -> Result<Vec<ActorId>, AppError> {
-    if account.kind != ActorKind::Carbon || account.issuing_app().is_some() {
+    if account.kind != ActorKind::Carbon || account.confined_app().is_some() {
         return Ok(Vec::new());
     }
     Ok(state

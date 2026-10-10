@@ -90,12 +90,15 @@ impl Sender {
             .as_str()
             .ok_or("invitation_payload_invalid")?;
         {
+            // The entry's permanent address: its drive named by the owner's
+            // current id (or uuid while unknown), then its path.
             let mut segments = link
                 .path_segments_mut()
                 .map_err(|()| "invitation_url_invalid")?;
-            segments.pop_if_empty().extend(["org", drive]);
-            segments.extend(path.split('/'));
-            segments.push("");
+            segments.pop_if_empty().push(owner.unwrap_or(drive));
+            if !path.is_empty() && path != "." {
+                segments.extend(path.split('/'));
+            }
         }
         let name = payload["details"]["name"]
             .as_str()
@@ -181,7 +184,10 @@ mod tests {
         assert_eq!(body["To"], "verified@example.com");
         assert_eq!(body["TrackOpens"], false);
         let text = body["TextBody"].as_str().unwrap_or_default();
-        assert!(text.contains("/org/Ada1/reports/a%20report.md/"), "{text}");
+        assert!(
+            text.contains("https://briefcase.teamofsilicons.com/c:ada/reports/a%20report.md\n"),
+            "{text}"
+        );
         assert!(
             text.contains("A report in c:ada's Briefcase was shared with you."),
             "{text}"

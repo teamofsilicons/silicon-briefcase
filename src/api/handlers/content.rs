@@ -170,7 +170,7 @@ pub(crate) async fn upload(
     let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
-    Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
+    Ok((StatusCode::CREATED, Json(state.entry_dto(entry).await?)))
 }
 
 pub(crate) async fn list_versions(
@@ -236,7 +236,7 @@ pub(crate) async fn restore_version(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(entry)?))
+    Ok(Json(state.entry_dto(entry).await?))
 }
 
 pub(crate) async fn configure_storage(

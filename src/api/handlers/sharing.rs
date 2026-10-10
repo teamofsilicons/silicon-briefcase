@@ -49,10 +49,13 @@ pub(crate) async fn link_access(
         .metadata_repository()
         .link_access(&context, extract::entry_id(id)?)
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    let drive = context.authorization().organization_id().as_str();
+    Ok(Json(
+        state
+            .mapper_for([drive])
+            .await?
+            .link_access(drive, &access)?,
+    ))
 }
 
 pub(crate) async fn set_link_access(
@@ -76,10 +79,13 @@ pub(crate) async fn set_link_access(
             &metadata,
         )
         .await?;
-    Ok(Json(state.mapper.link_access(
-        context.authorization().organization_id().as_str(),
-        &access,
-    )?))
+    let drive = context.authorization().organization_id().as_str();
+    Ok(Json(
+        state
+            .mapper_for([drive])
+            .await?
+            .link_access(drive, &access)?,
+    ))
 }
 
 pub(crate) async fn logs(
@@ -119,15 +125,7 @@ pub(crate) struct PublicQuery {
     pub cursor: Option<Uuid>,
 }
 
-pub(crate) async fn public_path(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((org, path)): Path<(String, String)>,
-    Query(query): Query<PublicQuery>,
-) -> Result<Response, AppError> {
-    read_public(&state, &headers, &org, &path, query).await
-}
-
+/// Serves what anyone with the link may read at `path` in the drive `org`.
 pub(crate) async fn read_public(
     state: &AppState,
     headers: &HeaderMap,

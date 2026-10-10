@@ -186,6 +186,10 @@ pub enum Credential {
         proof_id: String,
         /// The one scope this route required and the proof carried.
         scope: String,
+        /// Whether the operator lists the app as first-party
+        /// (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS`): it then reaches everything
+        /// the account can, instead of only its own `apps/{app}/` folder.
+        first_party: bool,
     },
 }
 
@@ -230,6 +234,21 @@ impl Actor {
         match &self.credential {
             Credential::AccessToken { .. } => None,
             Credential::Proof { issuing_app, .. } => Some(issuing_app),
+        }
+    }
+
+    /// The app acting for the account when it is confined to its own
+    /// `apps/{app}/` folder in the account's own drive: every issuer except
+    /// the first-party ones the operator lists.
+    #[must_use]
+    pub fn confined_app(&self) -> Option<&str> {
+        match &self.credential {
+            Credential::Proof {
+                issuing_app,
+                first_party: false,
+                ..
+            } => Some(issuing_app),
+            Credential::AccessToken { .. } | Credential::Proof { .. } => None,
         }
     }
 }

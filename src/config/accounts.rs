@@ -79,9 +79,14 @@ impl WebhookSettings {
 /// semicolons or whitespace, each `scope=app` or `scope=app1|app2`, where the
 /// scope is one of Briefcase's delegated scopes. Unset means no app may act
 /// for anyone (deny by default).
+///
+/// `BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` names the apps (such as `interface`)
+/// that, for the scopes they are allowed, reach everything the account can
+/// instead of only their own `apps/{app}/` folder in its drive.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProofIssuers {
     by_scope: BTreeMap<String, BTreeSet<String>>,
+    first_party: BTreeSet<String>,
 }
 
 impl ProofIssuers {
@@ -118,7 +123,43 @@ impl ProofIssuers {
                 allowed.insert(issuer.to_owned());
             }
         }
-        Ok(Self { by_scope })
+        Ok(Self {
+            by_scope,
+            first_party: BTreeSet::new(),
+        })
+    }
+
+    /// Adds the first-party apps, parsed from a list separated by commas,
+    /// semicolons or whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a precise reason for an entry that is not a bare app id.
+    pub fn with_first_party(mut self, value: &str) -> Result<Self, String> {
+        for issuer in value
+            .split(|character: char| matches!(character, ',' | ';') || character.is_whitespace())
+            .filter(|entry| !entry.is_empty())
+        {
+            if !is_canonical_iam_application_id(issuer) {
+                return Err(format!(
+                    "`{issuer}` is not a bare app id such as `interface`"
+                ));
+            }
+            self.first_party.insert(issuer.to_owned());
+        }
+        Ok(self)
+    }
+
+    /// Returns whether `issuer` is a first-party app: allowed scopes then
+    /// reach everything the account can, not only the app's own folder.
+    #[must_use]
+    pub fn is_first_party(&self, issuer: &str) -> bool {
+        self.first_party.contains(issuer)
+    }
+
+    /// The first-party apps.
+    pub fn first_party(&self) -> impl Iterator<Item = &str> {
+        self.first_party.iter().map(String::as_str)
     }
 
     /// Returns whether `issuer` may use `scope`.
@@ -184,6 +225,12 @@ pub(super) fn accounts_settings() -> Result<AccountsSettings, SettingsError> {
         Some(value) => ProofIssuers::parse(&value)
             .map_err(|reason| invalid("BRIEFCASE_PROOF_ISSUERS", reason))?,
         None => ProofIssuers::default(),
+    };
+    let proof_issuers = match optional("BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS") {
+        Some(value) => proof_issuers
+            .with_first_party(&value)
+            .map_err(|reason| invalid("BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS", reason))?,
+        None => proof_issuers,
     };
     Ok(AccountsSettings {
         public_url,
@@ -338,6 +385,21 @@ mod tests {
                 .issuers_for("briefcase.uploads.reserve")
                 .collect::<Vec<_>>(),
             ["extend", "waveform"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn first_party_issuers_are_bare_app_ids() -> Result<(), String> {
+        let issuers = ProofIssuers::parse("briefcase.entries.list=interface|waveform")?
+            .with_first_party("interface")?;
+        assert!(issuers.is_first_party("interface"));
+        assert!(!issuers.is_first_party("waveform"));
+        assert_eq!(issuers.first_party().collect::<Vec<_>>(), vec!["interface"]);
+        assert!(!ProofIssuers::default().is_first_party("interface"));
+        assert_eq!(
+            ProofIssuers::default().with_first_party("Interface").err(),
+            Some("`Interface` is not a bare app id such as `interface`".to_owned())
         );
         Ok(())
     }

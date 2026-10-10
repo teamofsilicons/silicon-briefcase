@@ -7,13 +7,11 @@ use axum::{
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse as _, Response},
 };
 use uuid::Uuid;
 
 use crate::{
     application::{
-        content::ContentIntent,
         context::ExecutionContext,
         service::{
             CONTENTS_PAGE_SIZE, CreateFolderCommand, InitialPermission, ListBinQuery,
@@ -22,7 +20,6 @@ use crate::{
         },
     },
     domain::{
-        account::is_account_uuid,
         actor::{ActorId, ActorKind, ActorRef},
         entry::{EntryName, EntryPath},
         filter::FilterQuery,
@@ -32,21 +29,18 @@ use crate::{
     error::AppError,
 };
 
-use super::{
-    super::{
-        auth::Action,
-        cursor, drives,
-        dto::{
-            ActivityPageDto, ActorRefDto, ActorTypeDto, DispositionDto, DrivePageQuery, EntryDto,
-            EntryPageDto, EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery,
-            PathContentQuery, PermissionGrantCreateDto, RootTypeDto, SearchPageDto, SearchQueryDto,
-        },
-        extract,
-        mapping::metadata_error,
-        state::AppState,
-        validation,
+use super::super::{
+    auth::Action,
+    cursor, drives,
+    dto::{
+        ActivityPageDto, ActorRefDto, ActorTypeDto, DrivePageQuery, EntryDto, EntryPageDto,
+        EntryPatchDto, FolderCreateDto, GrantAccessDto, ListEntriesQuery, PermissionGrantCreateDto,
+        RootTypeDto, SearchPageDto, SearchQueryDto,
     },
-    content,
+    extract,
+    mapping::metadata_error,
+    state::AppState,
+    validation,
 };
 
 /// Lists folder contents, the top of a drive, or a filtered view of a drive.
@@ -109,10 +103,11 @@ pub(crate) async fn list_entries(
     // A folder shared only through its contents is listed as a traversal
     // entry: the caller can open it and see what was shared, and nothing else
     // about it is disclosed.
+    let mapper = state.mapper_for([resource.as_str()]).await?;
     let items = result
         .items
         .into_iter()
-        .map(|item| state.mapper.entry_item(&resource, item))
+        .map(|item| mapper.entry_item(&resource, item))
         .collect::<Result<_, _>>()?;
     Ok(Json(EntryPageDto {
         items,
@@ -173,7 +168,7 @@ pub(crate) async fn create_folder(
     )
     .await
     .map_err(metadata_error)?;
-    Ok((StatusCode::CREATED, Json(state.mapper.entry(created)?)))
+    Ok((StatusCode::CREATED, Json(state.entry_dto(created).await?)))
 }
 
 pub(crate) async fn get_entry(
@@ -189,71 +184,12 @@ pub(crate) async fn get_entry(
     let entry = extract::scoped(&context, state.metadata.visible_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry_item(&organization, entry)?))
-}
-
-/// Serves the permanent URL `/org/{drive}/{path}`, where `drive` is the
-/// drive owner's account uuid.
-///
-/// An entry the caller cannot read is reported exactly like a missing one.
-/// The same URL returns the entry with its effective access by default, and
-/// the sandboxed bytes when a disposition is requested.
-pub(crate) async fn resolve_path(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    path: Result<Path<(String, String)>, PathRejection>,
-    query: Result<Query<PathContentQuery>, QueryRejection>,
-) -> Result<Response, AppError> {
-    let query = extract::query(query)?;
-    let location = extract::path(path)?;
-    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
-        return super::sharing::read_public(
-            &state,
-            &headers,
-            &location.0,
-            &location.1,
-            super::sharing::PublicQuery {
-                view: query.disposition.map(|value| match value {
-                    DispositionDto::Inline => "inline".to_owned(),
-                    DispositionDto::Attachment => "attachment".to_owned(),
-                }),
-                cursor: None,
-            },
-        )
-        .await;
-    }
-    let resource = format!("{}/{}", location.0, location.1);
-    let intent = query.disposition.map(content_intent);
-    let action = intent.map_or(Action::ReadEntry, |intent| match intent {
-        ContentIntent::Render => Action::ReadContent,
-        ContentIntent::Download => Action::DownloadFile,
-    });
-    let context = extract::authenticate(&state, &headers, action, &resource).await?;
-    if !is_account_uuid(&location.0) {
-        return Err(AppError::NotFound);
-    }
-    let context = drives::enter(&state, context, &location.0).await?;
-    let (organization, entry_path) = extract::entry_location(location, &context)?;
-    let entry = extract::scoped(
-        &context,
-        state.metadata.get_entry_by_path(&context, &entry_path),
-    )
-    .await
-    .map_err(metadata_error)?;
-    let Some(intent) = intent else {
-        return Ok(Json(state.mapper.entry_item(&organization, entry)?).into_response());
-    };
-    if entry.is_folder() && !matches!(intent, ContentIntent::Download) {
-        return Err(AppError::NotFound);
-    }
-    content::serve(&state, &headers, &context, entry.id(), intent).await
-}
-
-const fn content_intent(value: DispositionDto) -> ContentIntent {
-    match value {
-        DispositionDto::Inline => ContentIntent::Render,
-        DispositionDto::Attachment => ContentIntent::Download,
-    }
+    Ok(Json(
+        state
+            .mapper_for([organization.as_str()])
+            .await?
+            .entry_item(&organization, entry)?,
+    ))
 }
 
 /// Returns the retained "who did what, when" history of one entry.
@@ -306,7 +242,7 @@ pub(crate) async fn update_entry(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(updated)?))
+    Ok(Json(state.entry_dto(updated).await?))
 }
 
 pub(crate) async fn delete_entry(
@@ -372,7 +308,12 @@ pub(crate) async fn list_bin(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry_page(result)?))
+    let drives = result
+        .items
+        .iter()
+        .map(|item| item.entry.organization_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    Ok(Json(state.mapper_for(drives).await?.entry_page(result)?))
 }
 
 /// Searches everything the caller can reach: its own drive, the drives of
@@ -392,7 +333,11 @@ pub(crate) async fn search(
     let results = extract::scoped(&context, state.metadata.search_drives(&contexts, &query))
         .await
         .map_err(metadata_error)?;
-    Ok(Json(state.mapper.search(results)?))
+    let drives = results
+        .iter()
+        .map(|result| result.entry.entry.organization_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    Ok(Json(state.mapper_for(drives).await?.search(results)?))
 }
 
 /// How many drives besides the caller's own and its Silicons' one search
@@ -465,7 +410,7 @@ pub(crate) async fn restore_bin_entry(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(restored)?))
+    Ok(Json(state.entry_dto(restored).await?))
 }
 
 /// Entries move only within the drive that holds them: their bytes, versions

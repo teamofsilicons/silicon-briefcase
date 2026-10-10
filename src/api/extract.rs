@@ -24,7 +24,6 @@ use crate::{
     domain::{
         account::Actor,
         actor::{ActorId, ActorKind, ActorRef, RequestAuthContext},
-        entry::EntryPath,
         ids::{EntryId, GrantId, VersionId},
     },
     error::AppError,
@@ -275,21 +274,6 @@ where
         category: "request_fingerprint",
     })?;
     Ok(bytes_fingerprint(operation, &canonical))
-}
-
-/// Validates a permanent-URL location against the drive the request acts in.
-///
-/// A different drive or an unparsable path is reported as not found: the
-/// permanent URL must never confirm that an inaccessible entry exists.
-pub(crate) fn entry_location(
-    (organization, path): (String, String),
-    context: &ExecutionContext,
-) -> Result<(String, EntryPath), AppError> {
-    if tenant(context) != organization {
-        return Err(AppError::NotFound);
-    }
-    let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
-    Ok((organization, path))
 }
 
 pub(crate) fn entry_id(value: Uuid) -> Result<EntryId, AppError> {

@@ -77,7 +77,10 @@ pub(crate) async fn list(
             "owner": account_json(&record),
             "relation": relation,
             "root_id": root.entry.id.as_uuid(),
-            "permanent_url": state.mapper.permanent_url(&owner, &root.entry.path)?,
+            "permanent_url": state
+                .mapper_for([owner.as_str()])
+                .await?
+                .permanent_url(&owner, &root.entry.path)?,
         }));
     }
     Ok(private_json(json!({ "items": items })))
@@ -116,6 +119,9 @@ pub(crate) async fn shared(
             category: "shared_lookup",
         })?;
     let has_more = rows.len() > usize::from(limit);
+    let mapper = state
+        .mapper_for(rows.iter().map(|row| row.drive.clone()))
+        .await?;
     let mut items = Vec::with_capacity(usize::from(limit));
     let mut last = None;
     // A page usually spans few drives: resolve each drive (the caller's
@@ -155,7 +161,7 @@ pub(crate) async fn shared(
         items.push(json!({
             "owner": account_json(owner),
             "shared_at": row.shared_at,
-            "entry": state.mapper.entry_item(&row.drive, item)?,
+            "entry": mapper.entry_item(&row.drive, item)?,
         }));
     }
     let next_cursor = if has_more {

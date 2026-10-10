@@ -351,6 +351,65 @@ impl super::PostgresRepository {
             .await
     }
 
+    /// Returns whether `key` is a drive (an account's), not a pre-migration
+    /// organization or nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn drive_exists(&self, key: &str) -> std::result::Result<bool, sqlx::Error> {
+        let mut transaction = self
+            .begin(&super::TenantContext::for_service(key, "drive-exists"))
+            .await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM briefcase.organizations \
+                  WHERE org_id = briefcase.current_org_id() \
+                    AND owner_account_uuid = briefcase.current_org_id())",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(exists)
+    }
+
+    /// Returns the drive and current path a pre-migration address
+    /// (`/org/{org}/{path}`) leads to, through the aliases the cutover
+    /// recorded when it moved the organization's files into drives.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn legacy_location(
+        &self,
+        organization: &str,
+        path: &str,
+    ) -> std::result::Result<Option<(String, String)>, sqlx::Error> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT drive, path FROM briefcase.resolve_legacy_location($1, $2)",
+        )
+        .bind(organization)
+        .bind(path)
+        .fetch_optional(self.pool())
+        .await
+    }
+
+    /// Returns the drive holding a delegated upload reservation, so a byte
+    /// transfer that names only its upload can run inside that drive.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn delegated_upload_drive(
+        &self,
+        upload_id: Uuid,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, Option<String>>("SELECT briefcase.delegated_upload_drive($1)")
+            .bind(upload_id)
+            .fetch_one(self.pool())
+            .await
+    }
+
     /// Lists entries other accounts shared with `principal`, newest first,
     /// one row per entry. Each must still be authorized inside its drive.
     ///

@@ -263,6 +263,50 @@ impl AccountStore {
         .collect()
     }
 
+    /// Returns the current public id of each listed account Briefcase knows
+    /// one for, keyed by uuid. Permanent URLs name drives by these ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn public_ids(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>, sqlx::Error> {
+        if uuids.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT account_uuid, public_id FROM briefcase.accounts \
+              WHERE account_uuid = ANY($1) AND public_id IS NOT NULL AND status <> 'deleted'",
+        )
+        .bind(uuids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Returns the account that most recently gave up `public_id`, so an
+    /// address using an old id can be sent to the account's current one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn former_holder(&self, public_id: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT history.account_uuid \
+               FROM briefcase.account_id_history AS history \
+               JOIN briefcase.accounts AS account \
+                 ON account.account_uuid = history.account_uuid AND account.status <> 'deleted' \
+              WHERE history.public_id = $1 \
+              ORDER BY history.replaced_at DESC, history.account_uuid \
+              LIMIT 1",
+        )
+        .bind(public_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     /// Lists the cached Silicons whose custodian is `custodian_uuid`.
     ///
     /// # Errors

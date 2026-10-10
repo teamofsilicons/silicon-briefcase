@@ -205,13 +205,17 @@ pub(crate) fn require_bearer_shape(headers: &HeaderMap) -> Result<(), AppError> 
     bearer_token(headers).map(drop)
 }
 
+/// The refusal for a request that carries no credential where one is needed.
+pub(crate) fn authentication_required() -> AppError {
+    AppError::unauthorized(
+        "authentication_required",
+        "Send Authorization: Bearer <access token> with a Silicon Accounts access token issued to Briefcase.",
+    )
+}
+
 fn authorization(headers: &HeaderMap) -> Result<(&str, &str), AppError> {
-    let value = optional_single_header(headers, &AUTHORIZATION)?.ok_or_else(|| {
-        AppError::unauthorized(
-            "authentication_required",
-            "Send Authorization: Bearer <access token> with a Silicon Accounts access token issued to Briefcase.",
-        )
-    })?;
+    let value =
+        optional_single_header(headers, &AUTHORIZATION)?.ok_or_else(authentication_required)?;
     let mut parts = value.split_ascii_whitespace();
     match (parts.next(), parts.next(), parts.next()) {
         (Some(scheme), Some(credential), None) => Ok((scheme, credential)),

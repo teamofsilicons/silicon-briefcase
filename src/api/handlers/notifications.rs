@@ -19,7 +19,18 @@ pub(crate) async fn list_notifications(
     let inbox = extract::scoped(&context, state.metadata.notification_inbox(&context))
         .await
         .map_err(metadata_error)?;
-    Ok(Json(state.mapper.inbox(&organization, inbox)?))
+    let drives = std::iter::once(organization.clone()).chain(
+        inbox
+            .items
+            .iter()
+            .filter_map(|item| item.subject.as_ref()?.drive.clone()),
+    );
+    Ok(Json(
+        state
+            .mapper_for(drives)
+            .await?
+            .inbox(&organization, inbox)?,
+    ))
 }
 
 /// Marks the caller's entire inbox read and returns it afterwards.
@@ -43,5 +54,16 @@ pub(crate) async fn read_notifications(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.inbox(&organization, inbox)?))
+    let drives = std::iter::once(organization.clone()).chain(
+        inbox
+            .items
+            .iter()
+            .filter_map(|item| item.subject.as_ref()?.drive.clone()),
+    );
+    Ok(Json(
+        state
+            .mapper_for(drives)
+            .await?
+            .inbox(&organization, inbox)?,
+    ))
 }

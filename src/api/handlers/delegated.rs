@@ -139,7 +139,7 @@ pub(crate) async fn create_folder(
     )
     .await
     .map_err(metadata_error)?;
-    Ok((StatusCode::CREATED, Json(state.mapper.entry(created)?)))
+    Ok((StatusCode::CREATED, Json(state.entry_dto(created).await?)))
 }
 
 /// Lists the same privacy-filtered view as the ordinary member endpoint.
@@ -154,18 +154,21 @@ pub(crate) async fn list_entries(
     if let Some(cursor) = query.cursor.as_deref() {
         cursor::validate_opaque(cursor).map_err(|_| AppError::bad_request("invalid_cursor"))?;
     }
-    if query.drive.is_some() {
+    let confined = context.authorization().confined_application().is_some();
+    if query.drive.is_some() && confined {
         return Err(AppError::validation("drive_not_delegated"));
     }
     let filter = super::entries::filter_query(&state, query.filter.as_deref()).await?;
-    let context = match query.parent_id {
-        Some(id) => drives::for_entry(&state, context, extract::entry_id(id)?).await?,
-        None => context,
+    let context = match (query.parent_id, query.drive.as_deref()) {
+        (Some(id), _) => drives::for_entry(&state, context, extract::entry_id(id)?).await?,
+        (None, Some(drive)) => drives::named(&state, context, Some(drive)).await?,
+        (None, None) => context,
     };
     let parent_id = match (query.parent_id, query.path.as_deref()) {
         (Some(_), Some(_)) => return Err(AppError::bad_request("ambiguous_parent")),
         (Some(id), None) => Some(extract::entry_id(id)?),
         (None, Some(path)) => Some(existing_folder(&state, &context, path).await?),
+        (None, None) if query.drive.is_some() => None,
         (None, None) => {
             let folder = state
                 .metadata
@@ -191,10 +194,11 @@ pub(crate) async fn list_entries(
     .await
     .map_err(metadata_error)?;
     let organization = context.authorization().organization_id().as_str();
+    let mapper = state.mapper_for([organization]).await?;
     let items = result
         .items
         .into_iter()
-        .map(|item| state.mapper.entry_item(organization, item))
+        .map(|item| mapper.entry_item(organization, item))
         .collect::<Result<_, _>>()?;
     Ok(Json(EntryPageDto {
         items,
@@ -236,6 +240,7 @@ pub(crate) async fn trash_entry(
         authorize_json(&state, &headers, &body, TRASH_ENTRY_ENDPOINT_ID).await?;
     let entry_id = extract::entry_id(body.entry_id)?;
     let context = drives::for_entry(&state, context, entry_id).await?;
+    require_created_by_app(&state, &context, entry_id).await?;
     let metadata = logical_mutation(
         TRASH_ENTRY_ENDPOINT_ID,
         &entry_id.to_string(),
@@ -251,6 +256,48 @@ pub(crate) async fn trash_entry(
     .await
     .map_err(metadata_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// An app moves to the bin only what it created (`briefcase.entries.trash`
+/// is "move an app-created entry to the bin"), whatever else the account may
+/// delete. Anything the account cannot see answers 404.
+async fn require_created_by_app(
+    state: &AppState,
+    context: &ExecutionContext,
+    entry_id: EntryId,
+) -> Result<(), AppError> {
+    use crate::application::service::MetadataRepository as _;
+
+    let app = context
+        .authorization()
+        .originating_application()
+        .ok_or(AppError::Internal {
+            category: "delegated_trash_without_app",
+        })?;
+    let entry = extract::scoped(
+        context,
+        state
+            .content_adapter
+            .metadata_repository()
+            .find_active_entry(context, entry_id),
+    )
+    .await
+    .map_err(|error| metadata_error(error.into()))?
+    .ok_or(AppError::NotFound)?;
+    if entry.authorization(context.authorization()).visibility()
+        != crate::domain::permission::EntryVisibility::Full
+    {
+        return Err(AppError::NotFound);
+    }
+    if entry.entry.origin_application_id.as_ref() != Some(app) {
+        return Err(AppError::refused(
+            "not_created_by_app",
+            format!(
+                "{app} can move to the bin only what it created, and it did not create this entry. The account can move it to the bin itself."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn destination_folder(

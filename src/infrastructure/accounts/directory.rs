@@ -31,6 +31,24 @@ use crate::{
     },
 };
 
+/// Where the owner segment of a permanent address (`/c:ada/notes/a.md`)
+/// leads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DriveOwner {
+    /// The drive of the account with this uuid.
+    Drive(String),
+    /// The id used to belong to this account, which goes by `id` now: the
+    /// address moved with it.
+    Moved {
+        /// The account's uuid.
+        uuid: String,
+        /// Its current public id.
+        id: String,
+    },
+    /// No account: the address leads nowhere.
+    Unknown,
+}
+
 /// Verified identities, the account cache, and the custodian rule.
 pub struct AccountDirectory {
     gateway: Arc<AccountsGateway>,
@@ -236,6 +254,7 @@ impl AccountDirectory {
             kind: record.kind,
             id: (!user.id.is_empty()).then(|| user.id.clone()),
             credential: Credential::Proof {
+                first_party: self.proof_issuers.is_first_party(&issuer),
                 issuing_app: issuer,
                 proof_id: proof.proof_id.clone(),
                 scope: scope.to_owned(),
@@ -478,6 +497,109 @@ impl AccountDirectory {
             ));
         }
         Ok(record)
+    }
+
+    /// Resolves the owner segment of a permanent address: an account uuid,
+    /// or a `c:`/`si:` id.
+    ///
+    /// Silicon Accounts tells Briefcase about every id change by webhook, so
+    /// a fresh cached holder of the id answers without a lookup (permanent
+    /// addresses are opened far more often than recipients are named). An id
+    /// nobody holds any more leads to the account that gave it up, by its
+    /// current id ([`DriveOwner::Moved`]). An id someone else took since
+    /// leads to that account's drive: the id belongs to its current holder.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error, or the lookup error when Silicon Accounts
+    /// cannot answer and nothing usable is cached.
+    pub async fn drive_owner(&self, segment: &str) -> Result<DriveOwner, AppError> {
+        if is_account_uuid(segment) {
+            return Ok(DriveOwner::Drive(segment.to_owned()));
+        }
+        let Ok(id) = PublicId::parse(segment) else {
+            return Ok(DriveOwner::Unknown);
+        };
+        let cached = self
+            .store
+            .find_by_public_id(id.as_str())
+            .await
+            .map_err(database_error)?;
+        if let [record] = cached.as_slice()
+            && self.is_fresh(record)
+        {
+            return Ok(DriveOwner::Drive(record.uuid.clone()));
+        }
+        match self.gateway.lookup_by_id(id.as_str()).await {
+            Ok(Some(summary)) => {
+                let record = self
+                    .store
+                    .apply_snapshot(&snapshot_from_summary(&summary))
+                    .await
+                    .map_err(database_error)?;
+                Ok(if record.status == AccountStatus::Deleted {
+                    DriveOwner::Unknown
+                } else {
+                    DriveOwner::Drive(record.uuid)
+                })
+            }
+            Ok(None) => self.moved_from(&id).await,
+            Err(
+                error @ (AccountsError::RateLimited { .. } | AccountsError::Unavailable { .. }),
+            ) => match cached.first() {
+                Some(record) => {
+                    tracing::warn!(
+                        event = "accounts_lookup_fell_back_to_cache",
+                        error = %error,
+                        "resolved a permanent address's owner from the cache"
+                    );
+                    Ok(DriveOwner::Drive(record.uuid.clone()))
+                }
+                None => Err(error.into()),
+            },
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The account that gave up `id`, by the id it uses now.
+    async fn moved_from(&self, id: &PublicId) -> Result<DriveOwner, AppError> {
+        let Some(uuid) = self
+            .store
+            .former_holder(id.as_str())
+            .await
+            .map_err(database_error)?
+        else {
+            return Ok(DriveOwner::Unknown);
+        };
+        let account = AccountUuid::new(uuid.clone()).map_err(|_| AppError::Internal {
+            category: "account_uuid",
+        })?;
+        // The cache can still list the old id when the change arrived only
+        // as history; ask Silicon Accounts for the account's id now.
+        let current = match self.store.find(&uuid).await.map_err(database_error)? {
+            Some(record) if record.public_id.as_deref() != Some(id.as_str()) => Some(record),
+            _ => self.refresh(&account).await?,
+        };
+        Ok(match current {
+            Some(record) if record.status != AccountStatus::Deleted => match record.public_id {
+                Some(current) if current != id.as_str() => DriveOwner::Moved { uuid, id: current },
+                _ => DriveOwner::Unknown,
+            },
+            _ => DriveOwner::Unknown,
+        })
+    }
+
+    /// The current public id of each listed account Briefcase knows one for,
+    /// keyed by uuid: the owner segment of its drive's permanent addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn labels(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>, AppError> {
+        self.store.public_ids(uuids).await.map_err(database_error)
     }
 
     /// Public ids move between accounts (an id given up can be taken by

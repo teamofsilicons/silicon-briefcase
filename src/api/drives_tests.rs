@@ -16,7 +16,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use super::accounts_tests::{Fixture, fixture};
+use super::accounts_tests::{Fixture, fixture_with};
 use crate::infrastructure::accounts::test_support::{carbon_summary, silicon_summary};
 
 /// One test world: Ada and Bob are Carbons, Cat is a Carbon nobody shares
@@ -44,7 +44,16 @@ impl World {
     /// The same world with apps allowed to act through proofs, in
     /// `BRIEFCASE_PROOF_ISSUERS` form.
     pub(super) async fn with_issuers(issuers: &str) -> anyhow::Result<Option<Self>> {
-        let Some(f) = fixture(issuers).await? else {
+        Self::with_delegation(issuers, "").await
+    }
+
+    /// [`World::with_issuers`] with first-party apps
+    /// (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` form).
+    pub(super) async fn with_delegation(
+        issuers: &str,
+        first_party: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(f) = fixture_with(issuers, first_party).await? else {
             return Ok(None);
         };
         let account = |prefix: &str, id: &str, kind: &str| Account {
@@ -511,7 +520,7 @@ async fn shares_by_id_reach_across_drives_and_show_in_shared_with_me() -> anyhow
     assert!(
         granted["subject"]["permanent_url"]
             .as_str()
-            .is_some_and(|url| url.contains(&format!("/org/{}/plans", w.ada.uuid))),
+            .is_some_and(|url| url.ends_with(&format!("/{}/plans", w.ada.id))),
         "{granted}"
     );
 

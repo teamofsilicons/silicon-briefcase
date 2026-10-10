@@ -1,6 +1,9 @@
 //! Mapping between transport DTOs and application/domain models.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use url::Url;
@@ -81,20 +84,22 @@ fn presented_path(path: EntryPath) -> String {
 mod url_tests {
     use super::*;
 
-    #[test]
-    fn share_links_cover_files_folders_inheritance_and_disabled_access() -> anyhow::Result<()> {
-        let mapper = ResponseMapper::new(
+    fn mapper() -> anyhow::Result<ResponseMapper> {
+        Ok(ResponseMapper::new(
             &Url::parse("https://api.example/api/v1/")?,
             Url::parse("https://site.example/")?,
-        );
+        )
+        .with_labels(BTreeMap::from([("Ada1".to_owned(), "c:ada".to_owned())])))
+    }
+
+    #[test]
+    fn share_links_cover_files_folders_inheritance_and_disabled_access() -> anyhow::Result<()> {
+        let mapper = mapper()?;
         for (path, encoded) in [
+            ("Shared reports", "Shared%20reports"),
             (
-                "private/me:tos/Shared reports",
-                "private/me:tos/Shared%20reports",
-            ),
-            (
-                "private/me:tos/Shared reports/draft #1.txt",
-                "private/me:tos/Shared%20reports/draft%20%231.txt",
+                "Shared reports/draft #1.txt",
+                "Shared%20reports/draft%20%231.txt",
             ),
         ] {
             for (enabled, inherited_from) in [
@@ -104,7 +109,7 @@ mod url_tests {
             ] {
                 let effective = enabled || inherited_from.is_some();
                 let result = mapper.link_access(
-                    "tos",
+                    "Ada1",
                     &crate::infrastructure::postgres::sharing::LinkAccess {
                         path: EntryPath::new(path)?,
                         can_manage: true,
@@ -120,7 +125,7 @@ mod url_tests {
                 if effective {
                     assert_eq!(
                         document["url"],
-                        format!("https://site.example/org/tos/{encoded}")
+                        format!("https://site.example/c:ada/{encoded}")
                     );
                 } else {
                     assert!(document["url"].is_null());
@@ -132,24 +137,60 @@ mod url_tests {
     }
 
     #[test]
+    fn permanent_urls_name_the_owner_by_id_and_api_urls_by_uuid() -> anyhow::Result<()> {
+        let mapper = mapper()?;
+        let path = EntryPath::new("notes/plan.md")?;
+        assert_eq!(
+            mapper.permanent_url("Ada1", &path)?.as_str(),
+            "https://site.example/c:ada/notes/plan.md"
+        );
+        assert_eq!(
+            mapper
+                .permanent_url("Ada1", &EntryPath::drive_root())?
+                .as_str(),
+            "https://site.example/c:ada"
+        );
+        assert_eq!(
+            mapper.content_url("Ada1", &path, "inline")?.as_str(),
+            "https://api.example/api/v1/paths/Ada1/notes/plan.md?disposition=inline"
+        );
+        // A drive whose owner's id Briefcase has not learned is named by uuid.
+        assert_eq!(
+            mapper.permanent_url("Bob1", &path)?.as_str(),
+            "https://site.example/Bob1/notes/plan.md"
+        );
+        assert_eq!(
+            mapper
+                .api_path_url("c:ada", &path, Some("disposition=inline"))?
+                .as_str(),
+            "https://api.example/api/v1/paths/c:ada/notes/plan.md?disposition=inline"
+        );
+        assert_eq!(
+            mapper.public_api_url("c:ada", &path, None)?.as_str(),
+            "https://api.example/api/v1/public/c:ada/notes/plan.md"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reserved_characters_remain_in_their_entry_segment() -> anyhow::Result<()> {
-        let base = Url::parse("https://briefcase.example/api/v1/")?;
-        let mapper = ResponseMapper::new(&base, Url::parse("https://site.example/")?);
+        let mapper = mapper()?;
         let name = "résumé 猫 #1 %\\.md";
         let path = EntryPath::new(format!("public/{name}"))?;
-        for url in [
-            mapper.permanent_url("example", &path)?,
-            mapper.content_url("example", &path, "inline")?,
-            mapper.content_url("example", &path, "attachment")?,
+        for (url, segment_count) in [
+            (mapper.permanent_url("Ada1", &path)?, 3),
+            (mapper.content_url("Ada1", &path, "inline")?, 6),
+            (mapper.content_url("Ada1", &path, "attachment")?, 6),
         ] {
             let segments = url
                 .path_segments()
                 .ok_or_else(|| anyhow::anyhow!("URL must have path segments"))?
                 .collect::<Vec<_>>();
-            assert_eq!(segments.len(), 4);
-            assert!(segments[3].contains("%5C"));
+            assert_eq!(segments.len(), segment_count, "{url}");
+            let last = segments[segment_count - 1];
+            assert!(last.contains("%5C"));
             assert_eq!(
-                percent_encoding::percent_decode_str(segments[3]).decode_utf8()?,
+                percent_encoding::percent_decode_str(last).decode_utf8()?,
                 name
             );
         }
@@ -158,23 +199,41 @@ mod url_tests {
 }
 
 /// Builds public response representations with the configured canonical URLs.
+///
+/// Permanent addresses name a drive by its owner's current `c:`/`si:` id
+/// (`https://briefcase.teamofsilicons.com/c:ada/notes/plan.md`); the labels
+/// a handler attaches with [`ResponseMapper::with_labels`] say which id each
+/// drive key (the owner's uuid) goes by. API content addresses name the drive
+/// by uuid, so they stay valid when the owner's id changes.
 #[derive(Clone)]
 pub(crate) struct ResponseMapper {
-    public_api_origin: Url,
+    public_api_base: Url,
     public_site_base_url: Url,
+    labels: Arc<BTreeMap<String, String>>,
 }
 
 impl ResponseMapper {
     pub(crate) fn new(public_base_url: &Url, public_site_base_url: Url) -> Self {
-        // Organization-scoped routes live at the API origin rather than below
-        // its version prefix, so the origin is derived once here.
-        let public_api_origin = public_base_url
-            .join("/")
-            .unwrap_or_else(|_| public_base_url.clone());
         Self {
-            public_api_origin,
+            public_api_base: with_directory_path(public_base_url.clone()),
             public_site_base_url: with_directory_path(public_site_base_url),
+            labels: Arc::new(BTreeMap::new()),
         }
+    }
+
+    /// The same mapper naming drives by the given owner ids (drive key →
+    /// current `c:`/`si:` id).
+    pub(crate) fn with_labels(&self, labels: BTreeMap<String, String>) -> Self {
+        Self {
+            labels: Arc::new(labels),
+            ..self.clone()
+        }
+    }
+
+    /// The owner segment of a drive's permanent addresses: the owner's
+    /// current id, or its uuid while Briefcase has not learned the id.
+    fn label<'a>(&'a self, drive: &'a str) -> &'a str {
+        self.labels.get(drive).map_or(drive, String::as_str)
     }
 
     pub(crate) fn entry(&self, view: AuthorizedEntryView) -> Result<EntryDto, AppError> {
@@ -287,28 +346,47 @@ impl ResponseMapper {
         })
     }
 
-    /// Builds the contracted clean permanent URL for one entry.
+    /// Builds the contracted clean permanent URL for one entry,
+    /// `{site}/{owner id}/{path}`.
     ///
-    /// The organization identifier and every path segment are percent-encoded
-    /// so a name containing a URL-significant character cannot change the
+    /// The owner segment and every path segment are percent-encoded so a
+    /// name containing a URL-significant character cannot change the
     /// resolved location.
-    pub(crate) fn permanent_url(
-        &self,
-        organization_id: &str,
-        path: &EntryPath,
-    ) -> Result<Url, AppError> {
-        Self::entry_url(&self.public_site_base_url, organization_id, path)
+    pub(crate) fn permanent_url(&self, drive: &str, path: &EntryPath) -> Result<Url, AppError> {
+        Self::entry_url(&self.public_site_base_url, "", self.label(drive), path)
     }
 
-    fn entry_url(base: &Url, organization_id: &str, path: &EntryPath) -> Result<Url, AppError> {
-        // Every Briefcase URL is scoped to a drive: the base is effectively
-        // `{host}/org/{drive}/`, and the entry path continues it. A drive's
-        // root is the drive's own URL.
-        let mut target = String::from("org/");
-        target.push_str(&encode_segment(organization_id));
-        if path.is_drive_root() {
-            target.push('/');
-        } else {
+    /// The API address resolving a permanent URL, `{api}/paths/{owner}/{path}`.
+    pub(crate) fn api_path_url(
+        &self,
+        owner: &str,
+        path: &EntryPath,
+        query: Option<&str>,
+    ) -> Result<Url, AppError> {
+        let mut url = Self::entry_url(&self.public_api_base, "paths/", owner, path)?;
+        url.set_query(query);
+        Ok(url)
+    }
+
+    /// The anonymous link address, `{api}/public/{owner}/{path}`.
+    pub(crate) fn public_api_url(
+        &self,
+        owner: &str,
+        path: &EntryPath,
+        query: Option<&str>,
+    ) -> Result<Url, AppError> {
+        let mut url = Self::entry_url(&self.public_api_base, "public/", owner, path)?;
+        url.set_query(query);
+        Ok(url)
+    }
+
+    fn entry_url(base: &Url, prefix: &str, owner: &str, path: &EntryPath) -> Result<Url, AppError> {
+        // Every Briefcase address is scoped to a drive: `{base}{prefix}{owner}`
+        // is the drive's own address and the entry path continues it. The
+        // leading `./` keeps an owner id such as `c:ada` from reading as a URL
+        // scheme.
+        let mut target = format!("./{prefix}{}", encode_segment(owner));
+        if !path.is_drive_root() {
             for segment in path.segments() {
                 target.push('/');
                 target.push_str(&encode_segment(segment));
@@ -319,20 +397,19 @@ impl ResponseMapper {
         })
     }
 
-    /// Builds the authenticated content URL for one file.
+    /// Builds the authenticated content URL for one file,
+    /// `{api}/paths/{drive uuid}/{path}?disposition=…`.
     ///
-    /// Every minted URL is organization-scoped and path-addressed, so a client
-    /// that holds one URL holds all three: the same address serves the entry,
-    /// its rendered bytes, and its download.
+    /// The same address serves the entry, its rendered bytes and its
+    /// download. It names the drive by uuid, so it keeps working when the
+    /// owner's id changes.
     fn content_url(
         &self,
-        organization_id: &str,
+        drive: &str,
         path: &EntryPath,
         disposition: &str,
     ) -> Result<Url, AppError> {
-        let mut url = Self::entry_url(&self.public_api_origin, organization_id, path)?;
-        url.set_query(Some(&format!("disposition={disposition}")));
-        Ok(url)
+        self.api_path_url(drive, path, Some(&format!("disposition={disposition}")))
     }
 
     pub(crate) fn entry_page(

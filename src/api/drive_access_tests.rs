@@ -43,7 +43,11 @@ use crate::{
 
 /// The context `who` gets for a request in `drive`, built exactly as the
 /// API builds it: the verified token, then the drive resolution.
-async fn in_drive(w: &World, who: &Account, drive: &Account) -> anyhow::Result<ExecutionContext> {
+pub(super) async fn in_drive(
+    w: &World,
+    who: &Account,
+    drive: &Account,
+) -> anyhow::Result<ExecutionContext> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::AUTHORIZATION,
@@ -65,7 +69,7 @@ async fn in_drive(w: &World, who: &Account, drive: &Account) -> anyhow::Result<E
 
 /// Publishes a small file into `parent` with a stored-object receipt and
 /// returns its id, or the refusal.
-async fn publish(
+pub(super) async fn publish(
     w: &World,
     context: &ExecutionContext,
     parent: &str,
@@ -423,7 +427,7 @@ async fn permanent_and_public_urls_resolve_inside_the_drive() -> anyhow::Result<
         .share(&w.ada, &handbook, "carbon", &w.bob.id, &["read"])
         .await?;
     assert_eq!(status, StatusCode::CREATED);
-    let permanent = |path: &str| format!("/org/{}/{path}", w.ada.uuid);
+    let permanent = |path: &str| format!("/api/v1/paths/{}/{path}", w.ada.id);
     let (status, body) = w
         .call(&w.bob, Method::GET, &permanent("handbook"), None)
         .await?;
@@ -443,7 +447,7 @@ async fn permanent_and_public_urls_resolve_inside_the_drive() -> anyhow::Result<
         )
         .await?;
     assert_eq!(status, StatusCode::OK, "{link}");
-    let public = |path: &str| format!("/api/v1/public/{}/{path}", w.ada.uuid);
+    let public = |path: &str| format!("/api/v1/public/{}/{path}", w.ada.id);
     let (status, body) =
         w.f.send(Method::GET, &public("handbook"), None, None, &[])
             .await?;
