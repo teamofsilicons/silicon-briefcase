@@ -444,3 +444,8 @@ their own first request, a lookup or `silicon.custodian_changed` teach it too. F
 `resolveDriveTop`, `resolveLegacyPermanentUrl` (deprecated) and `listArchiveContents` at 1.0.0. The new address
 format of `permanent_url`/`content_url` in every entry is covered by the contract major (4.0.0), like S36's
 rights changes. 57 operations.
+
+### S49. No Ting adapter, no outgoing proofs
+Briefcase sends nothing through Ting (the survey found no Ting delivery; notifications are its own inbox and
+Postmark email), so there is no D4 adapter and no `BRIEFCASE_TING_URL`. Briefcase calls no other app either: it only
+receives proofs, so it issues and stores none (and has no proof refresh tokens to protect or revoke).
