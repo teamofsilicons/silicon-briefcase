@@ -991,7 +991,10 @@ async fn the_byte_transfer_carries_only_its_capability() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines, reason = "one sharing flow verifies authenticated writes and anonymous reads")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sharing flow verifies authenticated writes and anonymous reads"
+)]
 async fn shares_go_to_accounts_and_link_reads_never_carry_the_bearer() {
     use briefcase_client::{ByteRange, Invite, Recipient};
     let server = MockServer::start().await;

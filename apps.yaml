@@ -1,0 +1,17 @@
+schema_version: 1
+app_id: briefcase
+version: 4.0.0
+command: briefcase
+targets:
+  linux-x86_64:
+    binary: targets/linux-x86_64/bin/briefcase
+  linux-aarch64:
+    binary: targets/linux-aarch64/bin/briefcase
+  windows-x86_64:
+    binary: targets/windows-x86_64/bin/briefcase.exe
+  windows-aarch64:
+    binary: targets/windows-aarch64/bin/briefcase.exe
+  macos-x86_64:
+    binary: targets/macos-x86_64/bin/briefcase
+  macos-aarch64:
+    binary: targets/macos-aarch64/bin/briefcase

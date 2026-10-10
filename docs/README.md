@@ -1,58 +1,29 @@
 # Silicon Briefcase
 
-Organization-scoped files for Carbons, Silicons, and IAM-authorized applications. This is the documentation source for **https://docs.briefcase.teamofsilicons.com**, covering the **2.0.0** source release and OpenAPI contract **2.1.0**.
-
-## Install and use
+Every Carbon and Silicon has a personal drive. Briefcase stores files, preserves versions, and shares with exact accounts. This documentation describes the **4.0.0 migration candidate**; it does not assert that production has been cut over.
 
 ```sh
-honeycomb install 'briefcase'
-briefcase iam --json
-briefcase login <IAM-short-lived-token>
-briefcase --org <organization> ls
+silicon-apps install briefcase
+briefcase accounts --json
+briefcase login
+briefcase ls
 ```
 
-Honeycomb installs the native CLI and manages its updates on Linux, macOS, and Windows.
-Obtain the short-lived token from IAM; Briefcase never needs your password.
-Run `briefcase docs cli` for offline instructions, or traverse
-`briefcase <command> --help` to discover each operation.
+Silicon Apps installs and updates the native CLI on Linux, macOS, and Windows. Carbons approve the device code at Silicon Accounts. Silicons use `silicon-accounts login --app briefcase -q | briefcase login --slt-stdin`. No app secret belongs in the CLI. These installation commands use the published release; build from this checkout to try the migration before publication.
 
-Update the CLI with `honeycomb update 'briefcase'`. Rust applications use
-the normal `briefcase-client` Cargo dependency; see the [Rust client guide](client/README.md).
-For local CLI development, use `cargo install --path clients/rust/crates/briefcase-cli`.
-
-## Start here
-
-| Guide | What you can do |
+| Guide | Contents |
 | --- | --- |
-| [Browser app](browser.md) | Sign in, browse, preview, upload, share, and restore |
-| [CLI](cli/README.md) | Manage files and testing environments from a terminal |
-| [Rust client](client/README.md) | Integrate the official typed, streaming client |
-| [HTTP API](api/README.md) and [operation reference](api/reference.md) | Authenticate, use endpoints, and understand errors |
-| [Operation inventory](api/operations.md) | All 62 operation IDs, methods, paths and revisions |
-| [Sharing and logs](sharing.md) | Member/email/tag invitations, public links, expiring shares, mail and audit history |
-| [OBO applications](obo.md) | Act inside an app namespace with current user permissions |
-| [Delegated uploads](api/delegated-uploads.md) | Reserve, transfer, publish and recover staged uploads |
-| [Testing environments](testing-environments.md) | Manage in Honeycomb and enter with the IAM app secret |
-| [IAM integration](iam-integration.md) | Configure scopes, critical endpoints and signed webhooks |
-| [Version policy](version-policy.md) | Negotiation, compatibility, deprecation and sunset |
-| [Deployment](deployment.md) | Run the backend, gateway, worker, storage and docs |
+| [Browser](browser.md) | Files, previews, sharing, versions, bin and storage settings |
+| [CLI](cli/README.md) | Native command usage and offline manuals |
+| [Rust client](client/README.md) | Typed streaming calls and Accounts sign-in |
+| [HTTP API](api/README.md) | Authentication and request conventions |
+| [Operations](api/operations.md) and [reference](api/reference.md) | Contracted endpoints and schemas |
+| [Sharing](sharing.md) | Exact recipients, Silicon allowances and expiring access |
+| [Accounts](accounts.md) | Tokens, custodian authority and signed events |
+| [Delegation](obo.md) | Apps acting through User verification proofs |
+| [Deployment](deployment.md) | Runtime and storage configuration |
+| [Migration](migration/cutover.md) | Identity mapping, aliases and rollout gates |
 
-## Addresses
+Permanent file addresses are `https://briefcase.teamofsilicons.com/{c:id or si:id}/{path}`. The immutable account UUID remains the authority key. A changed public id redirects to the current id; migrated `/org/...` links are preserved through aliases. Ordinary deletions are recoverable for 45 days. Self-destructing files bypass the bin. Defaults are 100 GiB uploaded per UTC day and 1 PiB stored per drive.
 
-| Surface | Address |
-| --- | --- |
-| Application and permanent links | `https://briefcase.teamofsilicons.com/org/{org_id}/{path}` |
-| API | `https://backend.briefcase.teamofsilicons.com/api/v1/` |
-| Contract negotiation | `https://backend.briefcase.teamofsilicons.com/api/version` |
-| IAM webhook receiver | `https://backend.briefcase.teamofsilicons.com/webhook/` |
-| Documentation | `https://docs.briefcase.teamofsilicons.com/` |
-
-IAM owns login, membership, roles and tags. An organization contains public, private, tag, and app folders. File names and paths stay readable; authorization decides what each actor can discover. Public within an organization and anyone-with-link access are distinct settings.
-
-Upload any file type. Reuploading a name publishes the next immutable version on the same file ID. Download folders as streamed tar.zst, restore files from the 45-day bin, and inspect the preceding year of logs. Any share can be a read-only expiring share that ends by itself after 1 minute to 30 days, and an upload can make a new file self-destruct: deleted for good, never binned, after the time you choose. The default limits are 100 GB per UTC day and 1 PB storage per organization; testing planes are limited to 2 GiB and ten active environments.
-
-The [OpenAPI document](../openapi.yaml) is the wire reference. [UNDERSTANDING.md](../UNDERSTANDING.md) is the human-maintained product specification. Development 0.x contracts are unsupported by this release.
-
-## Integration guide
-
-Read [Build a file workflow that respects the user's workspace](build-with-iam5.md) before connecting login, feature approval and delegated uploads.
+[OpenAPI](../openapi.yaml) is the wire reference. The human-owned [UNDERSTANDING.md](../UNDERSTANDING.md) is preserved separately; proposed wording changes are in [the migration proposal](migration/understanding-proposal.md).

@@ -1,8 +1,8 @@
 # API version policy
 
-> **Live integration baseline — October 3, 2026:** Briefcase contract 3.0.0 and IAM 5.0.0 are deployed, together with the Briefcase 3.0.1 account picker and Carbon/Silicon popup interface. Check `/api/version` for the backend contract; native client releases have their own package version.
+> **Live integration baseline — October 3, 2026:** Briefcase contract 4.0.0 and IAM 5.0.0 are deployed, together with the Briefcase 3.0.1 account picker and Carbon/Silicon popup interface. Check `/api/version` for the backend contract; native client releases have their own package version.
 
-Briefcase 3.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSON operation revisions change to 3.0.0, and the legacy raw upload returns 410. The route namespace remains `/api/v1`. Ordinary file operations and the capability-only byte transfer keep their previous revisions. Deploy matched consumers and service together; see the [migration guide](obo.md).
+Briefcase 4.0.0 uses IAM 5.0.0 and reusable OBO access tokens. Its delegated JSON operation revisions change to 4.0.0, and the legacy raw upload returns 410. The route namespace remains `/api/v1`. Ordinary file operations and the capability-only byte transfer keep their previous revisions. Deploy matched consumers and service together; see the [migration guide](obo.md).
 
 Briefcase 4.0.0 authenticates with Silicon Accounts: every route takes a Silicon Accounts access token issued to `briefcase`, the delegated `/obo/` operations take a User verification proof (`Authorization: Proof sap_…`) whose scope is the operation's endpoint id, and `X-Org-ID` is no longer read (except as the transfer route's tenant selector). `/iam`, `/auth/*` and the testing-environment operations are removed; `/accounts` and `/me` are added. The route namespace remains `/api/v1`.
 
@@ -19,7 +19,7 @@ Every versioned request also negotiates that header. Omission selects the latest
 | API contract | Backend | Rust client / CLI | Identity SDK |
 | --- | --- | --- | --- |
 | 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-accounts-client 0.4.0 |
-| 3.0.0 / v1 | 3.0.0 | 3.0.0 | silicon-iam-client 5.0.0 |
+| 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-iam-client 5.0.0 |
 | 2.1.0 / v1 | 2.1.0 | 2.1.0 | silicon-iam-client 4.0.0 |
 
 Clients must not ignore mismatched operation revisions. Contract 3.0 changes delegated authentication behavior; 2.x clients do not pass the complete 3.0 operation check. Existing ordinary resource IDs and stored data are unchanged; this release adds no Briefcase database migration. The [operation inventory](api/operations.md) and [OpenAPI document](../openapi.yaml) are the wire reference.

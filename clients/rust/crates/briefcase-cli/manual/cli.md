@@ -22,7 +22,7 @@ The positional `briefcase login <SLT>` and `--slt <SLT>` forms also work. A toke
 
 Sign-ins live in `$SILICON_HOME/.briefcase` when set, otherwise `$HOME/.briefcase`. Credentials are owner-readable only. Refresh runs under a file lock: a rotating refresh token is submitted once and its replacement is saved before use. Logout revokes this sign-in's refresh token and forgets the saved tokens. Other devices remain signed in. If revocation cannot reach Silicon Accounts the command says so and still clears local state.
 
-`briefcase accounts --json` discovers app identity without a network call or sign-in. `briefcase login status --json` always exits zero and reports `logged_in` and its reason; `--offline` inspects local state. `--token` / `BRIEFCASE_TOKEN` supplies a temporary access token for scripts; it is never saved or refreshed.
+`briefcase accounts --json` discovers app identity without a network call or sign-in. `briefcase login status --json` always exits zero and reports `authenticated` and its reason; `--offline` inspects local state. `--token` / `BRIEFCASE_TOKEN` supplies a temporary access token for scripts; it is never saved or refreshed.
 
 Use separate profiles for deployments:
 
@@ -64,7 +64,7 @@ Share with an exact `c:` or `si:` id. Delete rights cannot be shared. A Silicon 
 ```sh
 briefcase share notes/report.pdf c:ada --access read,update
 briefcase shares notes/report.pdf
-briefcase link notes/report.pdf true
+briefcase link notes/report.pdf --enabled true
 briefcase allow --help
 briefcase inbox
 briefcase inbox --read
@@ -76,7 +76,7 @@ Use `--expires-after` on a share or link for temporary read access, from one min
 
 ```sh
 briefcase rm notes/report.pdf
-briefcase bin ls
+briefcase bin list
 briefcase bin restore <entry-id>
 briefcase versions notes/report.pdf
 briefcase restore --help

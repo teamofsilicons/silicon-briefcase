@@ -4,7 +4,13 @@ Run shell commands from the backend repository root unless stated otherwise.
 This is the operator guide; start with the [documentation index](README.md)
 for API, package, and CLI usage.
 
-## Current production: base tier
+## Accounts migration candidate
+
+The 4.0 frontend is a Next.js standalone BFF built by `Dockerfile.browser`, listening on port3000 inside the image. Its runtime environment is separate from the Rust API: APP_ID, APP_SECRET, ACCOUNTS_URL, optional ACCOUNTS_API_URL, APP_API_URL (including `/api`), PUBLIC_URL and SESSION_SECRET. See [web setup](../web/README.md). The retired Rust browser gateway and static Vinext artifact are no longer deployed by this candidate.
+
+The nginx candidate forwards `/api/v1/uploads` with request buffering disabled and 15-minute timeouts. Register the exact web `/auth/callback` at Accounts. Configure Accounts signed events on the API, verify personal-drive identity mappings and drain old delegated uploads before switching. Follow the [cutover runbook](migration/cutover.md). No local migration check alone authorizes production changes.
+
+## Previously deployed base tier
 
 Briefcase runs on one ARM64 EC2 instance with direct Nginx TLS ingress, RDS for
 metadata, and S3 for file bytes. API, worker, and browser containers are managed

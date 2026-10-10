@@ -1,50 +1,6 @@
 # HTTP operation reference
 
-> Shared testing lifecycle has moved to Honeycomb. Legacy management routes beneath
-> `/organizations/{org_id}/testing-environments` and the selected-plane cleaning route
-> now return `testing_environment_managed_by_honeycomb`. Their historical shapes below
-> are compatibility references, not supported lifecycle operations. Use
-> [Honeycomb management](../testing-environments.md) and retain ordinary app-secret
-> data-plane selection. The protected [participant contract](../honeycomb-integration.md)
-> is a separate service integration.
-
-This reference is generated from the v1 [OpenAPI contract](../../openapi.yaml). Paths starting `/api/v1/` are absolute; normal requests require `Authorization: Bearer` and `X-Org-ID` unless the operation specifies another authority. Start with [API conventions](README.md), [sharing](../sharing.md), and [IAM OBO](../obo.md).
-
-Operation revisions are listed in the [inventory](operations.md). Public links expose read/download only. Test selection always uses `X-Briefcase-App-Secret` in addition to the stated actor authority.
-
-## Read the public IAM application ID before login
-
-`GET /iam` · `readIamInfo`
-
-No member token or organization is required. An optional X-Briefcase-App-Secret selects the paired test application's identity. Application secrets and environment keys are never returned.
-
-Authority: anonymous.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Public IAM configuration (Cache-Control no-store) | `application/json` IamInfo |
-| default | Error | `application/json` Error |
-
-## Verify the current Carbon or Silicon session with IAM
-
-`GET /auth/status` · `readLoginStatus`
-
-No organization selection is required. Missing, invalid, expired, or revoked member tokens return authenticated false. Active tokens return their identity and currently granted organizations; an empty grant list does not make an active session unauthenticated. IAM outages, malformed upstream responses, and invalid test-plane credentials remain errors.
-
-Authority: anonymous **or** bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Live authentication status (Cache-Control no-store) | `application/json` LoginStatus |
-| default | Error | `application/json` Error |
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 4.0.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative.
 
 ## Report the API version and per-operation contract revisions
 
@@ -58,318 +14,193 @@ An operation's `version` changes whenever its request or response shape changes 
 
 Also served unversioned at `/api/version`, so a client can negotiate before it knows which base path to use.
 
-Authority: anonymous.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `Briefcase-Supported-API-Versions` | header | no | API majors the client supports, newest first, comma separated |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Compatibility document | `application/json` ApiVersionDocument |
-| 406 | The client supports no API version this build serves | empty |
-| default | Error | `application/json` Error |
+| `Briefcase-Supported-API-Versions` | header | no |
 
-## Exchange an IAM short-lived token for a Briefcase Application session
+| Response | Meaning |
+| --- | --- |
+| 200 | Compatibility document |
+| 406 | The client supports no API version this build serves |
+| default | Error |
 
-`POST /auth/slt` · `exchangeShortLivedToken`
+## Describe how to sign in to Briefcase with Silicon Accounts
 
-In production, `slt` is the single-use code obtained from IAM's hosted Application login. With `X-Briefcase-App-Secret` selecting a paired test environment, `slt` can be an IAM-issued test login code or an existing test Carbon ID (`c:alice`) or Silicon ID (`si:worker`). Briefcase exchanges it through IAM using only the mapped testing key and test Application credential, and verifies the returned actor. IAM determines the actor's current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key and input when recovering an uncertain result.
+`GET /accounts` · `readAccountsInfo`
 
-Authority: anonymous.
+Public, so a client can find Briefcase's app id and the Silicon Accounts origin before it holds a token. Carbons sign in at Silicon Accounts (hosted pages for the web, the device flow for the CLI); Silicons exchange a short-lived token from `silicon-accounts login --app briefcase`. Either way Briefcase receives a Silicon Accounts access token whose audience is `briefcase`. The response also lists the scopes another app can hold in a User verification proof to act for an account here.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `Idempotency-Key` | header | yes | Stable key for recovering the same IAM token exchange |
-| `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
+| Response | Meaning |
+| --- | --- |
+| 200 | Sign-in facts (Cache-Control no-store) |
+| default | Error |
 
-Request: `application/json` (required).
+## Read the signed-in Carbon or Silicon as Briefcase knows it
 
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `slt` | string | yes | IAM-issued login code for the selected plane, or an existing Carbon/Silicon public ID when a test app secret is supplied. |
+`GET /me` · `readAccount`
 
-| Response | Meaning | Body |
+Verifies the access token and returns the account's uuid (the permanent key), its current public id, kind, display name and photo, and a Silicon's custodian. A token issued before the account signed out, removed Briefcase's access or was deleted answers 401 with the exact reason.
+
+| Response | Meaning |
+| --- | --- |
+| 200 | The signed-in account (Cache-Control no-store) |
+| default | Error |
+
+## List the drives the caller opens with the owner's rights
+
+`GET /drives` · `listDrives`
+
+Every Carbon and Silicon has one drive. The list holds the caller's own drive and, for a Carbon, the drive of every Silicon it looks after, where it holds the owner's rights (it never acts as the Silicon). Each item names the owner, how the caller relates to it (`own` or `custodial`), the drive's root folder and its permanent URL. What others shared with the caller is listed by `GET /shared`.
+
+| Response | Meaning |
+| --- | --- |
+| 200 | The caller's drives (Cache-Control no-store) |
+| default | Error |
+
+## List what other accounts shared with the caller
+
+`GET /shared` · `listSharedWithMe`
+
+Newest share first, one item per shared entry, each with the account whose drive holds it so a client can group by owner. Only live shares on entries the caller can still see are listed. A shared entry opens by its id like any other.
+
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Opaque access token, rotating refresh token, and the live organizations reachable by the IAM session | `application/json` ApplicationSessionTokens |
-| 400 | Missing or invalid idempotency key or request body | empty |
-| 401 | The production SLT or selected test actor is invalid, inactive, or belongs to another plane | empty |
-| 503 | IAM or the configured testing plane is unavailable | empty |
-| default | Error | `application/json` Error |
+| `cursor` | query | no |
+| `limit` | query | no |
 
-## Rotate an IAM Application refresh token
+| Response | Meaning |
+| --- | --- |
+| 200 | Entries shared with the caller (Cache-Control no-store) |
+| default | Error |
 
-`POST /auth/refresh` · `refreshApplicationSession`
+## List who may share with a Silicon besides its custodian and the custodian's other Silicons
 
-A successful refresh consumes the presented token and returns its replacement. Serialize refreshes per token family. Retry an uncertain result only with the exact same token, Idempotency-Key, and testing environment selection; rejected refreshes are terminal.
+`GET /silicons/{silicon}/allowed-accounts` · `listSiliconAllowedAccounts`
 
-Authority: anonymous.
+A Silicon acts on what it receives, so it accepts shares only from its custodian, the other Silicons its custodian looks after, and the accounts listed here. Only the Silicon itself and its custodian may read the list (403 `not_silicons_custodian`); naming a Carbon is 422 `not_a_silicon`.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `Idempotency-Key` | header | yes | Stable key for recovering the same IAM token exchange |
-| `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
+| Response | Meaning |
+| --- | --- |
+| 200 | The accounts allowed to share with the Silicon, oldest first (Cache-Control no-store) |
+| default | Error |
 
-Request: `application/json` (required).
+## Let an account share with a Silicon
 
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `refresh_token` | string | yes |  |
+`PUT /silicons/{silicon}/allowed-accounts/{account}` · `allowAccountToShareWithSilicon`
 
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Rotated access and refresh tokens, including the live organizations reachable by the IAM session | `application/json` ApplicationSessionTokens |
-| 400 | Missing or invalid idempotency key or request body | empty |
-| 401 | The refresh token is invalid, consumed, revoked, or belongs to another plane | empty |
-| 503 | IAM or the configured testing plane is unavailable | empty |
-| default | Error | `application/json` Error |
+Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the Silicon itself is 422 `allowance_self`.
 
-## List Briefcase testing environments owned by an organization
+| Response | Meaning |
+| --- | --- |
+| 201 | The account may now share with the Silicon |
+| 204 | The account was already allowed; nothing changed |
+| default | Error |
 
-`GET /organizations/{org_id}/testing-environments` · `listTestingEnvironments`
+## Stop letting an account share with a Silicon
 
-This lifecycle route always authenticates in production. The path organization must equal X-Org-ID. Active environments are returned by default; status=deleted or status=all changes that selection.
+`DELETE /silicons/{silicon}/allowed-accounts/{account}` · `disallowAccountToShareWithSilicon`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+Shares the account already made stay; the Silicon or its custodian can revoke them one by one. 404 when the account was not allowed.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `org_id` | path | yes | string |
-| `status` | query | no | string: active, deleted, all |
+| Response | Meaning |
+| --- | --- |
+| 204 | The account may no longer share with the Silicon |
+| default | Error |
 
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Matching environments; at most ten can be active | `application/json` TestingEnvironmentPage |
-| default | Error | `application/json` Error |
-
-## Manage the shared environment through Honeycomb
-
-`POST /organizations/{org_id}/testing-environments` · `createTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Read one testing environment without revealing credentials
-
-`GET /organizations/{org_id}/testing-environments/{environment_id}` · `getTestingEnvironment`
-
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `org_id` | path | yes | string |
-| `environment_id` | path | yes | string (uuid) |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Environment metadata | `application/json` TestingEnvironment |
-| default | Error | `application/json` Error |
-
-## Manage the shared environment through Honeycomb
-
-`PATCH /organizations/{org_id}/testing-environments/{environment_id}` · `updateTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Manage the shared environment through Honeycomb
-
-`DELETE /organizations/{org_id}/testing-environments/{environment_id}` · `deleteTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Manage the shared environment through Honeycomb
-
-`GET /organizations/{org_id}/testing-environments/{environment_id}/key` · `getTestingEnvironmentKey`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Manage the shared environment through Honeycomb
-
-`POST /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings` · `replaceTestingEnvironmentIamPairing`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Manage the shared environment through Honeycomb
-
-`POST /organizations/{org_id}/testing-environments/{environment_id}/cleanings` · `cleanTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Manage the shared environment through Honeycomb
-
-`POST /organizations/{org_id}/testing-environments/{environment_id}/restorations` · `restoreTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## Describe the environment selected by its IAM app secret
-
-`GET /testing-environment` · `describeCurrentTestingEnvironment`
-
-Authority: testingEnvironmentKey.
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Minimal environment metadata visible to a key holder | `application/json` TestingEnvironmentSelf |
-| default | Error | `application/json` Error |
-
-## Manage the shared environment through Honeycomb
-
-`POST /testing-environment/cleanings` · `cleanCurrentTestingEnvironment`
-
-Deprecated compatibility route. Returns HTTP 409 with `testing_environment_managed_by_honeycomb`. Use `honeycomb environments` or `briefcase env manage` with Honeycomb's own authenticated session.
-
-Briefcase still accepts an existing IAM-issued test app secret for its normal file operations. See [testing environments](../testing-environments.md).
-
-## List folder contents, or filter everything the caller can reach
+## List folder contents, the top of a drive, or a filtered view of a drive
 
 `GET /entries` · `listEntries`
 
-Returns the hundred most recently changed visible entries per page, newest first. Without `filter`, the listing browses one level: the organization roots, or the contents of `parent_id`/`path`. With `filter` and no parent, it searches every entry the caller may reach, which is how a `location:` predicate selects a subtree.
+Returns the hundred most recently changed visible entries per page, newest first. Every Carbon and Silicon has one drive; `drive` names which (its owner's `c:`/`si:` id or uuid), defaulting to the caller's own, and is ignored with `parent_id` because a folder names its drive. Without `filter`, the listing browses one level: the top of the drive, or the contents of `parent_id`/`path`. With `filter` and no parent, it searches every entry in the drive the caller may reach, which is how a `location:` predicate selects a subtree. In another account's drive the caller sees only what was shared with it and what it (or a Silicon it looks after) created there.
 
 The filter language combines freely. Terms are ANDed; `or` introduces an alternative; `not` or a leading `-` negates; parentheses group. Supported keys:
 
-`last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest` order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@{carbon:id}` matches the creator; `to:@{silicon:id}` matches an explicit share; `for:@{id}` matches what that member can reach; `contains:'term'` matches names and extracted content, with `*` as a wildcard; `has:'term'` matches extracted content only; `name:'term'` matches names only; `location:'private/cos:tos'` matches a path prefix; `is:` takes `file`, `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported`), `expiring` (a live expiring share that gave the caller access or that the caller manages), `self-destruct` (a file whose self-destruct timer is running; also `self_destruct`, `selfdestruct`), or an extension such as `md`, with `expiring` and `self-destruct` matched before the extension fallback; `permissions:` takes `read`, `write`, `update`, `delete`, or `manage_permissions` and matches the caller's effective access. A bare word is shorthand for `contains:`.
+`last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest` order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@c:ada` matches the creator; `to:@si:scout` matches an explicit share; `for:@c:ada` matches what that account can reach (ids are resolved at Silicon Accounts to the account they name now; an unknown id is 422 `unknown_account`); `contains:'term'` matches names and extracted content, with `*` as a wildcard; `has:'term'` matches extracted content only; `name:'term'` matches names only; `location:'notes/2026'` matches a path prefix; `is:` takes `file`, `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`, `unsupported`), or an extension such as `md`; `permissions:` takes `read`, `write`, `update`, `delete`, or `manage_permissions` and matches the caller's effective access. A bare word is shorthand for `contains:`.
 
 Filtering only ever returns entries the caller can already see.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `parent_id` | query | no | Omit for the organization root |
-| `path` | query | no | Parent folder addressed by path instead of identifier |
-| `filter` | query | no | Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat') is:md". `is:expiring` matches entries with a live expiring share that gave the caller access or that the caller manages; `is:self-destruct` matches files whose self-destruct timer is running. |
-| `cursor` | query | no | string |
-| `limit` | query | no | integer |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Visible entries | `application/json` EntryPage |
-| default | Error | `application/json` Error |
+| `parent_id` | query | no |
+| `path` | query | no |
+| `drive` | query | no |
+| `filter` | query | no |
+| `cursor` | query | no |
+| `limit` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Visible entries |
+| default | Error |
 
 ## createFolder
 
 `POST /entries` · `createFolder`
 
-Without a parent, creates a user folder at the organization base with the required root_type access boundary (and IAM tag for type tag). The new folder is a sibling of the reserved containers, not redirected into one. With parent_id or parent_path, creates inside that folder and inherits its boundary. Existing folders are not relocated. Sibling name collisions return 409 without exposing hidden entry metadata.
+Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when neither is given. `drive` names the drive for `parent_path` or the top (its owner's `c:`/`si:` id or uuid; the caller's own by default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422 `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. `invitees` follow the sharing rules of `POST /entries/{entry_id}/invitations`. Sibling name collisions return 409 without exposing hidden entry metadata.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `name` | string | yes |  |
-| `parent_id` | string / null (uuid) | no |  |
-| `root_type` | string: public, private, tag | no | Required only when creating at organization root |
-| `tag` | string | no | Required for a tag root |
-| `invitees` | array of PermissionGrantCreate | no |  |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 201 | Folder created | `application/json` Entry |
-| default | Error | `application/json` Error |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 201 | Folder created |
+| default | Error |
 
 ## getEntry
 
 `GET /entries/{entry_id}` · `getEntry`
 
-`self_destruct_at` is when a self-destructing file is permanently deleted, and `null` for a permanent file and for every folder.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Entry metadata | `application/json` Entry |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Entry metadata |
+| default | Error |
 
 ## updateEntry
 
 `PATCH /entries/{entry_id}` · `updateEntry`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+Renames an entry and/or moves it to another folder of the same drive. Entries move only within the drive that holds them; a destination folder the caller can see in another drive is 422 `cross_drive_move` (download and upload instead), and one it cannot see answers 404.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `name` | string | no |  |
-| `parent_id` | string (uuid) | no |  |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Updated entry | `application/json` Entry |
-| default | Error | `application/json` Error |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Updated entry |
+| default | Error |
 
 ## moveEntryToBin
 
 `DELETE /entries/{entry_id}` · `moveEntryToBin`
 
-A self-destructing file is deleted permanently instead of entering the bin. Deleting a folder bins the folder and its ordinary files as usual, but deletes the self-destructing files inside it permanently; restoring the folder does not bring them back.
+The entry's creator, the drive's owner, and the custodian of either may move an entry to the bin. Delete is never shared.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 204 | Entry moved to the 45-day bin | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 204 | Entry moved to the 45-day bin |
+| default | Error |
 
 ## Stream current file bytes for sandboxed in-place rendering
 
 `GET /entries/{entry_id}/content` · `readEntryContent`
 
-Briefcase relays the bytes itself, so the response is always bound to a current IAM identity and is never cacheable. Responses are sandboxed by Content-Security-Policy and served with `X-Content-Type-Options: nosniff`. Byte ranges are supported for media playback.
+Briefcase relays the bytes itself, so the response is always bound to a current verified account and is never cacheable. Responses are sandboxed by Content-Security-Policy and served with `X-Content-Type-Options: nosniff`. Byte ranges are supported for media playback.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `Range` | header | no | Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned. |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Complete file bytes | `application/octet-stream` string (binary) |
-| 206 | Requested byte range of the file | `application/octet-stream` string (binary) |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `Range` | header | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Complete file bytes |
+| 206 | Requested byte range of the file |
+| default | Error |
 
 ## Download current file bytes as an attachment
 
@@ -377,19 +208,16 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 Streams file bytes or a tar.zst folder archive. Folder archives include only entries the caller may read. No whole archive is buffered. Range requests apply to files only.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `Range` | header | no | Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned. |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Complete file bytes | `application/octet-stream` string (binary) |
-| 206 | Requested byte range of the file | `application/octet-stream` string (binary) |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `Range` | header | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Complete file bytes |
+| 206 | Requested byte range of the file |
+| default | Error |
 
 ## Upload a file of any supported size
 
@@ -397,170 +225,139 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 One request carries the whole file. Briefcase stages the bytes, then decides internally whether they fit a single provider request or need a multipart transfer, so a client never drives parts. Files up to 5 TiB are accepted; operators size the upload deadline and temporary disk for the sizes they expect.
 
-The destination folder is named either by `parent_id` or by `path`, never both. A path is resolved from the organization base, so `private/cos:tos/reports` addresses the same folder its permanent URL shows.
+The destination folder is named either by `parent_id` or by `path`, never both; with neither, the file goes at the top of the drive. A path is resolved within the drive `drive` names (its owner's `c:`/`si:` id or uuid; the caller's own by default), so `reports/q3` addresses the same folder its permanent URL shows. `drive` is refused with `parent_id`, because a folder names its drive.
 
 Uploading a name that an active file already carries is how a file is updated: the bytes become that file's next version, the response is that same entry, and its history keeps the previous complete version history. Creating a file needs `write` on the folder; replacing one needs `update` on the file. A folder with the same name is a conflict.
 
-Two organization limits apply: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting content returns capacity once the bytes are gone. Either limit may be configured per organization. An upload that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
+Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting content returns capacity once the bytes are gone. Either limit may be configured per drive. An upload that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
 
-`self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with `self_destruct_requires_new_file` (409) before its bytes are stored, and a later version never changes the timer. An invalid value is `invalid_self_destruct_minutes` (422). The creator and organization admins and owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.
+`self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, the drive's owner, and the custodian of either can keep the file with `DELETE /entries/{entry_id}/self-destruct`.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `multipart/form-data` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `parent_id` | string (uuid) | no | Destination folder identifier |
-| `path` | string | no | Destination folder path, as an alternative to parent_id |
-| `self_destruct_minutes` | integer (1–43200) | no | New files only: permanently delete the file this many minutes after the upload finishes |
-| `file` | string (binary) | yes |  |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 201 | File created, or a new version published on the existing file | `application/json` Entry |
-| 413 | The file exceeds the 5 TiB maximum | empty |
-| 429 | The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC | empty |
-| 507 | The organization has no storage capacity left | empty |
-| default | Error | `application/json` Error |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 201 | File created, or a new version published on the existing file |
+| 413 | The file exceeds the 5 TiB maximum |
+| 429 | The drive's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC |
+| 507 | The drive has no storage capacity left |
+| default | Error |
 
 ## listPermissions
 
 `GET /entries/{entry_id}/permissions` · `listPermissions`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
 
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Explicit permissions | `application/json` object |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Explicit permissions |
+| default | Error |
 
 ## grantPermission
 
 `POST /entries/{entry_id}/permissions` · `grantPermission`
 
-With `expires_in_minutes` the grant is a read-only expiring share, separate from any permanent grant the member holds; `write` or `update` alongside it is `expiring_share_is_read_only` (422). The returned grant's `expires_at` is when it ends, or `null` for a permanent grant; expired grants are not listed.
+Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `principal` | ActorRef | yes |  |
-| `access` | array of string: read, write, update | yes |  |
-| `inherit` | boolean | no |  Default: True. |
-| `expires_in_minutes` | integer (1–43200) | no | Makes this a read-only expiring share that ends after this many minutes |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 201 | Permission granted | `application/json` PermissionGrant |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 201 | Permission granted |
+| default | Error |
 
 ## revokePermission
 
 `DELETE /entries/{entry_id}/permissions/{grant_id}` · `revokePermission`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `grant_id` | path | yes | string (uuid) |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 204 | Grant revoked | empty |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `grant_id` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Grant revoked |
+| default | Error |
 
 ## Report what the caller may do on named files and folders
 
 `POST /permissions/effective` · `inspectEffectivePermissions`
 
-Names up to 100 targets by identifier, path, or both. A target that does not exist and one the caller cannot read are both reported as unresolved, so the answer never confirms a hidden entry.
+Names up to 100 targets by identifier, path, or both. Identifiers may name entries in any drive; each is answered inside its own drive. Paths are resolved within `drive` (its owner's `c:`/`si:` id or uuid; the caller's own by default). A target that does not exist and one the caller cannot read are both reported as unresolved, so the answer never confirms a hidden entry.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `entry_ids` | array of string (uuid) | no |  |
-| `paths` | array of string | no |  |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Effective access per readable target | `application/json` PermissionInspectionResult |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Effective access per readable target |
+| default | Error |
 
 ## searchFiles
 
 `GET /search` · `searchFiles`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `q` | query | yes | string |
-| `limit` | query | no | integer |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Permission-filtered results | `application/json` object |
-| default | Error | `application/json` Error |
+| `q` | query | yes |
+| `limit` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Permission-filtered results |
+| default | Error |
+
+## Submit a bounded operational event
+
+`POST /telemetry` · `submitTelemetry`
+
+Best-effort anonymous relay to Space Station. No table key or credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Event accepted for best-effort delivery or collection disabled |
+| 429 | Process-wide telemetry intake limit reached |
+| default | Error |
+
+## Submit a bug report with an optional proposed fix
+
+`POST /reports` · `submitReport`
+
+Stores the account-authored report in the caller's drive. No telemetry, credentials, or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Durable report receipt, including on an idempotent replay |
+| default | Error |
 
 ## Read the central notification inbox
 
 `GET /notifications` · `listNotifications`
 
-Returns the twenty newest notifications for the authenticated Carbon or Silicon together with the unread count used for the badge.
+Returns the twenty newest notifications for the authenticated Carbon or Silicon together with the unread count used for the badge. The inbox is the account's own; each subject names the drive that holds its entry, usually someone else's.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Newest notifications and unread badge count | `application/json` NotificationInbox |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Newest notifications and unread badge count |
+| default | Error |
 
 ## Mark the entire notification inbox read
 
 `POST /notifications/read` · `readNotifications`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
 
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Inbox after every notification was marked read | `application/json` NotificationInbox |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Inbox after every notification was marked read |
+| default | Error |
 
 ## Read the retained action history of an entry
 
@@ -568,680 +365,489 @@ Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
 Returns up to the last hundred recorded actions on the entry — who created, read, updated, downloaded, deleted, or restored it, and when.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Newest-first action history | `application/json` ActivityPage |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
 
-## Create a file for a member on behalf of another application
+| Response | Meaning |
+| --- | --- |
+| 200 | Newest-first action history |
+| default | Error |
+
+## Retired raw delegated upload
 
 `POST /obo/files` · `createFileOnBehalfOfMember`
 
-The compatible one-shot delegated file upload. The request body is the raw file bytes, and everything else — the destination folder path, the file name, and the media type — travels as metadata bound into the IAM OBO proof, so an application cannot redirect a proof it legitimately obtained to another destination.
+Returns HTTP 410 without reading upload bytes. Use the delegated reserve, capability transfer, and commit operations with a Silicon Accounts User verification proof.
 
-Register the endpoint in IAM as `briefcase.files.create` at the path `/api/v1/obo/files` with metadata keys `path` (empty selects the application's own folder under `apps/{app_id}/private/{actor}`), `name`, and `content_type`. Exchange the proof over the SHA-256 digest of the exact bytes, then send those bytes here. Verification consumes the proof exactly once and is never retried.
-
-The represented member's own permissions still apply: the file is only created where that member may add content, and a name that an active file already carries publishes that file's next version. Any supported size is accepted; Briefcase picks the storage route internally, and the organization's daily and total upload allowances apply as usual.
-
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the tenant and the header must agree with it |
-
-Request: `application/octet-stream` (required).
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 201 | File created, or a new version published, for the represented member | `application/json` Entry |
-| 413 | The file exceeds the 5 TiB maximum | empty |
-| 429 | The organization's daily upload allowance is spent; Retry-After gives the seconds until it resets at 00:00 UTC | empty |
-| 507 | The organization has no storage capacity left | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 410 | Raw delegated uploads are retired; use reserve, transfer, and commit |
+| default | Error |
 
 ## Reserve private upload storage with current member authority
 
 `POST /obo/uploads/reserve` · `reserveDelegatedUpload`
 
-Register `briefcase.uploads.reserve` at `/api/v1/obo/uploads/reserve`. The exact destination, logical operation UUID, size and lowercase SHA-256 are immutable. A fresh proof binds POST and the exact JSON digest with empty metadata. A repeated reservation with unchanged intent can return its current state; a capability is issued only when a transfer can start. Store the non-secret operation UUID and manifest for reconciliation, never a parent token or proof. Capabilities do not authorize publication.
+Reserve private storage for the account a User verification proof speaks for (scope briefcase.uploads.reserve). The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes | Stable non-nil logical upload UUID |
-| `parent_path` | string | yes | Existing folder path; empty selects the private app folder |
-| `name` | string | yes |  |
-| `content_type` | string | yes |  |
-| `size` | integer | yes |  |
-| `sha256` | string | yes | Full raw-file digest |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Current authorized upload state | `application/json` DelegatedUploadReservation |
-| 404 | Operation or destination is absent or not visible | empty |
-| 409 | Logical intent or current lifecycle state conflicts | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized upload state |
+| 404 | Operation or destination is absent or not visible |
+| 409 | Logical intent or current lifecycle state conflicts |
+| default | Error |
 
 ## Publish previously staged bytes with fresh member authority
 
 `POST /obo/uploads/commit` · `commitDelegatedUpload`
 
-Register `briefcase.uploads.commit` at `/api/v1/obo/uploads/commit`. Mint a new proof after transfer, binding this small JSON body and empty metadata. Current IAM identity, membership, originating application, test generation, destination permission and quota are rechecked before atomic publication. The capability cannot commit. A response lost after publication is reconciled by the same logical operation UUID without creating another file version.
+Publish staged bytes with a valid User verification proof (scope briefcase.uploads.commit). The proof's account, issuing app, destination, resource permission and quota are verified before atomic publication. Repeating an unchanged logical operation does not create another file version.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized upload state |
+| 404 | Operation or destination is absent or not visible |
+| 409 | Logical intent or current lifecycle state conflicts |
+| default | Error |
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes |  |
-| `upload_id` | string (uuid) | yes |  |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Current authorized upload state | `application/json` DelegatedUploadStatus |
-| 404 | Operation or destination is absent or not visible | empty |
-| 409 | Logical intent or current lifecycle state conflicts | empty |
-| default | Error | `application/json` Error |
-
-## Reconcile one logical upload with a fresh IAM proof
+## Reconcile one logical upload with a current proof
 
 `POST /obo/uploads/status` · `getDelegatedUploadStatus`
 
-Register `briefcase.uploads.status` at `/api/v1/obo/uploads/status`. Use a fresh proof for the exact JSON body and empty metadata after an uncertain response. This endpoint returns only the represented member and originating application's operation in the selected plane. It does not return a staging capability or read file bytes. A staged result can be committed with another fresh proof; a committed result carries its published entry UUID.
+Reconcile an upload with a valid proof for the same account and issuing app (scope briefcase.uploads.status). Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes |  |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Current authorized upload state | `application/json` DelegatedUploadStatus |
-| 404 | Operation or destination is absent or not visible | empty |
-| 409 | Logical intent or current lifecycle state conflicts | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized upload state |
+| 404 | Operation or destination is absent or not visible |
+| 409 | Logical intent or current lifecycle state conflicts |
+| default | Error |
 
 ## Cancel unpublished private staging
 
 `POST /obo/uploads/cancel` · `cancelDelegatedUpload`
 
-Register `briefcase.uploads.cancel` at `/api/v1/obo/uploads/cancel`. Use a fresh proof for the exact JSON body and empty metadata. Cancellation revokes further staging and publication, with durable provider cleanup. Cleanup may remain pending while a writer lease or ambiguous provider operation is reconciled. Cancellation never deletes a published file; use the separately authorized trash operation for that.
+Cancel unpublished content with a valid proof for the same account and issuing app (scope briefcase.uploads.cancel). Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes |  |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Current authorized upload state | `application/json` DelegatedUploadStatus |
-| 404 | Operation or destination is absent or not visible | empty |
-| 409 | Logical intent or current lifecycle state conflicts | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized upload state |
+| 404 | Operation or destination is absent or not visible |
+| 409 | Logical intent or current lifecycle state conflicts |
+| default | Error |
 
 ## Transfer exact private bytes using a narrow upload capability
 
 `PUT /obo/uploads/{upload_id}/content` · `transferDelegatedUpload`
 
-Sends only the capability issued by the fresh-authorized reservation, the organization selector and the same test root when using a test plane. Do not send an IAM bearer, proof or application credential. Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider writes. A successful transfer is private staging only, not file publication. Use a fresh commit proof separately. A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
+Sends only the capability issued by the reservation. Do not send an access token or proof; the drive is found from the reservation (older clients may still send X-Org-ID, which must then name it). Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider writes. A successful transfer is private staging only, not file publication. Commit separately with a valid proof. A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
 
-Authority: uploadCapability **or** uploadCapability + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `upload_id` | path | yes | string (uuid) |
-| `Content-Length` | header | yes | integer |
-
-Request: `application/octet-stream` (required).
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Exact bytes are privately staged | `application/json` DelegatedUploadStatus |
-| 401 | Invalid or revoked upload capability | empty |
-| 409 | Transfer cannot start in the current lifecycle state | empty |
-| 413 | Content exceeds the reservation or maximum size | empty |
-| default | Error | `application/json` Error |
+| `X-Org-ID` | header | no |
+| `upload_id` | path | yes |
+| `Content-Length` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Exact bytes are privately staged |
+| 401 | Invalid or revoked upload capability |
+| 409 | Transfer cannot start in the current lifecycle state |
+| 404 | No reservation has this upload id |
+| 413 | Content exceeds the reservation or maximum size |
+| default | Error |
 
 ## Create a child folder for a represented member
 
 `POST /obo/folders/create` · `createFolderOnBehalfOfMember`
 
-Register `briefcase.folders.create` at `/api/v1/obo/folders/create` with an empty IAM metadata schema. Mint a fresh proof for POST and the SHA-256 of the exact JSON body. No bearer credential accompanies the proof. Every input, including the logical operation UUID, is body-bound; query parameters and Idempotency-Key do not select them. An empty parent_path selects the represented member's private folder for the originating application. Otherwise the path must resolve to an existing folder. Ordinary write permission is required, and the created folder retains its originating application for auditing. Retry an uncertain result with the same operation_id and unchanged input, but a fresh proof. Authorization is checked again before replay.
+Create a child folder with a User verification proof (scope briefcase.folders.create). An empty parent_path selects the account's folder for the issuing app, `apps/{app}/`; a path names a folder in the account's own drive (inside `apps/{app}/` unless the app is first-party). Ordinary write permissions apply and the folder records the issuing app. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | DelegatedOperationId | yes |  |
-| `parent_path` | string | yes | Existing parent path; the empty string selects the private application folder |
-| `name` | string | yes | One valid child folder name |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 201 | Created folder or the same logical operation's authorized replay | `application/json` Entry |
-| 404 | Parent is absent or not visible | empty |
-| 409 | Name or logical operation conflicts with existing state | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 201 | Created folder or the same logical operation's authorized replay |
+| 404 | Parent is absent or not visible |
+| 409 | Name or logical operation conflicts with existing state |
+| default | Error |
 
 ## List the represented member's visible entries
 
 `POST /obo/entries/list` · `listEntriesOnBehalfOfMember`
 
-Register `briefcase.entries.list` at `/api/v1/obo/entries/list` with an empty IAM metadata schema. Each page requires a fresh proof bound to POST and the exact JSON body digest. The ordinary entry-list semantics apply, including traversal-only folders, privacy-filtered results, filters and opaque pagination. A parent can be addressed by UUID or path, never both. Omission lists roots, or searches the visible tree when a filter is present. No query parameter changes the request.
+List the ordinary privacy-filtered entry view with a User verification proof (scope briefcase.entries.list). Parent UUID and path are mutually exclusive; with neither, the app's folder `apps/{app}/` is listed. Apps see only their folder in the account's own drive; a first-party app sees what the account sees and may name another drive with `drive` (others get 422 `drive_not_delegated`). Each page verifies the proof again and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `parent_id` | string / null (uuid) | no |  |
-| `path` | string / null | no | Alternative parent path; must not be blank |
-| `filter` | string / null | no | Ordinary permission-filtered entry expression |
-| `cursor` | string / null | no |  |
-| `limit` | integer / null | no |  Default: 100. |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Permission-filtered entries and optional next cursor | `application/json` EntryPage |
-| 404 | Parent is absent or not visible | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Permission-filtered entries and optional next cursor |
+| 404 | Parent is absent or not visible |
+| default | Error |
 
 ## Stream a file for a represented member
 
 `POST /obo/files/read` · `readFileOnBehalfOfMember`
 
-Register `briefcase.files.read` at `/api/v1/obo/files/read` with an empty IAM metadata schema. Mint a fresh proof for POST and the exact JSON body digest. Ordinary read/download authorization applies. Only the body-bound range and download flag control delivery; an HTTP Range header or query parameter cannot override them. Inline content uses the normal sandbox CSP, nosniff and private no-store response headers. Attachment content is served as application/octet-stream. The proof's authority applies only to this file request and is never cached.
+Read a current file with a User verification proof (scope briefcase.files.read) and ordinary resource permissions (inside `apps/{app}/` of the account's drive unless the app is first-party). Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `entry_id` | string (uuid) | yes |  |
-| `range` | string / null | no | Single bytes= range; malformed or multi-range syntax falls back to the complete file just as ordinary reads do |
-| `download` | boolean | no |  Default: False. |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Complete file bytes | `application/octet-stream` string (binary) |
-| 206 | Requested byte range of the file | `application/octet-stream` string (binary) |
-| 404 | File is absent or unreadable | empty |
-| 416 | The bound byte range is unsatisfiable | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 200 | Complete file bytes |
+| 206 | Requested byte range of the file |
+| 404 | File is absent or unreadable |
+| 416 | The bound byte range is unsatisfiable |
+| default | Error |
 
 ## Move an application-created entry to the recoverable bin
 
 `POST /obo/entries/trash` · `trashEntryOnBehalfOfMember`
 
-Register `briefcase.entries.trash` at `/api/v1/obo/entries/trash` with an empty IAM metadata schema. Mint a fresh proof for POST and the SHA-256 of the exact JSON body. The represented member must currently have delete authority across the subtree, and the originating application may delete only entries it created. System containers cannot be deleted. Retry an uncertain result with the same operation_id and entry_id but a fresh proof; current authority is rechecked before recognizing the same completed deletion. A successful old key cannot delete an entry that has since been restored. This is recoverable deletion with normal retention, not permanent removal.
+Recoverably remove content the issuing app created with a User verification proof (scope briefcase.entries.trash). An entry another app (or the account itself) created answers 403 `not_created_by_app`. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | DelegatedOperationId | yes |  |
-| `entry_id` | string (uuid) | yes |  |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 204 | Entry moved to the bin or the same deletion was recognized | empty |
-| 404 | Entry is absent or not visible | empty |
-| 409 | Logical operation or current entry state conflicts | empty |
-| default | Error | `application/json` Error |
+| Response | Meaning |
+| --- | --- |
+| 204 | Entry moved to the bin or the same deletion was recognized |
+| 403 | The issuing app did not create this entry (`not_created_by_app`) |
+| 404 | Entry is absent or not visible |
+| 409 | Logical operation or current entry state conflicts |
+| default | Error |
 
 ## listVersions
 
 `GET /entries/{entry_id}/versions` · `listVersions`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `cursor` | query | no | string |
-| `limit` | query | no | integer |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Newest-first page of at most 100 retained immutable versions | `application/json` FileVersionPage |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `cursor` | query | no |
+| `limit` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Newest-first page of at most 100 retained immutable versions |
+| default | Error |
 
 ## restoreVersion
 
 `POST /entries/{entry_id}/versions/{version_id}/restore` · `restoreVersion`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `version_id` | path | yes | string |
-| `Idempotency-Key` | header | yes | string |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Version restored as a new current version | `application/json` Entry |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `version_id` | path | yes |
+| `Idempotency-Key` | header | yes |
 
-## Report the organization's consumption and limits, in bytes
+| Response | Meaning |
+| --- | --- |
+| 200 | Version restored as a new current version |
+| default | Error |
+
+## Report a drive's consumption and limits, in bytes
 
 `GET /usage` · `readOrganizationUsage`
 
-Answers how much space the organization is actually consuming — exact byte counts, never percentages, so a client renders whichever unit or proportion it prefers.
+Answers how much space a drive is actually consuming — exact byte counts, never percentages, so a client renders whichever unit or proportion it prefers. The drive is the caller's own, or with `drive` that of a Silicon it looks after; only the drive's owner and that custodian may read it (404 otherwise).
 
 `storage.used_bytes` is what every retained version currently weighs, including versions of entries sitting in the bin, because those bytes are still stored. It falls as soon as content is really deleted. `daily_uploads.used_bytes` is what has been uploaded since the last midnight UTC, and `resets_at` is the next one.
 
-Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and either may be raised or lowered per organization, so the figures reported here are the ones actually in force.
+Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and either may be raised or lowered per drive, so the figures reported here are the ones actually in force. Uploads are charged to the drive they land in, whoever uploads them.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Consumption and limits | `application/json` OrganizationUsage |
-| default | Error | `application/json` Error |
+| `drive` | query | no |
 
-## List recoverable entries, newest deletion first
+| Response | Meaning |
+| --- | --- |
+| 200 | Consumption and limits |
+| default | Error |
+
+## List a drive's recoverable entries, newest deletion first
 
 `GET /bin` · `listBin`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+The drive is the caller's own unless `drive` names another. Its owner and the custodian of a Silicon that owns it see everything in its bin; anyone else sees what they created there and what was shared with them.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `cursor` | query | no | string |
-| `limit` | query | no | integer |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Deleted entries visible to the actor | `application/json` EntryPage |
-| default | Error | `application/json` Error |
+| `cursor` | query | no |
+| `limit` | query | no |
+| `drive` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Deleted entries visible to the actor |
+| default | Error |
 
 ## restoreEntry
 
 `POST /bin/{entry_id}/restore` · `restoreEntry`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Restored entry | `application/json` Entry |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
 
-## configureOrganizationBucket
+| Response | Meaning |
+| --- | --- |
+| 200 | Restored entry |
+| default | Error |
+
+## Configure a drive's bring-your-own S3 bucket
 
 `PUT /storage/configuration` · `configureOrganizationBucket`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+Configures storage for the caller's own drive, or with `drive` for a Silicon it looks after. Only the drive's owner and that custodian may (403 otherwise). Briefcase checks the bucket with a test upload, read, update and delete before it is used. The STS External ID Briefcase presents when it assumes the role is derived from the drive and stored with the configuration; name it in the role's trust policy.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `Idempotency-Key` | header | no | Retain with the exact configuration to recover a lost response. A completed failed probe is replayed; use a new key to run validation again. |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `bucket_name` | string | yes |  |
-| `region` | string | yes |  |
-| `role_arn` | string | yes |  |
-| `prefix` | string | yes |  |
-| `aws_account_id` | string | yes |  |
-| `encryption_mode` | string: sse_s3, sse_kms | yes |  |
-| `kms_key_arn` | string | no |  |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Configuration saved after CRUD validation | `application/json` BucketConfigurationStatus |
-| default | Error | `application/json` Error |
+| `Idempotency-Key` | header | no |
 
-## Resolve the clean permanent URL of an entry
+| Response | Meaning |
+| --- | --- |
+| 200 | Configuration saved after CRUD validation |
+| default | Error |
 
-`GET /org/{org_id}/{path}` · `resolvePermanentUrl`
+## Resolve an entry's permanent address
 
-The path segment mirrors the folder structure exactly, for example `/org/tos/private/cos:tos/top_secret/this_secret.md`. The organization segment must match `X-Org-ID`. Without `disposition` the entry and its effective access are returned; with `disposition` the file bytes are streamed. Anything the caller cannot read answers `404`.
+`GET /paths/{owner}/{path}` · `resolvePermanentUrl`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
+The address mirrors the folder structure below the drive's owner, for example `/paths/c:ada/notes/2026/plan.md` for https://briefcase.teamofsilicons.com/c:ada/notes/2026/plan.md. The owner is a `c:`/`si:` id or the account's uuid (entries' `content_url` uses the uuid, so it survives id changes). Without `disposition` the entry and the caller's effective access are returned; with it the file bytes are streamed. Without `Authorization` only what anyone with the link may read is served. An id the owner gave up answers `308` with the address under its current id. Anything the caller cannot read answers `404`.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `org_id` | path | yes | string |
-| `path` | path | yes | Organization-relative entry path |
-| `disposition` | query | no | Omit to receive entry metadata |
-| `Range` | header | no | Single `bytes=` range. A malformed or multi-range value is ignored and the complete file is returned. |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Entry metadata, or complete file bytes when a disposition is requested | `application/json` Entry, `application/octet-stream` string (binary) |
-| 206 | Requested byte range of the file | `application/octet-stream` string (binary) |
-| default | Error | `application/json` Error |
+| `owner` | path | yes |
+| `path` | path | yes |
+| `disposition` | query | no |
+| `Range` | header | no |
 
-## List current member and dynamic tag invitations
+| Response | Meaning |
+| --- | --- |
+| 200 | Entry metadata, or complete file bytes when a disposition is requested |
+| 206 | Requested byte range of the file |
+| 308 | The owner gave up the id the address used; the same address under the owner's current id |
+| default | Error |
+
+## Resolve the top of a drive
+
+`GET /paths/{owner}` · `resolveDriveTop`
+
+The drive's own address (https://briefcase.teamofsilicons.com/c:ada). Its owner and the custodian of a Silicon that owns it see the top folder; someone with a share inside sees a traversal entry; anyone else gets `404`. The top of a drive never has a link, so this always takes an access token. An id the owner gave up answers `308`.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `owner` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | The drive's top folder |
+| 308 | The owner gave up the id the address used; the same address under the owner's current id |
+| default | Error |
+
+## Resolve an address from before personal drives
+
+`GET /org/{org_id}/{path}` · `resolveLegacyPermanentUrl`
+
+Addresses such as `/org/tos/public/handbook/guide.md` keep working after the move to personal drives. They resolve through the aliases the cutover recorded when it moved each file (an address below a moved folder resolves through the folder) and answer exactly like `GET /paths/{owner}/{path}` for the entry's current place, whose `permanent_url` the response carries. Without `Authorization` only link-shared entries are served.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `org_id` | path | yes |
+| `path` | path | yes |
+| `disposition` | query | no |
+| `Range` | header | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Entry metadata, or complete file bytes when a disposition is requested |
+| 206 | Requested byte range of the file |
+| default | Error |
+
+## List what an archive holds
+
+`GET /entries/{entry_id}/archive` · `listArchiveContents`
+
+Lists the entries of a zip, tar, tar.gz, tar.zst or 7z file without extracting anything, for anyone who may read the file. Zip archives are listed from their central directory whatever their size; tar archives are read as a stream (up to 1 GiB of archive); 7z archives up to 512 MiB. At most `limit` entries are returned; `truncated` says when there are more. Any other file answers 422 `not_an_archive`; an unreadable or encrypted archive answers 422 `archive_unreadable` or `archive_encrypted`.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `entry_id` | path | yes |
+| `limit` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | The archive's entries |
+| default | Error |
+
+## List the live shares on an entry
 
 `GET /entries/{entry_id}/invitations` · `listInvitations`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `cursor` | query | no | Opaque continuation from next_cursor; pages contain at most 100 invitations. |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Success | `application/json` InvitationPage |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `cursor` | query | no |
 
-## Invite a current member by ID, verified email, or IAM tag
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |
+
+## Share with a Carbon or Silicon named by id
 
 `POST /entries/{entry_id}/invitations` · `createInvitation`
 
-With `expires_in_minutes` the invitation is a read-only expiring share: its own grant, separate from any permanent one, that stops working the instant its `expires_at` passes. `write` or `update` alongside it is `expiring_share_is_read_only` (422). The usual notification and email are sent on creation; nothing is sent when it expires.
+Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are retired (422 `email_recipients_retired`, `tag_recipients_retired`).
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `principal` | InvitationRecipient | yes |  |
-| `access` | array of string: read, write, update | no |  Default: ['read']. |
-| `inherit` | boolean | no |  Default: True. |
-| `expires_in_minutes` | integer (1–43200) | no | Makes this a read-only expiring share that ends after this many minutes |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 201 | Success | `application/json` Invitation |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `Idempotency-Key` | header | yes |
 
-## Revoke a member or tag invitation
+| Response | Meaning |
+| --- | --- |
+| 201 | Success |
+| default | Error |
+
+## Revoke a share (including one made to a tag before personal drives)
 
 `DELETE /entries/{entry_id}/invitations/{grant_id}` · `revokeInvitation`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `grant_id` | path | yes | string (uuid) |
-| `Idempotency-Key` | header | yes | string |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 204 | Success. Ending an expiring share early sends no notification. | empty |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `grant_id` | path | yes |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Success. Ending an expiring share early sends no notification. |
+| default | Error |
 
 ## Extend, shorten, or make permanent a live expiring share
 
 `PATCH /entries/{entry_id}/invitations/{grant_id}` · `changeExpiringShare`
 
-Send exactly one field. `expires_in_minutes` restarts the share's clock from now (1 to 43,200 minutes), which extends or shortens it. `permanent: true` keeps the access for good; when the recipient already holds a permanent grant on this entry, the expiring share folds into it and the response is that permanent grant. Both fields or neither is `expires_in_minutes_or_permanent` (422). An expired share no longer exists (404); a permanent grant is `not_an_expiring_share` (409). Requires manage-permissions authority on the entry.
+Send exactly one field. `expires_in_minutes` restarts the share's clock from now (1 to 43,200 minutes), which extends or shortens it. `permanent: true` keeps the access for good; when the recipient already holds a permanent grant on this entry, the expiring share folds into it and the response is that permanent grant. An expired share no longer exists (404); a permanent grant is `not_an_expiring_share` (409).
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `grant_id` | path | yes | string (uuid) |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `expires_in_minutes` | integer (1–43200) | no | New lifetime, counted from now |
-| `permanent` | boolean: true | no | Make the share permanent |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | The grant as it now stands | `application/json` Invitation |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `grant_id` | path | yes |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | The grant as it now stands |
+| default | Error |
 
 ## Keep a self-destructing file
 
 `DELETE /entries/{entry_id}/self-destruct` · `makeEntryPermanent`
 
-Stops the file's self-destruct timer. Only the file's creator and organization admins and owners may; anyone else who can see the file gets 403, and a caller who cannot see it gets 404. A file whose timer is not running is `not_self_destructing` (409).
+Stops the file's self-destruct timer. Only the file's creator, the drive's owner, and the custodian of either may; anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing` (409).
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 204 | The file is permanent. Repeating the call after success is `not_self_destructing` (409) unless it carries the same optional `Idempotency-Key`, which replays the success. | empty |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | The file is permanent. Repeating the call after success is `not_self_destructing` (409) unless it carries the same optional `Idempotency-Key`, which replays the success. |
+| default | Error |
 
 ## Read explicit and inherited anonymous access
 
 `GET /entries/{entry_id}/link-access` · `readLinkAccess`
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
 
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Success | `application/json` LinkAccess |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |
 
 ## Set anyone-with-link read/download access
 
 `PUT /entries/{entry_id}/link-access` · `setLinkAccess`
 
-With `enabled` true, `expires_in_minutes` makes this an expiring link that ends after that many minutes; sending it again on a live expiring link restarts the clock, and omitting it makes the link permanent. A permanent link that is already on is never shortened (`link_already_permanent`, 409). `expires_in_minutes` with `enabled` false is `expiring_link_requires_enabled` (422). The response's `expires_at` is when this entry's own expiring link ends, or `null`.
+Managed by the entry's creator, the drive's owner, and the custodian of either. The top of a drive and its apps folders never get a link (422 `protected_folder`); anything inside them can.
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `Idempotency-Key` | header | yes | string |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `enabled` | boolean | yes |  |
-| `expires_in_minutes` | integer (1–43200) | no | With `enabled` true, an expiring link that ends after this many minutes |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Success | `application/json` LinkAccess |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |
 
 ## Read 365 days of file/folder logs, newest first
 
 `GET /entries/{entry_id}/logs` · `listEntryLogs`
 
-Expiring-share and self-destruct actions, including the worker's expiry and deletion events, are listed in [Sharing and audit logs](../sharing.md#logs-and-versions).
 
-Authority: bearerAuth **or** bearerAuth + testingEnvironmentKey.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | yes | string |
-| `entry_id` | path | yes | string (uuid) |
-| `cursor` | query | no | string |
-| `limit` | query | no | integer |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Success | `application/json` LogPage |
-| default | Error | `application/json` Error |
+| `entry_id` | path | yes |
+| `cursor` | query | no |
+| `limit` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |
 
 ## Read or download a publicly shared file or folder
 
-`GET /public/{org_id}/{path}` · `readPublicEntry`
+`GET /public/{owner}/{path}` · `readPublicEntry`
 
-Authority: anonymous.
+What anyone with the link may read, at `/public/{owner}/{path}`. The owner is a `c:`/`si:` id or the account's uuid; the first segment of an address from before personal drives (`tos` in `/public/tos/…`) also works, through the cutover's aliases. An id the owner gave up answers `308` with the address under its current id.
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `org_id` | path | yes | string |
-| `path` | path | yes | string |
-| `view` | query | no | string: metadata, contents, inline, attachment |
-| `cursor` | query | no | string |
-| `test_environment` | query | no | Public sandbox UUID; requires effective public-link access and never falls back to production |
-| `X-Briefcase-App-Secret` | header | no | Selects a Briefcase test plane; omission selects production |
-
-| Response | Meaning | Body |
+| Parameter | Location | Required |
 | --- | --- | --- |
-| 200 | Success | `application/json` object, `application/octet-stream` string (binary), `application/zstd` string (binary) |
-| default | Error | `application/json` Error |
+| `owner` | path | yes |
+| `path` | path | yes |
+| `view` | query | no |
+| `cursor` | query | no |
 
-## Critical IAM-approved operation inside the calling app subtree
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| 308 | The owner gave up the id the address used; the same address under the owner's current id |
+| default | Error |
+
+## Share or link an entry for the account, inside the issuing app's folder
 
 `POST /obo/invitations` · `inviteOnBehalfOfMember`
 
-IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and calling application. Require critical user approval in the IAM endpoint catalog.
+Requires a User verification proof with scope briefcase.invitations.create from an app allowed for it. Ordinary invitation permissions and logical idempotency apply.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |
 
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes |  |
-| `entry_id` | string (uuid) | yes |  |
-| `invitation` | InvitationCreate | yes | Includes the optional expiring `expires_in_minutes` |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Success | `application/json` Invitation |
-| default | Error | `application/json` Error |
-
-## Critical IAM-approved operation inside the calling app subtree
+## Share or link an entry for the account, inside the issuing app's folder
 
 `POST /obo/link-access` · `setLinkAccessOnBehalfOfMember`
 
-IAM binds POST, this exact versioned path, the exact body SHA-256, subject, organization, and calling application. Require critical user approval in the IAM endpoint catalog.
+Requires a User verification proof with scope briefcase.link_access.update from an app allowed for it. Ordinary link-sharing permissions and logical idempotency apply.
 
-Authority: oboAccess + appId **or** oboAccess + appId + testingEnvironmentKey.
-
-| Parameter | Location | Required | Meaning |
-| --- | --- | --- | --- |
-| `X-Org-ID` | header | no | Optional; IAM derives the organization and any supplied value must agree |
-
-Request: `application/json` (required).
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `operation_id` | string (uuid) | yes |  |
-| `entry_id` | string (uuid) | yes |  |
-| `enabled` | boolean | yes |  |
-| `expires_in_minutes` | integer (1–43200) | no | With `enabled` true, an expiring link that ends after this many minutes |
-
-| Response | Meaning | Body |
-| --- | --- | --- |
-| 200 | Success | `application/json` LinkAccess |
-| default | Error | `application/json` Error |
-
-
-## Submit an explicit bug report
-
-`POST /reports` requires a member bearer, `X-Org-ID`, and an `Idempotency-Key`.
-Send `{ "message": "Steps, expected behavior, actual behavior", "pr": "https://github.com/teamofsilicons/silicon-briefcase/pull/42", "isi": "optional-component" }`.
-Only `message` is required (nonblank, at most 16384 UTF-8 bytes). `pr`, when
-present, must identify a Briefcase pull request. `isi` is optional, at most 256
-UTF-8 bytes, with no control characters. The response is `{ "id": "UUID",
-"accepted": true }`. Reuse the key and identical body after a lost response.
-An optional `X-Briefcase-App-Secret` keeps the report in its test environment.
-
-## Submit operational telemetry
-
-`POST /api/v1/telemetry` is an anonymous, bounded relay for fixed diagnostic
-fields. Its OpenAPI operation is `submitTelemetry`; 204 means intake and 429
-means the process limit was reached. Client events are untrusted observations.
-Use the SDK event model, preserve the UUID on retries, and never attach content
-or credentials. Collection settings and delivery guarantees are in
-[deployment](../deployment.md#telemetry).
+| Response | Meaning |
+| --- | --- |
+| 200 | Success |
+| default | Error |

@@ -409,3 +409,52 @@ Verification against the current code:
 Next: real CLI/API/Accounts storage journeys, native Apps archives, frontend and active docs. Production
 cutover remains separate. The recovered local Accounts stack was recreated; old cached test sessions
 are invalid and all new checks must mint fresh identities.
+
+
+## 2026-10-10 — Browser, storage, Apps packaging and active documentation
+
+Completed Next.js 16 + React 19 + Arc UI in `web/`: hosted Accounts PKCE sign-in,
+sealed server session and same-origin streaming BFF, personal/custodial drives,
+shared/recent/bin views, file/folder creation, retryable upload, bounded previews
+(including Office text/tables and archive listings), share/expiry/link management,
+version restore, rename/move, self-destruct keep, notifications, usage and drive S3
+settings. Permanent owner/path and legacy redirects work for signed-in readers and
+anonymous link readers; percent-containing names are covered. Public byte relays
+forward no account credentials. Preserved opt-out telemetry and its field sanitizer.
+
+Service follow-ups expose current recipient labels without replacing UUID keys,
+return the exact storage external id, and explicitly request SHA256 for PutObject.
+Native Apps packaging validates binary identity, isolated discovery and archive
+shape. Six native runner jobs produce artifacts; publication is separate. Runtime
+web Dockerfile and CI now build Next standalone. Active docs describe Accounts and
+personal drives; prior IAM/Honeycomb guides are retained under docs/history.
+
+Evidence (local logs are ignored, no test credentials committed):
+- Client stage commit `da8f7b7`: 142 tests passed, 2 external tests ignored; strict clippy passed.
+- Service/API follow-up commit `ec4fa85`: full suite **230 passed, 1 ignored**
+  (external telemetry delivery); real Postgres 5460. `.mig/logs/service-final.log`.
+- Extended S3 proof: exact full/range bytes, head SHA256, server-side restore copy,
+  and two-part 5 MiB+ multipart assembly/composite digest. `.mig/logs/s3-multipart.log`.
+- Web typecheck, lint, **45 unit tests** and production standalone build passed.
+- Full current browser suite **28 passed** against real local Accounts and Briefcase:
+  device CLI byte roundtrip; upload/rename/share/friend/public/version/bin/restore;
+  self-destruct keep; percent paths; archive/Office preview; session/CSRF/refresh/
+  revocation; WCAG 2.2 AA light/dark at desktop and phone sizes. `.mig/logs/web-e2e-final.log`.
+- Separate Silicon SLT CLI proof passed: bytes, spent-SLT rejection retaining the
+  saved session, and logout. `.mig/logs/cli-silicon-live.log`.
+- Screens captured and visually reviewed at 1440x900 and390x844, light/dark;
+  selected captures are in `docs/migration/screens/`.
+- macOS ARM64 current debug binary passed Apps validate/pack and isolated offline
+  discovery; candidate archive SHA256 `054c4c77be99a13f304c6fcd211abe21a424980f83048f9e385de292fdfec10a`.
+  This is a local packaging check, not the six-target release build.
+- Installer tests **3 passed**; CLI documentation sync passed; docs site **25 pages,
+  850 links/assets** verified.
+
+Storage fixture is `scripts/local-s3.py`, explicitly pinned to Moto5.2.1. It repairs
+that emulator's missing checksum type fields, multipart Result XML root and
+composite part-count suffix, using Moto's actual checksum calculations. Start with
+`python scripts/local-s3.py` in a venv with `moto[server]==5.2.1`, then create the
+local bucket. These are S3-compatible local checks, not actual AWS integration.
+Real AWS AssumeRole/KMS/versioned buckets, native six-platform release runners,
+container build/deploy, Apps publication and production cutover remain release
+gates. No push, deployment, cutover or human-owned UNDERSTANDING edits occurred.
