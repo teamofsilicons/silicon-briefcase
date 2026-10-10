@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/briefcase-client", "crates/briefcase-cli", "crates/briefcase-web"]
+members = ["crates/briefcase-client", "crates/briefcase-cli"]
 resolver = "3"
 
 # The two crates are published separately, so every shared choice lives here
