@@ -73,12 +73,12 @@ class LinuxAbiTests(unittest.TestCase):
 
     def test_packager_rejects_bad_linux_abi_before_packing(self):
         spec = importlib.util.spec_from_file_location(
-            "package_release", Path(__file__).with_name("package-native-session-release.py")
+            "package_release", Path(__file__).with_name("package_release_binary.py")
         )
         package = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(package)
         with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / "commit"
+            binary = Path(directory) / "briefcase"
             for target, machine in [("linux-aarch64", 183), ("linux-x86_64", 62)]:
                 binary.write_bytes(elf_requirements(["GLIBC_2.28"], machine))
                 package.verify_binary(binary, target)

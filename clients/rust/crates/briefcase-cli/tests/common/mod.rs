@@ -126,6 +126,10 @@ async fn run(
         .env("BRIEFCASE_TELEMETRY", "off")
         .env("HOSTNAME", "testhost")
         .args(arguments);
+    // Winsock loads its providers relative to SystemRoot on Windows.
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
     for (name, value) in extra {
         command.env(name, value);
     }
