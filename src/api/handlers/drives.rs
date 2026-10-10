@@ -1,6 +1,8 @@
 //! The drives a caller can open, what others shared with it, and who may
 //! share with a Silicon.
 
+use std::collections::HashMap;
+
 use axum::{
     extract::{Path, Query, State, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
@@ -13,7 +15,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    application::service::MetadataServiceError,
+    application::{context::ExecutionContext, service::MetadataServiceError},
     domain::{account::AccountUuid, actor::ActorKind},
     error::AppError,
     infrastructure::postgres::accounts::AccountRecord,
@@ -116,32 +118,42 @@ pub(crate) async fn shared(
     let has_more = rows.len() > usize::from(limit);
     let mut items = Vec::with_capacity(usize::from(limit));
     let mut last = None;
+    // A page usually spans few drives: resolve each drive (the caller's
+    // relation to its owner, and the owner's record) once per request.
+    let mut resolved: HashMap<String, Option<(ExecutionContext, AccountRecord)>> = HashMap::new();
     for row in rows.into_iter().take(usize::from(limit)) {
         last = Some((row.shared_at, row.entry_id));
-        let entered = match drives::enter(&state, context.clone(), &row.drive).await {
-            Ok(entered) => entered,
-            Err(AppError::NotFound) => continue,
-            Err(error) => return Err(error),
+        if !resolved.contains_key(&row.drive) {
+            let drive = match drives::enter(&state, context.clone(), &row.drive).await {
+                Ok(entered) => {
+                    let owner = state
+                        .accounts
+                        .record(&AccountUuid::new(row.drive.clone()).map_err(|_| {
+                            AppError::Internal {
+                                category: "account_uuid",
+                            }
+                        })?)
+                        .await?;
+                    Some((entered, owner))
+                }
+                Err(AppError::NotFound) => None,
+                Err(error) => return Err(error),
+            };
+            resolved.insert(row.drive.clone(), drive);
+        }
+        let Some(Some((entered, owner))) = resolved.get(&row.drive) else {
+            continue;
         };
         let entry_id = extract::entry_id(row.entry_id)?;
-        let item = match extract::scoped(&entered, state.metadata.visible_entry(&entered, entry_id))
-            .await
-        {
-            Ok(item) => item,
-            // The share ended or the entry moved to the bin since the lookup.
-            Err(MetadataServiceError::NotFound) => continue,
-            Err(error) => return Err(metadata_error(error)),
-        };
-        let owner = state
-            .accounts
-            .record(
-                &AccountUuid::new(row.drive.clone()).map_err(|_| AppError::Internal {
-                    category: "account_uuid",
-                })?,
-            )
-            .await?;
+        let item =
+            match extract::scoped(entered, state.metadata.visible_entry(entered, entry_id)).await {
+                Ok(item) => item,
+                // The share ended or the entry moved to the bin since the lookup.
+                Err(MetadataServiceError::NotFound) => continue,
+                Err(error) => return Err(metadata_error(error)),
+            };
         items.push(json!({
-            "owner": account_json(&owner),
+            "owner": account_json(owner),
             "shared_at": row.shared_at,
             "entry": state.mapper.entry_item(&row.drive, item)?,
         }));
@@ -263,7 +275,7 @@ pub(crate) async fn disallow(
 /// that Silicon or its custodian.
 async fn managed_silicon(
     state: &AppState,
-    context: &crate::application::context::ExecutionContext,
+    context: &ExecutionContext,
     named: &str,
 ) -> Result<(AccountUuid, AccountRecord), AppError> {
     let record = state.accounts.resolve(named).await?;
@@ -290,9 +302,7 @@ async fn managed_silicon(
     Ok((silicon, record))
 }
 
-fn caller_uuid(
-    context: &crate::application::context::ExecutionContext,
-) -> Result<AccountUuid, AppError> {
+fn caller_uuid(context: &ExecutionContext) -> Result<AccountUuid, AppError> {
     context
         .authorization()
         .account()
