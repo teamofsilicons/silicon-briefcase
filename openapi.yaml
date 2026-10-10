@@ -2521,6 +2521,10 @@ components:
       required:
       - items
       properties:
+        folder:
+          allOf:
+          - $ref: '#/components/schemas/Entry'
+          description: Delegated listings of a confined app's own root include that folder, even when it has no children. Ordinary listings omit this field.
         items:
           type: array
           items:

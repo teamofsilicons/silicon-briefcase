@@ -480,3 +480,15 @@ All existing identities must also migrate using the Accounts-owned immutable CSV
 keys/prefixes, stored BYOS external IDs and public IDs must not change. Briefcase
 uses provider-side encryption, with no account-derived application encryption AAD
 found. Production is untouched.
+
+
+## 2026-10-10 — Cross-app empty-folder discovery
+
+A genuine Waveform TTS→Briefcase stored audio→STT run found that a confined app
+could not discover its empty root before its first upload. Delegated list now
+ensures its own root exists and returns authorized `folder` metadata for that root,
+without widening parent/sibling visibility. Waveform reads that metadata explicitly.
+Targeted delegated tests2passed; complete genuine cross-app run22passed/0failed,
+recorded in Waveform `.mig/e2e/bcfinal02/summary.json` and `briefcase-artifacts.json`.
+It includes fresh empty-folder discovery, Carbon/Silicon audio storage and reads,
+proof refresh, confined listing, approval/revocation and held-download checks.

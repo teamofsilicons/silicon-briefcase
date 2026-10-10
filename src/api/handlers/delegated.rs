@@ -143,11 +143,21 @@ pub(crate) async fn create_folder(
 }
 
 /// Lists the same privacy-filtered view as the ordinary member endpoint.
+#[derive(Serialize)]
+pub(crate) struct DelegatedEntryPage {
+    #[serde(flatten)]
+    page: EntryPageDto,
+    /// The confined application's own folder, including when it is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder: Option<EntryDto>,
+}
+
+/// Lists authorized children and identifies the app's own empty root.
 pub(crate) async fn list_entries(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<EntryPageDto>, AppError> {
+) -> Result<Json<DelegatedEntryPage>, AppError> {
     let (context, query): (_, ListEntriesQuery) =
         authorize_json(&state, &headers, &body, LIST_ENTRIES_ENDPOINT_ID).await?;
     extract::validation(validation::list_entries(&query))?;
@@ -158,6 +168,17 @@ pub(crate) async fn list_entries(
     if query.drive.is_some() && confined {
         return Err(AppError::validation("drive_not_delegated"));
     }
+    let app_folder = if confined {
+        Some(
+            state
+                .metadata
+                .application_folder(&context)
+                .await
+                .map_err(metadata_error)?,
+        )
+    } else {
+        None
+    };
     let filter = super::entries::filter_query(&state, query.filter.as_deref()).await?;
     let context = match (query.parent_id, query.drive.as_deref()) {
         (Some(id), _) => drives::for_entry(&state, context, extract::entry_id(id)?).await?,
@@ -200,9 +221,16 @@ pub(crate) async fn list_entries(
         .into_iter()
         .map(|item| mapper.entry_item(organization, item))
         .collect::<Result<_, _>>()?;
-    Ok(Json(EntryPageDto {
-        items,
-        next_cursor: result.next_cursor,
+    let folder = match app_folder {
+        Some(folder) if Some(folder.entry.id) == parent_id => Some(state.entry_dto(folder).await?),
+        _ => None,
+    };
+    Ok(Json(DelegatedEntryPage {
+        page: EntryPageDto {
+            items,
+            next_cursor: result.next_cursor,
+        },
+        folder,
     }))
 }
 

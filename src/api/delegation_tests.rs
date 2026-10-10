@@ -135,6 +135,18 @@ async fn first_party_apps_reach_what_the_account_can_and_others_only_their_folde
     assert_eq!(made["owner"]["id"], w.bob.uuid.as_str());
 
     // Waveform acting for Bob reaches only apps/waveform/ in Bob's drive.
+    let (status, empty) = delegated(
+        &w,
+        "sap_waveform_bob",
+        "/api/v1/obo/entries/list",
+        json!({ "path": "apps/waveform" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["items"], json!([]));
+    assert_eq!(empty["folder"]["path"], "apps/waveform");
+    assert_eq!(empty["folder"]["type"], "folder");
+    assert!(empty["folder"]["id"].as_str().is_some());
     for body in [
         json!({ "parent_id": plans }),
         json!({ "parent_id": notes }),
