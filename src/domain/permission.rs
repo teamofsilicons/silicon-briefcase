@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use super::{
     actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
-    entry::{EntryBoundary, EntryKind, SystemEntryKind},
+    entry::{EntryKind, SystemEntryKind},
     ids::{EntryId, GrantId},
 };
 
@@ -160,11 +160,11 @@ impl PermissionInheritance {
 pub struct PermissionGrantParts {
     /// Unique grant identifier.
     pub id: GrantId,
-    /// Organization security boundary.
+    /// The drive holding the entry.
     pub organization_id: OrganizationId,
     /// Entry on which the grant was created.
     pub entry_id: EntryId,
-    /// Current organization member receiving the grant.
+    /// The account receiving the grant.
     pub principal: ActorRef,
     /// Rights conveyed by the grant.
     pub access: GrantedAccess,
@@ -215,7 +215,7 @@ impl PermissionGrant {
         self.parts.id
     }
 
-    /// Returns the organization security boundary.
+    /// Returns the drive holding the entry.
     #[must_use]
     pub const fn organization_id(&self) -> &OrganizationId {
         &self.parts.organization_id
@@ -302,7 +302,7 @@ pub enum Capability {
     WriteContent,
     /// Move an entry to the recoverable bin.
     Delete,
-    /// Create and revoke explicit grants.
+    /// Create and revoke explicit grants and manage link access.
     ManagePermissions,
 }
 
@@ -349,7 +349,8 @@ impl CapabilitySet {
     ///
     /// Write adds content that does not exist yet, update changes content that
     /// does, and delete stands alone. A grant never conveys permission
-    /// management: only ownership and organization administration do.
+    /// management: only creating the entry and owning (or looking after) the
+    /// drive do.
     #[must_use]
     pub fn from_granted_access(access: GrantedAccess) -> Self {
         let mut capabilities = Self(Capability::Read.mask());
@@ -459,29 +460,25 @@ pub enum EntryVisibility {
 /// All trusted facts needed to authorize one entry.
 #[derive(Debug)]
 pub struct EffectiveAuthorizationInput<'a> {
-    /// Online-IAM-verified request identity and organization membership.
+    /// The verified caller, the drive the request acts in, and the caller's
+    /// relation to that drive.
     pub context: &'a RequestAuthContext,
-    /// Organization that owns the entry.
+    /// The drive that holds the entry.
     pub entry_organization_id: &'a OrganizationId,
     /// Entry being authorized.
     pub entry_id: EntryId,
     /// Whether the target is a file or folder.
     pub entry_kind: EntryKind,
-    /// Internal system classification, when reconciled by Briefcase.
+    /// System classification, for structural folders.
     pub system_kind: Option<SystemEntryKind>,
-    /// Inherited Public, Private, or Tag boundary.
-    pub boundary: &'a EntryBoundary,
-    /// Represented actor that owns the entry.
+    /// The account that created the entry.
     pub owner: &'a ActorRef,
     /// Server-derived application that originally created the entry.
     pub origin_application_id: Option<&'a ApplicationId>,
     /// Direct and repository-proven ancestor grants relevant to the entry.
     pub grants: &'a [GrantApplication<'a>],
-    /// Whether the caller owns a folder this entry sits inside.
-    ///
-    /// The repository proves this over the entry's ancestry and excludes the
-    /// reserved Public, Private, and Tag containers, whose persistence
-    /// custodian is not their proprietor.
+    /// Whether the caller (or a Silicon it looks after) created a folder this
+    /// entry sits inside.
     pub owns_ancestor: bool,
     /// Whether a visible descendant requires this otherwise-hidden folder.
     pub required_for_traversal: bool,
@@ -525,20 +522,32 @@ impl EffectiveAuthorization {
 
 /// Evaluates additive Briefcase authorization for one entry.
 ///
-/// A cross-organization entry always evaluates to hidden with no capabilities.
-/// The caller must still enforce tree-wide checks for recursive operations.
+/// Rights come from exactly four places:
+///
+/// - **the drive**: its owner, and the custodian of a Silicon that owns it,
+///   hold every operation on every file and folder in it, including what
+///   others created there (it is their space and their quota);
+/// - **creating the entry**: the creator keeps every operation on it, and so
+///   does the custodian of a Silicon that created it (the custodian rule);
+/// - **an explicit share** on the entry or an inheriting ancestor;
+/// - **creating a folder above it**, which conveys reading what others put
+///   inside.
+///
+/// Nothing is open to "everyone": the Public and Tag boundaries of rows from
+/// before personal drives convey nothing. An entry in another drive than the
+/// one the request acts in is always hidden; callers must still enforce
+/// tree-wide checks for recursive operations.
 #[must_use]
 pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> EffectiveAuthorization {
     if input.context.organization_id() != input.entry_organization_id {
-        return EffectiveAuthorization {
-            visibility: EntryVisibility::Hidden,
-            capabilities: CapabilitySet::empty(),
-        };
+        return EffectiveAuthorization::hidden();
     }
 
     let mut capabilities = CapabilitySet::empty();
-    let is_owner = input.context.actor() == input.owner;
-    let is_administrator = input.context.role().has_administrative_access();
+    let has_owner_rights = input.context.has_owner_rights();
+    // The owner column of a pre-migration organization container names
+    // whoever first materialized it, not a proprietor; the apps container
+    // belongs to the drive and is reached through the drive's rights.
     let ownership_is_authoritative = !matches!(
         input.system_kind,
         Some(
@@ -548,33 +557,14 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
                 | SystemEntryKind::ApplicationContainer
         )
     );
-
-    if (is_owner && ownership_is_authoritative) || is_administrator {
+    if has_owner_rights || (input.context.is_creator(input.owner) && ownership_is_authoritative) {
         capabilities = CapabilitySet::all();
     }
 
-    match input.boundary {
-        EntryBoundary::Public => {
-            capabilities.insert(Capability::Read);
-            if input.entry_kind.can_contain_children() {
-                capabilities.insert(Capability::CreateChild);
-            }
-        }
-        EntryBoundary::Tag { tag } if input.context.has_tag(tag) => {
-            // Everyone carrying the tag may read the tag's tree and create
-            // children in its folders. Mutating an existing peer-owned entry
-            // still requires ownership, administration, or an explicit grant.
-            capabilities.insert(Capability::Read);
-            capabilities.insert(Capability::CreateChild);
-        }
-        EntryBoundary::Private | EntryBoundary::Tag { .. } => {}
-    }
-
-    // Owning a folder means seeing what is inside it. Without this, a member
-    // who invites someone into their own folder loses sight of whatever that
-    // person puts there. It conveys reading only: renaming, replacing, and
-    // deleting stay with whoever created the entry, so a shared tag folder
-    // still cannot be emptied by the member who happened to create it.
+    // Creating a folder means seeing what is inside it. Without this, a
+    // Carbon who invites someone into their folder loses sight of whatever
+    // that person puts there. It conveys reading only: renaming, replacing
+    // and deleting stay with whoever created the entry.
     if input.owns_ancestor {
         capabilities.insert(Capability::Read);
     }
@@ -600,32 +590,24 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
         capabilities.remove(Capability::WriteContent);
     }
 
-    if input.system_kind == Some(SystemEntryKind::PrivateContainer) {
-        // Every current organization member must be able to enter the canonical
-        // Private container. Only the reconciler creates actor folders directly
-        // below it, so its persistence custodian is not allowed to create
-        // arbitrary children through the public API.
-        capabilities.insert(Capability::Read);
-        capabilities.remove(Capability::CreateChild);
-    }
-
-    if input.system_kind == Some(SystemEntryKind::ApplicationContainer) {
+    if matches!(
+        input.system_kind,
+        Some(SystemEntryKind::ApplicationContainer | SystemEntryKind::PrivateContainer)
+    ) {
+        // Only Briefcase creates the folders directly inside these.
         capabilities.remove(Capability::CreateChild);
     }
 
     if input.system_kind.is_some() {
-        // Reserved containers are structure, not content: IAM reconciliation
-        // owns their existence, name, and place, so nobody renames, moves,
-        // deletes, or shares them — an administrator included. Everything
-        // inside them is ordinary content and is administered normally.
+        // System folders are structure, not content: nobody renames, moves,
+        // deletes, or shares them, the drive's owner included. Everything
+        // inside them is ordinary content.
         capabilities.remove(Capability::UpdateMetadata);
         capabilities.remove(Capability::WriteContent);
         capabilities.remove(Capability::Delete);
         capabilities.remove(Capability::ManagePermissions);
-    } else if is_administrator {
-        // Organization owners and admins hold every operation on every piece
-        // of content in their organization. Restating it here keeps a boundary
-        // rule from quietly narrowing administrative authority.
+    } else if has_owner_rights {
+        // Restated so that no rule above quietly narrows the drive's rights.
         capabilities = CapabilitySet::all();
         if !input.entry_kind.can_contain_children() {
             capabilities.remove(Capability::CreateChild);
@@ -654,262 +636,278 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        AccessRight, Capability, EffectiveAccess, EffectiveAuthorizationInput, EntryVisibility,
-        GrantApplication, GrantedAccess, PermissionGrant, PermissionGrantParts,
-        PermissionInheritance, evaluate_authorization,
+        AccessRight, Capability, EffectiveAccess, EffectiveAuthorization,
+        EffectiveAuthorizationInput, EntryVisibility, GrantApplication, GrantedAccess,
+        PermissionGrant, PermissionGrantParts, PermissionInheritance, evaluate_authorization,
     };
     use crate::domain::{
         actor::{
-            ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, OrganizationId,
-            OrganizationRole, RequestAuthContext, TagName,
+            ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, DriveAccess,
+            OrganizationId, RequestAuthContext,
         },
-        entry::{EntryBoundary, EntryKind, SystemEntryKind},
+        entry::{EntryKind, SystemEntryKind},
         ids::{EntryId, GrantId},
     };
 
-    fn external_id<T, E>(result: Result<T, E>) -> T
-    where
-        E: std::fmt::Display,
-    {
-        match result {
-            Ok(value) => value,
-            Err(error) => panic!("test identifier must be valid: {error}"),
-        }
-    }
-
-    fn actor(value: &str) -> ActorRef {
-        ActorRef::new(ActorKind::Carbon, external_id(ActorId::new(value)))
-    }
-
-    fn organization() -> OrganizationId {
-        external_id(OrganizationId::new("tos"))
-    }
-
-    fn request_context(
-        represented_actor: ActorRef,
-        role: OrganizationRole,
-        tags: Vec<TagName>,
-        authentication: AuthenticationMode,
-    ) -> RequestAuthContext {
-        RequestAuthContext::new(
-            organization(),
-            represented_actor,
-            role,
-            tags,
-            authentication,
+    fn account(kind: ActorKind, value: &str) -> ActorRef {
+        ActorRef::new(
+            kind,
+            ActorId::new(value).unwrap_or_else(|error| panic!("test id {value}: {error}")),
         )
     }
 
-    #[test]
-    fn public_members_can_create_children_without_mutating_the_folder() {
-        let caller = actor("carbon-a");
-        let owner = actor("carbon-b");
-        let context = request_context(
-            caller,
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: None,
-            boundary: &EntryBoundary::Public,
-            owner: &owner,
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert!(authorization.allows(Capability::Read));
-        assert!(authorization.allows(Capability::CreateChild));
-        assert!(!authorization.allows(Capability::UpdateMetadata));
-        assert!(!authorization.allows(Capability::Delete));
+    fn carbon(value: &str) -> ActorRef {
+        account(ActorKind::Carbon, value)
     }
 
-    #[test]
-    fn a_matching_tag_conveys_read_and_folder_creation_but_not_peer_mutation() {
-        let finance = external_id(TagName::new("finance"));
-        let context = request_context(
-            actor("carbon-a"),
-            OrganizationRole::Member,
-            vec![finance.clone()],
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Tag {
-                tag: finance.clone(),
-            },
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
+    fn silicon(value: &str) -> ActorRef {
+        account(ActorKind::Silicon, value)
+    }
 
+    /// Ada's drive, the drive every test entry below lives in.
+    fn drive() -> OrganizationId {
+        OrganizationId::new("Ada1").unwrap_or_else(|error| panic!("test drive: {error}"))
+    }
+
+    fn in_adas_drive(caller: &ActorRef, access: DriveAccess) -> RequestAuthContext {
+        RequestAuthContext::for_drive(
+            carbon("Ada1"),
+            caller.clone(),
+            access,
+            AuthenticationMode::Bearer,
+        )
+        .unwrap_or_else(|error| panic!("test context: {error}"))
+    }
+
+    struct Target<'a> {
+        kind: EntryKind,
+        system_kind: Option<SystemEntryKind>,
+        owner: ActorRef,
+        grants: &'a [GrantApplication<'a>],
+        owns_ancestor: bool,
+        required_for_traversal: bool,
+        id: EntryId,
+    }
+
+    impl Target<'_> {
+        fn file(owner: ActorRef) -> Self {
+            Target {
+                kind: EntryKind::File,
+                system_kind: None,
+                owner,
+                grants: &[],
+                owns_ancestor: false,
+                required_for_traversal: false,
+                id: EntryId::new(),
+            }
+        }
+
+        fn folder(owner: ActorRef) -> Self {
+            Target {
+                kind: EntryKind::Folder,
+                ..Self::file(owner)
+            }
+        }
+    }
+
+    fn evaluate(context: &RequestAuthContext, target: &Target<'_>) -> EffectiveAuthorization {
+        evaluate_authorization(&EffectiveAuthorizationInput {
+            context,
+            entry_organization_id: &drive(),
+            entry_id: target.id,
+            entry_kind: target.kind,
+            system_kind: target.system_kind,
+            owner: &target.owner,
+            origin_application_id: None,
+            grants: target.grants,
+            owns_ancestor: target.owns_ancestor,
+            required_for_traversal: target.required_for_traversal,
+        })
+    }
+
+    fn grant(
+        principal: &ActorRef,
+        entry_id: EntryId,
+        access: GrantedAccess,
+        inheritance: PermissionInheritance,
+    ) -> PermissionGrant {
+        PermissionGrant::from_parts(PermissionGrantParts {
+            id: GrantId::new(),
+            organization_id: drive(),
+            entry_id,
+            principal: principal.clone(),
+            access,
+            inheritance,
+            granted_by: carbon("Ada1"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+    }
+
+    const EVERYTHING_ON_A_FOLDER: [EffectiveAccess; 5] = [
+        EffectiveAccess::Read,
+        EffectiveAccess::Write,
+        EffectiveAccess::Update,
+        EffectiveAccess::Delete,
+        EffectiveAccess::ManagePermissions,
+    ];
+
+    #[test]
+    fn the_drive_owner_holds_every_operation_on_everything_in_the_drive() {
+        let ada = carbon("Ada1");
+        let owner = in_adas_drive(&ada, DriveAccess::Owner);
+        // Bob created this folder inside Ada's drive through a share.
+        let authorization = evaluate(&owner, &Target::folder(carbon("Bob1")));
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
-        assert!(authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::CreateChild));
-        assert!(!authorization.allows(Capability::WriteContent));
-        assert!(!authorization.allows(Capability::UpdateMetadata));
-        // Peer mutation belongs to whoever created the entry, administrators,
-        // and principals carrying a matching explicit grant.
-        assert!(!authorization.allows(Capability::Delete));
-        assert!(!authorization.allows(Capability::ManagePermissions));
-
-        let folder = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: None,
-            boundary: &EntryBoundary::Tag {
-                tag: finance.clone(),
-            },
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-        assert!(folder.allows(Capability::Read));
-        assert!(folder.allows(Capability::CreateChild));
-        assert!(!folder.allows(Capability::UpdateMetadata));
-        assert!(!folder.allows(Capability::Delete));
-
-        // The member who created the entry may delete their own.
-        let creator = request_context(
-            actor("carbon-b"),
-            OrganizationRole::Member,
-            vec![finance.clone()],
-            AuthenticationMode::Bearer,
+        assert_eq!(
+            authorization.capabilities().effective_access(),
+            EVERYTHING_ON_A_FOLDER
         );
-        let own = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &creator,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Tag {
-                tag: finance.clone(),
-            },
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-        assert!(own.allows(Capability::Delete));
-
-        // So may an organization administrator without the tag at all.
-        let administrator = request_context(
-            actor("carbon-admin"),
-            OrganizationRole::Admin,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let administered = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &administrator,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Tag { tag: finance },
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-        assert!(administered.allows(Capability::Delete));
-        assert!(administered.allows(Capability::ManagePermissions));
     }
 
     #[test]
-    fn administrators_hold_every_operation_on_content_anywhere() {
-        let administrator = request_context(
-            actor("carbon-owner"),
-            OrganizationRole::Owner,
-            Vec::new(),
+    fn a_custodian_holds_the_owner_rights_in_its_silicons_drive() {
+        let ada = carbon("Ada1");
+        let silicon_drive = RequestAuthContext::for_drive(
+            silicon("Ada1"),
+            carbon("Cus1"),
+            DriveAccess::Custodian,
             AuthenticationMode::Bearer,
-        );
-        // Another member's private folder, which the owner does not own and has
-        // never been granted.
-        let folder = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &administrator,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert_eq!(folder.visibility(), EntryVisibility::Full);
+        )
+        .unwrap_or_else(|error| panic!("test context: {error}"));
+        let authorization = evaluate(&silicon_drive, &Target::folder(ada));
         assert_eq!(
-            folder.capabilities().effective_access(),
-            vec![
-                EffectiveAccess::Read,
-                EffectiveAccess::Write,
-                EffectiveAccess::Update,
-                EffectiveAccess::Delete,
-                EffectiveAccess::ManagePermissions,
-            ]
+            authorization.capabilities().effective_access(),
+            EVERYTHING_ON_A_FOLDER
         );
+    }
+
+    #[test]
+    fn a_visitor_sees_nothing_that_was_not_shared() {
+        let visitor = in_adas_drive(&carbon("Bob1"), DriveAccess::Visitor);
+        let authorization = evaluate(&visitor, &Target::file(carbon("Ada1")));
+        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
+        assert!(authorization.capabilities().is_empty());
+    }
+
+    #[test]
+    fn creators_keep_their_rights_in_another_accounts_drive() {
+        let bob = carbon("Bob1");
+        let visitor = in_adas_drive(&bob, DriveAccess::Visitor);
+        let own = evaluate(&visitor, &Target::file(bob.clone()));
+        assert!(own.allows(Capability::Delete));
+        assert!(own.allows(Capability::ManagePermissions));
+        let sibling = evaluate(&visitor, &Target::file(carbon("Ada1")));
+        assert_eq!(sibling.visibility(), EntryVisibility::Hidden);
+    }
+
+    #[test]
+    fn a_custodian_has_creator_rights_on_what_its_silicons_created_elsewhere() {
+        let scout = silicon("Sc1");
+        let custodian = in_adas_drive(&carbon("Cus1"), DriveAccess::Visitor)
+            .with_custodial_silicons([scout.id().clone()]);
+        let created_by_scout = evaluate(&custodian, &Target::file(scout));
+        assert!(created_by_scout.allows(Capability::Read));
+        assert!(created_by_scout.allows(Capability::Delete));
+        let created_by_ada = evaluate(&custodian, &Target::file(carbon("Ada1")));
+        assert_eq!(created_by_ada.visibility(), EntryVisibility::Hidden);
+    }
+
+    #[test]
+    fn the_drive_root_admits_new_entries_from_the_owner_rights_only() {
+        let ada = carbon("Ada1");
+        let root = Target {
+            system_kind: Some(SystemEntryKind::DriveRoot),
+            ..Target::folder(ada.clone())
+        };
+        let owner = evaluate(&in_adas_drive(&ada, DriveAccess::Owner), &root);
+        assert!(owner.allows(Capability::Read) && owner.allows(Capability::CreateChild));
+        assert!(!owner.allows(Capability::UpdateMetadata));
+        assert!(!owner.allows(Capability::Delete));
+        assert!(!owner.allows(Capability::ManagePermissions));
+
+        let visitor = in_adas_drive(&carbon("Bob1"), DriveAccess::Visitor);
+        assert_eq!(
+            evaluate(&visitor, &root).visibility(),
+            EntryVisibility::Hidden
+        );
+        let traversed = Target {
+            required_for_traversal: true,
+            ..root
+        };
+        let traversal = evaluate(&visitor, &traversed);
+        assert_eq!(traversal.visibility(), EntryVisibility::Traversal);
+        assert!(!traversal.allows(Capability::CreateChild));
+    }
+
+    #[test]
+    fn apps_folders_are_structure_the_owner_reads_and_apps_write_into() {
+        let ada = carbon("Ada1");
+        let owner = in_adas_drive(&ada, DriveAccess::Owner);
+        let container = evaluate(
+            &owner,
+            &Target {
+                system_kind: Some(SystemEntryKind::ApplicationContainer),
+                ..Target::folder(ada.clone())
+            },
+        );
+        assert!(container.allows(Capability::Read));
+        assert!(!container.allows(Capability::CreateChild));
+        let app_folder = evaluate(
+            &owner,
+            &Target {
+                system_kind: Some(SystemEntryKind::ApplicationFolder),
+                ..Target::folder(ada)
+            },
+        );
+        assert!(app_folder.allows(Capability::CreateChild));
+        assert!(!app_folder.allows(Capability::Delete));
+        assert!(!app_folder.allows(Capability::ManagePermissions));
+    }
+
+    #[test]
+    fn legacy_public_and_tag_containers_convey_nothing() {
+        let visitor = in_adas_drive(&carbon("Bob1"), DriveAccess::Visitor);
+        for system_kind in [
+            SystemEntryKind::PublicContainer,
+            SystemEntryKind::TagRoot,
+            SystemEntryKind::PrivateContainer,
+        ] {
+            let authorization = evaluate(
+                &visitor,
+                &Target {
+                    system_kind: Some(system_kind),
+                    ..Target::folder(carbon("Bob1"))
+                },
+            );
+            assert_eq!(
+                authorization.visibility(),
+                EntryVisibility::Hidden,
+                "{system_kind:?}"
+            );
+        }
     }
 
     #[test]
     fn an_inherited_update_grant_conveys_neither_deletion_nor_management() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let bob = carbon("Bob1");
+        let source = EntryId::new();
+        let shared = grant(
+            &bob,
+            source,
+            GrantedAccess::new([AccessRight::Update]),
+            PermissionInheritance::Descendants,
         );
-        let source_entry_id = EntryId::new();
-        let target_entry_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id: source_entry_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Update]),
-            inheritance: PermissionInheritance::Descendants,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Inherited(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: target_entry_id,
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        let grants = [GrantApplication::Inherited(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..Target::file(carbon("Ada1"))
+            },
+        );
         assert!(authorization.allows(Capability::Read));
         assert!(authorization.allows(Capability::WriteContent));
         assert!(authorization.allows(Capability::UpdateMetadata));
-        // Deletion is an independent right and was never granted here.
         assert!(!authorization.allows(Capability::Delete));
         assert!(!authorization.allows(Capability::ManagePermissions));
         assert_eq!(
@@ -920,39 +918,22 @@ mod tests {
 
     #[test]
     fn deletion_requires_its_own_right_even_alongside_update() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let bob = carbon("Bob1");
+        let target = Target::file(carbon("Ada1"));
+        let shared = grant(
+            &bob,
+            target.id,
+            GrantedAccess::new([AccessRight::Update, AccessRight::Delete]),
+            PermissionInheritance::EntryOnly,
         );
-        let entry_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Update, AccessRight::Delete]),
-            inheritance: PermissionInheritance::EntryOnly,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Direct(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id,
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        let grants = [GrantApplication::Direct(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..target
+            },
+        );
         assert!(!authorization.allows(Capability::Delete));
         assert!(authorization.allows(Capability::UpdateMetadata));
         assert!(!authorization.allows(Capability::ManagePermissions));
@@ -960,39 +941,22 @@ mod tests {
 
     #[test]
     fn a_write_grant_adds_children_without_renaming_or_deleting() {
-        let caller = actor("silicon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let scout = silicon("Sc1");
+        let target = Target::folder(carbon("Ada1"));
+        let shared = grant(
+            &scout,
+            target.id,
+            GrantedAccess::new([AccessRight::Write]),
+            PermissionInheritance::EntryOnly,
         );
-        let entry_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Write]),
-            inheritance: PermissionInheritance::EntryOnly,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Direct(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id,
-            entry_kind: EntryKind::Folder,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        let grants = [GrantApplication::Direct(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&scout, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..target
+            },
+        );
         assert!(authorization.allows(Capability::CreateChild));
         assert!(!authorization.allows(Capability::UpdateMetadata));
         assert!(!authorization.allows(Capability::Delete));
@@ -1000,281 +964,110 @@ mod tests {
 
     #[test]
     fn non_inheritable_grants_do_not_flow_to_descendants() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let bob = carbon("Bob1");
+        let shared = grant(
+            &bob,
+            EntryId::new(),
+            GrantedAccess::READ_ONLY,
+            PermissionInheritance::EntryOnly,
         );
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id: EntryId::new(),
-            principal: caller,
-            access: GrantedAccess::READ_ONLY,
-            inheritance: PermissionInheritance::EntryOnly,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Inherited(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
-        assert!(authorization.capabilities().is_empty());
-    }
-
-    #[test]
-    fn canonical_private_container_is_navigation_visible_to_every_member() {
-        let context = request_context(
-            actor("carbon-a"),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: Some(SystemEntryKind::PrivateContainer),
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: true,
-        });
-
-        assert_eq!(authorization.visibility(), EntryVisibility::Full);
-        assert!(authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::CreateChild));
-    }
-
-    #[test]
-    fn private_container_custodial_owner_cannot_create_arbitrary_children() {
-        let custodian = actor("carbon-a");
-        let context = request_context(
-            custodian.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: Some(SystemEntryKind::PrivateContainer),
-            boundary: &EntryBoundary::Private,
-            owner: &custodian,
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert!(authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::CreateChild));
-        assert!(!authorization.allows(Capability::UpdateMetadata));
-    }
-
-    #[test]
-    fn another_members_private_folder_is_hidden_and_unwritable() {
-        // The contract forbids saving into a folder assigned to someone else,
-        // and such a folder must not even be visible.
-        let context = request_context(
-            actor("carbon-a"),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: Some(SystemEntryKind::PrivateActorFolder),
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
-        assert!(!authorization.allows(Capability::Read));
-        assert!(!authorization.allows(Capability::CreateChild));
-        assert!(authorization.capabilities().effective_access().is_empty());
-    }
-
-    #[test]
-    fn tag_root_custodian_does_not_bypass_current_iam_tags() {
-        let custodian = actor("carbon-a");
-        let context = request_context(
-            custodian.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: Some(SystemEntryKind::TagRoot),
-            boundary: &EntryBoundary::Tag {
-                tag: external_id(TagName::new("finance")),
+        let grants = [GrantApplication::Inherited(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..Target::file(carbon("Ada1"))
             },
-            owner: &custodian,
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        );
         assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
         assert!(authorization.capabilities().is_empty());
     }
 
     #[test]
-    fn system_entries_remain_immutable_even_for_administrators() {
-        let administrator = actor("carbon-admin");
-        let context = request_context(
-            administrator.clone(),
-            OrganizationRole::Admin,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+    fn a_share_to_someone_else_conveys_nothing_to_the_caller() {
+        let bob = carbon("Bob1");
+        let target = Target::file(carbon("Ada1"));
+        let shared = grant(
+            &carbon("Cat1"),
+            target.id,
+            GrantedAccess::READ_ONLY,
+            PermissionInheritance::EntryOnly,
         );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::Folder,
-            system_kind: Some(SystemEntryKind::PrivateActorFolder),
-            boundary: &EntryBoundary::Private,
-            owner: &administrator,
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert!(authorization.allows(Capability::Read));
-        assert!(authorization.allows(Capability::CreateChild));
-        assert!(!authorization.allows(Capability::UpdateMetadata));
-        assert!(!authorization.allows(Capability::Delete));
-        assert!(!authorization.allows(Capability::ManagePermissions));
+        let grants = [GrantApplication::Direct(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..target
+            },
+        );
+        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
     }
 
     #[test]
-    fn obo_subject_authority_is_independent_of_the_entries_origin() {
-        let application_id = external_id(ApplicationId::new("silicon-dm"));
-        let other_application_id = external_id(ApplicationId::new("silicon-remind"));
-        let represented_actor = actor("carbon-a");
-        let context = request_context(
-            represented_actor.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
+    fn delegated_authority_is_independent_of_the_entries_origin() {
+        let ada = carbon("Ada1");
+        let delegated = RequestAuthContext::for_drive(
+            ada.clone(),
+            ada.clone(),
+            DriveAccess::Owner,
             AuthenticationMode::OnBehalfOf {
-                application_id: application_id.clone(),
+                application_id: ApplicationId::new("waveform")
+                    .unwrap_or_else(|error| panic!("test app: {error}")),
             },
-        );
+        )
+        .unwrap_or_else(|error| panic!("test context: {error}"));
+        let other_application =
+            ApplicationId::new("extend").unwrap_or_else(|error| panic!("test app: {error}"));
         let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
+            context: &delegated,
+            entry_organization_id: &drive(),
             entry_id: EntryId::new(),
             entry_kind: EntryKind::File,
             system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &represented_actor,
-            origin_application_id: Some(&other_application_id),
+            owner: &ada,
+            origin_application_id: Some(&other_application),
             grants: &[],
             owns_ancestor: false,
             required_for_traversal: false,
         });
-
         assert!(authorization.allows(Capability::Read));
         assert!(authorization.allows(Capability::WriteContent));
         assert!(authorization.allows(Capability::Delete));
     }
 
     #[test]
-    fn tenant_mismatch_fails_closed() {
-        let context = request_context(
-            actor("carbon-a"),
-            OrganizationRole::Owner,
-            Vec::new(),
+    fn an_entry_in_another_drive_is_hidden_even_from_its_owner() {
+        let ada = carbon("Ada1");
+        let in_bobs_drive = RequestAuthContext::for_drive(
+            carbon("Bob1"),
+            ada.clone(),
+            DriveAccess::Visitor,
             AuthenticationMode::Bearer,
-        );
-        let other_organization = external_id(OrganizationId::new("other"));
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &other_organization,
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Public,
-            owner: context.actor(),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        )
+        .unwrap_or_else(|error| panic!("test context: {error}"));
+        let authorization = evaluate(&in_bobs_drive, &Target::file(ada));
         assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
         assert!(authorization.capabilities().is_empty());
     }
 
     #[test]
     fn folder_write_never_replaces_a_file_that_already_exists() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let bob = carbon("Bob1");
+        let shared = grant(
+            &bob,
+            EntryId::new(),
+            GrantedAccess::new([AccessRight::Write]),
+            PermissionInheritance::Descendants,
         );
-        let folder_id = EntryId::new();
-        let file_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id: folder_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Write]),
-            inheritance: PermissionInheritance::Descendants,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Inherited(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: file_id,
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-owner"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        let grants = [GrantApplication::Inherited(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..Target::file(carbon("Ada1"))
+            },
+        );
         // Write adds what is not there yet. Replacing the bytes of someone
         // else's existing file is an update, and this grant never said so.
         assert!(authorization.allows(Capability::Read));
@@ -1284,149 +1077,43 @@ mod tests {
     }
 
     #[test]
-    fn write_still_adds_children_to_the_folder_it_was_granted_on() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let folder_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id: folder_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Write]),
-            inheritance: PermissionInheritance::EntryOnly,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Direct(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: folder_id,
-            entry_kind: EntryKind::Folder,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-owner"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert!(authorization.allows(Capability::CreateChild));
-        assert!(
-            authorization
-                .capabilities()
-                .effective_access()
-                .contains(&EffectiveAccess::Write)
-        );
-        assert!(!authorization.allows(Capability::UpdateMetadata));
-    }
-
-    #[test]
     fn update_conveys_replacing_the_content_of_an_existing_file() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+        let bob = carbon("Bob1");
+        let target = Target::file(carbon("Ada1"));
+        let shared = grant(
+            &bob,
+            target.id,
+            GrantedAccess::new([AccessRight::Update]),
+            PermissionInheritance::EntryOnly,
         );
-        let file_id = EntryId::new();
-        let grant = PermissionGrant::from_parts(PermissionGrantParts {
-            id: GrantId::new(),
-            organization_id: organization(),
-            entry_id: file_id,
-            principal: caller,
-            access: GrantedAccess::new([AccessRight::Update]),
-            inheritance: PermissionInheritance::EntryOnly,
-            granted_by: actor("carbon-owner"),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        });
-        let grants = [GrantApplication::Direct(&grant)];
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: file_id,
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-owner"),
-            origin_application_id: None,
-            grants: &grants,
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
+        let grants = [GrantApplication::Direct(&shared)];
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                grants: &grants,
+                ..target
+            },
+        );
         assert!(authorization.allows(Capability::WriteContent));
         assert!(authorization.allows(Capability::UpdateMetadata));
         assert!(!authorization.allows(Capability::Delete));
     }
 
     #[test]
-    fn owning_a_folder_shows_what_others_put_inside_it_and_nothing_more() {
-        let owner = actor("carbon-a");
-        let context = request_context(
-            owner.clone(),
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
+    fn creating_a_folder_shows_what_others_put_inside_it_and_nothing_more() {
+        let bob = carbon("Bob1");
+        let authorization = evaluate(
+            &in_adas_drive(&bob, DriveAccess::Visitor),
+            &Target {
+                owns_ancestor: true,
+                ..Target::file(carbon("Cat1"))
+            },
         );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            // An invitee created this file inside the caller's own folder.
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            owns_ancestor: true,
-            required_for_traversal: false,
-        });
-
         assert_eq!(authorization.visibility(), EntryVisibility::Full);
         assert!(authorization.allows(Capability::Read));
-        // Reading is all it conveys: the file still belongs to its creator.
         assert!(!authorization.allows(Capability::WriteContent));
         assert!(!authorization.allows(Capability::UpdateMetadata));
         assert!(!authorization.allows(Capability::Delete));
         assert!(!authorization.allows(Capability::ManagePermissions));
-    }
-
-    #[test]
-    fn a_reserved_container_custodian_gains_nothing_over_its_contents() {
-        let caller = actor("carbon-a");
-        let context = request_context(
-            caller,
-            OrganizationRole::Member,
-            Vec::new(),
-            AuthenticationMode::Bearer,
-        );
-        let authorization = evaluate_authorization(&EffectiveAuthorizationInput {
-            context: &context,
-            entry_organization_id: &organization(),
-            entry_id: EntryId::new(),
-            entry_kind: EntryKind::File,
-            system_kind: None,
-            boundary: &EntryBoundary::Private,
-            owner: &actor("carbon-b"),
-            origin_application_id: None,
-            grants: &[],
-            // The repository never reports the Public, Private, or Tag
-            // containers as an owned ancestor, so a member who happened to
-            // materialize them sees no more than anyone else.
-            owns_ancestor: false,
-            required_for_traversal: false,
-        });
-
-        assert_eq!(authorization.visibility(), EntryVisibility::Hidden);
     }
 }

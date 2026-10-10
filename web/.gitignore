@@ -1,39 +1,28 @@
-# dependencies
+# Dependencies
 /node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
 
-# testing
-/coverage
-
-# next.js
+# Next.js (`.next-<name>/` and its `.next-<name>.tsconfig.json`: a build of its own, see next.config.ts)
 /.next/
-/.vinext/
+/.next-*/
+/.next-*.tsconfig.json
+/.next-*.tsconfig.json.*.tmp
 /out/
+next-env.d.ts
 *.tsbuildinfo
 
-# misc
+# Local environment (.env.example is the template)
+.env*
+!.env.example
+
+# Misc
 .DS_Store
 *.pem
-
-# debug
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 .pnpm-debug.log*
 
-# local environment
-.env*
+# Browser runs
+/test-results/
+/playwright-report/
+/blob-report/
 
-# deployment and generated files
-.vercel
-next-env.d.ts
-/dist/
-/.wrangler/
-/outputs/
-/work/
+/screens/

@@ -1,281 +1,192 @@
-//! One background service per operating-system user, shared across Silicon homes.
+//! Removing the background service older releases installed.
 //!
-//! Only private local IPC carries registration paths. Authentication remains in
-//! each home's existing credential store; no tokens enter service definitions.
+//! briefcase 3 could run a per-user daemon under launchd (macOS) or systemd
+//! (Linux). It did no file work and existed for update bookkeeping, which
+//! Silicon Apps now does. `briefcase daemon uninstall` stops a running one and
+//! removes its login service; `briefcase daemon run` — what an old login
+//! service still starts — removes that service and exits, so it is not
+//! restarted forever.
 
 use std::{
-    collections::BTreeSet,
-    fs::{File, OpenOptions},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Duration,
+    process::Command,
 };
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::{cli::DaemonCommand, render::Output, run::CliError, state::StateDirectory};
+use crate::{
+    cli::DaemonCommand,
+    error::{CliError, Result},
+    render::Output,
+};
 
-mod service;
+const LABEL: &str = "com.teamofsilicons.briefcase";
+const SYSTEMD_UNIT: &str = "briefcase.service";
 
-const SOCKET: &str = "control.sock";
-const IPC_TIMEOUT: Duration = Duration::from_secs(3);
+/// What the retired subcommands should use instead.
+const REPLACEMENT: &str = "briefcase no longer runs a background service: Silicon Apps keeps the CLI \
+    up to date. Remove an old one with `briefcase daemon uninstall`.";
 
-use briefcase_client::daemon::Request;
-
-#[derive(Default, Deserialize, Serialize)]
-struct Registry {
-    homes: BTreeSet<PathBuf>,
-}
-
-fn io(error: std::io::Error) -> CliError {
-    CliError::Io {
-        path: "Briefcase daemon".into(),
-        source: error,
-    }
-}
-
-pub(super) fn root() -> Result<PathBuf, CliError> {
-    if let Some(value) = std::env::var_os("BRIEFCASE_DAEMON_HOME") {
-        if value.is_empty() {
-            return Err(CliError::Usage(
-                "BRIEFCASE_DAEMON_HOME must be a directory".into(),
-            ));
-        }
-        return Ok(PathBuf::from(value));
-    }
-    // Deliberately independent of SILICON_HOME: all agents owned by this OS
-    // account share the service while retaining separate application state.
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".briefcase-daemon"))
-        .ok_or_else(|| {
-            CliError::Usage("set HOME or BRIEFCASE_DAEMON_HOME to locate the shared daemon".into())
-        })
-}
-
-fn private_directory(path: &Path) -> Result<(), CliError> {
-    std::fs::create_dir_all(path).map_err(io)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
-    }
-    Ok(())
-}
-
-fn private_file(path: &Path, append: bool) -> Result<File, CliError> {
-    let mut options = OpenOptions::new();
-    options
-        .create(true)
-        .read(true)
-        .write(true)
-        .append(append)
-        .truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options.open(path).map_err(io)
-}
-
-fn read_registry(root: &Path) -> Result<Registry, CliError> {
-    match std::fs::read(root.join("homes.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
-            CliError::Usage("daemon homes.json is malformed; repair it before restarting".into())
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
-        Err(error) => Err(io(error)),
-    }
-}
-
-fn save_registry(root: &Path, registry: &Registry) -> Result<(), CliError> {
-    use std::io::Write as _;
-    let mut file = tempfile::NamedTempFile::new_in(root).map_err(io)?;
-    serde_json::to_writer(&mut file, registry)
-        .map_err(|error| CliError::Usage(format!("cannot encode daemon registry: {error}")))?;
-    file.flush().map_err(io)?;
-    file.as_file().sync_all().map_err(io)?;
-    file.persist(root.join("homes.json"))
-        .map_err(|error| io(error.error))?;
-    Ok(())
-}
-
-async fn request(request: &Request) -> Result<Value, CliError> {
-    briefcase_client::daemon::request(&root()?, request)
-        .await
-        .map_err(|error| CliError::Usage(error.to_string()))
-}
-
-/// Registers the current state directory with an already running daemon.
-pub async fn register() -> Result<Value, CliError> {
-    let state = StateDirectory::locate()?;
-    private_directory(state.path())?;
-    request(&Request::Register {
-        state: state.path().canonicalize().map_err(io)?,
-    })
-    .await
-}
-
-async fn start() -> Result<Value, CliError> {
-    if request(&Request::Status).await.is_ok() {
-        return register().await;
-    }
-    let root = root()?;
-    private_directory(&root)?;
-    let log = private_file(&root.join("daemon.log"), true)?;
-    let mut child = Command::new(std::env::current_exe().map_err(io)?)
-        .args(["daemon", "run"])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log)
-        // Do not persist one-use login tokens into a long-lived process.
-        .env_remove("BRIEFCASE_TOKEN").env_remove("BRIEFCASE_APP_SECRET")
-        .env_remove("BRIEFCASE_TEST").env_remove("BRIEFCASE_IAM_APP_SECRET")
-        .env_remove("BRIEFCASE_IAM_TEST_KEY").env_remove("BRIEFCASE_IAM_ENVIRONMENT_KEY")
-        .spawn().map_err(io)?;
-    for _ in 0..50 {
-        if let Ok(response) = register().await {
-            return Ok(response);
-        }
-        if let Some(status) = child.try_wait().map_err(io)? {
-            // Another starter can have won the lock; use its live endpoint.
-            if let Ok(response) = register().await {
-                return Ok(response);
-            }
-            return Err(CliError::Usage(format!(
-                "daemon exited with {status}; inspect {}",
-                root.join("daemon.log").display()
-            )));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err(CliError::Usage(format!(
-        "daemon startup timed out; inspect {}",
-        root.join("daemon.log").display()
-    )))
-}
-
-/// Runs a lifecycle command without requiring an IAM login.
-pub async fn command(command: DaemonCommand, output: Output) -> Result<(), CliError> {
-    let value = match command {
-        DaemonCommand::Run => return serve().await,
-        DaemonCommand::Start => start().await?,
-        DaemonCommand::Status => match request(&Request::Status).await {
-            Ok(value) => value,
-            Err(error) => json!({"running": false, "reason": error.to_string()}),
-        },
-        DaemonCommand::Stop => request(&Request::Stop).await?,
-        DaemonCommand::Install => {
-            if request(&Request::Status).await.is_ok() {
-                request(&Request::Stop).await?;
-                for _ in 0..50 {
-                    if !root()?.join(SOCKET).exists() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                if root()?.join(SOCKET).exists() {
-                    return Err(CliError::Usage(
-                        "daemon is finishing an update; retry installation after it exits".into(),
-                    ));
-                }
-            }
-            // The supervisor owns persistence and restart after installation.
-            service::install()?;
-            start().await?
-        }
+/// Runs a `daemon` subcommand.
+///
+/// # Errors
+///
+/// Returns `retired` for start/status/stop/install, and an I/O error when an
+/// existing service definition cannot be removed.
+#[allow(
+    clippy::unused_async,
+    reason = "dispatched with the other commands, which all run on the async runtime"
+)]
+pub async fn command(command: &DaemonCommand, output: Output) -> Result<()> {
+    match command {
         DaemonCommand::Uninstall => {
-            service::uninstall()?;
-            let _ = request(&Request::Stop).await;
-            json!({"installed": false})
+            let stopped = stop_running_daemon();
+            let removed = remove_login_service(home().as_deref(), false)?;
+            output.json(&json!({
+                "installed": false,
+                "service_removed": removed.map(|path| path.display().to_string()),
+                "stopped": stopped,
+            }));
+            Ok(())
         }
-    };
-    output.json(&value);
-    Ok(())
+        DaemonCommand::Run => {
+            eprintln!(
+                "briefcase: the background service is retired; removing the login service that started it. {REPLACEMENT}"
+            );
+            // Best effort: whatever happens, exit 0 so the supervisor stops caring.
+            let _ = remove_login_service(home().as_deref(), true);
+            Ok(())
+        }
+        DaemonCommand::Start
+        | DaemonCommand::Status
+        | DaemonCommand::Stop
+        | DaemonCommand::Install => Err(CliError::retired("`briefcase daemon`", REPLACEMENT)),
+    }
 }
 
-#[cfg(unix)]
-#[allow(clippy::too_many_lines)] // Keep service startup and shutdown in one lifecycle.
-async fn serve() -> Result<(), CliError> {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tokio::{
-        io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
-        net::UnixListener,
-    };
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
 
-    let root = root()?;
-    private_directory(&root)?;
-    let lock = private_file(&root.join("daemon.lock"), false)?;
-    fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
-        CliError::Usage(
-            "a Briefcase daemon already owns this runtime; use `briefcase daemon status`".into(),
-        )
-    })?;
-    let socket_path = root.join(SOCKET);
-    match std::fs::remove_file(&socket_path) {
-        Ok(()) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(io(error)),
+/// Where an older release put the login service definition.
+fn service_file(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join(format!("Library/LaunchAgents/{LABEL}.plist"))
+    } else {
+        home.join(format!(".config/systemd/user/{SYSTEMD_UNIT}"))
     }
-    let listener = UnixListener::bind(&socket_path).map_err(io)?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
-    let mut registry = read_registry(&root)?;
-    let state = StateDirectory::locate()?;
-    private_directory(state.path())?;
-    registry
-        .homes
-        .insert(state.path().canonicalize().map_err(io)?);
-    save_registry(&root, &registry)?;
-    crate::telemetry::daemon_event(
-        &state,
-        "daemon_started",
-        briefcase_client::telemetry::Stage::Started,
-    )
-    .await;
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(io)?;
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.map_err(io)?;
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                let read = tokio::time::timeout(IPC_TIMEOUT, (&mut reader).take(8193).read_line(&mut line)).await;
-                if !matches!(read, Ok(Ok(_))) || line.len() > 8192 { continue; }
-                let mut stop = false;
-                let response = match serde_json::from_str::<Request>(&line) {
-                    Ok(Request::Status) => json!({"running": true, "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION"), "auto_update": false, "update_manager": "honeycomb", "homes": registry.homes}),
-                    Ok(Request::Stop) => { stop = true; json!({"running": false}) },
-                    Ok(Request::Register { state }) => {
-                        match state.canonicalize() {
-                            Ok(path) if path.is_dir() => {
-                                registry.homes.insert(path);
-                                match save_registry(&root, &registry) {
-                                    Ok(()) => json!({"running": true, "registered": true}),
-                                    Err(error) => json!({"error": error.to_string()}),
-                                }
-                            },
-                            _ => json!({"error": "registration requires an existing state directory"}),
-                        }
-                    }
-                    Err(_) => json!({"error": "invalid daemon command"}),
-                };
-                let mut bytes = response.to_string().into_bytes(); bytes.push(b'\n');
-                let _ = reader.get_mut().write_all(&bytes).await;
-                if stop { break; }
-            }
+}
+
+/// Removes the login service an older release installed, if any, returning
+/// the file that was removed. From inside the service (`daemon run`) the file
+/// goes first and the supervisor is told last, because telling it ends this
+/// process.
+fn remove_login_service(home: Option<&Path>, from_inside: bool) -> Result<Option<PathBuf>> {
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    let file = service_file(home);
+    if !file.exists() {
+        return Ok(None);
+    }
+    if cfg!(target_os = "macos") {
+        std::fs::remove_file(&file).map_err(|source| io(&file, source))?;
+        if let Some(uid) = user_id() {
+            let _ = Command::new("launchctl")
+                .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+                .output();
         }
+    } else if cfg!(target_os = "linux") {
+        // `--now` would stop this very process when it runs inside the unit.
+        let disable: &[&str] = if from_inside {
+            &["--user", "disable", SYSTEMD_UNIT]
+        } else {
+            &["--user", "disable", "--now", SYSTEMD_UNIT]
+        };
+        let _ = Command::new("systemctl").args(disable).output();
+        std::fs::remove_file(&file).map_err(|source| io(&file, source))?;
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+    } else {
+        std::fs::remove_file(&file).map_err(|source| io(&file, source))?;
     }
-    std::fs::remove_file(socket_path).map_err(io)?;
-    drop(lock);
-    Ok(())
+    Ok(Some(file))
+}
+
+fn user_id() -> Option<String> {
+    let output = Command::new("id").arg("-u").output().ok()?;
+    let uid = String::from_utf8(output.stdout).ok()?;
+    let uid = uid.trim();
+    (!uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())).then(|| uid.to_owned())
+}
+
+/// Asks a running old daemon to stop over its private control socket.
+#[cfg(unix)]
+fn stop_running_daemon() -> bool {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let runtime = std::env::var_os("BRIEFCASE_DAEMON_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().map(|home| home.join(".briefcase-daemon")));
+    let Some(runtime) = runtime else {
+        return false;
+    };
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(runtime.join("control.sock"))
+    else {
+        return false;
+    };
+    let timeout = Some(std::time::Duration::from_secs(3));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    if stream.write_all(b"{\"command\":\"stop\"}\n").is_err() {
+        return false;
+    }
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer).is_ok() && answer.contains("\"running\":false")
 }
 
 #[cfg(not(unix))]
-#[allow(clippy::too_many_lines)] // Keep service startup and shutdown in one lifecycle.
-async fn serve() -> Result<(), CliError> {
-    Err(CliError::Usage(
-        "the shared daemon currently requires macOS or Linux".into(),
-    ))
+fn stop_running_daemon() -> bool {
+    false
+}
+
+fn io(path: &Path, source: std::io::Error) -> CliError {
+    CliError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remove_login_service, service_file};
+
+    #[test]
+    fn nothing_installed_means_nothing_to_remove() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            remove_login_service(Some(home.path()), false).unwrap(),
+            None
+        );
+        assert_eq!(remove_login_service(None, false).unwrap(), None);
+    }
+
+    #[test]
+    fn the_service_file_lives_where_older_releases_put_it() {
+        let file = service_file(std::path::Path::new("/h"));
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                file,
+                std::path::Path::new("/h/Library/LaunchAgents/com.teamofsilicons.briefcase.plist")
+            );
+        } else {
+            assert_eq!(
+                file,
+                std::path::Path::new("/h/.config/systemd/user/briefcase.service")
+            );
+        }
+    }
 }

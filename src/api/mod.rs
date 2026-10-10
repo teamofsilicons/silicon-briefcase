@@ -21,20 +21,19 @@ use crate::{
         delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
         ports::ObjectStore,
         service::{MetadataRepository, MetadataService},
-        webhook::IamWebhookRepository,
     },
     config::{ServerSettings, Settings, WebhookSettings},
     infrastructure::{
-        iam::IamClient,
-        postgres::{self, PostgresContentRepository, PostgresRepository},
+        accounts::{AccountDirectory, AccountsGateway},
+        postgres::{self, PostgresContentRepository, PostgresRepository, accounts::AccountStore},
         s3::S3ObjectStore,
-        testing::TestingEnvironmentStore,
     },
 };
 
 mod auth;
 pub mod cursor;
 mod delivery;
+mod drives;
 pub mod dto;
 mod extract;
 mod handlers;
@@ -44,11 +43,11 @@ mod state;
 pub mod upload;
 pub mod validation;
 pub mod versioning;
-mod webhook;
 
 use handlers::{
-    content, delegated, delegated_upload, entries, invitations, notifications, obo, permissions,
-    reports, session, sharing, system, telemetry, testing, usage,
+    accounts, archive_listing, content, delegated, delegated_upload, drives as drive_handlers,
+    entries, invitations, locations, notifications, obo, permissions, reports, sharing, system,
+    telemetry, usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -64,44 +63,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     postgres::verify_tenant_isolated_role(&database).await?;
     let object_store: Arc<dyn ObjectStore> =
         Arc::new(S3ObjectStore::from_settings(&settings.s3).await);
-    let (test_database, testing) = if let Some(testing) = &settings.testing {
-        let test_database =
-            postgres::connect(&testing.database, "briefcase-api-test-plane").await?;
-        postgres::verify_tenant_isolated_role(&test_database).await?;
-        postgres::verify_distinct_databases(&database, &test_database).await?;
-        let store = TestingEnvironmentStore::new(
-            database.clone(),
-            test_database.clone(),
-            &testing.encryption_key,
-            &settings.iam.app_id,
-        )?
-        .with_honeycomb_token(testing.honeycomb_service_token.clone());
-        let store = Arc::new(store);
-        if testing.honeycomb_service_token.is_some() {
-            let reporter = store.clone();
-            let origin = testing.honeycomb_base_url.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    if reporter.report_honeycomb_activity(&origin).await.is_err() {
-                        tracing::warn!(
-                            "Honeycomb activity report failed; durable reports will retry"
-                        );
-                    }
-                }
-            });
-        }
-        (Some(test_database), Some(store))
-    } else {
-        (None, None)
-    };
-    let repository = test_database.as_ref().map_or_else(
-        || PostgresRepository::new(database.clone()),
-        |test| PostgresRepository::new(database.clone()).with_test_pool(test.clone()),
-    );
+    let repository = PostgresRepository::new(database.clone());
     let metadata_repository: Arc<dyn MetadataRepository> = Arc::new(repository.clone());
-    let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
     let concrete_content = Arc::new(PostgresContentRepository::new(
         repository,
         settings.s3.clone(),
@@ -126,17 +89,26 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         Arc::clone(&object_store),
         settings.s3.temporary_directory.clone(),
     ));
-    let iam = IamClient::connect(&settings.iam)
-        .await?
-        .with_identity_databases(database.clone(), test_database.clone());
+    let gateway = AccountsGateway::new(&settings.accounts)
+        .map_err(|error| anyhow::anyhow!("Silicon Accounts client: {error}"))?;
+    let accounts = AccountDirectory::new(
+        Arc::new(gateway),
+        AccountStore::new(database.clone()),
+        &settings.accounts,
+    );
+    if settings.accounts.proof_issuers.is_empty() {
+        tracing::warn!(
+            event = "proof_issuers_unset",
+            "BRIEFCASE_PROOF_ISSUERS is empty: no app may act for an account through /api/v1/obo/*"
+        );
+    }
     let state = AppState {
-        iam: Arc::new(iam),
+        accounts: Arc::new(accounts),
         metadata: MetadataService::new(metadata_repository),
         content,
         content_adapter: concrete_content,
         objects: object_store,
         delegated_uploads,
-        webhook_repository,
         database: database.clone(),
         contract_database: Some(database.clone()),
         mapper: mapping::ResponseMapper::new(
@@ -145,7 +117,6 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         ),
         temporary_directory: settings.s3.temporary_directory.clone(),
         webhook_settings: settings.webhook.clone(),
-        testing,
     };
     let application = router(state, &settings.server, &settings.webhook);
     let listener = tokio::net::TcpListener::bind(settings.server.bind_addr).await?;
@@ -155,7 +126,6 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         listener,
         application,
         database,
-        test_database,
         settings.server.shutdown_timeout,
     )
     .await
@@ -165,7 +135,6 @@ async fn serve_until_shutdown(
     listener: tokio::net::TcpListener,
     application: Router,
     database: sqlx::PgPool,
-    test_database: Option<sqlx::PgPool>,
     shutdown_timeout: Duration,
 ) -> anyhow::Result<()> {
     let (shutdown_sender, mut shutdown_receiver) = tokio::sync::watch::channel(false);
@@ -200,16 +169,6 @@ async fn serve_until_shutdown(
     {
         tracing::warn!(?shutdown_timeout, "database pool close deadline exceeded");
     }
-    if let Some(test_database) = test_database
-        && tokio::time::timeout(shutdown_timeout, test_database.close())
-            .await
-            .is_err()
-    {
-        tracing::warn!(
-            ?shutdown_timeout,
-            "test database pool close deadline exceeded"
-        );
-    }
     server_result?;
     Ok(())
 }
@@ -221,6 +180,16 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
     let upload_control =
         upload_control_routes().layer(DefaultBodyLimit::max(server.max_json_body_bytes.get()));
     let upload_control = with_deadline(upload_control, server.upload_timeout);
+
+    // Listing an archive reads (up to bounded amounts of) its bytes before
+    // answering, so it has the upload deadline rather than the JSON one.
+    let archive_listing = with_deadline(
+        Router::new().route(
+            "/api/v1/entries/{entry_id}/archive",
+            get(archive_listing::list),
+        ),
+        server.upload_timeout,
+    );
 
     let restore = with_deadline(
         Router::new()
@@ -251,20 +220,17 @@ fn router(state: AppState, server: &ServerSettings, webhook_settings: &WebhookSe
     );
     let webhook = with_deadline(
         Router::new()
-            .route("/webhook/", post(system::iam_webhook))
+            .route("/webhook/", post(accounts::webhook))
             .layer(DefaultBodyLimit::max(webhook_settings.max_body_bytes.get())),
         server.request_timeout,
     );
 
     ordinary
         .merge(upload_control)
+        .merge(archive_listing)
         .merge(restore)
         .merge(uploads)
         .merge(webhook)
-        .merge(with_deadline(
-            Router::new().route("/internal/honeycomb/organizations/{org_id}/testing-environments/{environment_id}/operations/{operation_id}",
-                put(handlers::honeycomb::apply).get(handlers::honeycomb::receipt))
-                .layer(DefaultBodyLimit::max(server.max_json_body_bytes.get())), server.request_timeout))
         .fallback(not_found)
         .layer(ConcurrencyLimitLayer::new(
             server.max_concurrent_requests.get(),
@@ -305,12 +271,39 @@ fn sharing_routes() -> Router<AppState> {
             get(sharing::link_access).put(sharing::set_link_access),
         )
         .route("/api/v1/entries/{entry_id}/logs", get(sharing::logs))
-        .route("/api/v1/public/{org_id}/{*path}", get(sharing::public_path))
+        .route("/api/v1/public/{owner}/{*path}", get(locations::public))
+}
+
+/// Permanent addresses: an entry by its drive owner's id and path, and the
+/// addresses from before personal drives.
+fn location_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/paths/{owner}", get(locations::resolve_root))
+        .route("/api/v1/paths/{owner}/{*path}", get(locations::resolve))
+        .route("/org/{org_id}/{*path}", get(locations::resolve_legacy))
+}
+
+/// The drives a caller opens, what was shared with it, and who may share
+/// with a Silicon.
+fn drive_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/drives", get(drive_handlers::list))
+        .route("/api/v1/shared", get(drive_handlers::shared))
+        .route(
+            "/api/v1/silicons/{silicon}/allowed-accounts",
+            get(drive_handlers::allowances),
+        )
+        .route(
+            "/api/v1/silicons/{silicon}/allowed-accounts/{account}",
+            put(drive_handlers::allow).delete(drive_handlers::disallow),
+        )
 }
 
 fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .merge(sharing_routes())
+        .merge(drive_routes())
+        .merge(location_routes())
         .route(
             delegated_upload::RESERVE_PATH,
             post(delegated_upload::reserve),
@@ -338,11 +331,8 @@ fn ordinary_routes() -> Router<AppState> {
         .route("/readyz", get(system::ready))
         .route("/api/version", get(system::version))
         .route("/api/v1/version", get(system::version))
-        .route("/api/v1/iam", get(session::iam_info))
-        .route("/api/v1/auth/status", get(session::status))
-        .route("/api/v1/auth/slt", post(session::exchange_slt))
-        .route("/api/v1/auth/refresh", post(session::refresh))
-        .merge(testing_environment_routes())
+        .route("/api/v1/accounts", get(accounts::discovery))
+        .route("/api/v1/me", get(accounts::me))
         .route(
             "/api/v1/entries",
             get(entries::list_entries).post(entries::create_folder),
@@ -384,7 +374,6 @@ fn ordinary_routes() -> Router<AppState> {
             "/api/v1/entries/{entry_id}/download",
             get(content::download_content),
         )
-        .route("/org/{org_id}/{*path}", get(entries::resolve_path))
         .route(
             "/api/v1/entries/{entry_id}/activity",
             get(entries::entry_activity),
@@ -405,41 +394,6 @@ fn ordinary_routes() -> Router<AppState> {
         )
 }
 
-fn testing_environment_routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments",
-            get(testing::list).post(testing::manage),
-        )
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}",
-            get(testing::get)
-                .patch(testing::manage)
-                .delete(testing::manage),
-        )
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/key",
-            get(testing::manage),
-        )
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
-            post(testing::manage),
-        )
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
-            post(testing::manage),
-        )
-        .route(
-            "/api/v1/organizations/{org_id}/testing-environments/{environment_id}/restorations",
-            post(testing::manage),
-        )
-        .route("/api/v1/testing-environment", get(testing::current))
-        .route(
-            "/api/v1/testing-environment/cleanings",
-            post(testing::manage),
-        )
-}
-
 fn upload_control_routes() -> Router<AppState> {
     Router::new().route(
         "/api/v1/storage/configuration",
@@ -453,14 +407,12 @@ fn with_deadline(routes: Router<AppState>, timeout: Duration) -> Router<AppState
     }))
 }
 
-fn sensitive_request_headers() -> [HeaderName; 7] {
+fn sensitive_request_headers() -> [HeaderName; 5] {
     [
         header::AUTHORIZATION,
         header::COOKIE,
-        HeaderName::from_static("x-iam-obo-access-token"),
-        HeaderName::from_static("x-silicon-iam-signature"),
+        HeaderName::from_static("x-accounts-signature"),
         HeaderName::from_static("idempotency-key"),
-        HeaderName::from_static("x-briefcase-app-secret"),
         HeaderName::from_static("x-briefcase-upload-capability"),
     ]
 }
@@ -470,630 +422,18 @@ async fn not_found() -> crate::error::AppError {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
-
-    use axum::{
-        Router,
-        body::Body,
-        http::{Method, Request, StatusCode, header},
-    };
-    use secrecy::SecretString;
-    use serde_yaml::Value;
-    use sqlx::postgres::PgPoolOptions;
-    use tower::ServiceExt as _;
-    use url::Url;
-    use uuid::Uuid;
-
-    use crate::{
-        application::{
-            content::{ContentRepository, ContentService},
-            delegated_upload::{DelegatedUploadRepository, DelegatedUploadService},
-            ports::ObjectStore,
-            service::{MetadataRepository, MetadataService},
-            webhook::IamWebhookRepository,
-        },
-        config::{IamSettings, S3Encryption, S3Settings, ServerSettings, WebhookSettings},
-        infrastructure::{
-            iam::IamClient,
-            postgres::{PostgresContentRepository, PostgresRepository},
-            s3::S3ObjectStore,
-        },
-    };
-
-    use super::{
-        AppState, ContentUseCases, DelegatedUploadUseCases, mapping::ResponseMapper, router,
-    };
-
-    const CONTRACT: [(&str, &str, &str); 62] = [
-        ("/version", "get", "200"),
-        ("/iam", "get", "200"),
-        ("/auth/status", "get", "200"),
-        ("/auth/slt", "post", "200"),
-        ("/auth/refresh", "post", "200"),
-        ("/organizations/{org_id}/testing-environments", "get", "200"),
-        (
-            "/organizations/{org_id}/testing-environments",
-            "post",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}",
-            "get",
-            "200",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}",
-            "patch",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}",
-            "delete",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}/key",
-            "get",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
-            "post",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
-            "post",
-            "409",
-        ),
-        (
-            "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
-            "post",
-            "409",
-        ),
-        ("/testing-environment", "get", "200"),
-        ("/testing-environment/cleanings", "post", "409"),
-        ("/entries", "get", "200"),
-        ("/entries", "post", "201"),
-        ("/entries/{entry_id}", "get", "200"),
-        ("/entries/{entry_id}", "patch", "200"),
-        ("/entries/{entry_id}", "delete", "204"),
-        ("/entries/{entry_id}/content", "get", "200"),
-        ("/entries/{entry_id}/download", "get", "200"),
-        ("/org/{org_id}/{path}", "get", "200"),
-        ("/uploads", "post", "201"),
-        ("/obo/files", "post", "410"),
-        ("/obo/uploads/reserve", "post", "200"),
-        ("/obo/uploads/commit", "post", "200"),
-        ("/obo/uploads/status", "post", "200"),
-        ("/obo/uploads/cancel", "post", "200"),
-        ("/obo/uploads/{upload_id}/content", "put", "200"),
-        ("/obo/folders/create", "post", "201"),
-        ("/obo/entries/list", "post", "200"),
-        ("/obo/files/read", "post", "200"),
-        ("/obo/entries/trash", "post", "204"),
-        ("/entries/{entry_id}/permissions", "get", "200"),
-        ("/entries/{entry_id}/permissions", "post", "201"),
-        (
-            "/entries/{entry_id}/permissions/{grant_id}",
-            "delete",
-            "204",
-        ),
-        ("/permissions/effective", "post", "200"),
-        ("/search", "get", "200"),
-        ("/usage", "get", "200"),
-        ("/reports", "post", "200"),
-        ("/telemetry", "post", "204"),
-        ("/notifications", "get", "200"),
-        ("/notifications/read", "post", "200"),
-        ("/entries/{entry_id}/activity", "get", "200"),
-        ("/entries/{entry_id}/versions", "get", "200"),
-        (
-            "/entries/{entry_id}/versions/{version_id}/restore",
-            "post",
-            "200",
-        ),
-        ("/bin", "get", "200"),
-        ("/bin/{entry_id}/restore", "post", "200"),
-        ("/storage/configuration", "put", "200"),
-        ("/entries/{entry_id}/invitations", "get", "200"),
-        ("/entries/{entry_id}/invitations", "post", "201"),
-        (
-            "/entries/{entry_id}/invitations/{grant_id}",
-            "delete",
-            "204",
-        ),
-        ("/entries/{entry_id}/invitations/{grant_id}", "patch", "200"),
-        ("/entries/{entry_id}/self-destruct", "delete", "204"),
-        ("/entries/{entry_id}/link-access", "get", "200"),
-        ("/entries/{entry_id}/link-access", "put", "200"),
-        ("/entries/{entry_id}/logs", "get", "200"),
-        ("/public/{org_id}/{path}", "get", "200"),
-        ("/obo/invitations", "post", "200"),
-        ("/obo/link-access", "post", "200"),
-    ];
-
-    #[test]
-    fn every_openapi_operation_has_the_expected_response_status() -> anyhow::Result<()> {
-        let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
-        let mut documented_operations = 0_usize;
-        for path_item in document["paths"]
-            .as_mapping()
-            .ok_or_else(|| anyhow::anyhow!("OpenAPI paths must be a mapping"))?
-            .values()
-        {
-            let Some(methods) = path_item.as_mapping() else {
-                continue;
-            };
-            documented_operations += methods
-                .keys()
-                .filter_map(Value::as_str)
-                .filter(|method| matches!(*method, "get" | "post" | "put" | "patch" | "delete"))
-                .count();
-        }
-        assert_eq!(documented_operations, CONTRACT.len());
-
-        for (path, method, success_status) in CONTRACT {
-            let responses = &document["paths"][path][method]["responses"];
-            assert!(
-                responses[success_status].is_mapping(),
-                "missing {success_status} response for {method} {path}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn openapi_models_production_and_test_plane_credentials_explicitly() -> anyhow::Result<()> {
-        let document: Value = serde_yaml::from_str(include_str!("../../openapi.yaml"))?;
-        let global_security = document["security"]
-            .as_sequence()
-            .ok_or_else(|| anyhow::anyhow!("OpenAPI security must be a sequence"))?;
-
-        // Ordinary operations accept a production bearer by itself or the
-        // same IAM actor credential plus the Briefcase root that selects a
-        // test plane. The key never replaces actor authentication.
-        assert_eq!(global_security.len(), 2);
-        assert!(global_security[0]["bearerAuth"].is_sequence());
-        assert_eq!(
-            global_security[0]
-                .as_mapping()
-                .map(serde_yaml::Mapping::len),
-            Some(1)
-        );
-        assert!(global_security[1]["bearerAuth"].is_sequence());
-        assert!(global_security[1]["testingEnvironmentKey"].is_sequence());
-        assert_eq!(
-            global_security[1]
-                .as_mapping()
-                .map(serde_yaml::Mapping::len),
-            Some(2)
-        );
-
-        // The application endpoint likewise keeps the IAM proof and app ID
-        // together, with the root key added only for its test-plane form.
-        let obo_security = document["paths"]["/obo/uploads/reserve"]["post"]["security"]
-            .as_sequence()
-            .ok_or_else(|| anyhow::anyhow!("OBO security must be a sequence"))?;
-        assert_eq!(obo_security.len(), 2);
-        assert!(obo_security[0]["oboAccess"].is_sequence());
-        assert!(obo_security[0]["appId"].is_sequence());
-        assert_eq!(
-            obo_security[0].as_mapping().map(serde_yaml::Mapping::len),
-            Some(2)
-        );
-        assert!(obo_security[1]["oboAccess"].is_sequence());
-        assert!(obo_security[1]["appId"].is_sequence());
-        assert!(obo_security[1]["testingEnvironmentKey"].is_sequence());
-        assert_eq!(
-            obo_security[1].as_mapping().map(serde_yaml::Mapping::len),
-            Some(3)
-        );
-
-        let storage_security = document["paths"]["/storage/configuration"]["put"]["security"]
-            .as_sequence()
-            .ok_or_else(|| anyhow::anyhow!("storage security must be a sequence"))?;
-        assert_eq!(storage_security.len(), 2);
-        assert!(storage_security[0]["bearerAuth"].is_sequence());
-        assert_eq!(
-            storage_security[0]
-                .as_mapping()
-                .map(serde_yaml::Mapping::len),
-            Some(1)
-        );
-        assert!(storage_security[1]["bearerAuth"].is_sequence());
-        assert!(storage_security[1]["testingEnvironmentKey"].is_sequence());
-        assert_eq!(
-            storage_security[1]
-                .as_mapping()
-                .map(serde_yaml::Mapping::len),
-            Some(2)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn retired_access_request_routes_are_not_registered() -> anyhow::Result<()> {
-        let application = test_router()?;
-        let identifier = Uuid::now_v7();
-        for path in [
-            format!("/api/v1/entries/{identifier}/access-requests"),
-            "/api/v1/access-requests".to_owned(),
-            format!("/api/v1/access-requests/{identifier}/decision"),
-        ] {
-            let response = application
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri(&path)
-                        .body(Body::empty())?,
-                )
-                .await?;
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn every_contracted_method_is_registered_by_the_runtime_router() -> anyhow::Result<()> {
-        let application = test_router()?;
-        let identifier = Uuid::now_v7().to_string();
-
-        for (path, method, _) in CONTRACT {
-            let path = path
-                .replace("{entry_id}", &identifier)
-                .replace("{grant_id}", &identifier)
-                .replace("{environment_id}", &identifier)
-                .replace("{org_id}", "tos")
-                .replace("{upload_id}", &identifier)
-                .replace("{version_id}", &identifier)
-                .replace("{part_number}", "1");
-            let path = match path.as_str() {
-                "/search" => format!("/api/v1{path}?q=registered"),
-                // The permanent URL is served outside the versioned API base.
-                "/org/tos/{path}" => "/org/tos/private/cos:tos/notes.md".to_owned(),
-                _ => format!("/api/v1{path}"),
-            };
-            let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())?;
-            let mut request = Request::builder()
-                .method(method.clone())
-                .uri(&path)
-                .header("x-request-id", "route-contract-test");
-            if method == Method::PUT && path.contains("/parts/") {
-                request = request.header(header::CONTENT_TYPE, "application/octet-stream");
-            }
-            let response = application
-                .clone()
-                .oneshot(request.body(Body::empty())?)
-                .await?;
-
-            assert_ne!(
-                response.status(),
-                StatusCode::NOT_FOUND,
-                "runtime did not register {method} {path}"
-            );
-            assert_ne!(
-                response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
-                "runtime did not bind {method} to {path}"
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get("x-request-id")
-                    .and_then(|value| value.to_str().ok()),
-                Some("route-contract-test")
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn system_and_fallback_routes_are_exposed_through_middleware() -> anyhow::Result<()> {
-        let application = test_router()?;
-        for path in ["/healthz", "/api/v1/version"] {
-            let response = application
-                .clone()
-                .oneshot(Request::get(path).body(Body::empty())?)
-                .await?;
-            assert_eq!(response.status(), StatusCode::OK, "GET {path}");
-            assert!(response.headers().contains_key("x-request-id"));
-        }
-
-        let response = application
-            .oneshot(Request::get("/not-a-route").body(Body::empty())?)
-            .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("application/json")
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn iam_discovery_and_logged_out_status_are_public_and_not_cached() -> anyhow::Result<()> {
-        let application = test_router()?;
-        for path in ["/api/v1/iam", "/api/v1/auth/status"] {
-            let response = application
-                .clone()
-                .oneshot(Request::builder().uri(path).body(Body::empty())?)
-                .await?;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CACHE_CONTROL)
-                    .and_then(|value| value.to_str().ok()),
-                Some("no-store")
-            );
-            let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
-            let body: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if path.ends_with("/iam") {
-                assert!(body["app_id"].as_str().is_some_and(|id| {
-                    crate::domain::actor::is_canonical_iam_application_id(id)
-                }));
-                assert!(body["test_environment_id"].is_null());
-                assert_eq!(body.as_object().map(serde_json::Map::len), Some(3));
-            } else {
-                assert_eq!(body["authenticated"], false);
-                assert!(body["actor"].is_null());
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn telemetry_relay_is_anonymous_and_rejects_arbitrary_payloads() -> anyhow::Result<()> {
-        use briefcase_client::telemetry::{Event, Source, Stage};
-        let router = test_router()?;
-        let mut event = serde_json::to_value(Event::new(Source::Cli, "upload", Stage::Completed))?;
-        for (mutation, expected) in [(None, 204), (Some("token"), 422), (Some("source"), 422)] {
-            if let Some(field) = mutation {
-                event[field] = serde_json::json!(if field == "source" {
-                    "backend"
-                } else {
-                    "slt_private"
-                });
-            }
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/v1/telemetry")
-                        .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(&event)?))?,
-                )
-                .await?;
-            assert_eq!(response.status().as_u16(), expected);
-            event
-                .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("object"))?
-                .remove("token");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore = "explicit live Space Station check; requires the private collector configuration"]
-    async fn telemetry_live_delivery() -> anyhow::Result<()> {
-        use briefcase_client::telemetry::{Event, Source, Stage};
-        crate::telemetry::init_process(
-            crate::config::RuntimeEnvironment::Test,
-            "silicon_briefcase=info",
-        )?;
-        anyhow::ensure!(
-            crate::telemetry::configured(),
-            "collector is not configured"
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base = format!("http://{}/api/v1/", listener.local_addr()?);
-        let router = test_router()?;
-        let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        for source in [Source::Sdk, Source::Cli, Source::Daemon, Source::Web] {
-            let mut event = Event::new(source, "telemetry_integration_check", Stage::Completed);
-            event.testing = true;
-            event.count = Some(1);
-            briefcase_client::telemetry::submit(&base, &event).await?;
-            println!("live telemetry event {} source {source:?}", event.id);
-        }
-        let mut acked = false;
-        for _ in 0..40 {
-            if crate::telemetry::flush() {
-                acked = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        server.abort();
-        anyhow::ensure!(
-            acked,
-            "Space Station did not acknowledge within the live-check window"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn honeycomb_control_requires_only_the_dedicated_service_token() -> anyhow::Result<()> {
-        let database = PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(10))
-            .connect_lazy("postgresql://briefcase:briefcase@127.0.0.1:9/briefcase")?;
-        let (mut state, server, webhook) = test_state(database.clone())?;
-        let token = "dedicated-honeycomb-service-token-12345";
-        state.testing = Some(Arc::new(
-            crate::infrastructure::testing::TestingEnvironmentStore::new(
-                database.clone(),
-                database,
-                &SecretString::from("MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
-                "briefcase",
-            )?
-            .with_honeycomb_token(Some(SecretString::from(token))),
-        ));
-        let app = router(state, &server, &webhook);
-        let id = uuid::Uuid::new_v4();
-        let operation = uuid::Uuid::new_v4();
-        let path = format!(
-            "/internal/honeycomb/organizations/tos/testing-environments/{id}/operations/{operation}"
-        );
-        let body=serde_json::json!({"operation_id":operation,"environment_id":id,"org_id":"other-org","app_id":"briefcase","environment_revision":1,"generation":1,"key_version":1,"action":"prepare","testing_key":"0123456789abcdefghijklmnopqrstuv"}).to_string();
-        for supplied in [
-            None,
-            Some("Bearer member-session"),
-            Some("Bearer 0123456789abcdefghijklmnopqrstuv"),
-        ] {
-            let mut request = Request::builder()
-                .method("PUT")
-                .uri(&path)
-                .header("content-type", "application/json");
-            if let Some(value) = supplied {
-                request = request.header("authorization", value);
-            }
-            let response = app
-                .clone()
-                .oneshot(request.body(Body::from(body.clone()))?)
-                .await?;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        }
-        let authorized = Request::builder()
-            .method("PUT")
-            .uri(&path)
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
-            .body(Body::from(body.clone()))?;
-        assert_eq!(
-            app.clone().oneshot(authorized).await?.status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        let duplicate = Request::builder()
-            .method("PUT")
-            .uri(&path)
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
-            .header("authorization", "Bearer second")
-            .body(Body::from(body))?;
-        assert_eq!(
-            app.oneshot(duplicate).await?.status(),
-            StatusCode::UNAUTHORIZED
-        );
-        Ok(())
-    }
-
-    fn test_router() -> anyhow::Result<Router> {
-        let database = PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(10))
-            .connect_lazy("postgresql://briefcase:briefcase@127.0.0.1:9/briefcase")?;
-        let (state, server, webhook) = test_state(database)?;
-        Ok(router(state, &server, &webhook))
-    }
-
-    pub(crate) fn test_state(
-        database: sqlx::PgPool,
-    ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
-        test_state_with_test_database(database, None)
-    }
-
-    pub(crate) fn test_state_with_test_database(
-        database: sqlx::PgPool,
-        test_database: Option<sqlx::PgPool>,
-    ) -> anyhow::Result<(AppState, ServerSettings, WebhookSettings)> {
-        let repository = PostgresRepository::new(database.clone());
-        let repository = match test_database {
-            Some(test) => repository.with_test_pool(test),
-            None => repository,
-        };
-        let s3 = S3Settings {
-            region: "ap-south-1".to_owned(),
-            bucket: "briefcase-test".to_owned(),
-            key_prefix: "organizations".to_owned(),
-            endpoint_url: None,
-            force_path_style: false,
-            encryption: S3Encryption::SseS3,
-            temporary_directory: std::env::temp_dir().join("silicon-briefcase-tests"),
-            operation_timeout: Duration::from_secs(1),
-        };
-        let metadata_repository: Arc<dyn MetadataRepository> = Arc::new(repository.clone());
-        let webhook_repository: Arc<dyn IamWebhookRepository> = Arc::new(repository.clone());
-        let concrete_content = Arc::new(PostgresContentRepository::new(repository, s3.clone()));
-        let content_repository: Arc<dyn ContentRepository> = concrete_content.clone();
-        let delegated_repository: Arc<dyn DelegatedUploadRepository> = concrete_content.clone();
-        let object_store: Arc<dyn ObjectStore> = Arc::new(S3ObjectStore::new(
-            aws_config::SdkConfig::builder().build(),
-            None,
-            false,
-        ));
-        let content: Arc<ContentUseCases> = Arc::new(ContentService::new(
-            content_repository,
-            Arc::clone(&object_store),
-            s3.temporary_directory.clone(),
-        ));
-        let delegated_uploads: Arc<DelegatedUploadUseCases> =
-            Arc::new(DelegatedUploadService::new(
-                delegated_repository,
-                Arc::clone(&object_store),
-                122,
-                s3.operation_timeout,
-            ));
-        let iam_base = Url::parse("http://127.0.0.1:9/")?;
-        let iam = IamClient::new_without_handshake(&IamSettings {
-            base_url: iam_base,
-            app_id: "briefcase".to_owned(),
-            app_secret: SecretString::from(
-                "ask_0123456789012345678901234567890123456789012".to_owned(),
-            ),
-            request_timeout: Duration::from_millis(10),
-            max_response_bytes: nonzero(1_048_576)?,
-        })?;
-        let webhook = WebhookSettings {
-            signing_secrets: std::collections::BTreeMap::from([(
-                1,
-                SecretString::from("01234567890123456789012345678901".to_owned()),
-            )]),
-            replay_window: Duration::from_secs(300),
-            max_body_bytes: nonzero(262_144)?,
-        };
-        let server = ServerSettings {
-            bind_addr: ([127, 0, 0, 1], 0).into(),
-            public_base_url: Url::parse("https://briefcase.example/api/v1/")?,
-            public_site_base_url: Url::parse("https://briefcase.example/")?,
-            request_timeout: Duration::from_secs(1),
-            upload_timeout: Duration::from_secs(1),
-            restore_timeout: Duration::from_secs(1),
-            max_json_body_bytes: nonzero(1_048_576)?,
-            max_concurrent_requests: nonzero(32)?,
-            max_concurrent_restores: nonzero(2)?,
-            shutdown_timeout: Duration::from_secs(1),
-        };
-        let state = AppState {
-            iam: Arc::new(iam),
-            metadata: MetadataService::new(metadata_repository),
-            content,
-            content_adapter: concrete_content,
-            objects: object_store,
-            delegated_uploads,
-            webhook_repository,
-            database,
-            contract_database: None,
-            mapper: ResponseMapper::new(
-                &server.public_base_url,
-                server.public_site_base_url.clone(),
-            ),
-            temporary_directory: s3.temporary_directory,
-            webhook_settings: webhook.clone(),
-            testing: None,
-        };
-        Ok((state, server, webhook))
-    }
-
-    fn nonzero(value: usize) -> anyhow::Result<NonZeroUsize> {
-        NonZeroUsize::new(value).ok_or_else(|| anyhow::anyhow!("test fixture must be non-zero"))
-    }
-}
-
+mod accounts_tests;
 #[cfg(test)]
-mod testing_auth_tests;
+mod archive_tests;
+#[cfg(test)]
+mod delegation_tests;
+#[cfg(test)]
+mod drive_access_tests;
+#[cfg(test)]
+mod drives_tests;
+#[cfg(test)]
+mod locations_tests;
+#[cfg(test)]
+mod memory_store;
+#[cfg(test)]
+pub(crate) mod tests;

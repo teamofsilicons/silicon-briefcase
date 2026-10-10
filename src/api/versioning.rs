@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "3.0.0";
+pub const CONTRACT_VERSION: &str = "4.0.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 62] = [
+pub const OPERATIONS: [OperationVersion; 57] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -71,90 +71,37 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "transferDelegatedUpload",
-        "2.0.0",
+        "2.1.0",
         "PUT",
         "/obo/uploads/{upload_id}/content",
     ),
-    operation("readIamInfo", "2.0.0", "GET", "/iam"),
-    operation("readLoginStatus", "2.0.0", "GET", "/auth/status"),
     operation("readApiVersion", "1.0.0", "GET", "/version"),
-    operation("exchangeShortLivedToken", "2.0.0", "POST", "/auth/slt"),
+    operation("readAccountsInfo", "1.0.0", "GET", "/accounts"),
+    operation("readAccount", "1.0.0", "GET", "/me"),
+    operation("listDrives", "1.0.0", "GET", "/drives"),
+    operation("listSharedWithMe", "1.0.0", "GET", "/shared"),
     operation(
-        "refreshApplicationSession",
-        "2.0.0",
-        "POST",
-        "/auth/refresh",
-    ),
-    operation(
-        "listTestingEnvironments",
-        "2.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments",
-    ),
-    operation(
-        "createTestingEnvironment",
-        "2.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments",
-    ),
-    operation(
-        "getTestingEnvironment",
-        "2.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
-    ),
-    operation(
-        "updateTestingEnvironment",
+        "listSiliconAllowedAccounts",
         "1.0.0",
-        "PATCH",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
+        "GET",
+        "/silicons/{silicon}/allowed-accounts",
     ),
     operation(
-        "deleteTestingEnvironment",
+        "allowAccountToShareWithSilicon",
+        "1.0.0",
+        "PUT",
+        "/silicons/{silicon}/allowed-accounts/{account}",
+    ),
+    operation(
+        "disallowAccountToShareWithSilicon",
         "1.0.0",
         "DELETE",
-        "/organizations/{org_id}/testing-environments/{environment_id}",
+        "/silicons/{silicon}/allowed-accounts/{account}",
     ),
-    operation(
-        "getTestingEnvironmentKey",
-        "1.0.0",
-        "GET",
-        "/organizations/{org_id}/testing-environments/{environment_id}/key",
-    ),
-    operation(
-        "replaceTestingEnvironmentIamPairing",
-        "2.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/iam-pairings",
-    ),
-    operation(
-        "cleanTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/cleanings",
-    ),
-    operation(
-        "restoreTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/organizations/{org_id}/testing-environments/{environment_id}/restorations",
-    ),
-    operation(
-        "describeCurrentTestingEnvironment",
-        "2.0.0",
-        "GET",
-        "/testing-environment",
-    ),
-    operation(
-        "cleanCurrentTestingEnvironment",
-        "1.0.0",
-        "POST",
-        "/testing-environment/cleanings",
-    ),
-    operation("listEntries", "1.0.0", "GET", "/entries"),
-    operation("createFolder", "1.0.0", "POST", "/entries"),
+    operation("listEntries", "2.0.0", "GET", "/entries"),
+    operation("createFolder", "2.0.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
-    operation("updateEntry", "1.0.0", "PATCH", "/entries/{entry_id}"),
+    operation("updateEntry", "1.1.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
     operation(
         "readEntryContent",
@@ -170,11 +117,24 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "resolvePermanentUrl",
-        "1.1.0",
+        "2.0.0",
+        "GET",
+        "/paths/{owner}/{path}",
+    ),
+    operation("resolveDriveTop", "1.0.0", "GET", "/paths/{owner}"),
+    operation(
+        "resolveLegacyPermanentUrl",
+        "1.0.0",
         "GET",
         "/org/{org_id}/{path}",
     ),
-    operation("uploadFile", "1.0.0", "POST", "/uploads"),
+    operation(
+        "listArchiveContents",
+        "1.0.0",
+        "GET",
+        "/entries/{entry_id}/archive",
+    ),
+    operation("uploadFile", "1.1.0", "POST", "/uploads"),
     operation("createFileOnBehalfOfMember", "3.0.0", "POST", "/obo/files"),
     operation(
         "createFolderOnBehalfOfMember",
@@ -184,7 +144,7 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "listEntriesOnBehalfOfMember",
-        "3.0.0",
+        "3.1.0",
         "POST",
         "/obo/entries/list",
     ),
@@ -196,7 +156,7 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "trashEntryOnBehalfOfMember",
-        "3.0.0",
+        "3.1.0",
         "POST",
         "/obo/entries/trash",
     ),
@@ -208,7 +168,7 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "grantPermission",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
@@ -220,14 +180,14 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "inspectEffectivePermissions",
-        "1.0.0",
+        "1.1.0",
         "POST",
         "/permissions/effective",
     ),
     operation("searchFiles", "1.0.0", "GET", "/search"),
     operation("submitTelemetry", "1.0.0", "POST", "/telemetry"),
     operation("submitReport", "1.0.0", "POST", "/reports"),
-    operation("listNotifications", "1.0.0", "GET", "/notifications"),
+    operation("listNotifications", "1.1.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
     operation(
         "listEntryActivity",
@@ -247,12 +207,12 @@ pub const OPERATIONS: [OperationVersion; 62] = [
         "POST",
         "/entries/{entry_id}/versions/{version_id}/restore",
     ),
-    operation("readOrganizationUsage", "1.0.0", "GET", "/usage"),
-    operation("listBin", "1.0.0", "GET", "/bin"),
+    operation("readOrganizationUsage", "2.0.0", "GET", "/usage"),
+    operation("listBin", "1.1.0", "GET", "/bin"),
     operation("restoreEntry", "1.0.0", "POST", "/bin/{entry_id}/restore"),
     operation(
         "configureOrganizationBucket",
-        "1.0.0",
+        "2.0.0",
         "PUT",
         "/storage/configuration",
     ),
@@ -264,7 +224,7 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "createInvitation",
-        "1.0.0",
+        "2.0.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),
@@ -294,12 +254,12 @@ pub const OPERATIONS: [OperationVersion; 62] = [
     ),
     operation(
         "setLinkAccess",
-        "1.1.0",
+        "1.2.0",
         "PUT",
         "/entries/{entry_id}/link-access",
     ),
     operation("listEntryLogs", "2.0.0", "GET", "/entries/{entry_id}/logs"),
-    operation("readPublicEntry", "1.1.0", "GET", "/public/{org_id}/{path}"),
+    operation("readPublicEntry", "2.0.0", "GET", "/public/{owner}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
         "3.0.0",

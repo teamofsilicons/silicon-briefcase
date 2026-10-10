@@ -28,10 +28,9 @@ use crate::{
     config::{S3Encryption, S3Settings},
     domain::{
         actor::{
-            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
-            RequestAuthContext, TagName,
+            ActorId, ActorKind, ActorRef, AuthenticationMode, DriveAccess, RequestAuthContext,
         },
-        entry::{EntryName, EntryPath},
+        entry::EntryName,
         filter::FilterQuery,
         ids::EntryId,
         lifetime::LifetimeMinutes,
@@ -41,20 +40,28 @@ use crate::{
     error::AppError,
 };
 
-fn context(
-    org: &str,
-    actor: &str,
-    role: OrganizationRole,
-    tags: Vec<TagName>,
+/// A fresh account uuid: a short prefix and random characters.
+fn account_uuid(prefix: &str) -> String {
+    format!("{prefix}{}", &Uuid::now_v7().simple().to_string()[12..])
+}
+
+fn account(kind: ActorKind, uuid: &str) -> anyhow::Result<ActorRef> {
+    Ok(ActorRef::new(kind, ActorId::new(uuid)?))
+}
+
+/// `caller` acting in the drive of `owner`.
+fn in_drive(
+    owner: &ActorRef,
+    caller: &ActorRef,
+    access: DriveAccess,
 ) -> anyhow::Result<ExecutionContext> {
     Ok(ExecutionContext::new(
-        RequestAuthContext::new(
-            OrganizationId::new(org)?,
-            ActorRef::new(ActorKind::Carbon, ActorId::new(actor)?),
-            role,
-            tags,
+        RequestAuthContext::for_drive(
+            owner.clone(),
+            caller.clone(),
+            access,
             AuthenticationMode::Bearer,
-        ),
+        )?,
         "lifetime-integration",
     ))
 }
@@ -90,10 +97,15 @@ struct Fixture {
     repo: Arc<PostgresRepository>,
     service: MetadataService,
     files: PostgresContentRepository,
-    org: String,
+    /// The account whose drive every test works in.
+    owner: ActorRef,
 }
 
 async fn fixture() -> anyhow::Result<Option<Fixture>> {
+    fixture_owned_by(ActorKind::Carbon).await
+}
+
+async fn fixture_owned_by(kind: ActorKind) -> anyhow::Result<Option<Fixture>> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
         return Ok(None);
     };
@@ -124,7 +136,7 @@ async fn fixture() -> anyhow::Result<Option<Fixture>> {
         repo,
         service,
         files,
-        org: format!("life-{}", Uuid::new_v4().simple()),
+        owner: account(kind, &account_uuid("Own"))?,
     }))
 }
 
@@ -134,26 +146,31 @@ impl Fixture {
         self.pool.close().await;
     }
 
-    /// Reconciles the member (and their private folder) on first sight.
-    async fn member(
-        &self,
-        actor: &str,
-        role: OrganizationRole,
-        tags: Vec<TagName>,
-    ) -> anyhow::Result<ExecutionContext> {
-        let member = context(&self.org, actor, role, tags)?;
-        self.service
-            .get_entry_by_path(&member, &EntryPath::new("public")?)
-            .await?;
-        Ok(member)
+    fn drive(&self) -> &str {
+        self.owner.id().as_str()
     }
 
-    async fn private_root(&self, member: &ExecutionContext) -> anyhow::Result<EntryId> {
-        let path = EntryPath::new(format!(
-            "private/{}",
-            member.authorization().actor().id().as_str()
-        ))?;
-        Ok(self.service.get_entry_by_path(member, &path).await?.id())
+    /// The drive's owner, creating the drive on first use.
+    async fn owner(&self) -> anyhow::Result<ExecutionContext> {
+        let owner = in_drive(&self.owner, &self.owner, DriveAccess::Owner)?;
+        self.service.drive_root(&owner).await?;
+        Ok(owner)
+    }
+
+    /// Another Carbon in the owner's drive, who sees only what is shared.
+    fn visitor(&self, prefix: &str) -> anyhow::Result<ExecutionContext> {
+        let caller = account(ActorKind::Carbon, &account_uuid(prefix))?;
+        in_drive(&self.owner, &caller, DriveAccess::Visitor)
+    }
+
+    /// The same caller in its own drive, where its inbox lives.
+    fn own_drive(caller: &ExecutionContext) -> anyhow::Result<ExecutionContext> {
+        let actor = caller.authorization().actor();
+        in_drive(actor, actor, DriveAccess::Owner)
+    }
+
+    async fn root(&self, owner: &ExecutionContext) -> anyhow::Result<EntryId> {
+        Ok(self.service.drive_root(owner).await?.entry.id)
     }
 
     async fn folder(
@@ -166,12 +183,20 @@ impl Fixture {
             .service
             .create_folder(
                 member,
-                CreateFolderCommand::new(EntryName::new(name)?, Some(parent), None, vec![])?,
+                CreateFolderCommand::new(EntryName::new(name)?, Some(parent), vec![])?,
                 &mutation()?,
             )
             .await?
             .entry
             .id)
+    }
+
+    /// The owner's context while it shares with `recipient`: the recipient
+    /// becomes a participant of the drive so the grant can name it.
+    fn sharing(owner: &ExecutionContext, recipient: &ExecutionContext) -> ExecutionContext {
+        owner
+            .clone()
+            .with_share_recipients(vec![recipient.authorization().actor().clone()])
     }
 
     /// Publishes bytes as `name` without touching object storage.
@@ -259,7 +284,7 @@ impl Fixture {
     /// Moves a stored deadline into the past, as if the time had passed.
     async fn expire(&self, statement: &'static str, id: Uuid) -> anyhow::Result<()> {
         let changed = sqlx::query(statement)
-            .bind(&self.org)
+            .bind(self.drive())
             .bind(id)
             .execute(&self.pool)
             .await?
@@ -302,9 +327,6 @@ impl Fixture {
 const EXPIRE_GRANT: &str = "UPDATE briefcase.permission_grants \
      SET expires_at = clock_timestamp() - interval '1 second' \
      WHERE org_id = $1 AND grant_id = $2";
-const EXPIRE_TAG_GRANT: &str = "UPDATE briefcase.tag_permission_grants \
-     SET expires_at = clock_timestamp() - interval '1 second' \
-     WHERE org_id = $1 AND grant_id = $2";
 const EXPIRE_LINK: &str = "UPDATE briefcase.entries \
      SET link_expires_at = clock_timestamp() - interval '1 second' \
      WHERE org_id = $1 AND entry_id = $2";
@@ -318,19 +340,11 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     let Some(f) = fixture().await? else {
         return Ok(());
     };
-    let owner = f
-        .member("owner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let guest = f
-        .member("guest:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let partner = f
-        .member("partner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let outsider = f
-        .member("outsider:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let root = f.private_root(&owner).await?;
+    let owner = f.owner().await?;
+    let guest = f.visitor("Gst")?;
+    let partner = f.visitor("Prt")?;
+    let outsider = f.visitor("Out")?;
+    let root = f.root(&owner).await?;
     let file = f.upload(&owner, root, "plan.txt", b"plan", None).await?;
     let expiring =
         |principal: &ExecutionContext, access: GrantedAccess, lifetime| GrantPermissionCommand {
@@ -345,7 +359,7 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     assert!(
         f.service
             .grant_permission(
-                &owner,
+                &Fixture::sharing(&owner, &guest),
                 &expiring(
                     &guest,
                     GrantedAccess::new([AccessRight::Update]),
@@ -360,7 +374,7 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     let guest_expiring = f
         .service
         .grant_permission(
-            &owner,
+            &Fixture::sharing(&owner, &guest),
             &expiring(&guest, GrantedAccess::READ_ONLY, Some(minutes(5)?)),
             &mutation()?,
         )
@@ -372,7 +386,7 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     let permanent = f
         .service
         .grant_permission(
-            &owner,
+            &Fixture::sharing(&owner, &partner),
             &expiring(&partner, GrantedAccess::new([AccessRight::Update]), None),
             &mutation()?,
         )
@@ -380,7 +394,7 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     let partner_expiring = f
         .service
         .grant_permission(
-            &owner,
+            &Fixture::sharing(&owner, &partner),
             &expiring(&partner, GrantedAccess::READ_ONLY, Some(minutes(5)?)),
             &mutation()?,
         )
@@ -394,7 +408,7 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
     assert_eq!(listed["items"].as_array().map(Vec::len), Some(3));
 
     // `is:expiring` finds the share for whoever it gave access to and for the
-    // member who manages it, and for nobody else.
+    // account who manages it, and for nobody else.
     assert_eq!(f.listed(&guest, "is:expiring").await?, vec![file]);
     assert_eq!(f.listed(&owner, "is:expiring").await?, vec![file]);
     assert!(f.listed(&outsider, "is:expiring").await?.is_empty());
@@ -429,7 +443,17 @@ async fn expiring_shares_are_separate_read_only_grants_that_end_on_time() -> any
             .count(),
         2
     );
-    let inbox = f.repo.load_notification_inbox(&guest).await?;
+    let inbox = f
+        .repo
+        .load_notification_inbox(&Fixture::own_drive(&guest)?)
+        .await?;
+    assert!(
+        inbox
+            .items
+            .iter()
+            .any(|n| n.kind == NotificationKind::AccessGranted),
+        "the share itself reached the guest's own inbox"
+    );
     assert!(
         !inbox
             .items
@@ -446,16 +470,10 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
     let Some(f) = fixture().await? else {
         return Ok(());
     };
-    let owner = f
-        .member("owner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let guest = f
-        .member("guest:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let partner = f
-        .member("partner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let root = f.private_root(&owner).await?;
+    let owner = f.owner().await?;
+    let guest = f.visitor("Gst")?;
+    let partner = f.visitor("Prt")?;
+    let root = f.root(&owner).await?;
     let folder = f.folder(&owner, root, "drafts").await?;
     let grant = |principal: &ExecutionContext, lifetime| GrantPermissionCommand {
         entry_id: folder,
@@ -466,7 +484,11 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
     };
     let share = f
         .service
-        .grant_permission(&owner, &grant(&guest, Some(minutes(5)?)), &mutation()?)
+        .grant_permission(
+            &Fixture::sharing(&owner, &guest),
+            &grant(&guest, Some(minutes(5)?)),
+            &mutation()?,
+        )
         .await?;
     let id = share.id().as_uuid();
 
@@ -479,7 +501,7 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
         .change_expiring_share(&owner, folder, id, Some(minutes(1)?), &mutation()?)
         .await?;
     assert_ne!(extended["expires_at"], shortened["expires_at"]);
-    // A member who cannot manage the folder cannot change the share.
+    // An account that cannot manage the folder cannot change the share.
     assert!(matches!(
         f.repo
             .change_expiring_share(&guest, folder, id, None, &mutation()?)
@@ -506,11 +528,19 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
     // Making a share permanent folds it into an existing permanent grant.
     let permanent = f
         .service
-        .grant_permission(&owner, &grant(&partner, None), &mutation()?)
+        .grant_permission(
+            &Fixture::sharing(&owner, &partner),
+            &grant(&partner, None),
+            &mutation()?,
+        )
         .await?;
     let partner_expiring = f
         .service
-        .grant_permission(&owner, &grant(&partner, Some(minutes(5)?)), &mutation()?)
+        .grant_permission(
+            &Fixture::sharing(&owner, &partner),
+            &grant(&partner, Some(minutes(5)?)),
+            &mutation()?,
+        )
         .await?;
     let merged = f
         .repo
@@ -530,7 +560,11 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
     // Ending an expiring share early revokes it quietly.
     let early = f
         .service
-        .grant_permission(&owner, &grant(&partner, Some(minutes(5)?)), &mutation()?)
+        .grant_permission(
+            &Fixture::sharing(&owner, &partner),
+            &grant(&partner, Some(minutes(5)?)),
+            &mutation()?,
+        )
         .await?;
     f.repo
         .revoke_tag_or_member(&owner, folder, early.id().as_uuid(), &mutation()?)
@@ -544,7 +578,10 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
     ] {
         assert!(actions.iter().any(|a| a == expected), "missing {expected}");
     }
-    let inbox = f.repo.load_notification_inbox(&partner).await?;
+    let inbox = f
+        .repo
+        .load_notification_inbox(&Fixture::own_drive(&partner)?)
+        .await?;
     assert!(
         !inbox
             .items
@@ -557,71 +594,21 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
 }
 
 #[tokio::test]
-async fn tag_and_link_expiring_shares_end_on_time() -> anyhow::Result<()> {
+async fn expiring_links_open_and_close_on_time() -> anyhow::Result<()> {
     let Some(f) = fixture().await? else {
         return Ok(());
     };
-    let owner = f
-        .member("owner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let root = f.private_root(&owner).await?;
+    let owner = f.owner().await?;
+    let root = f.root(&owner).await?;
     let folder = f.folder(&owner, root, "launch").await?;
     let file = f
         .upload(&owner, folder, "brief.txt", b"brief", None)
         .await?;
 
-    let mut tx = f.repo.begin(&TenantContext::from_execution(&owner)).await?;
-    sqlx::query("INSERT INTO briefcase.organization_tags(org_id,tag_id,name) VALUES($1,'design-id','design')")
-        .bind(&f.org)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    let designer = f
-        .member(
-            "designer:tos",
-            OrganizationRole::Member,
-            vec![TagName::new("design")?],
-        )
-        .await?;
-    // Seeing the member with the tag reconciles their membership of it.
-
-    assert!(matches!(
-        f.repo
-            .invite_tag(
-                &owner,
-                folder,
-                "design-id",
-                GrantedAccess::new([AccessRight::Update]),
-                true,
-                Some(minutes(5)?),
-                &mutation()?,
-            )
-            .await,
-        Err(AppError::Validation { .. })
-    ));
-    let (tag_grant, expires_at) = f
-        .repo
-        .invite_tag(
-            &owner,
-            folder,
-            "design-id",
-            GrantedAccess::READ_ONLY,
-            true,
-            Some(minutes(5)?),
-            &mutation()?,
-        )
-        .await?;
-    assert!(expires_at.is_some());
-    assert!(
-        f.can_read(&designer, file).await?,
-        "the folder share reaches its files"
-    );
-    f.expire(EXPIRE_TAG_GRANT, tag_grant).await?;
-    assert!(!f.can_read(&designer, file).await?);
-
     // An expiring link opens the folder to anyone, then closes on time.
-    let tenant = TenantContext::for_control_service(&f.org, "anonymous-test");
+    let tenant = TenantContext::for_service(f.drive(), "anonymous-test");
     let file_path = f.service.get_entry(&owner, file).await?.entry.path;
+    assert_eq!(file_path.as_str(), "launch/brief.txt");
     let link = f
         .repo
         .set_link_access(&owner, folder, true, Some(minutes(5)?), &mutation()?)
@@ -657,8 +644,6 @@ async fn tag_and_link_expiring_shares_end_on_time() -> anyhow::Result<()> {
     f.sweep().await?;
     let actions = f.actions(&owner, folder).await?;
     for expected in [
-        "permission.tag_expiring_share_granted.v1",
-        "permission.tag_expiring_share_expired.v1",
         "entry.expiring_link_enabled.v1",
         "entry.expiring_link_expired.v1",
     ] {
@@ -667,23 +652,22 @@ async fn tag_and_link_expiring_shares_end_on_time() -> anyhow::Result<()> {
     f.close().await;
     Ok(())
 }
-
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn self_destructing_files_never_reach_the_bin() -> anyhow::Result<()> {
-    let Some(f) = fixture().await? else {
+    // The drive belongs to a Silicon, so its custodian can be shown keeping a
+    // file the way the drive's owner can.
+    let Some(f) = fixture_owned_by(ActorKind::Silicon).await? else {
         return Ok(());
     };
-    let owner = f
-        .member("owner:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let admin = f
-        .member("admin:tos", OrganizationRole::Admin, vec![])
-        .await?;
-    let editor = f
-        .member("editor:tos", OrganizationRole::Member, vec![])
-        .await?;
-    let root = f.private_root(&owner).await?;
+    let owner = f.owner().await?;
+    let custodian = in_drive(
+        &f.owner,
+        &account(ActorKind::Carbon, &account_uuid("Cus"))?,
+        DriveAccess::Custodian,
+    )?;
+    let editor = f.visitor("Edt")?;
+    let root = f.root(&owner).await?;
 
     let file = f
         .upload(&owner, root, "secret.txt", b"one", Some(minutes(1)?))
@@ -720,10 +704,11 @@ async fn self_destructing_files_never_reach_the_bin() -> anyhow::Result<()> {
         Some(deadline)
     );
 
-    // Only the creator, admins and owners may keep it.
+    // Only the creator, the drive's owner, or the custodian of either may
+    // keep it.
     f.service
         .grant_permission(
-            &owner,
+            &Fixture::sharing(&owner, &editor),
             &GrantPermissionCommand {
                 entry_id: file,
                 principal: editor.authorization().actor().clone(),
@@ -738,7 +723,9 @@ async fn self_destructing_files_never_reach_the_bin() -> anyhow::Result<()> {
         f.repo.make_permanent(&editor, file, &mutation()?).await,
         Err(AppError::Forbidden)
     ));
-    f.repo.make_permanent(&admin, file, &mutation()?).await?;
+    f.repo
+        .make_permanent(&custodian, file, &mutation()?)
+        .await?;
     assert_eq!(
         f.service
             .get_entry(&owner, file)
@@ -819,7 +806,7 @@ async fn self_destructing_files_never_reach_the_bin() -> anyhow::Result<()> {
         "SELECT count(*) FROM briefcase.entries \
           WHERE org_id = $1 AND entry_id = ANY($2) AND purge_after <= clock_timestamp()",
     )
-    .bind(&f.org)
+    .bind(f.drive())
     .bind(vec![doomed.as_uuid(), by_hand.as_uuid(), inside.as_uuid()])
     .fetch_one(&f.pool)
     .await?;

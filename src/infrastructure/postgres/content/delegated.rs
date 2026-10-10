@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     application::{
-        context::{ExecutionContext, TestingEnvironmentContext},
+        context::ExecutionContext,
         delegated_upload::{
             DelegatedUploadCommit, DelegatedUploadRepository, DelegatedUploadScope,
             DelegatedUploadState, DelegatedUploadStatus, DelegatedUploadTransfer,
@@ -20,7 +20,9 @@ use crate::{
             StoredObject,
         },
     },
-    domain::{ids::EntryId, multipart::MAX_UPLOAD_BYTES, permission::Capability},
+    domain::{
+        account::storage_key, ids::EntryId, multipart::MAX_UPLOAD_BYTES, permission::Capability,
+    },
     error::AppError,
     infrastructure::postgres::{TenantContext, quota},
 };
@@ -222,18 +224,14 @@ impl DelegatedUploadRepository for PostgresContentRepository {
         if expires_at <= now {
             return Err(AppError::validation("invalid_delegated_upload_expiration"));
         }
-        let (target, backend, configuration_id) = resolve_write_target(
-            &mut request.transaction,
-            context,
-            self.platform_target(context),
-        )
-        .await?;
+        let (target, backend, configuration_id) =
+            resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let upload_id = Uuid::now_v7();
         let proposed = EntryId::new();
         let key = object_key(format!("delegated/{upload_id}/object"))?;
         sqlx::query(
             "INSERT INTO briefcase.delegated_uploads (org_id,upload_id,operation_id,testing_environment_id,control_version,iam_organization_id,iam_principal_id,iam_membership_id,actor_type,actor_id,origin_app_id,request_hash,capability_hash,parent_id,parent_path,name,content_type,size_bytes,expected_sha256,destination_entry_id,proposed_entry_id,expires_at,storage_backend,storage_config_id,bucket_name,storage_region,storage_prefix,storage_role_arn,storage_external_id,storage_encryption_mode,storage_kms_key_arn,object_key) VALUES (briefcase.current_org_id(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)",
-        ).bind(upload_id).bind(command.operation_id).bind(context.testing_environment().map(TestingEnvironmentContext::id))
+        ).bind(upload_id).bind(command.operation_id).bind(Option::<Uuid>::None)
             .bind(identity.control_version).bind(identity.organization).bind(identity.principal).bind(identity.membership)
             .bind(identity.actor_type).bind(identity.actor_id).bind(identity.application)
             .bind(command.request_hash.as_slice()).bind(capability_hash.as_slice()).bind(command.parent_id.as_uuid())
@@ -623,21 +621,7 @@ impl PostgresContentRepository {
         &'a self,
         scope: &DelegatedUploadScope,
     ) -> Result<Transaction<'a, Postgres>, AppError> {
-        let tenant = scope.testing_environment.map_or_else(
-            || {
-                TenantContext::for_control_service(
-                    scope.organization_id.as_str(),
-                    &scope.request_id,
-                )
-            },
-            |plane| {
-                TenantContext::for_testing_environment_service(
-                    scope.organization_id.as_str(),
-                    plane,
-                    &scope.request_id,
-                )
-            },
-        );
+        let tenant = TenantContext::for_service(scope.organization_id.as_str(), &scope.request_id);
         self.repository.begin(&tenant).await.map_err(database_error)
     }
 
@@ -717,19 +701,24 @@ struct Identity<'a> {
 }
 
 impl<'a> Identity<'a> {
+    /// Binds a reservation to the verified tenant, account and issuing app.
+    ///
+    /// The legacy `iam_*` UUID columns now hold keys derived from those
+    /// values, so a reserve, commit, status or cancel only ever finds the
+    /// reservation its own account and app made.
     fn new(context: &'a ExecutionContext) -> Result<Self, AppError> {
         let auth = context.authorization();
-        let binding = auth.iam_binding().ok_or(AppError::Forbidden)?;
         let application = auth.originating_application().ok_or(AppError::Forbidden)?;
+        let tenant = auth.organization_id().as_str();
+        let actor_type = super::actor_kind(auth.actor().kind());
+        let actor_id = auth.actor().id().as_str();
         Ok(Self {
-            control_version: context
-                .testing_environment()
-                .map_or(0, TestingEnvironmentContext::control_version),
-            organization: binding.organization_id,
-            principal: binding.principal_id,
-            membership: binding.membership_id,
-            actor_type: super::actor_kind(auth.actor().kind()),
-            actor_id: auth.actor().id().as_str(),
+            control_version: 0,
+            organization: storage_key("tenant", tenant),
+            principal: storage_key("account", &format!("{actor_type}:{actor_id}")),
+            membership: storage_key("membership", &format!("{tenant}/{actor_type}:{actor_id}")),
+            actor_type,
+            actor_id,
             application: application.as_str(),
         })
     }
@@ -763,13 +752,9 @@ async fn database_now(
         .map_err(database_error)
 }
 
-fn validate_scope(row: &UploadRow, scope: &DelegatedUploadScope) -> Result<(), AppError> {
-    if row.testing_environment_id != scope.testing_environment.map(TestingEnvironmentContext::id)
-        || row.control_version
-            != scope
-                .testing_environment
-                .map_or(0, TestingEnvironmentContext::control_version)
-    {
+fn validate_scope(row: &UploadRow, _scope: &DelegatedUploadScope) -> Result<(), AppError> {
+    // Reservations made in a retired testing plane are never served.
+    if row.testing_environment_id.is_some() || row.control_version != 0 {
         return Err(AppError::NotFound);
     }
     Ok(())

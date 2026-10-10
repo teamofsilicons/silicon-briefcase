@@ -1,8 +1,8 @@
 //! Read-only public-link access and authenticated sharing/log controls.
 
 use super::super::{
-    auth::IamAction,
-    delivery,
+    auth::Action,
+    delivery, drives,
     dto::{LinkAccessDto, PageQuery},
     extract,
     state::AppState,
@@ -10,10 +10,9 @@ use super::super::{
 use crate::{
     application::{
         content::{ContentDelivery, ContentIntent, map_object_error, resolve_range},
-        context::TestingEnvironmentContext,
         ports::OpenObjectRequest,
     },
-    domain::{actor::is_canonical_iam_organization_id, entry::EntryPath},
+    domain::{account::is_tenant_key, entry::EntryPath},
     error::AppError,
     infrastructure::postgres::{TenantContext, sharing::LogPage},
 };
@@ -43,20 +42,19 @@ pub(crate) async fn link_access(
     Path(id): Path<Uuid>,
 ) -> Result<Json<LinkAccessDto>, AppError> {
     let context =
-        extract::authenticate(&state, &headers, IamAction::ReadEntry, &id.to_string()).await?;
+        extract::authenticate(&state, &headers, Action::ReadEntry, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let access = state
         .content_adapter
         .metadata_repository()
         .link_access(&context, extract::entry_id(id)?)
         .await?;
+    let drive = context.authorization().organization_id().as_str();
     Ok(Json(
-        state.mapper.link_access(
-            context.authorization().organization_id().as_str(),
-            &access,
-            context
-                .testing_environment()
-                .map(TestingEnvironmentContext::id),
-        )?,
+        state
+            .mapper_for([drive])
+            .await?
+            .link_access(drive, &access)?,
     ))
 }
 
@@ -66,13 +64,9 @@ pub(crate) async fn set_link_access(
     Path(id): Path<Uuid>,
     Json(body): Json<LinkUpdate>,
 ) -> Result<Json<LinkAccessDto>, AppError> {
-    let context = extract::authenticate(
-        &state,
-        &headers,
-        IamAction::GrantPermission,
-        &id.to_string(),
-    )
-    .await?;
+    let context =
+        extract::authenticate(&state, &headers, Action::GrantPermission, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let metadata = extract::mutation(&headers, "set_link_access", &id.to_string(), &body, true)?;
     let access = state
         .content_adapter
@@ -85,14 +79,12 @@ pub(crate) async fn set_link_access(
             &metadata,
         )
         .await?;
+    let drive = context.authorization().organization_id().as_str();
     Ok(Json(
-        state.mapper.link_access(
-            context.authorization().organization_id().as_str(),
-            &access,
-            context
-                .testing_environment()
-                .map(TestingEnvironmentContext::id),
-        )?,
+        state
+            .mapper_for([drive])
+            .await?
+            .link_access(drive, &access)?,
     ))
 }
 
@@ -103,7 +95,8 @@ pub(crate) async fn logs(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<LogPage>, AppError> {
     let context =
-        extract::authenticate(&state, &headers, IamAction::ListActivity, &id.to_string()).await?;
+        extract::authenticate(&state, &headers, Action::ListActivity, &id.to_string()).await?;
+    let context = drives::for_entry(&state, context, extract::entry_id(id)?).await?;
     let cursor = query
         .cursor
         .map(|v| {
@@ -130,19 +123,9 @@ pub(crate) struct PublicQuery {
     /// metadata, contents, inline, or attachment.
     pub view: Option<String>,
     pub cursor: Option<Uuid>,
-    /// Public sandbox routing ID; never an application secret.
-    pub test_environment: Option<Uuid>,
 }
 
-pub(crate) async fn public_path(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((org, path)): Path<(String, String)>,
-    Query(query): Query<PublicQuery>,
-) -> Result<Response, AppError> {
-    read_public(&state, &headers, &org, &path, query).await
-}
-
+/// Serves what anyone with the link may read at `path` in the drive `org`.
 pub(crate) async fn read_public(
     state: &AppState,
     headers: &HeaderMap,
@@ -150,47 +133,11 @@ pub(crate) async fn read_public(
     path: &str,
     query: PublicQuery,
 ) -> Result<Response, AppError> {
-    if !is_canonical_iam_organization_id(org) {
+    if !is_tenant_key(org) {
         return Err(AppError::NotFound);
     }
     let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
-    let access = extract::optional_testing_access(state, headers).await?;
-    if query.test_environment.is_some_and(|id| {
-        id.is_nil()
-            || access
-                .as_ref()
-                .is_some_and(|access| access.environment_id != id)
-    }) {
-        return Err(AppError::NotFound);
-    }
-    let (public_context, public_fence) = if let Some(id) = query.test_environment {
-        let (context, fence) = state
-            .testing
-            .as_ref()
-            .ok_or(AppError::NotFound)?
-            .public_link_context(id, org)
-            .await?;
-        (Some(context), Some(fence))
-    } else {
-        (None, None)
-    };
-    let fence = if public_fence.is_some() {
-        public_fence
-    } else {
-        extract::testing_use_fence(state, access.as_ref()).await?
-    };
-    extract::touch_testing_access(state, access.as_ref()).await?;
-    let tenant = if let Some(context) = public_context {
-        TenantContext::for_testing_environment_service(org, context, "public-link")
-    } else if let Some(access) = access {
-        TenantContext::for_testing_environment_service(
-            org,
-            TestingEnvironmentContext::new(access.environment_id, access.control_version),
-            "public-link",
-        )
-    } else {
-        TenantContext::for_control_service(org, "public-link")
-    };
+    let tenant = TenantContext::for_service(org, "public-link");
     let repo = state.content_adapter.metadata_repository();
     let mut response = match query.view.as_deref().unwrap_or("metadata") {
         "metadata" => Ok(Json(repo.public_entry(&tenant, path.as_str()).await?).into_response()),
@@ -207,9 +154,8 @@ pub(crate) async fn read_public(
             };
             let entry = repo.public_entry(&tenant, path.as_str()).await?;
             if entry.entry_type == "folder" && matches!(intent, ContentIntent::Download) {
-                let response =
-                    super::archive::serve_public(state, tenant, path.into_inner(), headers).await?;
-                return Ok(retain_fence(response, fence));
+                return super::archive::serve_public(state, tenant, path.into_inner(), headers)
+                    .await;
             }
             let content = open_public(
                 state,
@@ -226,20 +172,7 @@ pub(crate) async fn read_public(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
-    Ok(retain_fence(response, fence))
-}
-
-fn retain_fence(
-    response: Response,
-    fence: Option<crate::infrastructure::testing::TestingEnvironmentUseFence>,
-) -> Response {
-    use futures::StreamExt as _;
-    let (parts, body) = response.into_parts();
-    let stream = futures::stream::unfold(
-        (body.into_data_stream(), fence),
-        |(mut body, fence)| async move { body.next().await.map(|chunk| (chunk, (body, fence))) },
-    );
-    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+    Ok(response)
 }
 
 pub(super) async fn open_public(

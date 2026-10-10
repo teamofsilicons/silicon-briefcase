@@ -63,7 +63,6 @@ const number = (
 // never transmitted to either Briefcase or Space Station.
 export function safeBrowserEvent(
   raw: { id?: unknown; type?: unknown; data?: Record<string, unknown> },
-  environment: string | null,
 ) {
   const type =
     typeof raw.type === 'string' && allowed.has(raw.type)
@@ -81,8 +80,8 @@ export function safeBrowserEvent(
       (status !== null && status >= 400)
         ? 'failed'
         : 'completed',
-    testing: !!environment,
-    environment_id: uuid(environment),
+    testing: false,
+    environment_id: null,
     request_id: null,
     duration_ms: number(data.duration_ms ?? data.elapsed_ms ?? data.load_ms),
     status: status !== null && status >= 100 ? status : null,
@@ -94,13 +93,11 @@ export function safeBrowserEvent(
 
 export function startTelemetry() {
   const transport = window.fetch.bind(window);
-  // Plane changes reload the document; queued events retain their original plane.
-  const environment = sessionStorage.getItem('briefcase-test-environment');
   setTelemetryEnabled(telemetryEnabled());
   collector = createSpaceStationWeb({
     analyticsTable: 'siliconbriefcase',
     eventsTable: 'siliconbriefcase',
-    endpoint: '/browser/telemetry',
+    endpoint: '/api/v1/telemetry',
     enabled: telemetryEnabled(),
     fetch: async (url, init) => {
       if (!telemetryEnabled()) return new Response(null, { status: 204 });
@@ -118,7 +115,7 @@ export function startTelemetry() {
         body: JSON.stringify({
           table: 'siliconbriefcase',
           events: body.events.map((event) =>
-            safeBrowserEvent(event, environment),
+            safeBrowserEvent(event),
           ),
         }),
       });

@@ -1,169 +1,29 @@
-# Browser file manager
+# Briefcase in your browser
 
-Briefcase's browser app provides an organisation-scoped file manager. IAM owns
-authentication; the Briefcase API checks access for each operation. Browser
-controls reflect the rights returned by the API, rather than defining those rights.
+The Next.js application uses Silicon Accounts hosted sign-in. Open Briefcase and select **Sign in**. Approve the account and requested details at Accounts. The server seals the sign-in in an httpOnly cookie; file requests go through the same site's API proxy.
 
-## Sign in and open a file
+## Files
 
-Choose **Continue with IAM**. IAM selects one Carbon or Silicon and exactly one
-organization for the login. The production callback is
-`https://briefcase.teamofsilicons.com/auth/callback`; its random state and HttpOnly
-login cookie bind it to this browser. Tokens stay on the gateway.
+**My files** opens your drive. Create a folder, drop files on the page, or choose **Upload files**. A transfer can be cancelled and retried; each retry retains the original idempotency key. Uploading the same name into the same folder publishes a new immutable version. Upload options can schedule permanent deletion after 1 minute to 30 days.
 
-Use **Workspaces & access** to switch between saved accounts and organizations.
-**Add an account or organization** starts another IAM login while retaining the
-existing sessions. Each saved context owns its token pair, refresh retry state,
-and testing contexts. Refresh cannot change its actor or organization. Old
-unscoped sessions require a new sign-in.
+Use list or grid view, folder breadcrumbs, the search box, and file-type filters. Recent shows the latest changes. Search includes accessible file content. Entries with more pages offer **Load more**. A shared folder can show only the children you may access.
 
-A file link `/org/{org_id}/{path}` retains its destination through sign-in. It
-can select an already saved context for that organization when exactly one is
-available; otherwise choose or add the intended account. A link or organization
-header never changes a token's authority. An old tab or preview URL receives a
-conflict instead of operating under a newly selected account.
+Choose a file to preview or **Details** for either a file or folder. Previews support images, audio, video, PDFs, text and code, Office/OpenDocument text and tables, and archive listings. Text reads are capped at 256 KiB; document inputs at 10 MiB, with bounded decompression. Download originals for full Office formatting, charts and embedded media. Unsupported types remain downloadable. Uploaded HTML and SVG never execute as site code.
 
-Organization creation, membership, and invitations remain in IAM. Signing out
-removes only the selected session; another saved context remains available.
+## Sharing and history
 
-The address bar follows folder navigation and opened files. **Copy link** copies
-the clean file URL without a token. Browser Back and Forward resolve their target
-again through Briefcase. Renamed or moved paths may no longer resolve; copy the
-entry's current link after changing its location.
+The **Sharing** tab grants read, add or edit access to an exact `c:` or `si:` id. Optional expiry is read-only. Remove a grant, change an expiring grant's lifetime, or keep it permanently. The owner controls deletion. Silicon recipient allowances are managed in Settings by its custodian.
 
-## Browse and manage files
+Enable **Anyone with the link** for anonymous reading or downloads. Disabling it closes anonymous access; invitation grants are independent. Folders pass inherited access to descendants. Public links reveal only accessible children.
 
-- **All files** shows the organisation's top-level containers.
-- **Public**, **My files**, and team spaces open their respective folders.
-- **Recent** shows the 20 newest matching entries.
-- **Search** searches names and indexed contents. The **Filter** field accepts
-  the expressions documented in the [API guide](api/README.md).
-- Folder listings load 100 entries at a time; **Load more** retrieves the next page.
-- **Upload file** and **New folder** are available inside writable folders.
-  From **All files**, **New folder** creates a top-level folder and asks for its
-  Public, Private, or tag access boundary. The new folder stays alongside the
-  reserved containers; its type does not move it inside one. To create inside
-  Public or your Private folder, open that destination first. Nested folders
-  inherit their parent's type.
-- Entry actions include download, rename, move, share, and move to bin, according
-  to the rights returned for that entry.
-- **Bin** supports restoring deleted entries during their retention period.
+**Versions** lists stored versions and restores a selected version. **Activity** records retained changes. **Details** renames, moves within the drive, cancels self-destruction, or moves an ordinary entry to the bin. The bin restores entries within 45 days. Removing a self-destructing file deletes it permanently.
 
-If a Bin restore response is lost, retry **Restore** on the same entry while the
-page remains open. The browser keeps the operation identity for that deletion,
-so recovery confirms the original restore instead of repeating it. Deleting
-the entry again starts a new restore operation.
+**Shared with me** lists explicit shares. **My Silicons** opens drives of Silicons you look after while you remain the acting Carbon. **Notifications** lists sharing updates and can mark the inbox read.
 
-The details panel provides a preview, access information, version history, and
-activity history. Markdown previews format headings, lists, tables, and fenced
-code; embedded HTML appears as source, and links and external images remain
-inactive. Code and data formats such as JSON, XML, HTML, CSS, JavaScript,
-TypeScript, Python, Java, SQL, and YAML use syntax highlighting. Previewing code
-does not execute it.
+## Settings
 
-CSV and TSV previews show a grid with spreadsheet column labels and row numbers,
-up to 200 rows and 50 columns. Values remain text, including formulas, leading
-zeroes, and large integers. Malformed or incomplete quoting is identified.
+Choose a drive to see storage and daily upload usage. Connect an S3 bucket by supplying its region, role ARN, prefix, account id and encryption. Copy the drive's STS External ID into the role trust policy and use the deployment's Briefcase service role as its trusted principal. Briefcase verifies bucket operations before using the configuration. Existing versions remain in their original storage.
 
-Text-based previews read at most 1 MiB and clearly identify truncated content;
-downloading retrieves the complete file. UTF-16 byte-order marks and supported
-declared character encodings are recognised. Parsing runs in a cancellable
-worker with a time limit, and the result appears in a script-disabled sandbox
-with no external-resource access. If formatting cannot finish, the preview shows
-escaped source instead. Preview requests and workers are cancelled when the
-selection changes. File content is never inserted as executable page markup.
+The account menu switches light/dark/system themes and signs out. Sign-out revokes this sign-in and other open tabs follow. Problems can be reported from Settings; only the text you submit is included.
 
-If an upload response is lost, choose **Retry same upload**. Briefcase retains the
-file, destination, and operation identity for that retry while the page remains
-open. Do not replace the pending file if you intend to recover the same operation.
-
-The gateway checks the filename, media type, destination, and current write
-permission before staging bytes. It checks the session and destination again
-before forwarding the file through the official client. Temporary-storage
-capacity is separate from your organisation's quota: an upload may need to wait
-if the browser gateway cannot reserve enough disk space. File size remains
-limited to 5 TiB, subject to your organisation's configured limits.
-
-## Sharing
-
-Open a file or folder's Access tab. Invite a Carbon, Silicon, verified email
-contact, or IAM tag using independent read/update rights, plus create rights
-on folders. Delete cannot be granted. Creators and organization administrators
-can enable anyone-with-link read/download access. Inheritance is shown
-explicitly, and protected private roots cannot be shared publicly.
-
-Permanent links open public files and folders without login. Shared folders
-are browsable and downloadable as tar.zst. Private links return to IAM sign-in.
-The Versions tab pages through all immutable versions and restores by creating
-a new version. Logs show the past 365 days, including descendant changes in
-folder logs. See [Sharing and audit logs](sharing.md).
-
-## Notifications
-
-The bell shows the unread count. Open it to see your latest 20 notifications,
-including grants and revocations. Historical requests and decisions remain
-readable. **Mark all as read** marks
-the entire inbox read, not just those 20 displayed items. The inbox refreshes when
-opened, when the window regains focus, or when you select **Refresh**.
-
-Opening a notification resolves its stable entry identifier, so access is checked again and stale paths
-are not trusted.
-
-## Organisation settings
-
-Open **Organisation settings** from the sidebar. **Usage** reports stored bytes,
-the daily upload allowance, remaining capacity, and the next reset time. Storage
-includes retained versions and items in the bin.
-
-The **Storage configuration** tab is where an organisation owner or authorised
-administrator can configure an organisation-owned S3 bucket. Enter its bucket
-name, region, AWS account ID, role ARN, prefix, and encryption mode. SSE-KMS also
-requires the KMS key ARN in that account and region. Do not enter AWS access keys
-or Silicon IAM application secrets.
-
-**Validate and configure bucket** runs the backend's temporary create/read/update/
-delete probe. The form reports **S3 bucket configured** only after a successful
-response. Failed validation leaves the previous storage selected. Existing file
-versions keep their recorded location; newly uploaded versions use the activated
-configuration.
-
-If the outcome is uncertain, the form retains the exact request and locks its
-fields. **Retry same configuration** recovers that operation's result. A completed
-failed probe unlocks the form; **Run a new validation** starts a new operation
-after the external bucket or role has been fixed. Keep the page open while
-recovering an uncertain request. The operation ID is displayed for reference.
-
-## Test environments
-
-Open **Test environments** in the sidebar. **Manage environments in Honeycomb**
-opens the shared environment console for creation, imports and lifecycle actions.
-To enter an existing environment here, provide its Briefcase **test app secret**
-and **Test SLT or Carbon/Silicon ID**. The sign-in screen also permits direct test
-entry without a production session. IAM validates existing test actors and their
-current file permissions; the app secret does not grant administrator access.
-
-Credentials are masked and retained only for an uncertain retry, then cleared when
-the drawer closes. A persistent banner identifies the environment and signed-in
-actor and provides an exit button. Test and production sessions remain separate;
-exiting restores production or asks you to sign in. The tab stores only the public
-UUID. Limits are 2 GiB per environment and 10 active environments. Use Honeycomb
-for rotation, cleaning, recoverable deletion and restoration.
-See [Testing environments](testing-environments.md).
-
-## Sessions and local operation
-
-Session tokens stay in the Rust browser gateway. The browser stores only an
-HttpOnly session cookie and, in a test tab, the public environment ID in
-sessionStorage. Environment app secrets stay on the gateway during test sign-in.
-Signing out of a test session preserves production access. The gateway saves
-sessions privately across restarts and refreshes access automatically. Sessions
-last up to IAM's 900-day refresh-family lifetime, subject to IAM revocation and
-browser cookie retention. HTTPS uses Secure, host-only cookies.
-
-See the [browser development guide](../web/README.md) for build commands, local
-preview, origin configuration, and same-origin gateway deployment.
-
-Browsers that support imperative WebMCP can expose
-`read_visible_briefcase_files`: a read-only snapshot of up to 100 entries already
-shown in the current listing. It neither fetches file contents nor changes files,
-permissions, or navigation. User-supplied names and paths remain untrusted content.
+Local setup and browser checks are documented in [web/README.md](../web/README.md).

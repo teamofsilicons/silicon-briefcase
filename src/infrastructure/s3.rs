@@ -741,6 +741,7 @@ impl ObjectStore for S3ObjectStore {
             .key(full_key)
             .content_type(content_type)
             .content_length(content_length)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
             .checksum_sha256(&encoded_checksum)
             .body(body);
         let output = Self::apply_encryption_to_put(request, target)

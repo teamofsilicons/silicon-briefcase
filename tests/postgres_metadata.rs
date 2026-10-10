@@ -1,16 +1,15 @@
 //! Repository checks that run against a live PostgreSQL instance.
 //!
-//! These execute the SQL the repository actually builds — reconciliation, path
-//! resolution, the compiled filter language, the notification inbox, and the
-//! application folder — so a statement that only type-checks cannot pass for
-//! working. The whole file is skipped unless
+//! These execute the SQL the repository actually builds — drive creation,
+//! path resolution, the compiled filter language, the notification inbox, and
+//! the application folder — so a statement that only type-checks cannot pass
+//! for working. The whole file is skipped unless
 //! `BRIEFCASE_TEST_DATABASE_URL` names a database whose role may create the
-//! `briefcase` schema and write projection rows, because that is exactly what
-//! the first request of a new organization does.
+//! `briefcase` schema and write rows, because that is exactly what the first
+//! request of a new drive does.
 //!
 //! ```bash
-//! docker compose up -d postgres
-//! BRIEFCASE_TEST_DATABASE_URL=postgres://briefcase:briefcase-local-only@127.0.0.1:5433/briefcase \
+//! BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig \
 //!   cargo test --test postgres_metadata
 //! ```
 
@@ -25,28 +24,25 @@ use silicon_briefcase::{
             CreateFolderCommand, EntryListItem, GrantPermissionCommand, ListEntriesQuery,
             MetadataRepository, MetadataRepositoryError, MetadataService, MetadataServiceError,
             MutationMetadata, PageRequest, RestoreBinEntryCommand, RevokePermissionCommand,
-            SearchQuery, TokenAuthorizationQuery,
+            SearchQuery,
         },
     },
     config::DatabaseSettings,
     domain::{
         actor::{
-            ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, OrganizationId,
-            OrganizationRole, RequestAuthContext, TagName,
+            ActorId, ActorKind, ActorRef, ApplicationId, AuthenticationMode, DriveAccess,
+            RequestAuthContext,
         },
         entry::{EntryName, EntryPath},
         filter::FilterQuery,
+        ids::EntryId,
         permission::{AccessRight, Capability, GrantedAccess},
     },
     infrastructure::postgres::{self, PostgresRepository},
 };
 use uuid::Uuid;
 
-const ACTOR_ID: &str = "c:cos";
 const APPLICATION_ID: &str = "silicon-dm";
-const VIEWER_ID: &str = "c:filter-viewer";
-const PEER_ID: &str = "c:ancestor-peer";
-const OUTSIDER_ID: &str = "c:ancestor-outsider";
 
 fn settings(url: String) -> DatabaseSettings {
     DatabaseSettings {
@@ -58,28 +54,30 @@ fn settings(url: String) -> DatabaseSettings {
     }
 }
 
-fn authorization(organization: &str, authentication: AuthenticationMode) -> RequestAuthContext {
-    authorization_with_role(
-        organization,
-        ACTOR_ID,
-        OrganizationRole::Owner,
-        authentication,
+/// A fresh account uuid: a short prefix and random characters.
+fn account_uuid(prefix: &str) -> String {
+    format!("{prefix}{}", &Uuid::now_v7().simple().to_string()[12..])
+}
+
+fn carbon(uuid: &str) -> ActorRef {
+    ActorRef::new(
+        ActorKind::Carbon,
+        ActorId::new(uuid).unwrap_or_else(|error| panic!("test account: {error}")),
     )
 }
 
-fn authorization_with_role(
-    organization: &str,
-    actor_id: &str,
-    role: OrganizationRole,
+fn in_drive(
+    owner: &ActorRef,
+    caller: &ActorRef,
+    access: DriveAccess,
     authentication: AuthenticationMode,
-) -> RequestAuthContext {
-    let organization_id = OrganizationId::new(organization.to_owned())
-        .unwrap_or_else(|error| panic!("test organization: {error}"));
-    let actor = ActorRef::new(
-        ActorKind::Carbon,
-        ActorId::new(actor_id).unwrap_or_else(|error| panic!("test actor: {error}")),
-    );
-    RequestAuthContext::new(organization_id, actor, role, Vec::new(), authentication)
+    request: &str,
+) -> ExecutionContext {
+    ExecutionContext::new(
+        RequestAuthContext::for_drive(owner.clone(), caller.clone(), access, authentication)
+            .unwrap_or_else(|error| panic!("test context: {error}")),
+        request,
+    )
 }
 
 fn entry_name(item: &EntryListItem) -> &str {
@@ -87,6 +85,55 @@ fn entry_name(item: &EntryListItem) -> &str {
         EntryListItem::Full(view) => view.entry.name.as_str(),
         EntryListItem::Traversal(view) => view.name.as_str(),
     }
+}
+
+fn key(value: &str, fingerprint: u8) -> anyhow::Result<MutationMetadata> {
+    Ok(MutationMetadata::new(
+        Some(IdempotencyKey::new(format!("{value}-{}", Uuid::now_v7()))?),
+        [fingerprint; 32],
+    ))
+}
+
+async fn folder(
+    metadata: &MetadataService,
+    context: &ExecutionContext,
+    parent: Option<EntryId>,
+    name: &str,
+    fingerprint: u8,
+) -> anyhow::Result<EntryId> {
+    Ok(metadata
+        .create_folder(
+            context,
+            CreateFolderCommand::new(EntryName::new(name)?, parent, Vec::new())?,
+            &key(name, fingerprint)?,
+        )
+        .await?
+        .entry
+        .id)
+}
+
+async fn share(
+    metadata: &MetadataService,
+    owner: &ExecutionContext,
+    entry_id: EntryId,
+    recipient: &ActorRef,
+    access: GrantedAccess,
+    inherit: bool,
+) -> anyhow::Result<silicon_briefcase::domain::permission::PermissionGrant> {
+    let sharing = owner.clone().with_share_recipients(vec![recipient.clone()]);
+    Ok(metadata
+        .grant_permission(
+            &sharing,
+            &GrantPermissionCommand {
+                entry_id,
+                principal: recipient.clone(),
+                access,
+                inherits_to_descendants: inherit,
+                lifetime: None,
+            },
+            &key("share", 90)?,
+        )
+        .await?)
 }
 
 #[tokio::test]
@@ -99,17 +146,51 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
     let pool = postgres::connect(&settings(url), "briefcase-tests").await?;
     postgres::migrate(&pool).await?;
     let repository = PostgresRepository::new(pool.clone());
+    let metadata = MetadataService::new(Arc::new(repository.clone()));
 
-    // A fresh organization per run keeps the test additive: it never has to
-    // delete anything to be repeatable.
-    let organization = format!("test-{}", Uuid::now_v7().simple());
-    let context = ExecutionContext::new(
-        authorization(&organization, AuthenticationMode::Bearer),
-        "postgres-metadata-test",
+    // A fresh drive per run keeps the test additive: it never has to delete
+    // anything to be repeatable.
+    let ada = carbon(&account_uuid("Ada"));
+    let viewer = carbon(&account_uuid("Vwr"));
+    let peer = carbon(&account_uuid("Per"));
+    let outsider = carbon(&account_uuid("Out"));
+    let context = in_drive(
+        &ada,
+        &ada,
+        DriveAccess::Owner,
+        AuthenticationMode::Bearer,
+        "owner",
     );
+    let viewer_context = in_drive(
+        &ada,
+        &viewer,
+        DriveAccess::Visitor,
+        AuthenticationMode::Bearer,
+        "viewer",
+    );
+    let outsider_context = in_drive(
+        &ada,
+        &outsider,
+        DriveAccess::Visitor,
+        AuthenticationMode::Bearer,
+        "outsider",
+    );
+    // `for:` resolves accounts through the account cache.
+    for (account, kind) in [
+        (&viewer, "carbon"),
+        (&outsider, "carbon"),
+        (&peer, "carbon"),
+    ] {
+        sqlx::query("INSERT INTO briefcase.accounts (account_uuid, kind) VALUES ($1, $2)")
+            .bind(account.id().as_str())
+            .bind(kind)
+            .execute(&pool)
+            .await?;
+    }
 
-    // The first request projects the caller and reconciles the reserved roots.
-    let roots = repository
+    // The first request creates the drive; its top lists nothing yet but the
+    // folders made below.
+    let top = repository
         .list_active_children(
             &context,
             &ListEntriesQuery {
@@ -119,70 +200,32 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             },
         )
         .await?;
-    let root_names: Vec<String> = roots
-        .items
-        .iter()
-        .map(|entry| entry.entry.name.as_str().to_owned())
-        .collect();
-    assert!(
-        root_names.contains(&"public".to_owned()) && root_names.contains(&"private".to_owned()),
-        "reserved containers use their lowercase URL segments: {root_names:?}"
-    );
-
-    // The actor's private folder resolves by the path its permanent URL shows.
-    let actor_path = EntryPath::new(format!("private/{ACTOR_ID}"))?;
-    let actor_root = repository
-        .find_active_entry_by_path(&context, &actor_path)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the caller's private folder must be reconciled"))?;
-    assert_eq!(actor_root.entry.path, actor_path);
+    assert!(top.items.is_empty(), "a new drive starts empty");
 
     // Mixed SQL/policy boolean expressions retain their exact meaning, and a
     // chronological take is applied only after authorization and permission
-    // filtering. Five member-owned folders are deliberately older than nine
-    // peer-owned folders so `last:5 permissions:delete` must scan past an
+    // filtering. Five viewer-created folders are deliberately older than nine
+    // owner-created ones so `last:5 permissions:delete` must scan past an
     // entire newer, non-matching block.
-    let public_root_id = roots
-        .items
-        .iter()
-        .find(|entry| entry.entry.name.as_str() == "public")
-        .map(|entry| entry.entry.id)
-        .ok_or_else(|| anyhow::anyhow!("public root must exist"))?;
-    sqlx::query(
-        "INSERT INTO briefcase.organization_members \
-             (org_id, actor_type, actor_id, org_role, membership_status, iam_version) \
-         VALUES ($1, 'carbon', $2, 'member', 'active', 1)",
+    let space = folder(&metadata, &context, None, "shared-space", 1).await?;
+    share(
+        &metadata,
+        &context,
+        space,
+        &viewer,
+        GrantedAccess::new([AccessRight::Write]),
+        true,
     )
-    .bind(&organization)
-    .bind(VIEWER_ID)
-    .execute(&pool)
     .await?;
-    let viewer_context = ExecutionContext::new(
-        authorization_with_role(
-            &organization,
-            VIEWER_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::Bearer,
-        ),
-        "postgres-filter-viewer",
-    );
-    let metadata = MetadataService::new(Arc::new(repository.clone()));
     for index in 0_u8..5 {
-        metadata
-            .create_folder(
-                &viewer_context,
-                CreateFolderCommand::new(
-                    EntryName::new(format!("viewer-{index}"))?,
-                    Some(public_root_id),
-                    None,
-                    Vec::new(),
-                )?,
-                &MutationMetadata::new(
-                    Some(IdempotencyKey::new(format!("filter-viewer-{index}"))?),
-                    [index.saturating_add(1); 32],
-                ),
-            )
-            .await?;
+        folder(
+            &metadata,
+            &viewer_context,
+            Some(space),
+            &format!("viewer-{index}"),
+            index.saturating_add(1),
+        )
+        .await?;
     }
     for index in 0_u8..9 {
         let name = if index == 0 {
@@ -190,33 +233,27 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         } else {
             format!("owner-{index}")
         };
-        metadata
-            .create_folder(
-                &context,
-                CreateFolderCommand::new(
-                    EntryName::new(name)?,
-                    Some(public_root_id),
-                    None,
-                    Vec::new(),
-                )?,
-                &MutationMetadata::new(
-                    Some(IdempotencyKey::new(format!("filter-owner-{index}"))?),
-                    [index.saturating_add(16); 32],
-                ),
-            )
-            .await?;
+        folder(
+            &metadata,
+            &context,
+            Some(space),
+            &name,
+            index.saturating_add(16),
+        )
+        .await?;
     }
+    let listing = |filter: &str| -> anyhow::Result<ListEntriesQuery> {
+        Ok(ListEntriesQuery {
+            parent_id: Some(space),
+            filter: Some(FilterQuery::parse(filter)?),
+            page: PageRequest::new(None, 100)?,
+        })
+    };
 
     let mixed_or = metadata
         .list_entries(
             &viewer_context,
-            &ListEntriesQuery {
-                parent_id: Some(public_root_id),
-                filter: Some(FilterQuery::parse(
-                    "name:'owner-apple' or permissions:delete",
-                )?),
-                page: PageRequest::new(None, 100)?,
-            },
+            &listing("name:'owner-apple' or permissions:delete")?,
         )
         .await?;
     assert_eq!(mixed_or.items.len(), 6);
@@ -234,17 +271,10 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             .count(),
         5
     );
-
     let mixed_not = metadata
         .list_entries(
             &viewer_context,
-            &ListEntriesQuery {
-                parent_id: Some(public_root_id),
-                filter: Some(FilterQuery::parse(
-                    "not (name:'owner-apple' or permissions:delete)",
-                )?),
-                page: PageRequest::new(None, 100)?,
-            },
+            &listing("not (name:'owner-apple' or permissions:delete)")?,
         )
         .await?;
     assert_eq!(mixed_not.items.len(), 8);
@@ -255,16 +285,8 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             .all(|entry| entry_name(entry).starts_with("owner-")
                 && entry_name(entry) != "owner-apple")
     );
-
     let latest_owned = metadata
-        .list_entries(
-            &viewer_context,
-            &ListEntriesQuery {
-                parent_id: Some(public_root_id),
-                filter: Some(FilterQuery::parse("last:5 permissions:delete")?),
-                page: PageRequest::new(None, 100)?,
-            },
-        )
+        .list_entries(&viewer_context, &listing("last:5 permissions:delete")?)
         .await?;
     assert_eq!(latest_owned.items.len(), 5);
     assert!(
@@ -273,16 +295,8 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             .iter()
             .all(|entry| entry_name(entry).starts_with("viewer-"))
     );
-
     let earliest_peer_owned = metadata
-        .list_entries(
-            &viewer_context,
-            &ListEntriesQuery {
-                parent_id: Some(public_root_id),
-                filter: Some(FilterQuery::parse("first:5 -permissions:delete")?),
-                page: PageRequest::new(None, 100)?,
-            },
-        )
+        .list_entries(&viewer_context, &listing("first:5 -permissions:delete")?)
         .await?;
     assert_eq!(earliest_peer_owned.items.len(), 5);
     assert!(
@@ -292,48 +306,43 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             .all(|entry| entry_name(entry).starts_with("owner-"))
     );
 
-    // A folder owner retains read access to content a collaborator creates
-    // below it. Search and `accessible-to` narrow before their result limits,
-    // so their SQL must carry the same owned-ancestor rule as domain policy.
-    sqlx::query(
-        "INSERT INTO briefcase.organization_members \
-             (org_id, actor_type, actor_id, org_role, membership_status, iam_version) \
-         VALUES ($1, 'carbon', $2, 'member', 'active', 1), \
-                ($1, 'carbon', $3, 'member', 'active', 1)",
+    // A folder's creator retains read access to content a collaborator
+    // creates below it. Search and `accessible-to` narrow before their result
+    // limits, so their SQL must carry the same owned-ancestor rule as policy.
+    // The viewer may only add to this folder (no inherited read), so what it
+    // sees below is exactly what the owned-ancestor rule gives it.
+    let owned_space = folder(&metadata, &context, None, "owned-space", 41).await?;
+    share(
+        &metadata,
+        &context,
+        owned_space,
+        &viewer,
+        GrantedAccess::new([AccessRight::Write]),
+        false,
     )
-    .bind(&organization)
-    .bind(PEER_ID)
-    .bind(OUTSIDER_ID)
-    .execute(&pool)
     .await?;
-    let viewer_root = repository
-        .find_active_entry_by_path(
-            &viewer_context,
-            &EntryPath::new(format!("private/{VIEWER_ID}"))?,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the viewer private root must be reconciled"))?;
-    let owned_folder = metadata
-        .create_folder(
-            &viewer_context,
-            CreateFolderCommand::new(
-                EntryName::new("owned-search-container")?,
-                Some(viewer_root.entry.id),
-                None,
-                Vec::new(),
-            )?,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("owned-search-container")?),
-                [42; 32],
-            ),
-        )
-        .await?;
+    let owned_folder = folder(
+        &metadata,
+        &viewer_context,
+        Some(owned_space),
+        "owned-search-container",
+        42,
+    )
+    .await?;
     let peer_file_id = Uuid::now_v7();
     let peer_version_id = Uuid::now_v7();
     let mut peer_file_transaction = pool.begin().await?;
     sqlx::query("SET CONSTRAINTS briefcase.entries_current_version_fk DEFERRED")
         .execute(&mut *peer_file_transaction)
         .await?;
+    sqlx::query(
+        "INSERT INTO briefcase.organization_members (org_id, actor_type, actor_id) \
+         VALUES ($1, 'carbon', $2)",
+    )
+    .bind(ada.id().as_str())
+    .bind(peer.id().as_str())
+    .execute(&mut *peer_file_transaction)
+    .await?;
     sqlx::query(
         "INSERT INTO briefcase.entries ( \
                 org_id, entry_id, parent_id, entry_type, name, root_type, \
@@ -345,10 +354,10 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
                 'carbon', $4, 'carbon', $4 \
          )",
     )
-    .bind(&organization)
+    .bind(ada.id().as_str())
     .bind(peer_file_id)
-    .bind(owned_folder.entry.id.as_uuid())
-    .bind(PEER_ID)
+    .bind(owned_folder.as_uuid())
+    .bind(peer.id().as_str())
     .bind(peer_version_id)
     .execute(&mut *peer_file_transaction)
     .await?;
@@ -365,12 +374,12 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
                 'text/plain', 'carbon', $6 \
          )",
     )
-    .bind(&organization)
+    .bind(ada.id().as_str())
     .bind(peer_file_id)
     .bind(peer_version_id)
     .bind(format!("audit/{peer_file_id}"))
     .bind("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    .bind(PEER_ID)
+    .bind(peer.id().as_str())
     .execute(&mut *peer_file_transaction)
     .await?;
     sqlx::query(
@@ -378,7 +387,7 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
                 org_id, entry_id, filename, extracted_content, extraction_status, indexed_at \
          ) VALUES ($1, $2, 'ancestorneedle.txt', 'owned ancestor search proof', 'indexed', clock_timestamp())",
     )
-    .bind(&organization)
+    .bind(ada.id().as_str())
     .bind(peer_file_id)
     .execute(&mut *peer_file_transaction)
     .await?;
@@ -391,28 +400,20 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         viewer_search
             .iter()
             .any(|result| result.entry.entry.id.as_uuid() == peer_file_id),
-        "a private folder owner must find peer-created descendants"
-    );
-    let outsider_context = ExecutionContext::new(
-        authorization_with_role(
-            &organization,
-            OUTSIDER_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::Bearer,
-        ),
-        "postgres-filter-outsider",
+        "a folder's creator must find what others put inside it"
     );
     let outsider_search = metadata
         .search(&outsider_context, &SearchQuery::new("ancestorneedle", 20)?)
         .await?;
     assert!(
         outsider_search.is_empty(),
-        "an unrelated peer must not find the private descendant"
+        "a visitor with no share must not find the descendant"
     );
-
-    let hidden_path = EntryPath::new(format!(
-        "private/{VIEWER_ID}/owned-search-container/ancestorneedle.txt"
-    ))?;
+    let owner_search = metadata
+        .search(&context, &SearchQuery::new("ancestorneedle", 20)?)
+        .await?;
+    assert_eq!(owner_search.len(), 1, "the drive's owner finds everything");
+    let hidden_path = EntryPath::new("owned-space/owned-search-container/ancestorneedle.txt")?;
     assert!(matches!(
         metadata
             .get_entry_by_path(&outsider_context, &hidden_path)
@@ -420,33 +421,33 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         Err(MetadataServiceError::NotFound)
     ));
 
-    let accessible_to_owner = metadata
-        .list_entries(
-            &context,
-            &ListEntriesQuery {
-                parent_id: Some(owned_folder.entry.id),
-                filter: Some(FilterQuery::parse(&format!("for:@{{{VIEWER_ID}}}"))?),
-                page: PageRequest::new(None, 100)?,
-            },
-        )
+    let accessible = |id: &ActorRef| -> anyhow::Result<ListEntriesQuery> {
+        Ok(ListEntriesQuery {
+            parent_id: Some(owned_folder),
+            filter: Some(FilterQuery::parse(&format!(
+                "for:@{{{}}}",
+                id.id().as_str()
+            ))?),
+            page: PageRequest::new(None, 100)?,
+        })
+    };
+    let accessible_to_viewer = metadata
+        .list_entries(&context, &accessible(&viewer)?)
         .await?;
-    assert_eq!(accessible_to_owner.items.len(), 1);
+    assert_eq!(accessible_to_viewer.items.len(), 1);
     assert_eq!(
-        entry_name(&accessible_to_owner.items[0]),
+        entry_name(&accessible_to_viewer.items[0]),
         "ancestorneedle.txt"
     );
-
     let accessible_to_outsider = metadata
-        .list_entries(
-            &context,
-            &ListEntriesQuery {
-                parent_id: Some(owned_folder.entry.id),
-                filter: Some(FilterQuery::parse(&format!("for:@{{{OUTSIDER_ID}}}"))?),
-                page: PageRequest::new(None, 100)?,
-            },
-        )
+        .list_entries(&context, &accessible(&outsider)?)
         .await?;
     assert!(accessible_to_outsider.items.is_empty());
+    let accessible_to_owner = metadata.list_entries(&context, &accessible(&ada)?).await;
+    assert!(
+        accessible_to_owner.is_ok(),
+        "an account the cache does not hold simply matches nothing"
+    );
 
     // The compiled filter language narrows by kind and location.
     let filtered = repository
@@ -454,30 +455,25 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
             &context,
             &ListEntriesQuery {
                 parent_id: None,
-                filter: Some(FilterQuery::parse("is:folder location:'private'")?),
+                filter: Some(FilterQuery::parse("is:folder location:'shared-space'")?),
                 page: PageRequest::new(None, 100)?,
             },
         )
         .await?;
     assert!(
-        filtered
-            .items
-            .iter()
-            .all(|entry| entry.entry.path.as_str().starts_with("private")),
-        "a location filter selects only that subtree"
-    );
-    assert!(
-        filtered
-            .items
-            .iter()
-            .any(|entry| entry.entry.path == actor_path),
-        "the caller's own private folder matches the filter"
+        !filtered.items.is_empty()
+            && filtered.items.iter().all(|entry| entry
+                .entry
+                .path
+                .as_str()
+                .starts_with("shared-space")),
+        "a location filter selects only that subtree, never the drive root"
     );
 
     // Every documented predicate compiles into runnable SQL.
     let exhaustive = FilterQuery::parse(
         "last:5 (between:12-06-2020=12-07-2030 or after:20-08-2020) before:01-01-2035 \
-         location:'private' (contains:'apple' or has:'cat') name:'q*' \
+         location:'shared-space' (contains:'apple' or has:'cat') name:'q*' \
          from:@{c:cos} to:@{c:someone} for:@{si:agent} \
          -is:image is:md permissions:read sort:oldest",
     )?;
@@ -493,128 +489,37 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         .await?;
 
     // Batch resolution mixes identifiers and paths in one snapshot.
+    let space_path = EntryPath::new("shared-space")?;
     let batch = repository
         .find_active_entries(
             &context,
-            std::slice::from_ref(&actor_root.entry.id),
-            std::slice::from_ref(&actor_path),
+            std::slice::from_ref(&space),
+            std::slice::from_ref(&space_path),
         )
         .await?;
     assert_eq!(batch.len(), 1, "one target resolved twice stays one row");
 
-    // A webhook snapshot adds IAM's immutable identifiers. Bearer authority is
-    // returned only for the exact principal, membership, and epoch tuple.
-    let principal_id = Uuid::now_v7();
-    let membership_id = Uuid::now_v7();
-    let updated = sqlx::query(
-        "UPDATE briefcase.organization_members \
-            SET principal_id = $3, membership_id = $4, authorization_epoch = 7 \
-          WHERE org_id = $1 AND actor_type = 'carbon' AND actor_id = $2",
-    )
-    .bind(&organization)
-    .bind(ACTOR_ID)
-    .bind(principal_id)
-    .bind(membership_id)
-    .execute(&pool)
-    .await?;
-    assert_eq!(updated.rows_affected(), 1);
-    let projection_query = TokenAuthorizationQuery {
-        organization_id: context.authorization().organization_id(),
-        actor_kind: ActorKind::Carbon,
-        principal_id,
-        membership_id,
-        authorization_epoch: 7,
-        request_id: "postgres-metadata-test",
-        testing_environment: None,
-    };
-    let projected = repository
-        .project_token_authorization(&projection_query)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the exact IAM identity tuple must resolve"))?;
-    assert_eq!(projected.actor.id().as_str(), ACTOR_ID);
-    assert_eq!(projected.role, OrganizationRole::Owner);
-    assert!(
-        repository
-            .project_token_authorization(&TokenAuthorizationQuery {
-                authorization_epoch: 8,
-                ..projection_query
-            })
-            .await?
-            .is_none(),
-        "a stale authorization epoch must fail closed"
+    // An application request materializes its own folder in the drive.
+    let application_context = in_drive(
+        &ada,
+        &ada,
+        DriveAccess::Owner,
+        AuthenticationMode::OnBehalfOf {
+            application_id: ApplicationId::new(APPLICATION_ID)?,
+        },
+        "application",
     );
-
-    // An application request materializes its own folder under the actor.
-    let tagged_owner = ExecutionContext::new(
-        RequestAuthContext::new(
-            context.authorization().organization_id().clone(),
-            context.authorization().actor().clone(),
-            OrganizationRole::Owner,
-            vec![TagName::new("research")?],
-            AuthenticationMode::Bearer,
-        ),
-        "postgres-tagged-owner",
-    );
-    repository
-        .find_active_entry_by_path(&tagged_owner, &actor_path)
-        .await?;
-    sqlx::query("UPDATE briefcase.organization_members SET iam_version = 1 WHERE org_id = $1 AND actor_id = $2")
-        .bind(&organization).bind(ACTOR_ID).execute(&pool).await?;
-    let application_id = ApplicationId::new(APPLICATION_ID)?;
-    let application_context = ExecutionContext::new(
-        authorization_with_role(
-            &organization,
-            ACTOR_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::OnBehalfOf { application_id },
-        ),
-        "postgres-metadata-test",
-    );
-    let folder = repository
+    let app_folder = repository
         .ensure_application_folder(&application_context)
         .await?;
     assert_eq!(
-        folder.entry.path.as_str(),
-        format!("apps/{APPLICATION_ID}/private/{ACTOR_ID}")
+        app_folder.entry.path.as_str(),
+        format!("apps/{APPLICATION_ID}")
     );
-    // Materializing it twice returns the same reserved folder.
     let again = repository
         .ensure_application_folder(&application_context)
         .await?;
-    assert_eq!(again.entry.id, folder.entry.id);
-    let preserved = repository
-        .project_token_authorization(&projection_query)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("OBO must preserve signed identity"))?;
-    assert_eq!(
-        preserved.role,
-        OrganizationRole::Owner,
-        "OBO must not downgrade the owner's projection"
-    );
-    assert!(
-        preserved.tags.contains(&TagName::new("research")?),
-        "OBO must not erase projected tags"
-    );
-    // A request authenticated before a signed demotion must not overwrite the
-    // newer projection when its repository transaction begins afterward.
-    sqlx::query("UPDATE briefcase.organization_members SET org_role = 'member', iam_version = 2, authorization_epoch = 8 WHERE org_id = $1 AND actor_id = $2")
-        .bind(&organization).bind(ACTOR_ID).execute(&pool).await?;
-    repository
-        .find_active_entry_by_path(&context, &actor_path)
-        .await?;
-    let demoted = repository
-        .project_token_authorization(&TokenAuthorizationQuery {
-            authorization_epoch: 8,
-            ..projection_query
-        })
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("new signed identity must remain"))?;
-    assert_eq!(
-        demoted.role,
-        OrganizationRole::Member,
-        "stale bearer must not undo a signed demotion"
-    );
-    assert!(demoted.tags.contains(&TagName::new("research")?));
+    assert_eq!(again.entry.id, app_folder.entry.id);
 
     // Loading activity is itself metadata access. It is committed before the
     // history query so the response contains the access that produced it.
@@ -622,13 +527,11 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         "SELECT count(*) FROM briefcase.audit_events \
           WHERE org_id = $1 AND entry_id = $2 AND action = 'entry.metadata_read.v1'",
     )
-    .bind(&organization)
-    .bind(actor_root.entry.id.as_uuid())
+    .bind(ada.id().as_str())
+    .bind(space.as_uuid())
     .fetch_one(&pool)
     .await?;
-    let activity = metadata
-        .entry_activity(&context, actor_root.entry.id)
-        .await?;
+    let activity = metadata.entry_activity(&context, space).await?;
     assert!(activity.len() <= 100);
     assert_eq!(
         activity.first().map(|event| event.action.as_str()),
@@ -639,8 +542,8 @@ async fn the_repository_serves_paths_filters_and_application_folders() -> anyhow
         "SELECT count(*) FROM briefcase.audit_events \
           WHERE org_id = $1 AND entry_id = $2 AND action = 'entry.metadata_read.v1'",
     )
-    .bind(&organization)
-    .bind(actor_root.entry.id.as_uuid())
+    .bind(ada.id().as_str())
+    .bind(space.as_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(metadata_reads_after, metadata_reads_before + 1);
@@ -661,106 +564,58 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
     postgres::migrate(&pool).await?;
     let repository = PostgresRepository::new(pool.clone());
     let service = MetadataService::new(Arc::new(repository.clone()));
-    let organization = format!("test-bin-{}", Uuid::now_v7().simple());
-    let owner = ExecutionContext::new(
-        authorization(&organization, AuthenticationMode::Bearer),
+    let ada = carbon(&account_uuid("Ada"));
+    let bob = carbon(&account_uuid("Bob"));
+    let owner = in_drive(
+        &ada,
+        &ada,
+        DriveAccess::Owner,
+        AuthenticationMode::Bearer,
         "bin-owner",
     );
-    let member = ExecutionContext::new(
-        authorization_with_role(
-            &organization,
-            VIEWER_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::Bearer,
-        ),
+    let member = in_drive(
+        &ada,
+        &bob,
+        DriveAccess::Visitor,
+        AuthenticationMode::Bearer,
         "bin-member",
     );
-    let roots_query = ListEntriesQuery {
-        parent_id: None,
-        filter: None,
-        page: PageRequest::new(None, 100)?,
-    };
-    let roots = repository
-        .list_active_children(&owner, &roots_query)
-        .await?;
-    repository
-        .list_active_children(&member, &roots_query)
-        .await?;
-    let public = roots
-        .items
-        .iter()
-        .find(|entry| entry.entry.name.as_str() == "public")
-        .ok_or_else(|| anyhow::anyhow!("public root must exist"))?
-        .entry
-        .id;
-    let folder = service
-        .create_folder(
-            &owner,
-            CreateFolderCommand::new(
-                EntryName::new("restore-root")?,
-                Some(public),
-                None,
-                Vec::new(),
-            )?,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-1".to_owned())?),
-                [1; 32],
-            ),
-        )
-        .await?;
-    let child = service
-        .create_folder(
-            &owner,
-            CreateFolderCommand::new(
-                EntryName::new("restore-child")?,
-                Some(folder.entry.id),
-                None,
-                Vec::new(),
-            )?,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-2".to_owned())?),
-                [2; 32],
-            ),
-        )
-        .await?;
-    let grant = service
-        .grant_permission(
-            &owner,
-            &GrantPermissionCommand {
-                entry_id: folder.entry.id,
-                principal: member.authorization().actor().clone(),
-                access: GrantedAccess::new([AccessRight::Update]),
-                inherits_to_descendants: true,
-                lifetime: None,
-            },
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-3".to_owned())?),
-                [3; 32],
-            ),
-        )
-        .await?;
+    // Bob may add to the workspace and update the folder that will be
+    // deleted and restored.
+    let workspace = folder(&service, &owner, None, "workspace", 1).await?;
+    share(
+        &service,
+        &owner,
+        workspace,
+        &bob,
+        GrantedAccess::new([AccessRight::Write]),
+        false,
+    )
+    .await?;
+    let restore_root = folder(&service, &owner, Some(workspace), "restore-root", 2).await?;
+    let child = folder(&service, &owner, Some(restore_root), "restore-child", 3).await?;
+    let grant = share(
+        &service,
+        &owner,
+        restore_root,
+        &bob,
+        GrantedAccess::new([AccessRight::Update]),
+        true,
+    )
+    .await?;
     service
-        .soft_delete_entry(
-            &owner,
-            folder.entry.id,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-4".to_owned())?),
-                [4; 32],
-            ),
-        )
+        .soft_delete_entry(&owner, restore_root, &key("delete-1", 4)?)
         .await?;
     let restore = MutationMetadata::new(
-        Some(IdempotencyKey::new("restore-root".to_owned())?),
+        Some(IdempotencyKey::new(format!(
+            "restore-root-{}",
+            Uuid::now_v7()
+        ))?),
         [5; 32],
     );
     assert!(matches!(
         repository
-            .restore_bin_entry(
-                &member,
-                child.entry.id,
-                &restore,
-                Capability::UpdateMetadata
-            )
+            .restore_bin_entry(&member, child, &restore, Capability::UpdateMetadata)
             .await,
         Err(MetadataRepositoryError::NotFound)
     ));
@@ -768,9 +623,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
         service
             .restore_bin_entry(
                 &member,
-                RestoreBinEntryCommand {
-                    entry_id: child.entry.id
-                },
+                RestoreBinEntryCommand { entry_id: child },
                 &restore
             )
             .await,
@@ -778,7 +631,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
     ));
 
     let command = RestoreBinEntryCommand {
-        entry_id: folder.entry.id,
+        entry_id: restore_root,
     };
     let first = service
         .restore_bin_entry(&member, command, &restore)
@@ -790,14 +643,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
         first, replay,
         "a completed keyed restore is replayable through the service"
     );
-    assert!(
-        repository
-            .find_active_entry(&owner, child.entry.id)
-            .await?
-            .is_some()
-    );
+    assert_eq!(first.entry.parent_id, Some(workspace));
+    assert!(repository.find_active_entry(&owner, child).await?.is_some());
     let restoration_count = repository
-        .list_entry_activity(&owner, folder.entry.id)
+        .list_entry_activity(&owner, restore_root)
         .await?
         .iter()
         .filter(|event| event.action == "entry.subtree_restored.v1")
@@ -824,17 +673,15 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
             service.restore_bin_entry(&owner, command, &restore).await,
             Err(MetadataServiceError::Conflict)
         ),
-        "another actor cannot use the completed claim"
+        "another account cannot use the completed claim"
     );
-    let application_member = ExecutionContext::new(
-        authorization_with_role(
-            &organization,
-            VIEWER_ID,
-            OrganizationRole::Member,
-            AuthenticationMode::OnBehalfOf {
-                application_id: ApplicationId::new(APPLICATION_ID)?,
-            },
-        ),
+    let application_member = in_drive(
+        &ada,
+        &bob,
+        DriveAccess::Visitor,
+        AuthenticationMode::OnBehalfOf {
+            application_id: ApplicationId::new(APPLICATION_ID)?,
+        },
         "bin-application-member",
     );
     assert!(
@@ -844,32 +691,16 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
                 .await,
             Err(MetadataServiceError::NotFound)
         ),
-        "an OBO app cannot restore a file outside its namespace"
+        "an app cannot restore an entry outside its folder"
     );
-    let other = service
-        .create_folder(
-            &member,
-            CreateFolderCommand::new(
-                EntryName::new("other-root")?,
-                Some(public),
-                None,
-                Vec::new(),
-            )?,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-7".to_owned())?),
-                [7; 32],
-            ),
-        )
-        .await?;
+    let other = folder(&service, &member, Some(workspace), "other-root", 7).await?;
     assert!(
         matches!(
             service
                 .restore_bin_entry(
                     &member,
-                    RestoreBinEntryCommand {
-                        entry_id: other.entry.id
-                    },
-                    &restore,
+                    RestoreBinEntryCommand { entry_id: other },
+                    &restore
                 )
                 .await,
             Err(MetadataServiceError::Conflict)
@@ -878,14 +709,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
     );
 
     service
-        .soft_delete_entry(
-            &owner,
-            folder.entry.id,
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-8".to_owned())?),
-                [8; 32],
-            ),
-        )
+        .soft_delete_entry(&owner, restore_root, &key("delete-2", 8)?)
         .await?;
     assert!(
         matches!(
@@ -896,14 +720,11 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
     );
     assert!(
         repository
-            .find_bin_entry(&owner, folder.entry.id)
+            .find_bin_entry(&owner, restore_root)
             .await?
             .is_some()
     );
-    let fresh_restore = MutationMetadata::new(
-        Some(IdempotencyKey::new("restore-again".to_owned())?),
-        [9; 32],
-    );
+    let fresh_restore = key("restore-again", 9)?;
     service
         .restore_bin_entry(&member, command, &fresh_restore)
         .await?;
@@ -911,13 +732,10 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
         .revoke_permission(
             &owner,
             RevokePermissionCommand {
-                entry_id: folder.entry.id,
+                entry_id: restore_root,
                 grant_id: grant.id(),
             },
-            &MutationMetadata::new(
-                Some(IdempotencyKey::new("metadata-operation-10".to_owned())?),
-                [10; 32],
-            ),
+            &key("revoke", 10)?,
         )
         .await?;
     assert!(
@@ -925,9 +743,7 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
             service
                 .restore_bin_entry(&member, command, &fresh_restore)
                 .await,
-            Err(MetadataServiceError::Forbidden {
-                required: Capability::UpdateMetadata
-            })
+            Err(MetadataServiceError::NotFound | MetadataServiceError::Forbidden { .. })
         ),
         "a completed key cannot preserve revoked restore rights"
     );
@@ -936,21 +752,41 @@ async fn bin_restore_replays_require_current_authority_and_the_original_root() -
             repository
                 .restore_bin_entry(
                     &member,
-                    folder.entry.id,
+                    restore_root,
                     &fresh_restore,
-                    Capability::UpdateMetadata,
+                    Capability::UpdateMetadata
                 )
                 .await,
             Err(MetadataRepositoryError::Conflict)
         ),
         "the locked repository path must also recheck current rights"
     );
+
+    // When the original folder is gone, an entry comes back at the top of
+    // the drive, which only the drive's owner may add to.
+    let lonely = folder(&service, &owner, Some(workspace), "lonely", 11).await?;
+    service
+        .soft_delete_entry(&owner, lonely, &key("delete-lonely", 12)?)
+        .await?;
+    service
+        .soft_delete_entry(&owner, workspace, &key("delete-workspace", 13)?)
+        .await?;
+    let back = service
+        .restore_bin_entry(
+            &owner,
+            RestoreBinEntryCommand { entry_id: lonely },
+            &key("restore-lonely", 14)?,
+        )
+        .await?;
+    let root = service.drive_root(&owner).await?;
+    assert_eq!(back.entry.parent_id, Some(root.entry.id));
+    assert_eq!(back.entry.path.as_str(), "lonely");
     pool.close().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn bug_reports_are_retry_safe_and_tenant_isolated() -> anyhow::Result<()> {
+async fn bug_reports_are_retry_safe_and_drive_isolated() -> anyhow::Result<()> {
     let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
         eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
         return Ok(());
@@ -958,9 +794,12 @@ async fn bug_reports_are_retry_safe_and_tenant_isolated() -> anyhow::Result<()> 
     let pool = postgres::connect(&settings(url), "briefcase-report-tests").await?;
     postgres::migrate(&pool).await?;
     let repository = PostgresRepository::new(pool.clone());
-    let org = format!("report-{}", Uuid::now_v7().simple());
-    let context = ExecutionContext::new(
-        authorization(&org, AuthenticationMode::Bearer),
+    let reporter = carbon(&account_uuid("Rep"));
+    let context = in_drive(
+        &reporter,
+        &reporter,
+        DriveAccess::Owner,
+        AuthenticationMode::Bearer,
         "report-test",
     );
     let metadata = MutationMetadata::new(
@@ -1002,7 +841,7 @@ async fn bug_reports_are_retry_safe_and_tenant_isolated() -> anyhow::Result<()> 
         .fetch_one(&mut *transaction)
         .await?;
     assert_eq!(count, 1);
-    sqlx::query("SELECT set_config('briefcase.org_id', 'other-report-org', true)")
+    sqlx::query("SELECT set_config('briefcase.org_id', 'OtherDrive1', true)")
         .execute(&mut *transaction)
         .await?;
     let hidden: i64 = sqlx::query_scalar("SELECT count(*) FROM briefcase.bug_reports")

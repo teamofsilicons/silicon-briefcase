@@ -1,27 +1,24 @@
-//! Per-operation online IAM authentication for HTTP handlers.
+//! Credential parsing for HTTP handlers.
+//!
+//! Every API route takes a Silicon Accounts access token issued to Briefcase:
+//! `Authorization: Bearer <JWT>`. The delegated `/api/v1/obo/*` routes take a
+//! User verification proof another app obtained instead:
+//! `Authorization: Proof sap_…`. Each route accepts exactly one of the two.
 
 use http::{HeaderMap, HeaderName, header::AUTHORIZATION};
 use secrecy::SecretString;
 
-use crate::{
-    application::{context::TestingEnvironmentContext, service::MetadataService},
-    domain::actor::{
-        ApplicationId, OrganizationId, RequestAuthContext, is_canonical_iam_application_id,
-        is_canonical_iam_organization_id,
-    },
-    error::AppError,
-    infrastructure::iam::{IamClient, IamEnvironmentCredential},
-    request_context,
-};
+use crate::error::AppError;
 
-const ORG_ID: HeaderName = HeaderName::from_static("x-org-id");
-const OBO_PROOF: HeaderName = HeaderName::from_static("x-iam-obo-access-token");
-const APP_ID: HeaderName = HeaderName::from_static("x-app-id");
-const TESTING_ENVIRONMENT_KEY: HeaderName = HeaderName::from_static("x-briefcase-app-secret");
+/// Longest access token Briefcase reads.
+const MAX_ACCESS_TOKEN_BYTES: usize = 8_192;
+/// Longest proof token Briefcase reads.
+const MAX_PROOF_TOKEN_BYTES: usize = 512;
+const PROOF_PREFIX: &str = "sap_";
 
-/// Stable IAM action bound to one Briefcase operation.
+/// One Briefcase operation, named for logs and for the revocation policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IamAction {
+pub enum Action {
     /// List visible children.
     ListEntries,
     /// Create a folder.
@@ -30,21 +27,23 @@ pub enum IamAction {
     ReadEntry,
     /// Rename or move an entry.
     UpdateEntry,
-    /// Move an entry to the bin.
+    /// Move an entry to the bin, or delete a self-destructing file.
     DeleteEntry,
+    /// Keep a self-destructing file permanently.
+    KeepEntry,
     /// Stream current file content for rendering.
     ReadContent,
     /// Download current file content.
     DownloadFile,
-    /// Upload a small file.
+    /// Upload a file.
     UploadFile,
     /// List explicit permissions.
     ListPermissions,
     /// Inspect the caller's own effective access on named targets.
     InspectPermissions,
-    /// Grant explicit permission.
+    /// Grant access, or change a share or the link access.
     GrantPermission,
-    /// Revoke explicit permission.
+    /// Revoke explicit access.
     RevokePermission,
     /// Search visible content.
     Search,
@@ -64,16 +63,24 @@ pub enum IamAction {
     ListBin,
     /// Restore a recoverable entry.
     RestoreBinEntry,
-    /// Configure organization storage.
+    /// Configure the bring-your-own S3 bucket.
     ConfigureStorage,
-    /// Read the organization's consumption and limits.
+    /// Read consumption and limits.
     ReadUsage,
-    /// Manage Briefcase testing environments on the production control plane.
-    ManageTestingEnvironments,
+    /// Read the caller's own account.
+    ReadAccount,
+    /// List the drives the caller may open (its own and its Silicons').
+    ListDrives,
+    /// List what other accounts shared with the caller.
+    ListShared,
+    /// Read who may share with a Silicon.
+    ReadShareAllowances,
+    /// Change who may share with a Silicon.
+    ManageShareAllowances,
 }
 
-impl IamAction {
-    /// Returns the action string recorded in IAM OBO capabilities.
+impl Action {
+    /// Returns the stable action name recorded in logs.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -82,6 +89,7 @@ impl IamAction {
             Self::ReadEntry => "briefcase.entry.read",
             Self::UpdateEntry => "briefcase.entry.update",
             Self::DeleteEntry => "briefcase.entry.delete",
+            Self::KeepEntry => "briefcase.entry.keep",
             Self::ReadContent => "briefcase.file.read_content",
             Self::DownloadFile => "briefcase.file.download",
             Self::UploadFile => "briefcase.file.upload",
@@ -100,234 +108,136 @@ impl IamAction {
             Self::RestoreBinEntry => "briefcase.bin.restore",
             Self::ConfigureStorage => "briefcase.storage.configure",
             Self::ReadUsage => "briefcase.usage.read",
-            Self::ManageTestingEnvironments => "briefcase.testing_environments.manage",
+            Self::ReadAccount => "briefcase.account.read",
+            Self::ListDrives => "briefcase.drives.list",
+            Self::ListShared => "briefcase.shared.list",
+            Self::ReadShareAllowances => "briefcase.share_allowances.read",
+            Self::ManageShareAllowances => "briefcase.share_allowances.manage",
         }
     }
-}
 
-/// IAM-verified identity plus request correlation passed to application services.
-#[derive(Clone, Debug)]
-pub struct AuthenticatedRequest {
-    authorization: RequestAuthContext,
-    request_id: String,
-}
-
-impl AuthenticatedRequest {
-    /// Returns the trusted authorization facts.
+    /// Whether the token must also be confirmed active with Silicon Accounts.
+    ///
+    /// Reads, lists, content and uploads verify the token locally (it lives
+    /// at most 30 minutes, and webhook-fed sign-outs are checked on every
+    /// request). Changing who can reach an entry, destroying data, restoring
+    /// a version and configuring storage also introspect, so a revocation the
+    /// webhook has not delivered yet still stops them.
     #[must_use]
-    pub const fn authorization(&self) -> &RequestAuthContext {
-        &self.authorization
-    }
-
-    /// Returns the correlation identifier.
-    #[must_use]
-    pub fn request_id(&self) -> &str {
-        &self.request_id
+    pub const fn requires_introspection(self) -> bool {
+        matches!(
+            self,
+            Self::GrantPermission
+                | Self::RevokePermission
+                | Self::DeleteEntry
+                | Self::KeepEntry
+                | Self::RestoreVersion
+                | Self::ConfigureStorage
+                | Self::ManageShareAllowances
+        )
     }
 }
 
-/// Authenticates one operation with a direct IAM bearer token.
-///
-/// The contracted API is a bearer surface. An application acts through the one
-/// exposed OBO endpoint instead, where IAM binds the proof to the exact
-/// request; presenting an OBO proof anywhere else is a request error rather
-/// than a partially honored credential.
+/// Returns the access token of a `Bearer` request.
 ///
 /// # Errors
 ///
-/// Returns an opaque public error for missing, malformed, inactive, expired,
-/// mismatched, or unverifiable credentials.
-pub async fn authenticate(
-    iam: &IamClient,
-    _metadata: &MetadataService,
-    headers: &HeaderMap,
-    action: IamAction,
-    resource: &str,
-    environment: Option<&IamEnvironmentCredential>,
-    _testing_environment: Option<TestingEnvironmentContext>,
-) -> Result<AuthenticatedRequest, AppError> {
-    let organization = parse_organization(headers)?;
-    let authorization = require_bearer_only(headers)?;
-    let token = parse_bearer(authorization)?;
-    let verified = iam
-        .introspect_bearer(&token, &organization, environment)
-        .await?;
-    if verified.organization_id() != &organization {
-        return Err(AppError::Forbidden);
+/// Returns 401 with the exact reason when the header is missing, duplicated,
+/// uses another scheme, or does not hold a JWT.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<SecretString, AppError> {
+    let (scheme, value) = authorization(headers)?;
+    if scheme.eq_ignore_ascii_case("proof") {
+        return Err(AppError::unauthorized(
+            "proof_not_accepted_here",
+            "This route takes the caller's own Silicon Accounts access token (Authorization: Bearer). Apps acting for an account use the /api/v1/obo/ routes with Authorization: Proof.",
+        ));
     }
-    tracing::debug!(
-        iam.action = action.as_str(),
-        iam.resource = resource,
-        "IAM bearer identity verified"
-    );
-    let request_id = request_context::current_request_id().ok_or(AppError::Internal {
-        category: "request_scope_missing",
-    })?;
-    let authorization = verified
-        .authorization()
-        .cloned()
-        .ok_or(AppError::Forbidden)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(AppError::unauthorized(
+            "unsupported_authorization_scheme",
+            "Send Authorization: Bearer <access token>, where the access token is a Silicon Accounts access token issued to Briefcase.",
+        ));
+    }
+    if value.len() > MAX_ACCESS_TOKEN_BYTES || !is_jwt_shape(value) {
+        return Err(AppError::unauthorized(
+            "token_malformed",
+            "The bearer token is not a Silicon Accounts access token (a JWT of three base64url parts). Send the access_token from Silicon Accounts, not a refresh token, short-lived token or proof.",
+        ));
+    }
+    Ok(SecretString::from(value.to_owned()))
+}
 
-    Ok(AuthenticatedRequest {
-        authorization,
-        request_id,
-    })
+/// Returns the proof token of a `Proof` request.
+///
+/// # Errors
+///
+/// Returns 401 with the exact reason when the header is missing, duplicated,
+/// uses another scheme, or does not hold a `sap_` proof token.
+pub(crate) fn proof_token(headers: &HeaderMap) -> Result<SecretString, AppError> {
+    let (scheme, value) = authorization(headers)?;
+    if !scheme.eq_ignore_ascii_case("proof") {
+        return Err(AppError::unauthorized(
+            "proof_required",
+            "This route is for apps acting for an account: send Authorization: Proof sap_… with a Silicon Accounts User verification proof whose receiving app is briefcase.",
+        ));
+    }
+    if value.len() > MAX_PROOF_TOKEN_BYTES
+        || !value.starts_with(PROOF_PREFIX)
+        || value.len() == PROOF_PREFIX.len()
+        || !value[PROOF_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(AppError::unauthorized(
+            "proof_malformed",
+            "The proof is not a Silicon Accounts proof token (sap_…). Send the proof_token, not the proof_refresh_token (sapr_…).",
+        ));
+    }
+    Ok(SecretString::from(value.to_owned()))
 }
 
 /// Validates the credential shape before a streaming handler reads a body.
 ///
 /// # Errors
 ///
-/// Returns an opaque authentication or request error for missing, ambiguous,
-/// duplicated, or syntactically invalid security headers.
+/// Returns the [`bearer_token`] refusal.
 pub(crate) fn require_bearer_shape(headers: &HeaderMap) -> Result<(), AppError> {
-    // Parse the organization here as well so a streaming endpoint rejects a
-    // malformed tenant boundary before it admits request-body bytes.
-    parse_organization(headers)?;
-    parse_bearer(require_bearer_only(headers)?)?;
-    Ok(())
+    bearer_token(headers).map(drop)
 }
 
-/// Authenticates an operation that explicitly permits only a direct bearer
-/// token, such as organization storage administration.
-pub async fn authenticate_bearer(
-    iam: &IamClient,
-    metadata: &MetadataService,
-    headers: &HeaderMap,
-    action: IamAction,
-    environment: Option<&IamEnvironmentCredential>,
-    testing_environment: Option<TestingEnvironmentContext>,
-) -> Result<AuthenticatedRequest, AppError> {
-    let organization = parse_organization(headers)?;
-    authenticate(
-        iam,
-        metadata,
-        headers,
-        action,
-        organization.as_str(),
-        environment,
-        testing_environment,
+/// The refusal for a request that carries no credential where one is needed.
+pub(crate) fn authentication_required() -> AppError {
+    AppError::unauthorized(
+        "authentication_required",
+        "Send Authorization: Bearer <access token> with a Silicon Accounts access token issued to Briefcase.",
     )
-    .await
 }
 
-/// Reads the optional Briefcase sandbox root key without exposing it as text.
-pub(crate) fn testing_environment_key(
-    headers: &HeaderMap,
-) -> Result<Option<SecretString>, AppError> {
-    optional_single_header(headers, &TESTING_ENVIRONMENT_KEY)?
-        .map(|value| {
-            if value.len() != 47
-                || !value.starts_with("ask_")
-                || !value[4..]
+fn authorization(headers: &HeaderMap) -> Result<(&str, &str), AppError> {
+    let value =
+        optional_single_header(headers, &AUTHORIZATION)?.ok_or_else(authentication_required)?;
+    let mut parts = value.split_ascii_whitespace();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(scheme), Some(credential), None) => Ok((scheme, credential)),
+        _ => Err(AppError::unauthorized(
+            "authorization_malformed",
+            "The Authorization header must be exactly `<scheme> <credential>`, such as `Bearer eyJ…`.",
+        )),
+    }
+}
+
+fn is_jwt_shape(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            {
-                return Err(AppError::bad_request("invalid_testing_environment_key"));
-            }
-            Ok(SecretString::from(value.to_owned()))
         })
-        .transpose()
 }
 
-/// Reads the application identity and proof presented to the OBO endpoint.
-///
-/// # Errors
-///
-/// Returns an opaque public error when either credential is absent, malformed,
-/// duplicated, or accompanied by a bearer token.
-pub(crate) fn obo_credentials(
-    headers: &HeaderMap,
-) -> Result<(ApplicationId, SecretString), AppError> {
-    if optional_single_header(headers, &AUTHORIZATION)?.is_some() {
-        return Err(AppError::bad_request("ambiguous_authentication"));
-    }
-    let proof = optional_single_header(headers, &OBO_PROOF)?.ok_or(AppError::Unauthenticated)?;
-    let app_id = optional_single_header(headers, &APP_ID)?.ok_or(AppError::Unauthenticated)?;
-    if !is_canonical_iam_application_id(app_id) {
-        return Err(AppError::bad_request("invalid_app_id"));
-    }
-    let application = ApplicationId::new(app_id.to_owned())
-        .map_err(|_| AppError::bad_request("invalid_app_id"))?;
-    Ok((application, parse_iam_secret_header(proof, "oba_")?))
-}
-
-/// Reads an optional tenant header, for a route where IAM names the tenant.
-///
-/// # Errors
-///
-/// Returns a request error when the header is duplicated or malformed.
-pub(crate) fn optional_organization(
-    headers: &HeaderMap,
-) -> Result<Option<OrganizationId>, AppError> {
-    optional_single_header(headers, &ORG_ID)?
-        .map(|value| {
-            if !is_canonical_iam_organization_id(value) {
-                return Err(AppError::bad_request("invalid_org_id"));
-            }
-            OrganizationId::new(value.to_owned())
-                .map_err(|_| AppError::bad_request("invalid_org_id"))
-        })
-        .transpose()
-}
-
-pub(super) fn require_bearer_only(headers: &HeaderMap) -> Result<&str, AppError> {
-    if optional_single_header(headers, &OBO_PROOF)?.is_some()
-        || optional_single_header(headers, &APP_ID)?.is_some()
-    {
-        return Err(AppError::bad_request("ambiguous_authentication"));
-    }
-    optional_single_header(headers, &AUTHORIZATION)?.ok_or(AppError::Unauthenticated)
-}
-
-/// Returns the validated organization identifier used as an IAM resource for
-/// organization-wide operations.
-pub fn organization_resource(headers: &HeaderMap) -> Result<String, AppError> {
-    Ok(parse_organization(headers)?.into_inner())
-}
-
-fn parse_organization(headers: &HeaderMap) -> Result<OrganizationId, AppError> {
-    let value = required_single_header(headers, &ORG_ID, "missing_org_id")?;
-    if !is_canonical_iam_organization_id(value) {
-        return Err(AppError::bad_request("invalid_org_id"));
-    }
-    OrganizationId::new(value.to_owned()).map_err(|_| AppError::bad_request("invalid_org_id"))
-}
-
-pub(super) fn parse_bearer(value: &str) -> Result<SecretString, AppError> {
-    let mut parts = value.split_ascii_whitespace();
-    let scheme = parts.next();
-    let token = parts.next();
-    if !scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer"))
-        || token.is_none()
-        || parts.next().is_some()
-    {
-        return Err(AppError::Unauthenticated);
-    }
-    parse_iam_secret_header(token.unwrap_or_default(), "oat_")
-}
-
-fn parse_iam_secret_header(value: &str, prefix: &str) -> Result<SecretString, AppError> {
-    if value.len() != prefix.len() + 43
-        || !value.starts_with(prefix)
-        || !value[prefix.len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(AppError::Unauthenticated);
-    }
-    Ok(SecretString::from(value.to_owned()))
-}
-
-fn required_single_header<'a>(
-    headers: &'a HeaderMap,
-    name: &HeaderName,
-    missing_code: &'static str,
-) -> Result<&'a str, AppError> {
-    optional_single_header(headers, name)?.ok_or_else(|| AppError::bad_request(missing_code))
-}
-
-fn optional_single_header<'a>(
+pub(super) fn optional_single_header<'a>(
     headers: &'a HeaderMap,
     name: &HeaderName,
 ) -> Result<Option<&'a str>, AppError> {
@@ -347,98 +257,155 @@ fn optional_single_header<'a>(
 
 #[cfg(test)]
 mod tests {
-    use http::{HeaderMap, HeaderValue};
+    use http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+    use secrecy::ExposeSecret as _;
 
-    use super::{IamAction, obo_credentials, parse_bearer, require_bearer_shape};
+    use super::{Action, bearer_token, proof_token, require_bearer_shape};
 
-    const ACCESS_TOKEN: &str = "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OBO_PROOF: &str = "oba_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const JWT: &str = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ6UW8ifQ.c2lnbmF0dXJl";
+
+    fn headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Ok(value) = HeaderValue::from_str(value) {
+            headers.insert(AUTHORIZATION, value);
+        }
+        headers
+    }
+
+    fn code(result: Result<impl Sized, crate::error::AppError>) -> String {
+        match result {
+            Ok(_) => "ok".to_owned(),
+            Err(crate::error::AppError::Explained { code, .. }) => code.into_owned(),
+            Err(other) => format!("{other:?}"),
+        }
+    }
 
     #[test]
-    fn action_names_are_stable_capabilities() {
+    fn action_names_are_stable() {
         let expected = [
-            (IamAction::ListEntries, "briefcase.entries.list"),
-            (IamAction::CreateFolder, "briefcase.folder.create"),
-            (IamAction::ReadEntry, "briefcase.entry.read"),
-            (IamAction::UpdateEntry, "briefcase.entry.update"),
-            (IamAction::DeleteEntry, "briefcase.entry.delete"),
-            (IamAction::ReadContent, "briefcase.file.read_content"),
-            (IamAction::DownloadFile, "briefcase.file.download"),
-            (IamAction::UploadFile, "briefcase.file.upload"),
-            (IamAction::ListPermissions, "briefcase.permissions.list"),
-            (
-                IamAction::InspectPermissions,
-                "briefcase.permissions.inspect",
-            ),
-            (IamAction::GrantPermission, "briefcase.permissions.grant"),
-            (IamAction::RevokePermission, "briefcase.permissions.revoke"),
-            (IamAction::Search, "briefcase.search"),
-            (IamAction::ListNotifications, "briefcase.notifications.list"),
-            (IamAction::ReadNotifications, "briefcase.notifications.read"),
-            (IamAction::ListActivity, "briefcase.activity.list"),
-            (IamAction::ListVersions, "briefcase.versions.list"),
-            (IamAction::RestoreVersion, "briefcase.versions.restore"),
-            (IamAction::ListBin, "briefcase.bin.list"),
-            (IamAction::RestoreBinEntry, "briefcase.bin.restore"),
-            (IamAction::ConfigureStorage, "briefcase.storage.configure"),
+            (Action::ListEntries, "briefcase.entries.list"),
+            (Action::CreateFolder, "briefcase.folder.create"),
+            (Action::ReadEntry, "briefcase.entry.read"),
+            (Action::UpdateEntry, "briefcase.entry.update"),
+            (Action::DeleteEntry, "briefcase.entry.delete"),
+            (Action::KeepEntry, "briefcase.entry.keep"),
+            (Action::ReadContent, "briefcase.file.read_content"),
+            (Action::DownloadFile, "briefcase.file.download"),
+            (Action::UploadFile, "briefcase.file.upload"),
+            (Action::ListPermissions, "briefcase.permissions.list"),
+            (Action::InspectPermissions, "briefcase.permissions.inspect"),
+            (Action::GrantPermission, "briefcase.permissions.grant"),
+            (Action::RevokePermission, "briefcase.permissions.revoke"),
+            (Action::Search, "briefcase.search"),
+            (Action::ListNotifications, "briefcase.notifications.list"),
+            (Action::ReadNotifications, "briefcase.notifications.read"),
+            (Action::ListActivity, "briefcase.activity.list"),
+            (Action::ListVersions, "briefcase.versions.list"),
+            (Action::RestoreVersion, "briefcase.versions.restore"),
+            (Action::ListBin, "briefcase.bin.list"),
+            (Action::RestoreBinEntry, "briefcase.bin.restore"),
+            (Action::ConfigureStorage, "briefcase.storage.configure"),
+            (Action::ReadAccount, "briefcase.account.read"),
         ];
-
         for (action, name) in expected {
             assert_eq!(action.as_str(), name);
         }
     }
 
     #[test]
-    fn the_bearer_surface_accepts_only_a_bearer_token() {
-        let mut bearer = HeaderMap::new();
-        bearer.insert("x-org-id", HeaderValue::from_static("org_example"));
-        bearer.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_static(concat!(
-                "Bearer ",
-                "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )),
-        );
-        assert!(require_bearer_shape(&bearer).is_ok());
-
-        let mut proof_only = HeaderMap::new();
-        proof_only.insert("x-org-id", HeaderValue::from_static("org_example"));
-        proof_only.insert(
-            "x-iam-obo-access-token",
-            HeaderValue::from_static(OBO_PROOF),
-        );
-        proof_only.insert("x-app-id", HeaderValue::from_static("app-example"));
-        // An application must use the OBO endpoint, not the bearer surface.
-        assert!(require_bearer_shape(&proof_only).is_err());
-        assert!(obo_credentials(&proof_only).is_ok());
+    fn only_sensitive_actions_introspect() {
+        for sensitive in [
+            Action::GrantPermission,
+            Action::RevokePermission,
+            Action::DeleteEntry,
+            Action::KeepEntry,
+            Action::RestoreVersion,
+            Action::ConfigureStorage,
+        ] {
+            assert!(sensitive.requires_introspection(), "{sensitive:?}");
+        }
+        for local in [
+            Action::ListEntries,
+            Action::ReadEntry,
+            Action::ReadContent,
+            Action::DownloadFile,
+            Action::UploadFile,
+            Action::Search,
+            Action::RestoreBinEntry,
+            Action::ReadAccount,
+        ] {
+            assert!(!local.requires_introspection(), "{local:?}");
+        }
     }
 
     #[test]
-    fn ambiguous_credential_shape_is_rejected() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-org-id", HeaderValue::from_static("org_example"));
-        headers.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_static(concat!(
-                "Bearer ",
-                "oat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )),
+    fn bearer_routes_take_exactly_one_jwt() {
+        assert_eq!(
+            bearer_token(&headers(&format!("Bearer {JWT}")))
+                .map(|token| token.expose_secret().to_owned())
+                .ok()
+                .as_deref(),
+            Some(JWT)
         );
-        headers.insert(
-            "x-iam-obo-access-token",
-            HeaderValue::from_static(OBO_PROOF),
+        assert!(require_bearer_shape(&headers(&format!("bearer {JWT}"))).is_ok());
+        assert_eq!(
+            code(bearer_token(&HeaderMap::new())),
+            "authentication_required"
         );
-        headers.insert("x-app-id", HeaderValue::from_static("app-example"));
-
-        assert!(require_bearer_shape(&headers).is_err());
-        assert!(obo_credentials(&headers).is_err());
+        assert_eq!(
+            code(bearer_token(&headers("Bearer one two"))),
+            "authorization_malformed"
+        );
+        assert_eq!(
+            code(bearer_token(&headers("Basic dXNlcjpwdw=="))),
+            "unsupported_authorization_scheme"
+        );
+        assert_eq!(
+            code(bearer_token(&headers("Bearer sar_refresh"))),
+            "token_malformed"
+        );
+        assert_eq!(
+            code(bearer_token(&headers("Bearer oat_aaaaaaaa"))),
+            "token_malformed"
+        );
+        assert_eq!(
+            code(bearer_token(&headers("Proof sap_abc"))),
+            "proof_not_accepted_here"
+        );
+        let mut duplicated = headers(&format!("Bearer {JWT}"));
+        duplicated.append(AUTHORIZATION, HeaderValue::from_static("Bearer x.y.z"));
+        assert!(matches!(
+            bearer_token(&duplicated),
+            Err(crate::error::AppError::BadRequest { .. })
+        ));
     }
 
     #[test]
-    fn bearer_parser_rejects_ambiguous_values() {
-        assert!(parse_bearer("Bearer one two").is_err());
-        assert!(parse_bearer("Basic token").is_err());
-        assert!(parse_bearer(&format!("bearer {ACCESS_TOKEN}")).is_ok());
-        assert!(parse_bearer("bearer token").is_err());
+    fn delegated_routes_take_exactly_one_proof() {
+        assert_eq!(
+            proof_token(&headers(
+                "Proof sap_OMGtGwcBe5QgGJng3SIp0yGOh1nxefxCufefPXqr7dk"
+            ))
+            .map(|token| token.expose_secret().len())
+            .ok(),
+            Some(47)
+        );
+        assert_eq!(
+            code(proof_token(&headers(&format!("Bearer {JWT}")))),
+            "proof_required"
+        );
+        assert_eq!(
+            code(proof_token(&headers("Proof sapr_refresh"))),
+            "proof_malformed"
+        );
+        assert_eq!(code(proof_token(&headers("Proof sap_"))), "proof_malformed");
+        assert_eq!(
+            code(proof_token(&headers("Proof sap_has space"))),
+            "authorization_malformed"
+        );
+        assert_eq!(
+            code(proof_token(&HeaderMap::new())),
+            "authentication_required"
+        );
     }
 }

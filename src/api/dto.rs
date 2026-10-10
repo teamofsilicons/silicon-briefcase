@@ -8,25 +8,25 @@ use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-/// IAM principal kind accepted by the Briefcase API.
+/// Principal kind accepted by the Briefcase API.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorTypeDto {
-    /// Human account.
+    /// A Carbon's account.
     Carbon,
-    /// AI-agent account.
+    /// A Silicon's account.
     Silicon,
     /// Registered application principal.
     Application,
 }
 
-/// Public reference to an IAM principal.
+/// Public reference to a Carbon or Silicon.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ActorRefDto {
     /// Principal kind.
     #[serde(rename = "type")]
     pub actor_type: ActorTypeDto,
-    /// IAM principal identifier.
+    /// `c:`/`si:` id when naming an account; its uuid when Briefcase answers.
     pub id: String,
 }
 
@@ -172,10 +172,14 @@ pub struct EntryPageDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListEntriesQuery {
-    /// Parent folder; omission lists organization roots.
+    /// Parent folder; omission lists the top of the drive.
     pub parent_id: Option<Uuid>,
     /// Parent folder addressed by path instead of identifier.
     pub path: Option<String>,
+    /// The drive to list or resolve `path` in: its owner's `c:`/`si:` id or
+    /// uuid. Defaults to the caller's own drive; ignored with `parent_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
     /// Filter expression; with one and no parent, the whole tree is searched.
     pub filter: Option<String>,
     /// Opaque pagination cursor.
@@ -194,19 +198,44 @@ pub struct PageQuery {
     pub limit: Option<u16>,
 }
 
+/// A paginated listing of one drive (the bin).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrivePageQuery {
+    /// Opaque pagination cursor.
+    pub cursor: Option<String>,
+    /// Page size from 1 through 100, defaulting to 100.
+    pub limit: Option<u16>,
+    /// The drive: its owner's `c:`/`si:` id or uuid. Defaults to the
+    /// caller's own drive.
+    pub drive: Option<String>,
+}
+
+/// Names one drive.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriveQuery {
+    /// The drive: its owner's `c:`/`si:` id or uuid. Defaults to the
+    /// caller's own drive.
+    pub drive: Option<String>,
+}
+
 /// Folder creation request.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FolderCreateDto {
     /// Display name.
     pub name: String,
-    /// Destination folder, or organization root when omitted.
+    /// Destination folder, or the top of the drive when omitted.
     pub parent_id: Option<Uuid>,
     /// Destination folder path, as an alternative to `parent_id`.
     pub parent_path: Option<String>,
-    /// Required only for organization-root creation.
+    /// The drive for `parent_path` or the top-level folder: its owner's
+    /// `c:`/`si:` id or uuid. Defaults to the caller's own drive.
+    pub drive: Option<String>,
+    /// Accepted for compatibility: only `private` (every drive is private).
     pub root_type: Option<RootTypeDto>,
-    /// Required for a tag root.
+    /// Retired: tags no longer exist.
     pub tag: Option<String>,
     /// Explicit grants created atomically with the folder.
     #[serde(default)]
@@ -239,8 +268,6 @@ pub enum DispositionDto {
 pub struct PathContentQuery {
     /// Omission returns entry metadata instead of content.
     pub disposition: Option<DispositionDto>,
-    /// Public sandbox routing ID. Authenticated requests must select the same sandbox.
-    pub test_environment: Option<Uuid>,
 }
 
 /// One right conveyed by an invitation or requested through the workflow.
@@ -308,12 +335,16 @@ pub struct PermissionGrantPageDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionInspectionDto {
-    /// Targets addressed by identifier.
+    /// Targets addressed by identifier, in any drives.
     #[serde(default)]
     pub entry_ids: Vec<Uuid>,
-    /// Targets addressed by organization-relative path.
+    /// Targets addressed by drive-relative path.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// The drive `paths` are in: its owner's `c:`/`si:` id or uuid. Defaults
+    /// to the caller's own drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
 }
 
 /// What the caller may do on one inspected target.
@@ -370,6 +401,9 @@ pub enum NotificationDecisionDto {
 pub struct NotificationSubjectDto {
     /// Entry identifier.
     pub entry_id: Uuid,
+    /// The drive holding the entry: its owner's account uuid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
     /// Name at the time of the event.
     pub name: String,
     /// Path at the time of the event.
@@ -559,6 +593,11 @@ pub enum EncryptionModeDto {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BucketConfigurationDto {
+    /// The drive whose storage this configures: its owner's `c:`/`si:` id or
+    /// uuid. Defaults to the caller's own drive; a custodian may configure
+    /// the drive of a Silicon it looks after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
     /// S3 bucket name.
     pub bucket_name: String,
     /// AWS region.

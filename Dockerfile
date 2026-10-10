@@ -4,7 +4,7 @@ FROM rust:1.98.0-bookworm AS builder
 ARG CARGO_BUILD_JOBS=2
 WORKDIR /workspace
 COPY . .
-RUN --mount=type=cache,id=silicon-iam-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=cache,id=silicon-briefcase-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=silicon-briefcase-target,target=/workspace/target,sharing=locked \
     cargo build --locked --release --bins --jobs "$CARGO_BUILD_JOBS" \
     && install -D -m 0755 target/release/briefcase-api /opt/silicon-briefcase/briefcase-api \

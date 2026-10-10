@@ -11,29 +11,27 @@ use axum::{
     },
 };
 use http::{HeaderMap, HeaderName, StatusCode};
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
     application::{
-        context::{ExecutionContext, TestingEnvironmentContext},
+        context::ExecutionContext,
         idempotency::{IdempotencyKey, bytes_fingerprint},
         service::MutationMetadata,
     },
     domain::{
-        entry::EntryPath,
+        account::Actor,
+        actor::{ActorId, ActorKind, ActorRef, RequestAuthContext},
         ids::{EntryId, GrantId, VersionId},
     },
     error::AppError,
-    infrastructure::{
-        iam::IamEnvironmentCredential,
-        testing::{TestingEnvironmentAccess, TestingEnvironmentUseFence},
-    },
     request_context,
 };
 
 use super::{
-    auth::{self, IamAction},
+    auth::{self, Action},
     state::AppState,
     upload::StageUploadError,
     validation::ValidationErrors,
@@ -41,231 +39,134 @@ use super::{
 
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 
-/// Resolve every share recipient live, including members with no local row.
-/// Missing members never fall back to a stale local membership projection.
-pub(crate) async fn with_directory_recipients(
-    state: &AppState,
-    headers: &HeaderMap,
-    context: ExecutionContext,
-    recipients: &[crate::domain::actor::ActorRef],
-) -> Result<ExecutionContext, AppError> {
-    if recipients.is_empty() {
-        return Ok(context);
-    }
-    let access = optional_testing_access(state, headers).await?;
-    let selection = access.as_ref().map(|access| {
-        TestingEnvironmentContext::new(access.environment_id, access.control_version)
-    });
-    if selection != context.testing_environment() {
-        return Err(AppError::NotFound);
-    }
-    let credential = access
-        .as_ref()
-        .map(iam_environment_credential)
-        .transpose()?;
-    let token = auth::parse_bearer(auth::require_bearer_only(headers)?)?;
-    let members = state
-        .iam
-        .resolve_directory_recipients(
-            &token,
-            context.authorization(),
-            recipients,
-            credential.as_ref(),
-        )
-        .await?
-        .ok_or_else(|| AppError::validation("invalid_principal"))?;
-    Ok(context.with_directory_members(members))
-}
-
+/// Authenticates a request carrying the caller's own Silicon Accounts access
+/// token. `resource` names what is acted on, for logs only.
 pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
-    action: IamAction,
+    action: Action,
     resource: &str,
 ) -> Result<ExecutionContext, AppError> {
-    let access = optional_testing_access(state, headers).await?;
-    // The production owner manages the sandbox. Only the selected world's
-    // live IAM snapshot authorizes the requested data organization.
-    let credential = access
-        .as_ref()
-        .map(iam_environment_credential)
-        .transpose()?;
-    let testing_environment = access.as_ref().map(|access| {
-        TestingEnvironmentContext::new(access.environment_id, access.control_version)
-    });
-    let authenticated = auth::authenticate(
-        &state.iam,
-        &state.metadata,
-        headers,
-        action,
-        resource,
-        credential.as_ref(),
-        testing_environment,
-    )
-    .await?;
-    touch_testing_access(state, access.as_ref()).await?;
-    Ok(execution_context(&authenticated, testing_environment))
+    authenticate_with_token(state, headers, action, resource)
+        .await
+        .map(|(context, _)| context)
 }
 
-pub(crate) async fn authenticate_bearer(
+/// Like [`authenticate`], also returning the verified token for calls made
+/// back to Silicon Accounts with it (such as reading the account's profile).
+pub(crate) async fn authenticate_with_token(
     state: &AppState,
     headers: &HeaderMap,
-    action: IamAction,
-) -> Result<ExecutionContext, AppError> {
-    let access = optional_testing_access(state, headers).await?;
-    // The production owner manages the sandbox. Only the selected world's
-    // live IAM snapshot authorizes the requested data organization.
-    let credential = access
-        .as_ref()
-        .map(iam_environment_credential)
-        .transpose()?;
-    let testing_environment = access.as_ref().map(|access| {
-        TestingEnvironmentContext::new(access.environment_id, access.control_version)
-    });
-    let authenticated = auth::authenticate_bearer(
-        &state.iam,
-        &state.metadata,
-        headers,
-        action,
-        credential.as_ref(),
-        testing_environment,
-    )
-    .await?;
-    touch_testing_access(state, access.as_ref()).await?;
-    Ok(execution_context(&authenticated, testing_environment))
-}
-
-/// Authenticates lifecycle management strictly on the production plane.
-pub(crate) async fn production_authenticate(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<ExecutionContext, AppError> {
-    if auth::testing_environment_key(headers)?.is_some() {
-        return Err(AppError::bad_request("production_control_plane_required"));
-    }
-    let authenticated = auth::authenticate_bearer(
-        &state.iam,
-        &state.metadata,
-        headers,
-        IamAction::ManageTestingEnvironments,
-        None,
-        None,
-    )
-    .await?;
-    Ok(ExecutionContext::new(
-        authenticated.authorization().clone(),
-        authenticated.request_id(),
-    ))
-}
-
-/// Resolves the required test-plane root key without treating it as actor auth.
-pub(crate) async fn testing_access(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<TestingEnvironmentAccess, AppError> {
-    optional_testing_access(state, headers)
-        .await?
-        .ok_or_else(|| AppError::bad_request("testing_environment_required"))
-}
-
-/// Resolves an optional sandbox selector for ordinary/auth-broker routes.
-pub(crate) async fn optional_testing_access(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<Option<TestingEnvironmentAccess>, AppError> {
-    let Some(key) = auth::testing_environment_key(headers)? else {
-        return Ok(None);
-    };
-    let store = state
-        .testing
-        .as_ref()
-        .ok_or(AppError::DependencyUnavailable {
-            dependency: "testing_database",
-        })?;
-    let mut current = state.iam.discover_testing_environment(&key).await?;
-    let id = current.environment_id;
-    let revision = store.honeycomb_discovery_revision(id).await?;
-    if revision.is_some() {
-        // Bind a fresh IAM response to the participant revision. An older request
-        // cannot repopulate a later clean, even across several unobserved cleans.
-        current = state.iam.discover_testing_environment(&key).await?;
-        if current.environment_id != id {
-            return Err(AppError::Unauthenticated);
-        }
-    }
-    let access = store.discover_at_revision(&current, &key, revision).await?;
-    Ok(Some(access))
-}
-
-pub(crate) fn iam_environment_credential(
-    access: &TestingEnvironmentAccess,
-) -> Result<IamEnvironmentCredential, AppError> {
-    IamEnvironmentCredential::new(
-        access.iam_environment_key.clone(),
-        access.iam_app_id.clone(),
-        access.iam_app_secret.clone(),
-    )
-    .map(|credential| credential.with_environment_id(access.iam_environment_id))
-    .map_err(|_| AppError::Internal {
-        category: "testing_environment_iam_credential",
-    })
-}
-
-pub(crate) async fn touch_testing_access(
-    state: &AppState,
-    access: Option<&TestingEnvironmentAccess>,
-) -> Result<(), AppError> {
-    if let Some(access) = access {
-        state
-            .testing
-            .as_ref()
-            .ok_or(AppError::DependencyUnavailable {
-                dependency: "testing_database",
-            })?
-            .touch(access)
-            .await?;
-    }
-    Ok(())
-}
-
-/// Acquires a shared lifecycle fence and revalidates the exact root generation.
-pub(crate) async fn testing_use_fence(
-    state: &AppState,
-    access: Option<&TestingEnvironmentAccess>,
-) -> Result<Option<TestingEnvironmentUseFence>, AppError> {
-    let Some(access) = access else {
-        return Ok(None);
-    };
-    let fence = state
-        .testing
-        .as_ref()
-        .ok_or(AppError::DependencyUnavailable {
-            dependency: "testing_database",
-        })?
-        .acquire_use_fence(access)
+    action: Action,
+    resource: &str,
+) -> Result<(ExecutionContext, SecretString), AppError> {
+    let token = auth::bearer_token(headers)?;
+    let actor = state
+        .accounts
+        .authenticate_token(token.expose_secret(), action.requires_introspection())
         .await?;
-    Ok(Some(fence))
+    tracing::debug!(
+        accounts.action = action.as_str(),
+        accounts.resource = resource,
+        accounts.introspected = action.requires_introspection(),
+        "Silicon Accounts access token verified"
+    );
+    Ok((execution_context(actor)?, token))
 }
 
-fn execution_context(
-    authenticated: &auth::AuthenticatedRequest,
-    testing_environment: Option<TestingEnvironmentContext>,
+/// Authenticates an app acting for an account with a User verification proof
+/// that must carry `scope`.
+pub(crate) async fn authenticate_proof(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: &'static str,
+) -> Result<ExecutionContext, AppError> {
+    let token = auth::proof_token(headers)?;
+    let actor = state
+        .accounts
+        .authenticate_proof(token.expose_secret(), scope)
+        .await?;
+    tracing::debug!(
+        accounts.scope = scope,
+        accounts.issuing_app = actor.issuing_app().unwrap_or_default(),
+        "Silicon Accounts proof verified"
+    );
+    execution_context(actor)
+}
+
+fn execution_context(actor: Actor) -> Result<ExecutionContext, AppError> {
+    let request_id = request_context::current_request_id().ok_or(AppError::Internal {
+        category: "request_scope_missing",
+    })?;
+    let authorization = RequestAuthContext::for_account(actor).map_err(|_| AppError::Internal {
+        category: "account_context",
+    })?;
+    Ok(ExecutionContext::new(authorization, request_id))
+}
+
+/// Resolves a share recipient the caller named by `c:`/`si:` id (or uuid) to
+/// the account it is now, keyed by its uuid, and checks the caller may share
+/// with it.
+///
+/// Carbons can be reached by anyone signed in to Briefcase. Silicons are not
+/// open to the world: a share reaches a Silicon only from its custodian, the
+/// other Silicons its custodian looks after, or an account the Silicon (or its
+/// custodian) allowed first.
+pub(crate) async fn resolve_recipient(
+    state: &AppState,
+    context: &ExecutionContext,
+    kind: ActorKind,
+    id: &str,
+) -> Result<ActorRef, AppError> {
+    let record = state.accounts.resolve(id).await?;
+    if record.kind != kind {
+        let (actual, expected) = (kind_title(record.kind), kind_title(kind));
+        return Err(AppError::unprocessable(
+            "principal_kind_mismatch",
+            format!(
+                "{id} is a {actual}, not a {expected}; name it with type {}.",
+                record_kind_name(record.kind)
+            ),
+        ));
+    }
+    if let Some(sharer) = context.authorization().account()
+        && !state.accounts.may_share_with(&sharer.uuid, &record).await?
+    {
+        let shown = record.public_id.as_deref().unwrap_or(id);
+        return Err(AppError::refused(
+            "silicon_not_open",
+            format!(
+                "{shown} accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it allowed. Ask {shown} or its custodian to allow you first."
+            ),
+        ));
+    }
+    let id = ActorId::new(record.uuid).map_err(|_| AppError::Internal {
+        category: "account_uuid",
+    })?;
+    Ok(ActorRef::new(record.kind, id))
+}
+
+/// Attaches resolved recipients so the transaction can name them in grants.
+/// They never become the caller.
+pub(crate) fn with_recipients(
+    context: ExecutionContext,
+    recipients: &[ActorRef],
 ) -> ExecutionContext {
-    testing_environment.map_or_else(
-        || {
-            ExecutionContext::new(
-                authenticated.authorization().clone(),
-                authenticated.request_id(),
-            )
-        },
-        |testing_environment| {
-            ExecutionContext::in_testing_environment(
-                authenticated.authorization().clone(),
-                authenticated.request_id(),
-                testing_environment,
-            )
-        },
-    )
+    context.with_share_recipients(recipients.to_vec())
+}
+
+const fn kind_title(kind: ActorKind) -> &'static str {
+    match kind {
+        ActorKind::Carbon => "Carbon",
+        ActorKind::Silicon => "Silicon",
+    }
+}
+
+const fn record_kind_name(kind: ActorKind) -> &'static str {
+    match kind {
+        ActorKind::Carbon => "carbon",
+        ActorKind::Silicon => "silicon",
+    }
 }
 
 pub(crate) fn scoped<T>(
@@ -282,8 +183,14 @@ pub(crate) fn scoped<T>(
     )
 }
 
-pub(crate) fn organization_resource(headers: &HeaderMap) -> Result<String, AppError> {
-    auth::organization_resource(headers)
+/// The drive the request acts in (its owner's uuid), used in permanent URLs
+/// and request fingerprints.
+pub(crate) fn tenant(context: &ExecutionContext) -> String {
+    context
+        .authorization()
+        .organization_id()
+        .as_str()
+        .to_owned()
 }
 
 pub(crate) fn json<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, AppError> {
@@ -367,21 +274,6 @@ where
         category: "request_fingerprint",
     })?;
     Ok(bytes_fingerprint(operation, &canonical))
-}
-
-/// Validates a permanent-URL location against the authenticated tenant header.
-///
-/// A mismatched organization or an unparsable path is reported as not found:
-/// the permanent URL must never confirm that an inaccessible entry exists.
-pub(crate) fn entry_location(
-    (organization, path): (String, String),
-    headers: &HeaderMap,
-) -> Result<(String, EntryPath), AppError> {
-    if auth::organization_resource(headers)? != organization {
-        return Err(AppError::NotFound);
-    }
-    let path = EntryPath::new(path).map_err(|_| AppError::NotFound)?;
-    Ok((organization, path))
 }
 
 pub(crate) fn entry_id(value: Uuid) -> Result<EntryId, AppError> {

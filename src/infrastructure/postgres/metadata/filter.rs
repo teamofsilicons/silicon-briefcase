@@ -27,7 +27,10 @@ const EXTENSION: &str = r"lower(substring(entry.name from '\.([^.]+)$'))";
 pub(in crate::infrastructure::postgres) struct FilterCaller<'a> {
     pub kind: &'static str,
     pub id: &'a str,
-    pub administrator: bool,
+    /// The caller and the Silicons it looks after (creator rights).
+    pub creators: &'a [String],
+    /// Whether the caller holds the drive owner's rights.
+    pub owner_rights: bool,
 }
 
 /// Appends one filter expression as a parenthesized boolean SQL fragment.
@@ -198,8 +201,9 @@ fn push_predicate(
 
 /// `is:expiring`: a live expiring share that either gave the caller their access (on
 /// this entry or inherited from a folder above it), or sits on this entry and
-/// is the caller's to manage — they created it, own the entry, or administer
-/// the organization. The effective-grant view already drops expired shares.
+/// is the caller's to manage — they created it, created the entry (or a
+/// Silicon they look after did), or hold the drive's owner rights. The
+/// effective-grant view already drops expired shares.
 fn push_expiring_match(builder: &mut QueryBuilder<Postgres>, caller: FilterCaller<'_>) {
     builder.push(
         "(EXISTS (SELECT 1 FROM briefcase.entry_closure AS expiring_path \
@@ -216,12 +220,10 @@ fn push_expiring_match(builder: &mut QueryBuilder<Postgres>, caller: FilterCalle
     builder.push_bind(caller.kind);
     builder.push(" AND expiring_grant.principal_id = ");
     builder.push_bind(caller.id.to_owned());
-    builder.push(") OR ((entry.owner_type = ");
-    builder.push_bind(caller.kind);
-    builder.push(" AND entry.owner_id = ");
-    builder.push_bind(caller.id.to_owned());
-    builder.push(") OR ");
-    builder.push_bind(caller.administrator);
+    builder.push(") OR ((entry.owner_id = ANY(");
+    builder.push_bind(caller.creators.to_vec());
+    builder.push(")) OR ");
+    builder.push_bind(caller.owner_rights);
     builder.push(
         ") AND (entry.link_expires_at > clock_timestamp() \
                OR EXISTS (SELECT 1 FROM briefcase.permission_grants AS own_expiring \
@@ -306,28 +308,30 @@ fn push_shared_with(builder: &mut QueryBuilder<Postgres>, selector: &ActorSelect
 }
 
 fn push_accessible_to(builder: &mut QueryBuilder<Postgres>, selector: &ActorSelector) {
-    // Reachability for another member is evaluated exactly like the caller's
-    // own: ownership (including an owned containing folder), the Public
-    // boundary, a matching tag, an administrative role, or an explicit grant.
+    // Reachability for another account is evaluated exactly like the
+    // caller's own: the drive's owner or the custodian of the Silicon that
+    // owns it, the entry's creator or the creator's custodian, an explicit
+    // share, or a folder above it that they (or a Silicon in their care)
+    // created. The account is named by uuid (the API resolves `@c:…` ids).
     builder.push(
-        "EXISTS (SELECT 1 FROM briefcase.organization_members AS reader \
-                  WHERE reader.org_id = entry.org_id \
-                    AND reader.membership_status = 'active' \
-                    AND reader.actor_id = ",
+        "EXISTS (SELECT 1 FROM briefcase.accounts AS reader \
+                  WHERE reader.account_uuid = ",
     );
     builder.push_bind(selector.id.clone());
-    push_optional_kind(builder, selector, "reader.actor_type");
+    push_optional_kind(builder, selector, "reader.kind");
     builder.push(
         " AND ( \
-             reader.org_role IN ('owner', 'admin') \
-             OR (entry.owner_type = reader.actor_type AND entry.owner_id = reader.actor_id) \
-             OR entry.root_type = 'public' \
-             OR (entry.root_type = 'tag' AND EXISTS ( \
-                    SELECT 1 FROM briefcase.organization_member_tags AS reader_tag \
-                     WHERE reader_tag.org_id = entry.org_id \
-                       AND reader_tag.actor_type = reader.actor_type \
-                       AND reader_tag.actor_id = reader.actor_id \
-                       AND reader_tag.tag_id = entry.tag_id)) \
+             reader.account_uuid = entry.org_id \
+             OR EXISTS (SELECT 1 FROM briefcase.accounts AS drive_owner \
+                         WHERE drive_owner.account_uuid = entry.org_id \
+                           AND drive_owner.kind = 'silicon' \
+                           AND drive_owner.custodian_uuid = reader.account_uuid) \
+             OR (entry.system_kind IS NULL AND ( \
+                    entry.owner_id = reader.account_uuid \
+                    OR EXISTS (SELECT 1 FROM briefcase.accounts AS creator \
+                                WHERE creator.account_uuid = entry.owner_id \
+                                  AND creator.kind = 'silicon' \
+                                  AND creator.custodian_uuid = reader.account_uuid))) \
              OR EXISTS ( \
                     SELECT 1 FROM briefcase.entry_closure AS reader_path \
                       JOIN briefcase.effective_permission_grants AS reader_grant \
@@ -335,8 +339,8 @@ fn push_accessible_to(builder: &mut QueryBuilder<Postgres>, selector: &ActorSele
                        AND reader_grant.entry_id = reader_path.ancestor_id \
                      WHERE reader_path.org_id = entry.org_id \
                        AND reader_path.descendant_id = entry.entry_id \
-                       AND reader_grant.principal_type = reader.actor_type \
-                       AND reader_grant.principal_id = reader.actor_id \
+                       AND reader_grant.principal_type = reader.kind \
+                       AND reader_grant.principal_id = reader.account_uuid \
                        AND reader_grant.revoked_at IS NULL \
                        AND (reader_path.depth = 0 OR reader_grant.inherits_to_descendants)) \
              OR ",

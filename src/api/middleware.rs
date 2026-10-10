@@ -76,12 +76,6 @@ pub async fn request_scope(mut request: Request, next: Next) -> Response {
         .get("x-briefcase-telemetry")
         .is_none_or(|value| value != "off")
         && !request.uri().path().ends_with("/telemetry");
-    let testing = request.headers().contains_key("x-briefcase-app-secret")
-        || request.uri().query().is_some_and(|query| {
-            query
-                .split('&')
-                .any(|pair| pair.starts_with("test_environment="))
-        });
     let source = match request
         .headers()
         .get("x-briefcase-source")
@@ -118,9 +112,7 @@ pub async fn request_scope(mut request: Request, next: Next) -> Response {
     let mut response = crate::telemetry::scope(
         crate::telemetry::RequestContext {
             enabled: telemetry_enabled,
-            testing,
             request_id: Uuid::parse_str(&request_id).ok(),
-            environment_id: None,
         },
         request_context::scope(request_id.clone(), future),
     )
@@ -140,7 +132,6 @@ pub async fn request_scope(mut request: Request, next: Next) -> Response {
                 Stage::Failed
             },
         );
-        event.testing = testing;
         event.request_id = Uuid::parse_str(&request_id).ok();
         event.duration_ms = Some(latency_ms);
         event.status = Some(response.status().as_u16());
@@ -248,12 +239,20 @@ mod tests {
     #[test]
     fn telemetry_uses_contract_names_for_catch_all_and_version_aliases() {
         assert_eq!(
-            super::operation_name("GET", "/api/v1/public/{org_id}/{*path}"),
+            super::operation_name("GET", "/api/v1/public/{owner}/{*path}"),
             "readPublicEntry"
         );
         assert_eq!(
-            super::operation_name("GET", "/org/{org_id}/{*path}"),
+            super::operation_name("GET", "/api/v1/paths/{owner}/{*path}"),
             "resolvePermanentUrl"
+        );
+        assert_eq!(
+            super::operation_name("GET", "/api/v1/paths/{owner}"),
+            "resolveDriveTop"
+        );
+        assert_eq!(
+            super::operation_name("GET", "/org/{org_id}/{*path}"),
+            "resolveLegacyPermanentUrl"
         );
         assert_eq!(
             super::operation_name("GET", "/api/version"),

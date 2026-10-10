@@ -18,9 +18,7 @@ tokio::task_local! { pub(super) static REQUEST: RequestContext; }
 #[derive(Clone, Copy)]
 pub(crate) struct RequestContext {
     pub enabled: bool,
-    pub testing: bool,
     pub request_id: Option<uuid::Uuid>,
-    pub environment_id: Option<uuid::Uuid>,
 }
 
 fn options() -> Option<(String, String, PathBuf)> {
@@ -165,15 +163,9 @@ fn observation(event: &tracing::Event<'_>) -> Option<Event> {
             .unwrap_or_else(|| metadata.target().replace("::", ".")),
         stage,
     );
-    value.testing = REQUEST.try_with(|context| context.testing).unwrap_or(false)
-        || value.operation.starts_with("test_")
-        || value.operation.starts_with("testing_environment_");
+    value.testing = value.operation.starts_with("test_");
     value.request_id = REQUEST
         .try_with(|context| context.request_id)
-        .ok()
-        .flatten();
-    value.environment_id = REQUEST
-        .try_with(|context| context.environment_id)
         .ok()
         .flatten();
     if value.operation.ends_with("_completed") || value.operation.ends_with("_shutdown") {
@@ -241,12 +233,9 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(Capture(events.clone()));
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let request_id = uuid::Uuid::new_v4();
-        let environment_id = uuid::Uuid::new_v4();
         let context = RequestContext {
             enabled: true,
-            testing: true,
             request_id: Some(request_id),
-            environment_id: Some(environment_id),
         };
         REQUEST.scope(context, async {
             tracing::info!(target: "silicon_briefcase::worker", event = "upload_completed", count = 42u64, attempt = 2u64, token = "slt_private", path = "private/secret.txt", "private message");
@@ -270,7 +259,7 @@ mod tests {
         assert_eq!(events[0].source, Source::Worker);
         assert_eq!(events[0].operation, "upload_completed");
         assert_eq!(events[0].request_id, Some(request_id));
-        assert_eq!(events[0].environment_id, Some(environment_id));
+        assert_eq!(events[0].environment_id, None);
         assert_eq!(events[0].count, Some(42));
         assert_eq!(events[0].attempt, Some(2));
         let stored = serde_json::to_string(&events[0])?;

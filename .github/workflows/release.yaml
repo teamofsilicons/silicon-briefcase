@@ -1,9 +1,8 @@
-name: Build validated Honeycomb release
+name: Build validated Silicon Apps release
 
 on:
   workflow_dispatch:
   push:
-    branches: [release/public-identifiers-20260923]
     tags: ["v*"]
 
 permissions:
@@ -53,7 +52,7 @@ jobs:
         with:
           workspaces: clients/rust
       - run: python ../../scripts/sync-cli-docs.py --check
-      - run: cargo test --locked -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}
+      - run: cargo test --locked -p briefcase-cli --target ${{ matrix.triple }}
       - uses: actions/setup-python@v5
         if: runner.os == 'Linux'
         with:
@@ -65,10 +64,10 @@ jobs:
           python3 -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
       - name: Build Linux CLI for glibc 2.28
         if: runner.os == 'Linux'
-        run: cargo zigbuild --locked --release -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}.2.28
+        run: cargo zigbuild --locked --release -p briefcase-cli --target ${{ matrix.triple }}.2.28
       - name: Build native CLI
         if: runner.os != 'Linux'
-        run: cargo build --release --locked -p briefcase-cli --features honeycomb-managed --target ${{ matrix.triple }}
+        run: cargo build --release --locked -p briefcase-cli --target ${{ matrix.triple }}
       - name: Verify Linux ABI
         if: runner.os == 'Linux'
         run: |
@@ -84,47 +83,37 @@ jobs:
               test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               briefcase --version
               briefcase --help
-              briefcase daemon status
+              briefcase accounts --json
+              briefcase login status --json
             '
       - run: ./target/${{ matrix.triple }}/release/${{ matrix.binary }} --version
+      - name: Install the pinned Silicon Apps packager
+        run: cargo install --locked silicon-apps-cli@0.2.0
+      - name: Validate and pack this native target
+        shell: bash
+        run: |
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then echo "Tag must match v$VERSION" >&2; exit 1; fi
+          python ../../scripts/package-apps.py "$VERSION" ${{ matrix.target }} target/${{ matrix.triple }}/release/${{ matrix.binary }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: clients/rust/target/${{ matrix.triple }}/release/${{ matrix.binary }}
+          name: briefcase-silicon-apps-${{ matrix.target }}
+          path: dist/apps/*
           if-no-files-found: error
 
-  package:
+  collect:
     needs: binaries
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: release-binaries
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-      - name: Install the pinned Honeycomb packager
-        run: cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb --rev b39b1ceb96997ec4c80cb5c5354130ecb9da73eb silicon-honeycomb-cli
-      - name: Check release tag against the CLI version
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          python - <<'PY'
-          import os, tomllib
-          with open('clients/rust/Cargo.toml', 'rb') as source:
-              version = tomllib.load(source)['workspace']['package']['version']
-          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Release tag must match the CLI version'
-          PY
-      - run: python scripts/package-release.py --binaries-dir release-binaries
+          pattern: briefcase-silicon-apps-*
+          merge-multiple: true
+          path: dist/apps
+      - run: cd dist/apps && cat *.sha256 > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: briefcase-honeycomb-release
-          path: dist/*
+          name: briefcase-silicon-apps-release
+          path: dist/apps/*
           if-no-files-found: error
-
-# This workflow produces reviewable artifacts; it does not publish a release.
+# Artifacts only. Release upload and publication are separate operator actions.

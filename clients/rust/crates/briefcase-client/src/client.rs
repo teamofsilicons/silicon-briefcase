@@ -1,4 +1,4 @@
-//! The client itself: one deployment, one organization, no stored state.
+//! The client itself: one deployment, one credential, no stored state.
 
 use std::time::Duration;
 
@@ -13,13 +13,12 @@ use crate::{
     contract::{API_VERSION, ServiceVersion},
     error::{ApiError, Error, Result, WireErrorEnvelope, transport},
     models::ServiceStatus,
-    update::UpdateStatus,
 };
 
 /// A key that makes a retried mutation return the first answer again.
 ///
-/// Briefcase requires one on creations, session exchange, testing-environment
-/// mutations, and upload finalization. The client generates one per call unless
+/// Briefcase requires one on creations, moves, sharing changes, version
+/// restores and uploads. The client generates one per call unless
 /// a caller supplies its own, which is what a caller wants when the retry
 /// happens in their own process rather than here.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,10 +98,10 @@ impl Client {
     pub fn new_unchecked(config: Config) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
-            // A redirect must never move a bearer, refresh token, test root,
-            // or idempotency-bound body outside the configured deployment.
+            // A redirect must never move a bearer, a proof or an
+            // idempotency-bound body outside the configured deployment.
             .redirect(reqwest::redirect::Policy::none())
-            // OBO proofs and staging capabilities are single-attempt calls;
+            // Proofs and staging capabilities are single-attempt calls;
             // even implicit protocol retries must remain caller-controlled.
             .retry(reqwest::retry::never())
             .user_agent(config.user_agent.clone())
@@ -119,18 +118,6 @@ impl Client {
         &self.config
     }
 
-    /// Runtime dependency updates are retired; always returns `Disabled`.
-    #[must_use]
-    pub fn update_status(&self) -> UpdateStatus {
-        UpdateStatus::Disabled
-    }
-
-    /// Returns the selected organization, or an empty string for sign-in-only clients.
-    #[must_use]
-    pub fn organization(&self) -> &str {
-        &self.config.organization
-    }
-
     /// Reads what the deployment serves, without authenticating.
     ///
     /// # Errors
@@ -144,7 +131,7 @@ impl Client {
             .get(url)
             .header("briefcase-supported-api-versions", API_VERSION)
             .timeout(self.config.request_timeout);
-        let request = self.apply_environment(request);
+        let request = self.apply_headers(request);
         let response = self.receive(request).await?;
         let selected_header = response
             .headers()
@@ -184,7 +171,7 @@ impl Client {
     pub async fn health(&self) -> Result<ServiceStatus> {
         let url = self.origin_url(&["healthz"])?;
         let request = self.http.get(url).timeout(self.config.request_timeout);
-        self.receive_json(self.apply_environment(request)).await
+        self.receive_json(self.apply_headers(request)).await
     }
 
     /// Reports whether the deployment can serve requests.
@@ -196,26 +183,13 @@ impl Client {
     pub async fn ready(&self) -> Result<ServiceStatus> {
         let url = self.origin_url(&["readyz"])?;
         let request = self.http.get(url).timeout(self.config.request_timeout);
-        self.receive_json(self.apply_environment(request)).await
+        self.receive_json(self.apply_headers(request)).await
     }
 
     // ---- request plumbing ------------------------------------------------
 
     /// Builds a URL under the versioned API base from already-safe segments.
     pub(crate) fn api_url(&self, segments: &[&str]) -> Result<Url> {
-        if self.config.organization.is_empty()
-            && !matches!(
-                segments,
-                ["iam" | "testing-environment" | "telemetry"]
-                    | ["auth", "slt" | "refresh" | "status"]
-                    | ["public", _, ..]
-                    | ["testing-environment", "cleanings"]
-            )
-        {
-            return Err(Error::Configuration(
-                "choose an authorised organisation before using workspace APIs".into(),
-            ));
-        }
         let mut url = self.config.api_base.clone();
         {
             let mut path = url
@@ -246,27 +220,24 @@ impl Client {
         Ok(url)
     }
 
-    /// Starts an authenticated request scoped to this client's organization.
+    /// Starts a request carrying the configured bearer, when there is one.
     pub(crate) fn request(&self, method: Method, url: Url) -> RequestBuilder {
-        let builder = self
-            .http
-            .request(method, url)
-            .header("x-org-id", &self.config.organization);
-        let builder = self.apply_environment(builder);
+        let builder = self.apply_headers(self.http.request(method, url));
         match &self.config.credential {
             Credential::Bearer(token) => builder.bearer_auth(token.expose_secret()),
             Credential::None => builder,
         }
     }
 
-    /// Adds only the testing-plane selector, never an IAM bearer credential.
+    /// Starts a request that never carries the configured bearer: links,
+    /// proofs and upload capabilities authenticate on their own.
     pub(crate) fn anonymous_request(&self, method: Method, url: Url) -> RequestBuilder {
-        self.apply_environment(self.http.request(method, url))
+        self.apply_headers(self.http.request(method, url))
     }
 
-    /// Adds the testing-plane selector to a manually constructed request.
-    pub(crate) fn apply_environment(&self, mut request: RequestBuilder) -> RequestBuilder {
-        request = request
+    /// Adds the telemetry preference and the calling component.
+    pub(crate) fn apply_headers(&self, request: RequestBuilder) -> RequestBuilder {
+        request
             .header(
                 "x-briefcase-telemetry",
                 if self.config.telemetry { "on" } else { "off" },
@@ -279,11 +250,7 @@ impl Client {
                     crate::telemetry::Source::Web => "web",
                     _ => "sdk",
                 },
-            );
-        if let Some(environment) = self.config.environment() {
-            request = request.header("x-briefcase-app-secret", environment.expose());
-        }
-        request
+            )
     }
 
     pub(crate) const fn request_timeout(&self) -> Duration {
@@ -303,7 +270,7 @@ impl Client {
         Self::decode_json(response).await
     }
 
-    async fn decode_json<T>(response: Response) -> Result<T>
+    pub(crate) async fn decode_json<T>(response: Response) -> Result<T>
     where
         T: DeserializeOwned,
     {
@@ -318,13 +285,24 @@ impl Client {
         self.receive(request).await.map(drop)
     }
 
+    /// Sends a request and hands back the response whatever its status, so a
+    /// caller can act on a `308` itself (redirects are never followed).
+    pub(crate) async fn send(request: RequestBuilder) -> Result<Response> {
+        request.send().await.map_err(transport)
+    }
+
+    /// Reads a non-successful response as Briefcase's refusal.
+    pub(crate) async fn refusal(response: Response) -> Error {
+        Error::Api(Box::new(api_error(response).await))
+    }
+
     /// Sends a request and returns the raw successful response.
     pub(crate) async fn receive(&self, request: RequestBuilder) -> Result<Response> {
         let response = request.send().await.map_err(transport)?;
         if response.status().is_success() {
             return Ok(response);
         }
-        Err(Error::Api(api_error(response).await))
+        Err(Error::Api(Box::new(api_error(response).await)))
     }
 }
 
@@ -367,6 +345,7 @@ async fn api_error(response: Response) -> ApiError {
                 .canonical_reason()
                 .unwrap_or("the request failed")
                 .to_owned(),
+            hint: None,
             request_id: None,
             retry_after,
             unsatisfied_range_length,
@@ -375,6 +354,7 @@ async fn api_error(response: Response) -> ApiError {
             status: status.as_u16(),
             code: envelope.error.code,
             message: envelope.error.message,
+            hint: envelope.error.hint,
             request_id: envelope.error.request_id,
             retry_after,
             unsatisfied_range_length,
@@ -400,23 +380,10 @@ fn fallback_code(status: StatusCode) -> String {
 mod tests {
     use super::{Client, IdempotencyKey};
     use crate::config::Config;
-    use crate::update::UpdateStatus;
-
-    #[test]
-    fn legacy_update_options_cannot_enable_runtime_updates() {
-        for enabled in [false, true] {
-            let config = Config::new("https://briefcase.example/api/v1/", "tos")
-                .unwrap()
-                .with_auto_update(enabled)
-                .with_update_manifest("/missing/Cargo.toml");
-            let client = Client::new_unchecked(config).unwrap();
-            assert_eq!(client.update_status(), UpdateStatus::Disabled);
-        }
-    }
 
     fn client() -> Client {
         Client::new_unchecked(
-            Config::new("https://briefcase.example/api/v1/", "tos")
+            Config::new("https://briefcase.example/api/v1/")
                 .unwrap()
                 .with_token("token"),
         )
@@ -450,15 +417,15 @@ mod tests {
 
     #[test]
     fn a_path_segment_is_escaped_rather_than_interpreted() {
-        // Entry names may contain anything but a slash, and an organization
-        // identifier is opaque, so segments are never pasted into a URL.
+        // Entry names may contain anything but a slash, and an owner id
+        // contains a colon, so segments are never pasted into a URL.
         let client = client();
         assert_eq!(
             client
-                .origin_url(&["org", "tos", "private/cos:tos"])
+                .api_url(&["paths", "c:ada", "notes/plan.md"])
                 .unwrap()
                 .as_str(),
-            "https://briefcase.example/org/tos/private%2Fcos:tos"
+            "https://briefcase.example/api/v1/paths/c:ada/notes%2Fplan.md"
         );
     }
 

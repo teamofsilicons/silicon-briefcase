@@ -1,10 +1,18 @@
 # Deploying Silicon Briefcase
 
+For the current Accounts release, follow [the parallel production plan](migration/parallel-production.md). Existing IAM runtimes and user data remain live; the historical replacement steps below do not authorize identity adoption or service shutdown.
+
 Run shell commands from the backend repository root unless stated otherwise.
 This is the operator guide; start with the [documentation index](README.md)
 for API, package, and CLI usage.
 
-## Current production: base tier
+## Accounts migration candidate
+
+The 4.0 frontend is a Next.js standalone BFF built by `Dockerfile.browser`, listening on port3000 inside the image. Its runtime environment is separate from the Rust API: APP_ID, APP_SECRET, ACCOUNTS_URL, optional ACCOUNTS_API_URL, APP_API_URL (including `/api`), PUBLIC_URL and SESSION_SECRET. See [web setup](../web/README.md). The old Rust gateway and its static assets remain on port 4318 for legacy links; the independent Next.js unit uses 4319.
+
+The nginx candidate forwards `/api/v1/uploads` with request buffering disabled and 15-minute timeouts. Register the exact web `/auth/callback` at Accounts. Configure Accounts signed events on the API, use a fresh Accounts database and the separate `accounts/` object prefix. Follow the [parallel release plan](migration/parallel-production.md). No local migration check alone authorizes production changes.
+
+## Previously deployed base tier
 
 Briefcase runs on one ARM64 EC2 instance with direct Nginx TLS ingress, RDS for
 metadata, and S3 for file bytes. API, worker, and browser containers are managed
@@ -57,13 +65,11 @@ Prepare a private JSON file using a secure editor/secret manager. Its schema is:
 
 ```json
 {
-  "BRIEFCASE_IAM_APP_ID": "briefcase",
-  "BRIEFCASE_IAM_APP_SECRET": "<existing-IAM-application-secret>",
-  "BRIEFCASE_IAM_WEBHOOK_SIGNING_SECRET": "<configured-webhook-secret>",
-  "BRIEFCASE_IAM_WEBHOOK_KEY_VERSION": 1,
+  "BRIEFCASE_APP_SECRET": "<briefcase-app-secret-from-silicon-apps>",
+  "BRIEFCASE_ACCOUNTS_WEBHOOK_SECRET": "<whsec-secret-returned-when-the-webhook-was-set>",
+  "BRIEFCASE_PROOF_ISSUERS": "<scope=app list; see below>",
   "BRIEFCASE_POSTMARK_SERVER_TOKEN": "<postmark-server-token>",
   "BRIEFCASE_TELEMETRY_TABLE_KEY": "<siliconbriefcase-table-key>",
-  "BRIEFCASE_TEST_ENVIRONMENT_ENCRYPTION_KEY": "<base64-encoded-random-32-bytes>",
   "BRIEFCASE_API_DATABASE_PASSWORD": "<strong-random-runtime-password>",
   "BRIEFCASE_WORKER_DATABASE_PASSWORD": "<different-strong-random-runtime-password>"
 }
@@ -83,64 +89,59 @@ aws --profile silicon-production --region us-east-1 secretsmanager create-secret
 
 This is first-time provisioning only. The hosted secret already exists; use
 `put-secret-value` for an intentional update, preserving existing database
-passwords, encryption key, and unrelated fields. Updating Secrets Manager does
-not itself reload running processes: deploy/restart in a planned sequence.
+passwords and unrelated fields. Updating Secrets Manager does not itself reload
+running processes: deploy/restart in a planned sequence.
 
-The canonical Application ID is `briefcase`, not its internal UUID. The
-Application secret comes from IAM; the webhook signing secret is the shared
-value supplied to IAM and configured here. Both are server-side secrets, not
-CLI login inputs. During webhook rotation, retain prior key versions using
-`BRIEFCASE_IAM_WEBHOOK_PREVIOUS_KEYS_JSON`, a JSON-object string such as
-`{"1":"<prior-secret>"}`. Never log that configuration or persist a raw signed
-test wrapper.
+Plain (non-secret) settings: `ACCOUNTS_URL=https://accounts.teamofsilicons.com`
+(the public Silicon Accounts origin, which is also the `iss` of every access
+token), `BRIEFCASE_APP_ID=briefcase`, and optionally `ACCOUNTS_API_URL` when
+Briefcase should reach Silicon Accounts at another origin than the public one.
+Plain http is refused except for this machine (`localhost`, `127.0.0.1`, `::1`),
+and production requires https.
 
-Runtime Docker env files are not shell scripts: do not `source` them. An
-unquoted canonical Application ID contains `>`, which a shell interprets as
-redirection. Inspect only specific non-secret configuration fields when needed.
+`BRIEFCASE_APP_SECRET` (`sa_app_…`) is Briefcase's app secret from Silicon
+Apps; it authenticates introspection, account lookups and proof verification
+and never leaves the server. `BRIEFCASE_ACCOUNTS_WEBHOOK_SECRET` (`whsec_…`) is
+returned once when the webhook URL is set. During a rotation, put the old value
+in `BRIEFCASE_ACCOUNTS_WEBHOOK_PREVIOUS_SECRET` until deliveries carry the new
+signature.
 
-The generated testing-environment encryption key protects retrievable IAM and
-Briefcase sandbox credentials at rest. Keep it stable across deployments and
-rotate it only with a data migration. First boot creates and migrates a
-separate `briefcase_test` database on a dedicated testing RDS instance, matching
-IAM's topology. Every sandbox shares that test database but is namespaced by
-its environment UUID, while control rows remain in production `briefcase`.
+`BRIEFCASE_PROOF_ISSUERS` lists, per scope, the apps that may act for an
+account through `/api/v1/obo/*` with a Silicon Accounts User verification
+proof: entries `scope=app` or `scope=app1|app2`, separated by commas or spaces.
+Unset means no app may (the API logs a warning at start). The production value
+is recorded in `docs/migration/decisions.md`. An app acting this way reaches
+only its own folder, `apps/{app}/`, in the account's own drive, and what it
+creates records the app.
 
-**3. Register the webhook and endpoints with IAM.** Follow the
-[separate IAM approval/OBO runbook](iam-integration.md). Production
-webhook approval uses IAM's dedicated `app approve-webhook` operation. It
-requires a direct Carbon session as the owning organization's owner/admin or
-an IAM `applications.review` reviewer, plus verified-channel step-up for
-`application.webhook.approve`. An Application secret cannot approve the pending
-destination. Do not expose this operator workflow in the Briefcase CLI/client.
+`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` (plain, optional) names the apps among
+those that act with everything the account can reach: its own files, what was
+shared with it and the drives of the Silicons it looks after, still only
+through the `/api/v1/obo/*` routes their scopes allow. Production:
+`interface`. Unset, every app is confined to its folder.
 
-Briefcase receives the IAM
-Application current-state events needed for organizations, memberships, roles,
-and tags at `POST https://backend.briefcase.teamofsilicons.com/webhook/`.
-Register every delegated control endpoint listed in the [IAM guide](iam-integration.md)
-on the appropriate production or test Application. The one-shot endpoint
-`briefcase.files.create` uses `/api/v1/obo/files` and metadata keys `path`,
-`name`, and `content_type`. The JSON folder/list/read/trash and upload-control
-endpoints use their own fixed paths and empty metadata schemas. The
-[capability-only byte-transfer route](api/delegated-uploads.md) is not an IAM
-endpoint registration; its ingress must allow the documented PUT request body.
+**Moving organization data at the cutover.** After `briefcase-migrate` applied
+migration 0050, and with the API and worker stopped, run
+`briefcase-migrate link-identities --file mapping.csv --dry-run`, review the
+report, then run it without `--dry-run` (same environment as the migrator). The
+mapping and the procedure are in `docs/migration/cutover.md`.
 
-Verify that the Briefcase Application discloses `profile`, `self.organizations.read`,
-`self.identity.read`, and `self.membership.read`; without those scopes IAM correctly omits
-fields that Briefcase needs to cross-bind an introspected bearer. The production
-webhook URL accepts both production events and IAM's signed wrapped test
-events. Test deliveries are routed by a constant-time root-key match into the
-separate shared test database; neither the testing key nor the outer envelope
-is persisted.
+**3. Set Briefcase's sign-in setup and webhook at Silicon Accounts.** With the
+app's credentials (never from the Briefcase CLI): the sign-in setup allows the
+web callback `https://briefcase.teamofsilicons.com/auth/callback`, the device
+flow and public clients (the CLI signs in without a secret), and asks for
+`email` as an optional field (invitation mail goes only to accounts that shared
+it). The webhook is `PUT /v1/apps/briefcase/webhook` with the URL
+`https://backend.briefcase.teamofsilicons.com/webhook/`; store the returned
+secret as above.
 
-Deploy IAM's current authorization contract (backend migration 0067 and test
-migration 9003) before this Briefcase version. Briefcase uses the official
-`silicon-iam-client` 1.8.0, with dependency auto-updates disabled. Complete
-online snapshots populate immutable membership bindings on first use; webhook
-delivery is no longer a prerequisite for first login or post-clean bootstrap.
-Keep webhooks enabled for other members, resource lifecycle and directory
-reconciliation. Snapshot conflicts fail closed rather than replacing newer
-signed versions. The SDK uses the complete request timeout; the old separate
-`BRIEFCASE_IAM_CONNECT_TIMEOUT_MS` setting is no longer used.
+Briefcase verifies every delivery's `X-Accounts-Signature` over the raw body
+(5-minute timestamp tolerance), applies each `event_id` once, and handles
+`account.id_changed`, `account.updated`, `silicon.custodian_changed`,
+`membership.signed_out`, `membership.access_removed` and `account.deleted`.
+Other types are acknowledged and logged. A bad signature answers 401 and a
+signed body that is not an event answers 400, so Silicon Accounts retries only
+what can succeed.
 
 ## Deploying
 
@@ -272,12 +273,8 @@ contacts, invitation outbox delivery, year-long logs and contract lifecycle stat
 Set `BRIEFCASE_POSTMARK_SERVER_TOKEN` on the worker and verify
 `briefcase@teamofsilicons.com` in Postmark. The public site base must be
 `https://briefcase.teamofsilicons.com/` so invitation links point to the browser.
-Monitor invitation outbox retries/dead letters; missing IAM-verified contacts
-are explicit delivery failures. Testing email never leaves the test plane.
-
-Configure IAM 1.7 scopes and the two critical sharing endpoints from the
-[IAM guide](iam-integration.md). Test credentials now select the paired plane
-using `X-Briefcase-App-Secret`. Replace a rotated IAM pairing atomically.
+Monitor invitation outbox retries/dead letters; a recipient who did not share
+an email with Briefcase is an explicit delivery failure, not a retry.
 
 Build the documentation with `npm ci && npm run build && npm run check` in
 `docs-site/`. Upload only `docs-site/dist/` to the static host for

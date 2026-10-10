@@ -53,18 +53,13 @@ impl PostgresRepository {
         if entry.authorization(context.authorization()).visibility() != EntryVisibility::Full {
             return Err(AppError::NotFound);
         }
-        let safe_root = matches!(
-            entry.system_kind,
-            Some(
-                crate::domain::entry::SystemEntryKind::PublicContainer
-                    | crate::domain::entry::SystemEntryKind::TagRoot
-            )
-        );
-        let can_manage = (!entry.entry.reserved
+        // Link access is managed by whoever may manage the entry's shares:
+        // its creator, the drive's owner, or the custodian of either. A
+        // drive's root and its apps folders never get a link.
+        let can_manage = entry.system_kind.is_none()
             && entry
                 .authorization(context.authorization())
-                .allows(Capability::ManagePermissions))
-            || (safe_root && context.authorization().role().has_administrative_access());
+                .allows(Capability::ManagePermissions);
         let result = read_link(
             &mut request.transaction,
             id.as_uuid(),
@@ -97,19 +92,13 @@ impl PostgresRepository {
         if auth.visibility() != EntryVisibility::Full {
             return Err(AppError::NotFound);
         }
-        let safe_root = matches!(
-            entry.system_kind,
-            Some(
-                crate::domain::entry::SystemEntryKind::PublicContainer
-                    | crate::domain::entry::SystemEntryKind::TagRoot
-            )
-        );
-        if entry.entry.reserved && !safe_root {
-            return Err(AppError::validation("protected_folder"));
+        if entry.system_kind.is_some() {
+            return Err(AppError::unprocessable(
+                "protected_folder",
+                "Link access is for files and folders inside a drive; the top of a drive and its apps folders cannot get a link.",
+            ));
         }
-        if !(auth.allows(Capability::ManagePermissions)
-            || safe_root && context.authorization().role().has_administrative_access())
-        {
+        if !auth.allows(Capability::ManagePermissions) {
             return Err(AppError::Forbidden);
         }
         let claim = common::claim_idempotency(

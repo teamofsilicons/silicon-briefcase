@@ -17,7 +17,10 @@ use std::time::Duration;
 use futures::TryStreamExt as _;
 use sha2::{Digest as _, Sha256};
 use silicon_briefcase::{
-    application::ports::{ByteRange, ObjectKey, ObjectStore, OpenObjectRequest, StorageTarget},
+    application::ports::{
+        ByteRange, CopyObjectRequest, ObjectKey, ObjectStore, OpenObjectRequest, StorageTarget,
+        StoredPart, UploadPartRequest,
+    },
     config::{S3Encryption, S3Settings},
     domain::storage::EncryptionMode,
     infrastructure::s3::S3ObjectStore,
@@ -70,7 +73,7 @@ async fn opening_an_object_streams_the_whole_body_and_exact_ranges() -> anyhow::
     drop(file);
     let digest: [u8; 32] = Sha256::digest(CONTENT).into();
     let size = u64::try_from(CONTENT.len())?;
-    store
+    let stored = store
         .put_file(&target, &key, &staged, "text/plain", size, &digest)
         .await?;
     tokio::fs::remove_file(&staged).await?;
@@ -103,7 +106,100 @@ async fn opening_an_object_streams_the_whole_body_and_exact_ranges() -> anyhow::
     assert_eq!(partial.range, Some(range));
     assert_eq!(collect(partial.body).await?, b"cat");
 
+    // Restoring a version requires the provider to retain the supplied
+    // SHA-256, and a server-side copy to preserve the exact content.
+    let metadata = store.head(&target, &key, None).await?;
+    assert_eq!(metadata.checksum, stored.checksum);
+    let copied_key = ObjectKey::new(format!("objects/{}", Uuid::now_v7()))?;
+    store
+        .copy(CopyObjectRequest {
+            target: &target,
+            source: &key,
+            source_provider_version_id: None,
+            destination: &copied_key,
+            content_type: "text/plain",
+            expected_size: size,
+            expected_checksum: stored
+                .checksum
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("put has no checksum"))?,
+        })
+        .await?;
+    let copied = store
+        .open_object(OpenObjectRequest {
+            target: &target,
+            key: &copied_key,
+            provider_version_id: None,
+            range: None,
+        })
+        .await?;
+    assert_eq!(collect(copied.body).await?, CONTENT);
+    store.delete(&target, &copied_key, None).await?;
     store.delete(&target, &key, None).await?;
+
+    check_multipart(&store, &target).await?;
+    Ok(())
+}
+
+async fn check_multipart(store: &S3ObjectStore, target: &StorageTarget) -> anyhow::Result<()> {
+    // Exercise real provider multipart assembly and its composite checksum.
+    let multipart_key = ObjectKey::new(format!("objects/{}", Uuid::now_v7()))?;
+    let upload = store
+        .create_multipart(target, &multipart_key, "text/plain")
+        .await?;
+    let mut bytes = vec![b'a'; 5 * 1024 * 1024];
+    bytes.extend_from_slice(CONTENT);
+    let staged = std::env::temp_dir().join(format!("briefcase-parts-{}", Uuid::now_v7()));
+    tokio::fs::write(&staged, &bytes).await?;
+    let mut parts = Vec::new();
+    for (index, chunk) in bytes.chunks(5 * 1024 * 1024).enumerate() {
+        let checksum_sha256: [u8; 32] = Sha256::digest(chunk).into();
+        let part_number = u32::try_from(index + 1)?;
+        let etag = store
+            .upload_part(UploadPartRequest {
+                target,
+                key: &multipart_key,
+                provider_upload_id: &upload,
+                part_number,
+                path: &staged,
+                offset: u64::try_from(index * 5 * 1024 * 1024)?,
+                size: u64::try_from(chunk.len())?,
+                checksum_sha256: &checksum_sha256,
+            })
+            .await?;
+        parts.push(StoredPart {
+            part_number,
+            etag,
+            checksum_sha256,
+        });
+    }
+    let completed = store
+        .complete_multipart(
+            target,
+            &multipart_key,
+            &upload,
+            &parts,
+            u64::try_from(bytes.len())?,
+        )
+        .await?;
+    assert!(
+        completed
+            .checksum
+            .ok_or_else(|| anyhow::anyhow!("multipart checksum missing"))?
+            .encoded_value()
+            .ends_with("-2")
+    );
+    let assembled = store
+        .open_object(OpenObjectRequest {
+            target,
+            key: &multipart_key,
+            provider_version_id: None,
+            range: None,
+        })
+        .await?;
+    assert_eq!(collect(assembled.body).await?, bytes);
+    store.delete(target, &multipart_key, None).await?;
+    tokio::fs::remove_file(staged).await?;
     Ok(())
 }
 

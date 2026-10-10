@@ -1,24 +1,24 @@
 //! The shapes Briefcase sends and accepts.
 //!
-//! These mirror the published contract exactly. Anything Briefcase treats as
-//! opaque — cursors, proofs, idempotency keys — stays opaque here too.
+//! These mirror the published contract. Anything Briefcase treats as opaque —
+//! cursors, proofs, idempotency keys — stays opaque here too. Accounts are
+//! keyed by their permanent `uuid` (short, case-sensitive text such as `zQo`,
+//! never an RFC 4122 UUID); their `c:`/`si:` id is for display and can change.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-use crate::config::EnvironmentKey;
-
-/// Kind of IAM principal.
+/// Kind of principal an action or grant names.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorType {
-    /// A human account.
+    /// A Carbon.
     Carbon,
-    /// An AI-agent account.
+    /// A Silicon.
     Silicon,
-    /// A registered application.
+    /// An app acting through a proof.
     Application,
 }
 
@@ -41,17 +41,21 @@ impl std::fmt::Display for ActorType {
 }
 
 /// A reference to one Carbon or Silicon.
+///
+/// When a request names an account (a grant, an invitee), `id` is its `c:`/`si:`
+/// id, such as `c:ada`. In Briefcase's answers (owners, actors, grantees) `id`
+/// is the account's permanent uuid, because ids can change.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ActorRef {
     /// Principal kind.
     #[serde(rename = "type")]
     pub actor_type: ActorType,
-    /// IAM principal identifier.
+    /// A `c:`/`si:` id in requests, the account's uuid in answers.
     pub id: String,
 }
 
 impl ActorRef {
-    /// References a Carbon by identifier.
+    /// Names a Carbon, such as `c:ada`.
     #[must_use]
     pub fn carbon(id: impl Into<String>) -> Self {
         Self {
@@ -60,12 +64,30 @@ impl ActorRef {
         }
     }
 
-    /// References a Silicon by identifier.
+    /// Names a Silicon, such as `si:scout`.
     #[must_use]
     pub fn silicon(id: impl Into<String>) -> Self {
         Self {
             actor_type: ActorType::Silicon,
             id: id.into(),
+        }
+    }
+
+    /// Names an account by its `c:` or `si:` id, taking the kind from the prefix.
+    ///
+    /// Returns `None` for anything that is not a `c:`/`si:` id.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        let id = id.trim();
+        let (kind, handle) = id.split_once(':')?;
+        if handle.is_empty() || handle.contains(['/', ':']) || handle.contains(char::is_whitespace)
+        {
+            return None;
+        }
+        match kind {
+            "c" => Some(Self::carbon(id)),
+            "si" => Some(Self::silicon(id)),
+            _ => None,
         }
     }
 }
@@ -76,6 +98,185 @@ impl std::fmt::Display for ActorRef {
     }
 }
 
+/// Whether an account is a Carbon or a Silicon.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    /// A Carbon (`c:` ids).
+    Carbon,
+    /// A Silicon (`si:` ids).
+    Silicon,
+}
+
+impl AccountKind {
+    /// Returns the wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Carbon => "carbon",
+            Self::Silicon => "silicon",
+        }
+    }
+}
+
+impl std::fmt::Display for AccountKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Another account, by its permanent uuid and (when known) its current id.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct AccountRef {
+    /// The permanent, case-sensitive account identifier.
+    pub uuid: String,
+    /// The current public id, such as `c:ada`; it can change.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// An account as Briefcase shows it next to a drive or a share.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountSummary {
+    /// The permanent, case-sensitive account identifier.
+    pub uuid: String,
+    /// The current public id, such as `c:ada` or `si:scout`; it can change.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Carbon or Silicon.
+    pub kind: AccountKind,
+    /// The display name, when Briefcase knows it.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The profile photo, when Briefcase knows it.
+    #[serde(default)]
+    pub pfp_url: Option<String>,
+}
+
+impl AccountSummary {
+    /// The public id, or the uuid while Briefcase has not learned it.
+    #[must_use]
+    pub fn display_id(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.uuid)
+    }
+}
+
+/// The signed-in account, verified by Briefcase (`GET /api/v1/me`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Account {
+    /// The permanent, case-sensitive account identifier.
+    pub uuid: String,
+    /// The current public id; it can change.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Carbon or Silicon.
+    pub kind: AccountKind,
+    /// The display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The profile photo.
+    #[serde(default)]
+    pub pfp_url: Option<String>,
+    /// A Silicon's custodian (a Carbon); absent for Carbons.
+    #[serde(default)]
+    pub custodian: Option<AccountRef>,
+}
+
+impl Account {
+    /// The public id, or the uuid while Briefcase has not learned it.
+    #[must_use]
+    pub fn display_id(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.uuid)
+    }
+}
+
+/// How this deployment signs accounts in (`GET /api/v1/accounts`, no
+/// credential needed).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AccountsInfo {
+    /// Briefcase's app id at Silicon Accounts, the audience of its access tokens.
+    pub app_id: String,
+    /// The Silicon Accounts URL, also the issuer of the access tokens.
+    pub accounts_url: String,
+    /// The scopes another app may hold in a User verification proof to act for
+    /// an account here.
+    #[serde(default)]
+    pub delegated_scopes: Vec<String>,
+}
+
+/// How the caller relates to a drive it opens with the owner's rights.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriveRelation {
+    /// The caller's own drive.
+    Own,
+    /// The drive of a Silicon the caller looks after.
+    Custodial,
+}
+
+/// A drive the caller opens with its owner's rights: its own, or a Silicon's
+/// it looks after.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Drive {
+    /// Whose drive it is.
+    pub owner: AccountSummary,
+    /// Own, or a Silicon the caller looks after.
+    pub relation: DriveRelation,
+    /// The drive's top folder; list it with `ListEntries::in_folder(root_id)`.
+    pub root_id: Uuid,
+    /// The drive's permanent address, such as `https://briefcase.teamofsilicons.com/c:ada`.
+    pub permanent_url: Url,
+}
+
+/// The drives the caller opens with the owner's rights.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DriveList {
+    /// The caller's own drive first, then one per Silicon it looks after.
+    pub items: Vec<Drive>,
+}
+
+/// Something another account shared with the caller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SharedEntry {
+    /// Whose drive the entry is in.
+    pub owner: AccountSummary,
+    /// When the newest live share on the entry was made.
+    #[serde(with = "time::serde::rfc3339")]
+    pub shared_at: OffsetDateTime,
+    /// The entry.
+    pub entry: Entry,
+}
+
+/// One page of Shared with me.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SharedPage {
+    /// Newest share first, one item per entry.
+    pub items: Vec<SharedEntry>,
+    /// Cursor for the following page, absent at the end.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// One account a Silicon (or its custodian) allowed to share with it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AllowedAccount {
+    /// The allowed account.
+    pub account: AccountSummary,
+    /// When it was allowed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub allowed_at: OffsetDateTime,
+}
+
+/// The accounts outside a Silicon's custodian and the custodian's other
+/// Silicons that may share with it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AllowedAccounts {
+    /// The Silicon.
+    pub silicon: AccountSummary,
+    /// The accounts it allows.
+    pub items: Vec<AllowedAccount>,
+}
+
 /// Whether an entry stores bytes or contains other entries.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,18 +285,6 @@ pub enum EntryType {
     File,
     /// A folder.
     Folder,
-}
-
-/// The visibility boundary an entry inherits.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootType {
-    /// Readable by every current organization member.
-    Public,
-    /// Readable through ownership or an explicit grant only.
-    Private,
-    /// Readable by everyone carrying one IAM tag.
-    Tag,
 }
 
 /// How much of an entry the caller can see.
@@ -168,7 +357,8 @@ impl std::fmt::Display for EffectiveAccess {
     }
 }
 
-/// One right a permission grant conveys.
+/// One right a share conveys. Delete is never shared: only the creator, the
+/// drive's owner and their custodians may delete.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRight {
@@ -178,7 +368,7 @@ pub enum AccessRight {
     Write,
     /// Change what already exists.
     Update,
-    /// Move to the recoverable bin.
+    /// Move to the recoverable bin (never grantable; kept so older answers parse).
     Delete,
 }
 
@@ -218,8 +408,12 @@ impl std::fmt::Display for AccessRight {
 pub struct Entry {
     /// Stable identifier.
     pub id: Uuid,
-    /// Organization the entry belongs to.
-    pub org_id: String,
+    /// The drive the entry is in: its owner's account uuid.
+    ///
+    /// Briefcase's API names this field `org_id`; it is read from there and
+    /// written as `drive`.
+    #[serde(rename(serialize = "drive"), alias = "org_id")]
+    pub drive: String,
     /// File or folder.
     #[serde(rename = "type")]
     pub entry_type: EntryType,
@@ -227,29 +421,27 @@ pub struct Entry {
     pub visibility: EntryVisibility,
     /// Display name within the parent.
     pub name: String,
-    /// Organization-relative path, without a leading separator.
+    /// Path within the drive, without a leading separator.
     pub path: String,
-    /// Parent folder, absent at the organization base.
+    /// Parent folder, absent at the top of a drive.
     pub parent_id: Option<Uuid>,
-    /// Inherited visibility boundary.
-    pub root_type: RootType,
-    /// IAM tag backing a tag boundary.
-    pub tag: Option<String>,
     /// Media type of a file.
     pub content_type: Option<String>,
     /// Size of a file in bytes.
     pub size: Option<u64>,
     /// Renderer a client should open for a file.
     pub render: Option<RenderKind>,
-    /// Clean permanent URL that shows the folder structure.
+    /// Clean permanent URL below the drive owner's id, such as
+    /// `https://briefcase.teamofsilicons.com/c:ada/notes/plan.md`.
     pub permanent_url: Url,
     /// Authenticated sandboxed content URL for a file.
     pub content_url: Option<Url>,
     /// Authenticated attachment URL for a file.
     pub download_url: Option<Url>,
-    /// Owner, absent for a traversal folder and for a reserved container.
+    /// Creator, absent for a traversal folder and for a system folder (the top
+    /// of a drive, `apps/`, `apps/{app}/`).
     pub owner: Option<ActorRef>,
-    /// Application that originally created the entry.
+    /// App that created the entry through a proof, such as `waveform`.
     pub origin_app_id: Option<String>,
     /// What the caller may do here.
     pub effective_access: Vec<EffectiveAccess>,
@@ -263,7 +455,7 @@ pub struct Entry {
     #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<OffsetDateTime>,
     /// When a self-destructing file is permanently deleted; absent for a
-    /// permanent file, every folder, and servers that predate self destruct.
+    /// permanent file and every folder.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub self_destruct_at: Option<OffsetDateTime>,
 }
@@ -285,18 +477,18 @@ impl Entry {
 /// One page of entries.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EntryPage {
-    /// Visible entries, newest first.
+    /// Visible entries.
     pub items: Vec<Entry>,
     /// Cursor for the following page, absent at the end.
     pub next_cursor: Option<String>,
 }
 
-/// An explicit permission grant.
+/// An explicit share (permission grant) on an entry.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PermissionGrant {
     /// Grant identifier.
     pub id: Uuid,
-    /// Member the grant is for.
+    /// The account the grant is for (its uuid in `id`).
     pub principal: ActorRef,
     /// Rights it conveys.
     pub access: Vec<AccessRight>,
@@ -373,6 +565,10 @@ pub enum NotificationDecision {
 pub struct NotificationSubject {
     /// Entry identifier.
     pub entry_id: Uuid,
+    /// The drive holding the entry (its owner's uuid); absent on notifications
+    /// from before personal drives.
+    #[serde(default)]
+    pub drive: Option<String>,
     /// Name at the time.
     pub name: String,
     /// Path at the time.
@@ -442,12 +638,13 @@ pub struct DailyUsageMeasure {
     pub resets_at: OffsetDateTime,
 }
 
-/// What an organization is consuming.
+/// What a drive is consuming. Uploads count against the drive they land in,
+/// whoever uploads them.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub struct OrganizationUsage {
-    /// Storage consumption and ceiling.
+pub struct DriveUsage {
+    /// Storage consumption and ceiling (1 PiB by default).
     pub storage: UsageMeasure,
-    /// Upload volume within the current UTC day.
+    /// Upload volume within the current UTC day (100 GiB by default).
     pub daily_uploads: DailyUsageMeasure,
 }
 
@@ -480,7 +677,7 @@ pub struct ActivityEvent {
     pub action: String,
     /// Who performed it.
     pub actor: ActorRef,
-    /// Application that acted on their behalf.
+    /// App that acted for the account through a proof.
     pub app_id: Option<String>,
     /// When it happened.
     #[serde(with = "time::serde::rfc3339")]
@@ -523,7 +720,7 @@ pub struct FileVersionPage {
     pub next_cursor: Option<String>,
 }
 
-/// Server-side encryption for an organization bucket.
+/// Server-side encryption for a bring-your-own bucket.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptionMode {
@@ -533,16 +730,20 @@ pub enum EncryptionMode {
     SseKms,
 }
 
-/// An organization-owned S3 bucket to store its files in.
+/// An S3 bucket the drive's owner brings for its files.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BucketConfiguration {
+    /// The drive to configure (its owner's `c:`/`si:` id or uuid); the caller's
+    /// own when absent. A custodian configures a Silicon's drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
     /// Bucket name.
     pub bucket_name: String,
     /// AWS region.
     pub region: String,
     /// Cross-account role Briefcase assumes.
     pub role_arn: String,
-    /// Organization-owned prefix.
+    /// Prefix inside the bucket.
     pub prefix: String,
     /// Expected AWS account.
     pub aws_account_id: String,
@@ -562,7 +763,7 @@ pub enum BucketConfigurationState {
     Failed,
 }
 
-/// The outcome of configuring organization storage.
+/// The outcome of configuring a drive's storage.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BucketConfigurationStatus {
     /// Outcome.
@@ -581,191 +782,91 @@ pub struct ServiceStatus {
     pub status: String,
 }
 
-/// Lifecycle state of a disposable Briefcase testing environment.
+/// What one entry inside an archive is.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TestingEnvironmentStatus {
-    /// The key selects an active environment.
-    Active,
-    /// The key is disabled while the environment remains recoverable.
-    Deleted,
+pub enum ArchiveItemType {
+    /// A file.
+    File,
+    /// A folder.
+    Folder,
+    /// A symbolic or hard link.
+    Link,
+    /// Anything else.
+    #[serde(other)]
+    Other,
 }
 
-/// One organization-owned Briefcase testing environment.
+/// One entry inside an archive, listed without extracting it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironment {
-    /// Public selector safe to store in build metadata and pass to `--test`.
-    pub id: Uuid,
-    /// Owning IAM organization handle.
-    pub org_id: String,
-    /// Human-readable environment name.
-    pub name: String,
-    /// Optional purpose or run description.
-    pub description: Option<String>,
-    /// Current lifecycle state.
-    pub status: TestingEnvironmentStatus,
-    /// Public IAM environment paired with this Briefcase plane.
-    pub iam_environment_id: Uuid,
-    /// Canonical test-only IAM Application used by Briefcase in this plane.
-    pub iam_app_id: crate::ApplicationId,
-    /// Public actor that created the environment.
-    pub created_by: TestingEnvironmentCreator,
-    /// Increments whenever the Briefcase root key rotates.
-    pub key_generation: i64,
-    /// Most recent root-key rotation.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub key_rotated_at: Option<OffsetDateTime>,
-    /// Last accepted request within this environment.
-    #[serde(with = "time::serde::rfc3339")]
-    pub last_activity_at: OffsetDateTime,
-    /// Last time all disposable contents were erased.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub cleaned_at: Option<OffsetDateTime>,
-    /// Soft-deletion time.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub deleted_at: Option<OffsetDateTime>,
-    /// Final purge deadline for a retired environment.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub purge_after: Option<OffsetDateTime>,
-    /// Optimistic-concurrency version.
-    pub version: i64,
-    /// Creation time.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    /// Last lifecycle change.
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
-}
-
-/// Public identity retained as a testing environment's creator.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentCreator {
-    /// Carbon or Silicon.
+pub struct ArchiveItem {
+    /// The path inside the archive, as the archive spells it.
+    pub path: String,
+    /// File, folder, link or other.
     #[serde(rename = "type")]
-    pub actor_type: ActorType,
-    /// Public actor handle.
-    pub id: String,
+    pub item_type: ArchiveItemType,
+    /// Bytes once extracted.
+    pub size: u64,
+    /// Bytes inside the archive (zip only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressed_size: Option<u64>,
+    /// When the entry was last changed, when the archive records it.
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub modified_at: Option<OffsetDateTime>,
+    /// Whether the entry's content is encrypted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub encrypted: bool,
 }
 
-/// Page of organization testing environments.
+/// The contents of an archive file (zip, tar, tar.gz, tar.zst, 7z).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentPage {
-    /// Environments in stable newest-first order.
-    pub items: Vec<TestingEnvironment>,
+pub struct ArchiveListing {
+    /// `zip`, `tar`, `tar.gz`, `tar.zst` or `7z`.
+    pub format: String,
+    /// What the archive holds, in the archive's order.
+    pub entries: Vec<ArchiveItem>,
+    /// Whether the archive holds more than is listed.
+    pub truncated: bool,
+    /// Why the listing stopped early: `entry_limit`, `directory_limit`,
+    /// `read_limit` or `unreadable_rest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_because: Option<String>,
 }
 
-/// Environment returned together with its current one-time secret value.
+/// A permanent address whose owner id moved to another id (`308`).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentWithKey {
-    /// Environment metadata.
-    #[serde(flatten)]
-    pub environment: TestingEnvironment,
-    /// Current Briefcase root key.
-    pub key: EnvironmentKey,
-}
-
-/// Audited retrieval of an environment's current root key.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentKey {
-    /// Environment whose key this is.
-    pub environment_id: Uuid,
-    /// Current key generation.
-    pub key_generation: i64,
-    /// Most recent rotation, when it has rotated.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub key_rotated_at: Option<OffsetDateTime>,
-    /// Current Briefcase root key.
-    pub key: EnvironmentKey,
-}
-
-/// Limited description available to a caller holding only the root key.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentSelf {
-    /// Public environment selector.
-    pub id: Uuid,
-    /// Environment name.
-    pub name: String,
-    /// Optional description.
-    pub description: Option<String>,
-    /// Current root-key generation.
-    pub key_generation: i64,
-    /// Creation time.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-}
-
-/// Result of erasing one test environment's disposable data.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TestingEnvironmentCleaning {
-    /// Cleaned environment.
-    pub environment_id: Uuid,
-    /// Database records erased, excluding the retained control record.
-    pub erased_rows: u64,
-    /// Completion time.
-    #[serde(with = "time::serde::rfc3339")]
-    pub cleaned_at: OffsetDateTime,
-}
-
-/// Access and rotating refresh credentials returned after an IAM SLT exchange.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionTokens {
-    /// Short-lived IAM access token used on Briefcase requests.
-    pub access_token: String,
-    /// Single-use rotating IAM refresh token.
-    pub refresh_token: String,
-    /// OAuth token type, normally `Bearer`.
-    pub token_type: String,
-    /// Access-token lifetime in seconds.
-    pub expires_in: u64,
-    /// Granted IAM scope catalogue.
-    pub scope: String,
-    /// Signed-in Carbon or Silicon.
-    pub actor: SessionActor,
-    /// Organization selected for this session.
-    pub org_id: Option<String>,
-    /// The single organization selected for this IAM 5 account session.
-    /// Empty means reauthorisation is needed, never access to all memberships.
-    #[serde(default)]
-    pub organizations: Vec<String>,
-}
-
-/// IAM actor represented by a Briefcase Application session.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SessionActor {
-    /// Stable IAM principal UUID.
-    pub principal_id: Uuid,
-    /// Carbon or Silicon.
-    #[serde(rename = "type")]
-    pub actor_type: ActorType,
-    /// Public Carbon/Silicon identifier.
-    pub public_id: String,
-}
-
-impl std::fmt::Debug for SessionTokens {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SessionTokens")
-            .field("access_token", &"<redacted>")
-            .field("refresh_token", &"<redacted>")
-            .field("token_type", &self.token_type)
-            .field("expires_in", &self.expires_in)
-            .field("scope", &self.scope)
-            .field("actor", &self.actor)
-            .field("org_id", &self.org_id)
-            .field("organizations", &self.organizations)
-            .finish()
-    }
+pub struct Moved {
+    /// The same API address under the owner's current id.
+    pub moved_to: Url,
+    /// The matching permanent address on the website.
+    pub permanent_url: Url,
+    /// The drive's owner.
+    pub owner: AccountRef,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessRight, ActorRef, ActorType, EffectiveAccess, Entry};
+    use super::{
+        AccessRight, ActorRef, ActorType, DriveList, DriveRelation, EffectiveAccess, Entry,
+        SharedPage,
+    };
 
     #[test]
     fn an_actor_reads_as_kind_and_identifier() {
-        let actor = ActorRef::carbon("c:cos");
+        let actor = ActorRef::carbon("c:ada");
         assert_eq!(actor.actor_type, ActorType::Carbon);
-        assert_eq!(actor.to_string(), "c:cos");
+        assert_eq!(actor.to_string(), "c:ada");
+        assert_eq!(
+            ActorRef::from_id("si:scout"),
+            Some(ActorRef::silicon("si:scout"))
+        );
+        assert_eq!(ActorRef::from_id("email:a@b.c"), None);
+        assert_eq!(ActorRef::from_id("c:"), None);
+        assert_eq!(ActorRef::from_id("c:a/b"), None);
     }
 
     #[test]
@@ -782,73 +883,70 @@ mod tests {
         assert_eq!(AccessRight::parse("manage_permissions"), None);
     }
 
-    #[test]
-    fn an_entry_answers_what_the_caller_may_do() {
-        let entry: Entry = serde_json::from_str(
-            r#"{
-                "id": "01a067ce-7f19-7790-820a-0be6b3d4f828",
-                "org_id": "tos",
-                "type": "file",
-                "visibility": "full",
-                "name": "notes.md",
-                "path": "private/cos:tos/notes.md",
-                "parent_id": null,
-                "root_type": "private",
-                "tag": null,
-                "content_type": "text/markdown",
-                "size": 12,
-                "render": "document",
-                "permanent_url": "https://briefcase.example/org/tos/private/cos:tos/notes.md",
-                "content_url": null,
-                "download_url": null,
-                "owner": {"type": "carbon", "id": "cos:tos"},
-                "origin_app_id": null,
-                "effective_access": ["read", "update"],
-                "created_at": null,
-                "updated_at": null,
-                "deleted_at": null
-            }"#,
-        )
-        .expect("the contract's entry shape must parse");
+    fn entry_json() -> &'static str {
+        r#"{
+            "id": "01a067ce-7f19-7790-820a-0be6b3d4f828",
+            "org_id": "zQo",
+            "type": "file",
+            "visibility": "full",
+            "name": "plan.md",
+            "path": "notes/plan.md",
+            "parent_id": null,
+            "root_type": "private",
+            "tag": null,
+            "content_type": "text/markdown",
+            "size": 12,
+            "render": "document",
+            "permanent_url": "https://briefcase.example/c:ada/notes/plan.md",
+            "content_url": null,
+            "download_url": null,
+            "owner": {"type": "carbon", "id": "zQo"},
+            "origin_app_id": null,
+            "effective_access": ["read", "update"],
+            "created_at": null,
+            "updated_at": null,
+            "deleted_at": null
+        }"#
+    }
 
+    #[test]
+    fn an_entry_names_its_drive_and_what_the_caller_may_do() {
+        let entry: Entry =
+            serde_json::from_str(entry_json()).expect("the contract's entry shape must parse");
+        assert_eq!(entry.drive, "zQo");
         assert!(!entry.is_folder());
         assert!(entry.allows(EffectiveAccess::Update));
         assert!(!entry.allows(EffectiveAccess::Delete));
+        // Written back as `drive`, and read again from either name.
+        let written = serde_json::to_value(&entry).unwrap();
+        assert_eq!(written["drive"], "zQo");
+        assert!(written.get("org_id").is_none());
+        let again: Entry = serde_json::from_value(written).unwrap();
+        assert_eq!(again.drive, "zQo");
     }
-}
 
-/// Public IAM application configuration for the selected Briefcase deployment.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct IamInfo {
-    /// Canonical app ID for which IAM should mint a short-lived token.
-    pub app_id: crate::ApplicationId,
-    /// Briefcase test plane, or production when absent.
-    pub test_environment_id: Option<Uuid>,
-    /// Paired IAM test plane, or production when absent.
-    pub iam_environment_id: Option<Uuid>,
-}
-
-/// Current authentication verified online by IAM; never contains credentials.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct LoginStatus {
-    /// Whether IAM accepted the access token as active for this application.
-    pub authenticated: bool,
-    /// The authenticated Carbon or Silicon, absent when unauthenticated.
-    pub actor: Option<LoginActor>,
-    /// The one organization in the currently active IAM 5 session.
-    pub organizations: Vec<String>,
-    /// Access-token expiry as a Unix timestamp, absent when unauthenticated.
-    pub expires_at: Option<i64>,
-}
-
-/// Identity returned by login inspection, even without an organization grant.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LoginActor {
-    /// Stable IAM principal UUID.
-    pub principal_id: Uuid,
-    /// Carbon or Silicon.
-    #[serde(rename = "type")]
-    pub actor_type: ActorType,
-    /// Public identifier, if an active organization snapshot supplies it.
-    pub public_id: Option<String>,
+    #[test]
+    fn drives_and_shared_pages_parse() {
+        let drives: DriveList = serde_json::from_str(
+            r#"{"items":[
+                {"owner":{"uuid":"zQo","id":"c:ada","kind":"carbon","display_name":"Ada","pfp_url":null},
+                 "relation":"own","root_id":"01a067ce-7f19-7790-820a-0be6b3d4f801",
+                 "permanent_url":"https://briefcase.example/c:ada"},
+                {"owner":{"uuid":"Sc0","id":null,"kind":"silicon"},
+                 "relation":"custodial","root_id":"01a067ce-7f19-7790-820a-0be6b3d4f802",
+                 "permanent_url":"https://briefcase.example/Sc0"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(drives.items[0].relation, DriveRelation::Own);
+        assert_eq!(drives.items[1].owner.display_id(), "Sc0");
+        let shared: SharedPage = serde_json::from_str(&format!(
+            r#"{{"items":[{{"owner":{{"uuid":"zQo","id":"c:ada","kind":"carbon"}},
+                "shared_at":"2026-10-10T10:00:00Z","entry":{}}}],"next_cursor":null}}"#,
+            entry_json()
+        ))
+        .unwrap();
+        assert_eq!(shared.items[0].owner.display_id(), "c:ada");
+        assert_eq!(shared.items[0].entry.name, "plan.md");
+    }
 }

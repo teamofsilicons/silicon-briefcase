@@ -310,8 +310,7 @@ mod tests {
         },
         domain::{
             actor::{
-                ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
-                RequestAuthContext,
+                ActorId, ActorKind, ActorRef, AuthenticationMode, DriveAccess, RequestAuthContext,
             },
             entry::{EntryName, EntryPath},
         },
@@ -330,31 +329,25 @@ mod tests {
         .await?;
         crate::infrastructure::postgres::migrate(&pool).await?;
         let (state, _, _) = crate::api::tests::test_state(pool.clone())?;
+        let reader = ActorRef::new(
+            ActorKind::Carbon,
+            ActorId::new(format!("Rdr{}", &Uuid::now_v7().simple().to_string()[12..]))?,
+        );
         let context = ExecutionContext::new(
-            RequestAuthContext::new(
-                OrganizationId::new(format!("archive-{}", Uuid::new_v4().simple()))?,
-                ActorRef::new(ActorKind::Carbon, ActorId::new("reader:tos")?),
-                OrganizationRole::Member,
-                vec![],
+            RequestAuthContext::for_drive(
+                reader.clone(),
+                reader,
+                DriveAccess::Owner,
                 AuthenticationMode::Bearer,
-            ),
+            )?,
             "archive-test",
         );
-        let private = state
-            .metadata
-            .get_entry_by_path(&context, &EntryPath::new("private/reader:tos")?)
-            .await?;
         for name in ["visible", "outside-the-download"] {
             state
                 .metadata
                 .create_folder(
                     &context,
-                    CreateFolderCommand::new(
-                        EntryName::new(name)?,
-                        Some(private.id()),
-                        None,
-                        vec![],
-                    )?,
+                    CreateFolderCommand::new(EntryName::new(name)?, None, vec![])?,
                     &MutationMetadata::new(
                         Some(IdempotencyKey::new(Uuid::new_v4().to_string())?),
                         [0; 32],
@@ -364,18 +357,13 @@ mod tests {
         }
         let visible = state
             .metadata
-            .get_entry_by_path(&context, &EntryPath::new("private/reader:tos/visible")?)
+            .get_entry_by_path(&context, &EntryPath::new("visible")?)
             .await?;
         state
             .metadata
             .create_folder(
                 &context,
-                CreateFolderCommand::new(
-                    EntryName::new("empty ✓")?,
-                    Some(visible.id()),
-                    None,
-                    vec![],
-                )?,
+                CreateFolderCommand::new(EntryName::new("empty ✓")?, Some(visible.id()), vec![])?,
                 &MutationMetadata::new(
                     Some(IdempotencyKey::new(Uuid::new_v4().to_string())?),
                     [1; 32],

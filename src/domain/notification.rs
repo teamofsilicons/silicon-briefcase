@@ -47,9 +47,13 @@ pub enum NotificationDecision {
 pub struct EntrySnapshot {
     /// Entry identifier.
     pub entry_id: EntryId,
+    /// The drive holding the entry (its owner's uuid). Notifications live in
+    /// the recipient's own inbox while the entry usually lives in someone
+    /// else's drive. `None` for notifications from before personal drives.
+    pub drive: Option<String>,
     /// Display name at the time of the event.
     pub name: String,
-    /// Organization-relative path at the time of the event.
+    /// Drive-relative path at the time of the event.
     pub path: EntryPath,
     /// File or folder discriminator.
     pub kind: EntryKind,

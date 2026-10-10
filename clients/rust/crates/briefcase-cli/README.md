@@ -28,7 +28,7 @@ see" (`3`) from "signed in, but not allowed" (`4`).
 
 The hosted Briefcase URL is automatic, including on first login. URL selection
 uses an explicit `--url`, then `BRIEFCASE_URL`, then the saved profile URL,
-then `https://backend.briefcase.teamofsilicons.com/api/v1/`. Use the optional
+then `https://api.briefcase.teamofsilicons.com/api/v1/`. Use the optional
 override only for local development or another deployment.
 
 For a normal production login the organization is optional: IAM returns exactly

@@ -13,6 +13,12 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[features]
+# Signing accounts in at Silicon Accounts as Briefcase's public client (device
+# flow, short-lived token exchange, refresh, revoke). Off by default: apps that
+# only call Briefcase (with a token or a proof) do not need it.
+accounts = ["dep:silicon-accounts-client"]
+
 [dependencies]
 futures-core = "0.3.31"
 mime = "0.3.17"
@@ -22,6 +28,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
+silicon-accounts-client = { version = "0.4.0", optional = true }
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }

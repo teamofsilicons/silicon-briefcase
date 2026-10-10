@@ -243,6 +243,10 @@ pub struct OrganizationStorageConfigRow {
     pub created_at: OffsetDateTime,
     /// Last state-change timestamp.
     pub updated_at: OffsetDateTime,
+    /// STS External ID the customer's trust policy names, persisted when the
+    /// configuration was created (legacy configurations keep the id derived
+    /// from their organization handle).
+    pub external_id: String,
 }
 
 /// Durable multipart upload session.

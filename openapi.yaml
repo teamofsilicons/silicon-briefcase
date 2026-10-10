@@ -1,20 +1,20 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 3.0.0
-  description: Organization-scoped file storage, permissions, previews, search, versioning, recovery, and OBO application
-    access.
+  version: 4.0.0
+  description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
+    search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
-- url: https://backend.briefcase.teamofsilicons.com/api/v1
-  description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead,
-    always organization-scoped as https://briefcase.teamofsilicons.com/org/{org_id}/{path}.
+- url: https://api.briefcase.teamofsilicons.com/api/v1
+  description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead
+    as https://briefcase.teamofsilicons.com/{owner}/{path}, where the owner is the drive owner's current `c:`/`si:` id
+    (for example `/c:ada/notes/plan.md`); `GET /paths/{owner}/{path}` resolves them. Addresses from before personal
+    drives (`/org/{org}/{path}`) keep resolving.
 security:
 - bearerAuth: []
-- bearerAuth: []
-  testingEnvironmentKey: []
 tags:
 - name: Authentication
-- name: Testing environments
+- name: Drives
 - name: Entries
 - name: Applications
 - name: Uploads
@@ -25,54 +25,6 @@ tags:
 - name: Bin
 - name: Storage
 paths:
-  /iam:
-    get:
-      tags:
-      - Authentication
-      operationId: readIamInfo
-      summary: Read the public IAM application ID before login
-      security: []
-      description: No member token or organization is required. An optional X-Briefcase-App-Secret selects the paired
-        test application's identity. Application secrets and environment keys are never returned.
-      parameters:
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      responses:
-        '200':
-          description: Public IAM configuration (Cache-Control no-store)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IamInfo'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /auth/status:
-    get:
-      tags:
-      - Authentication
-      operationId: readLoginStatus
-      summary: Verify the current Carbon or Silicon session with IAM
-      security:
-      - {}
-      - bearerAuth: []
-      - bearerAuth: []
-        testingEnvironmentKey: []
-      description: No organization selection is required. Missing, invalid, expired, or revoked member tokens return
-        authenticated false. Active tokens return their identity and currently granted organizations; an empty grant
-        list does not make an active session unauthenticated. IAM outages, malformed upstream responses, and invalid
-        test-plane credentials remain errors.
-      parameters:
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      responses:
-        '200':
-          description: Live authentication status (Cache-Control no-store)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LoginStatus'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
   /version:
     get:
       tags:
@@ -116,321 +68,145 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
-  /auth/slt:
-    post:
-      tags:
-      - Authentication
-      operationId: exchangeShortLivedToken
-      summary: Exchange an IAM short-lived token for a Briefcase Application session
-      security: []
-      description: In production, slt is the single-use code obtained from IAM's hosted Application login.
-        With X-Briefcase-App-Secret selecting a paired test environment, slt can be an IAM-issued test login code or an existing test Carbon ID
-        (alice) or Silicon ID (worker:tos). Briefcase exchanges it through IAM using only the mapped testing
-        key and test Application credential, and verifies the returned actor. IAM determines the actor's
-        current authority. Actor IDs never authenticate production sessions. Preserve the same Idempotency-Key
-        and input when recovering an uncertain result.
-      parameters:
-      - $ref: '#/components/parameters/AuthIdempotencyKey'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ShortLivedTokenExchange'
-      responses:
-        '200':
-          description: Opaque access token, rotating refresh token, and the live organizations reachable by the
-            IAM session
-          headers:
-            Cache-Control:
-              schema:
-                const: no-store
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApplicationSessionTokens'
-        '400':
-          description: Missing or invalid idempotency key or request body
-        '401':
-          description: The production SLT or selected test actor is invalid, inactive, or belongs to another plane
-        '503':
-          description: IAM or the configured testing plane is unavailable
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /auth/refresh:
-    post:
-      tags:
-      - Authentication
-      operationId: refreshApplicationSession
-      summary: Rotate an IAM Application refresh token
-      security: []
-      description: A successful refresh consumes the presented token and returns its replacement. Serialize refreshes
-        per token family. Retry an uncertain result only with the exact same token, Idempotency-Key, and testing
-        environment selection; rejected refreshes are terminal.
-      parameters:
-      - $ref: '#/components/parameters/AuthIdempotencyKey'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApplicationSessionRefresh'
-      responses:
-        '200':
-          description: Rotated access and refresh tokens, including the live organizations reachable by the IAM
-            session
-          headers:
-            Cache-Control:
-              schema:
-                const: no-store
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApplicationSessionTokens'
-        '400':
-          description: Missing or invalid idempotency key or request body
-        '401':
-          description: The refresh token is invalid, consumed, revoked, or belongs to another plane
-        '503':
-          description: IAM or the configured testing plane is unavailable
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
+  /accounts:
     get:
       tags:
-      - Testing environments
-      operationId: listTestingEnvironments
-      summary: List Briefcase testing environments owned by an organization
-      description: This lifecycle route always authenticates in production. The path organization must equal X-Org-ID.
-        Active environments are returned by default; status=deleted or status=all changes that selection.
-      parameters:
-      - name: status
-        in: query
-        schema:
-          type: string
-          enum:
-          - active
-          - deleted
-          - all
-          default: active
+      - Authentication
+      operationId: readAccountsInfo
+      summary: Describe how to sign in to Briefcase with Silicon Accounts
+      security: []
+      description: Public, so a client can find Briefcase's app id and the Silicon Accounts origin before it holds a
+        token. Carbons sign in at Silicon Accounts (hosted pages for the web, the device flow for the CLI); Silicons
+        exchange a short-lived token from `silicon-accounts login --app briefcase`. Either way Briefcase receives a
+        Silicon Accounts access token whose audience is `briefcase`. The response also lists the scopes another app
+        can hold in a User verification proof to act for an account here.
       responses:
         '200':
-          description: Matching environments; at most ten can be active
+          description: Sign-in facts (Cache-Control no-store)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironmentPage'
+                $ref: '#/components/schemas/AccountsInfo'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-    post:
-      tags:
-      - Testing environments
-      operationId: createTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
+      x-operation-version: 1.0.0
+  /me:
     get:
       tags:
-      - Testing environments
-      operationId: getTestingEnvironment
-      summary: Read one testing environment without revealing credentials
+      - Authentication
+      operationId: readAccount
+      summary: Read the signed-in Carbon or Silicon as Briefcase knows it
+      description: Verifies the access token and returns the account's uuid (the permanent key), its current public
+        id, kind, display name and photo, and a Silicon's custodian. A token issued before the account signed out,
+        removed Briefcase's access or was deleted answers 401 with the exact reason.
       responses:
         '200':
-          description: Environment metadata
-          headers:
-            ETag:
-              schema:
-                type: string
-                pattern: ^"[1-9][0-9]*"$
+          description: The signed-in account (Cache-Control no-store)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TestingEnvironment'
+                $ref: '#/components/schemas/Account'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-    patch:
+      x-operation-version: 1.0.0
+  /drives:
+    get:
       tags:
-      - Testing environments
-      operationId: updateTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
+      - Drives
+      operationId: listDrives
+      summary: List the drives the caller opens with the owner's rights
+      description: Every Carbon and Silicon has one drive. The list holds the caller's own drive and, for a Carbon,
+        the drive of every Silicon it looks after, where it holds the owner's rights (it never acts as the Silicon).
+        Each item names the owner, how the caller relates to it (`own` or `custodial`), the drive's root folder and
+        its permanent URL. What others shared with the caller is listed by `GET /shared`.
       responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
+        '200':
+          description: The caller's drives (Cache-Control no-store)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/DriveList'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /shared:
+    get:
+      tags:
+      - Drives
+      operationId: listSharedWithMe
+      summary: List what other accounts shared with the caller
+      description: Newest share first, one item per shared entry, each with the account whose drive holds it so a
+        client can group by owner. Only live shares on entries the caller can still see are listed. A shared entry
+        opens by its id like any other.
+      parameters:
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/ContentsLimit'
+      responses:
+        '200':
+          description: Entries shared with the caller (Cache-Control no-store)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedPage'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /silicons/{silicon}/allowed-accounts:
+    parameters:
+    - $ref: '#/components/parameters/Silicon'
+    get:
+      tags:
+      - Drives
+      operationId: listSiliconAllowedAccounts
+      summary: List who may share with a Silicon besides its custodian and the custodian's other Silicons
+      description: A Silicon acts on what it receives, so it accepts shares only from its custodian, the other
+        Silicons its custodian looks after, and the accounts listed here. Only the Silicon itself and its custodian
+        may read the list (403 `not_silicons_custodian`); naming a Carbon is 422 `not_a_silicon`.
+      responses:
+        '200':
+          description: The accounts allowed to share with the Silicon, oldest first (Cache-Control no-store)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllowedAccounts'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /silicons/{silicon}/allowed-accounts/{account}:
+    parameters:
+    - $ref: '#/components/parameters/Silicon'
+    - name: account
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 80
+      description: The account, by `c:`/`si:` id or uuid
+    put:
+      tags:
+      - Drives
+      operationId: allowAccountToShareWithSilicon
+      summary: Let an account share with a Silicon
+      description: Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the
+        Silicon itself is 422 `allowance_self`.
+      responses:
+        '201':
+          description: The account may now share with the Silicon
+        '204':
+          description: The account was already allowed; nothing changed
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
     delete:
       tags:
-      - Testing environments
-      operationId: deleteTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
+      - Drives
+      operationId: disallowAccountToShareWithSilicon
+      summary: Stop letting an account share with a Silicon
+      description: Shares the account already made stay; the Silicon or its custodian can revoke them one by one.
+        404 when the account was not allowed.
       responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/key:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    get:
-      tags:
-      - Testing environments
-      operationId: getTestingEnvironmentKey
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/iam-pairings:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: replaceTestingEnvironmentIamPairing
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/cleanings:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: cleanTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /organizations/{org_id}/testing-environments/{environment_id}/restorations:
-    parameters:
-    - $ref: '#/components/parameters/OrgId'
-    - $ref: '#/components/parameters/OrgIdPath'
-    - $ref: '#/components/parameters/TestingEnvironmentIdPath'
-    post:
-      tags:
-      - Testing environments
-      operationId: restoreTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /testing-environment:
-    get:
-      tags:
-      - Testing environments
-      operationId: describeCurrentTestingEnvironment
-      summary: Describe the environment selected by its IAM app secret
-      security:
-      - testingEnvironmentKey: []
-      responses:
-        '200':
-          description: Minimal environment metadata visible to a key holder
-          headers:
-            Cache-Control:
-              schema:
-                const: private, no-store
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TestingEnvironmentSelf'
-        default:
-          $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
-  /testing-environment/cleanings:
-    post:
-      tags:
-      - Testing environments
-      operationId: cleanCurrentTestingEnvironment
-      deprecated: true
-      summary: Manage the shared environment through Honeycomb
-      description: 'This compatibility route returns testing_environment_managed_by_honeycomb. Use the Honeycomb environments API or briefcase env manage; Briefcase credentials are never forwarded to Honeycomb.'
-      responses:
-        '409':
-          description: Shared testing lifecycle is managed by Honeycomb
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+        '204':
+          description: The account may no longer share with the Silicon
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
@@ -439,11 +215,14 @@ paths:
       tags:
       - Entries
       operationId: listEntries
-      summary: List folder contents, or filter everything the caller can reach
-      description: 'Returns the hundred most recently changed visible entries per page, newest first. Without `filter`,
-        the listing browses one level: the organization roots, or the contents of `parent_id`/`path`. With `filter`
-        and no parent, it searches every entry the caller may reach, which is how a `location:` predicate selects
-        a subtree.
+      summary: List folder contents, the top of a drive, or a filtered view of a drive
+      description: 'Returns the hundred most recently changed visible entries per page, newest first. Every Carbon
+        and Silicon has one drive; `drive` names which (its owner''s `c:`/`si:` id or uuid), defaulting to the
+        caller''s own, and is ignored with `parent_id` because a folder names its drive. Without `filter`, the listing
+        browses one level: the top of the drive, or the contents of `parent_id`/`path`. With `filter` and no parent,
+        it searches every entry in the drive the caller may reach, which is how a `location:` predicate selects a
+        subtree. In another account''s drive the caller sees only what was shared with it and what it (or a Silicon
+        it looks after) created there.
 
 
         The filter language combines freely. Terms are ANDed; `or` introduces an alternative; `not` or a leading
@@ -452,10 +231,11 @@ paths:
 
         `last:N` / `first:N` take N entries chronologically (1-100, single page); `sort:newest` / `sort:oldest`
         order the result, newest first by default; `between:DD-MM-YYYY=DD-MM-YYYY` bounds the last change with both
-        days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@{carbon:id}` matches the
-        creator; `to:@{silicon:id}` matches an explicit share; `for:@{id}` matches what that member can reach; `contains:''term''`
+        days inclusive; `after:DD-MM-YYYY` and `before:DD-MM-YYYY` bound one side; `from:@c:ada` matches the creator;
+        `to:@si:scout` matches an explicit share; `for:@c:ada` matches what that account can reach (ids are resolved
+        at Silicon Accounts to the account they name now; an unknown id is 422 `unknown_account`); `contains:''term''`
         matches names and extracted content, with `*` as a wildcard; `has:''term''` matches extracted content only;
-        `name:''term''` matches names only; `location:''private/cos:tos''` matches a path prefix; `is:` takes `file`,
+        `name:''term''` matches names only; `location:''notes/2026''` matches a path prefix; `is:` takes `file`,
         `folder`, a renderer (`image`, `video`, `document`, `spreadsheet`, `presentation`, `audio`, `archive`, `code`,
         `unsupported`), or an extension such as `md`; `permissions:` takes `read`, `write`, `update`, `delete`,
         or `manage_permissions` and matches the caller''s effective access. A bare word is shorthand for `contains:`.
@@ -463,25 +243,25 @@ paths:
 
         Filtering only ever returns entries the caller can already see.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: parent_id
         in: query
         schema:
           type: string
           format: uuid
-        description: Omit for the organization root
+        description: Omit for the top of the drive
       - name: path
         in: query
         schema:
           type: string
           maxLength: 2048
-        description: Parent folder addressed by path instead of identifier
+        description: Parent folder addressed by its path within the drive instead of identifier
+      - $ref: '#/components/parameters/Drive'
       - name: filter
         in: query
         schema:
           type: string
           maxLength: 1024
-        description: Filter expression, for example "last:5 location:'private' (contains:'apple' or contains:'cat')
+        description: Filter expression, for example "last:5 location:'notes' (contains:'apple' or contains:'cat')
           is:md". `is:expiring` matches entries with a live expiring share that gave the caller access or that the caller
           manages; `is:self-destruct` matches files whose self-destruct timer is running.
       - $ref: '#/components/parameters/Cursor'
@@ -495,17 +275,20 @@ paths:
                 $ref: '#/components/schemas/EntryPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     post:
       tags:
       - Entries
       operationId: createFolder
-      description: Without a parent, creates a user folder at the organization base with the required root_type
-        access boundary (and IAM tag for type tag). The new folder is a sibling of the reserved containers, not
-        redirected into one. With parent_id or parent_path, creates inside that folder and inherits its boundary.
-        Existing folders are not relocated. Sibling name collisions return 409 without exposing hidden entry metadata.
+      description: Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when neither is given.
+        `drive` names the drive for `parent_path` or the top (its owner's `c:`/`si:` id or uuid; the caller's own by
+        default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns
+        it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422
+        `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than
+        `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. `invitees` follow the
+        sharing rules of `POST /entries/{entry_id}/invitations`. Sibling name collisions return 409 without exposing
+        hidden entry metadata.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -522,10 +305,9 @@ paths:
                 $ref: '#/components/schemas/Entry'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /entries/{entry_id}:
     parameters:
-    - $ref: '#/components/parameters/OrgId'
     - $ref: '#/components/parameters/EntryId'
     get:
       tags:
@@ -545,6 +327,9 @@ paths:
       tags:
       - Entries
       operationId: updateEntry
+      description: Renames an entry and/or moves it to another folder of the same drive. Entries move only within the
+        drive that holds them; a destination folder the caller can see in another drive is 422 `cross_drive_move`
+        (download and upload instead), and one it cannot see answers 404.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -571,11 +356,13 @@ paths:
                 $ref: '#/components/schemas/Entry'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
     delete:
       tags:
       - Entries
       operationId: moveEntryToBin
+      description: The entry's creator, the drive's owner, and the custodian of either may move an entry to the bin.
+        Delete is never shared.
       responses:
         '204':
           description: Entry moved to the 45-day bin
@@ -588,11 +375,10 @@ paths:
       - Entries
       operationId: readEntryContent
       summary: Stream current file bytes for sandboxed in-place rendering
-      description: 'Briefcase relays the bytes itself, so the response is always bound to a current IAM identity
+      description: 'Briefcase relays the bytes itself, so the response is always bound to a current verified account
         and is never cacheable. Responses are sandboxed by Content-Security-Policy and served with `X-Content-Type-Options:
         nosniff`. Byte ranges are supported for media playback.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Range'
       responses:
@@ -610,7 +396,6 @@ paths:
       operationId: downloadEntry
       summary: Download current file bytes as an attachment
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Range'
       responses:
@@ -634,8 +419,10 @@ paths:
         to 5 TiB are accepted; operators size the upload deadline and temporary disk for the sizes they expect.
 
 
-        The destination folder is named either by `parent_id` or by `path`, never both. A path is resolved from
-        the organization base, so `private/cos:tos/reports` addresses the same folder its permanent URL shows.
+        The destination folder is named either by `parent_id` or by `path`, never both; with neither, the file goes
+        at the top of the drive. A path is resolved within the drive `drive` names (its owner''s `c:`/`si:` id or
+        uuid; the caller''s own by default), so `reports/q3` addresses the same folder its permanent URL shows.
+        `drive` is refused with `parent_id`, because a folder names its drive.
 
 
         Uploading a name that an active file already carries is how a file is updated: the bytes become that file''s
@@ -644,19 +431,19 @@ paths:
         same name is a conflict.
 
 
-        Two organization limits apply: 100 GiB of uploads per UTC day, and 1 PiB of storage. The daily figure counts
-        uploaded bytes and returns at midnight UTC; the storage figure counts what is currently kept, so deleting
-        content returns capacity once the bytes are gone. Either limit may be configured per organization. An upload
-        that does not fit is refused before its bytes are stored, and `GET /usage` reports both.
+        Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of uploads per UTC day, and 1
+        PiB of storage. The daily figure counts uploaded bytes and returns at midnight UTC; the storage figure counts
+        what is currently kept, so deleting content returns capacity once the bytes are gone. Either limit may be
+        configured per drive. An upload that does not fit is refused before its bytes are stored, and `GET /usage`
+        reports both.
 
 
         `self_destruct_minutes` makes a new file self-destruct: 1 to 43,200 minutes (30 days) after the upload
         finishes, the file is permanently deleted. It never goes to the bin, and deleting it by hand before then is
         permanent too. It can only be chosen when the upload creates a file; naming an existing file is refused with
-        `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, org admins and
-        owners can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
+        `self_destruct_requires_new_file`, and a later version never changes the timer. The creator, the drive''s
+        owner, and the custodian of either can keep the file with `DELETE /entries/{entry_id}/self-destruct`.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -674,7 +461,12 @@ paths:
                 path:
                   type: string
                   maxLength: 2048
-                  description: Destination folder path, as an alternative to parent_id
+                  description: Destination folder path within the drive, as an alternative to parent_id
+                drive:
+                  type: string
+                  maxLength: 80
+                  description: The drive for path or for the top of a drive (its owner's `c:`/`si:` id or uuid); refused
+                    with parent_id
                 self_destruct_minutes:
                   $ref: '#/components/schemas/LifetimeMinutes'
                 file:
@@ -690,16 +482,15 @@ paths:
         '413':
           description: The file exceeds the 5 TiB maximum
         '429':
-          description: The organization's daily upload allowance is spent; Retry-After gives the seconds until it
-            resets at 00:00 UTC
+          description: The drive's daily upload allowance is spent; Retry-After gives the seconds until it resets
+            at 00:00 UTC
         '507':
-          description: The organization has no storage capacity left
+          description: The drive has no storage capacity left
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/permissions:
     parameters:
-    - $ref: '#/components/parameters/OrgId'
     - $ref: '#/components/parameters/EntryId'
     get:
       tags:
@@ -724,6 +515,12 @@ paths:
       tags:
       - Permissions
       operationId: grantPermission
+      description: Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian,
+        the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT
+        /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only
+        the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
+        `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
+        by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
       requestBody:
         required: true
         content:
@@ -739,14 +536,13 @@ paths:
                 $ref: '#/components/schemas/PermissionGrant'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /entries/{entry_id}/permissions/{grant_id}:
     delete:
       tags:
       - Permissions
       operationId: revokePermission
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: grant_id
         in: path
@@ -766,10 +562,10 @@ paths:
       - Permissions
       operationId: inspectEffectivePermissions
       summary: Report what the caller may do on named files and folders
-      description: Names up to 100 targets by identifier, path, or both. A target that does not exist and one the
-        caller cannot read are both reported as unresolved, so the answer never confirms a hidden entry.
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
+      description: Names up to 100 targets by identifier, path, or both. Identifiers may name entries in any drive;
+        each is answered inside its own drive. Paths are resolved within `drive` (its owner's `c:`/`si:` id or uuid;
+        the caller's own by default). A target that does not exist and one the caller cannot read are both reported
+        as unresolved, so the answer never confirms a hidden entry.
       requestBody:
         required: true
         content:
@@ -785,14 +581,13 @@ paths:
                 $ref: '#/components/schemas/PermissionInspectionResult'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /search:
     get:
       tags:
       - Search
       operationId: searchFiles
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: q
         in: query
         required: true
@@ -828,7 +623,7 @@ paths:
       x-operation-version: 1.0.0
       summary: Submit a bounded operational event
       security: []
-      description: Best-effort anonymous relay to Space Station. No table key or IAM credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
+      description: Best-effort anonymous relay to Space Station. No table key or credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
       requestBody:
         required: true
         content:
@@ -861,9 +656,8 @@ paths:
       operationId: submitReport
       x-operation-version: 1.0.0
       summary: Submit a bug report with an optional proposed fix
-      description: Stores the user-authored report in the selected organization and environment. No telemetry, credentials, or files are collected automatically. Test reports stay in the test database. Reuse the same idempotency key and body after an uncertain response.
+      description: Stores the account-authored report in the caller's drive. No telemetry, credentials, or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -908,9 +702,8 @@ paths:
       operationId: listNotifications
       summary: Read the central notification inbox
       description: Returns the twenty newest notifications for the authenticated Carbon or Silicon together with
-        the unread count used for the badge.
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
+        the unread count used for the badge. The inbox is the account's own; each subject names the drive that holds
+        its entry, usually someone else's.
       responses:
         '200':
           description: Newest notifications and unread badge count
@@ -920,15 +713,13 @@ paths:
                 $ref: '#/components/schemas/NotificationInbox'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /notifications/read:
     post:
       tags:
       - Notifications
       operationId: readNotifications
       summary: Mark the entire notification inbox read
-      parameters:
-      - $ref: '#/components/parameters/OrgId'
       responses:
         '200':
           description: Inbox after every notification was marked read
@@ -948,7 +739,6 @@ paths:
       description: Returns up to the last hundred recorded actions on the entry — who created, read, updated, downloaded,
         deleted, or restored it, and when.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -968,11 +758,11 @@ paths:
       deprecated: true
       summary: Retired raw delegated upload
       description: Returns HTTP 410 without reading upload bytes. Use the delegated reserve, capability transfer,
-        and commit operations with a reusable IAM OBO access token.
+        and commit operations with a Silicon Accounts User verification proof.
       security: []
       responses:
         '410':
-          description: Raw OBO uploads are retired; use reserve, transfer, and commit
+          description: Raw delegated uploads are retired; use reserve, transfer, and commit
           content:
             application/json:
               schema:
@@ -987,15 +777,9 @@ paths:
       - Uploads
       operationId: reserveDelegatedUpload
       summary: Reserve private upload storage with current member authority
-      description: Reserve private storage with an approved reusable OBO access token. The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
+      description: Reserve private storage for the account a User verification proof speaks for (scope briefcase.uploads.reserve). The exact destination, logical operation UUID, size and SHA-256 remain immutable. An unchanged retry returns current state and may rotate an idle capability. A capability cannot publish.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1015,6 +799,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.reserve
       x-operation-version: 3.0.0
   /obo/uploads/commit:
     post:
@@ -1023,15 +808,9 @@ paths:
       - Uploads
       operationId: commitDelegatedUpload
       summary: Publish previously staged bytes with fresh member authority
-      description: Publish staged bytes using a currently valid OBO access token. Verify live identity, membership, originating app, destination organization, test generation, resource permission and quota before atomic publication. Repeating an unchanged logical operation does not create another file version.
+      description: Publish staged bytes with a valid User verification proof (scope briefcase.uploads.commit). The proof's account, issuing app, destination, resource permission and quota are verified before atomic publication. Repeating an unchanged logical operation does not create another file version.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1051,6 +830,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.commit
       x-operation-version: 3.0.0
   /obo/uploads/status:
     post:
@@ -1058,16 +838,10 @@ paths:
       - Applications
       - Uploads
       operationId: getDelegatedUploadStatus
-      summary: Reconcile one logical upload with current OBO authority
-      description: Reconcile an upload with a valid OBO token for the same immutable member, originating app and plane. Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
+      summary: Reconcile one logical upload with a current proof
+      description: Reconcile an upload with a valid proof for the same account and issuing app (scope briefcase.uploads.status). Status reveals no capability or file bytes. Destination write access is not required to reconcile an existing operation.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1087,6 +861,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.status
       x-operation-version: 3.0.0
   /obo/uploads/cancel:
     post:
@@ -1095,15 +870,9 @@ paths:
       - Uploads
       operationId: cancelDelegatedUpload
       summary: Cancel unpublished private staging
-      description: Cancel unpublished content with a valid OBO token for the same immutable member, originating app and plane. Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
+      description: Cancel unpublished content with a valid proof for the same account and issuing app (scope briefcase.uploads.cancel). Cancellation never deletes committed files and retains cleanup obligations until provider outcomes are known.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1123,6 +892,7 @@ paths:
           description: Logical intent or current lifecycle state conflicts
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.uploads.cancel
       x-operation-version: 3.0.0
   /obo/uploads/{upload_id}/content:
     put:
@@ -1131,17 +901,15 @@ paths:
       - Uploads
       operationId: transferDelegatedUpload
       summary: Transfer exact private bytes using a narrow upload capability
-      description: Sends only the capability issued by the fresh-authorized reservation, the organization selector
-        and the same test root when using a test plane. Do not send an IAM bearer, proof or application credential.
+      description: Sends only the capability issued by the reservation. Do not send an access token or proof; the
+        drive is found from the reservation (older clients may still send X-Org-ID, which must then name it).
         Content-Length and the raw bytes must match the reserved size; the complete SHA-256 is checked before provider
-        writes. A successful transfer is private staging only, not file publication. Commit separately with a valid OBO token.
+        writes. A successful transfer is private staging only, not file publication. Commit separately with a valid proof.
         A failed or uncertain transfer must be reconciled through the fresh-authorized status endpoint before retry.
       security:
       - uploadCapability: []
-      - uploadCapability: []
-        testingEnvironmentKey: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/UploadTenant'
       - name: upload_id
         in: path
         required: true
@@ -1173,26 +941,22 @@ paths:
           description: Invalid or revoked upload capability
         '409':
           description: Transfer cannot start in the current lifecycle state
+        '404':
+          description: No reservation has this upload id
         '413':
           description: Content exceeds the reservation or maximum size
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 2.1.0
   /obo/folders/create:
     post:
       tags:
       - Applications
       operationId: createFolderOnBehalfOfMember
       summary: Create a child folder for a represented member
-      description: Create a child folder using a reusable OBO token. An empty parent_path selects the represented member private app folder. Ordinary write permissions and the app namespace apply. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
+      description: Create a child folder with a User verification proof (scope briefcase.folders.create). An empty parent_path selects the account's folder for the issuing app, `apps/{app}/`; a path names a folder in the account's own drive (inside `apps/{app}/` unless the app is first-party). Ordinary write permissions apply and the folder records the issuing app. Retry uncertain results with the unchanged manifest and operation_id; current authority is verified again.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1212,6 +976,7 @@ paths:
           description: Name or logical operation conflicts with existing state
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.folders.create
       x-operation-version: 3.0.0
   /obo/entries/list:
     post:
@@ -1219,15 +984,9 @@ paths:
       - Applications
       operationId: listEntriesOnBehalfOfMember
       summary: List the represented member's visible entries
-      description: List the ordinary privacy-filtered entry view with a reusable OBO token. Parent UUID and path are mutually exclusive. Each page is verified online and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
+      description: List the ordinary privacy-filtered entry view with a User verification proof (scope briefcase.entries.list). Parent UUID and path are mutually exclusive; with neither, the app's folder `apps/{app}/` is listed. Apps see only their folder in the account's own drive; a first-party app sees what the account sees and may name another drive with `drive` (others get 422 `drive_not_delegated`). Each page verifies the proof again and uses an explicit JSON cursor, filter and limit. An HTTP query parameter cannot change the manifest.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1245,22 +1004,17 @@ paths:
           description: Parent is absent or not visible
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 3.0.0
+      x-proof-scope: briefcase.entries.list
+      x-operation-version: 3.1.0
   /obo/files/read:
     post:
       tags:
       - Applications
       operationId: readFileOnBehalfOfMember
       summary: Stream a file for a represented member
-      description: Read a current file with a reusable OBO token and ordinary resource permissions. Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
+      description: Read a current file with a User verification proof (scope briefcase.files.read) and ordinary resource permissions (inside `apps/{app}/` of the account's drive unless the app is first-party). Range and download disposition come only from the JSON body. Inline content retains sandbox CSP, nosniff and private no-store headers. Every request verifies current authority.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1278,6 +1032,7 @@ paths:
           description: The bound byte range is unsatisfiable
         default:
           $ref: '#/components/responses/Error'
+      x-proof-scope: briefcase.files.read
       x-operation-version: 3.0.0
   /obo/entries/trash:
     post:
@@ -1285,15 +1040,9 @@ paths:
       - Applications
       operationId: trashEntryOnBehalfOfMember
       summary: Move an application-created entry to the recoverable bin
-      description: Recoverably remove app-created content with a reusable OBO token. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
+      description: Recoverably remove content the issuing app created with a User verification proof (scope briefcase.entries.trash). An entry another app (or the account itself) created answers 403 `not_created_by_app`. Current subtree delete permission and app namespace confinement apply. Retry the same operation_id and entry_id after an uncertain result. A completed key cannot delete a restored entry.
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
+      - proofAuth: []
       requestBody:
         required: true
         content:
@@ -1303,20 +1052,22 @@ paths:
       responses:
         '204':
           description: Entry moved to the bin or the same deletion was recognized
+        '403':
+          description: The issuing app did not create this entry (`not_created_by_app`)
         '404':
           description: Entry is absent or not visible
         '409':
           description: Logical operation or current entry state conflicts
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 3.0.0
+      x-proof-scope: briefcase.entries.trash
+      x-operation-version: 3.1.0
   /entries/{entry_id}/versions:
     get:
       tags:
       - Versions
       operationId: listVersions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
@@ -1336,7 +1087,6 @@ paths:
       - Versions
       operationId: restoreVersion
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: version_id
         in: path
@@ -1359,9 +1109,10 @@ paths:
       tags:
       - Storage
       operationId: readOrganizationUsage
-      summary: Report the organization's consumption and limits, in bytes
-      description: 'Answers how much space the organization is actually consuming — exact byte counts, never percentages,
-        so a client renders whichever unit or proportion it prefers.
+      summary: Report a drive's consumption and limits, in bytes
+      description: 'Answers how much space a drive is actually consuming — exact byte counts, never percentages, so
+        a client renders whichever unit or proportion it prefers. The drive is the caller''s own, or with `drive` that
+        of a Silicon it looks after; only the drive''s owner and that custodian may read it (404 otherwise).
 
 
         `storage.used_bytes` is what every retained version currently weighs, including versions of entries sitting
@@ -1370,9 +1121,10 @@ paths:
 
 
         Limits default to 100 GiB of uploads per UTC day and 1 PiB of storage, and either may be raised or lowered
-        per organization, so the figures reported here are the ones actually in force.'
+        per drive, so the figures reported here are the ones actually in force. Uploads are charged to the drive
+        they land in, whoever uploads them.'
       parameters:
-      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/Drive'
       responses:
         '200':
           description: Consumption and limits
@@ -1382,17 +1134,20 @@ paths:
                 $ref: '#/components/schemas/OrganizationUsage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /bin:
     get:
       tags:
       - Bin
       operationId: listBin
-      summary: List recoverable entries, newest deletion first
+      summary: List a drive's recoverable entries, newest deletion first
+      description: The drive is the caller's own unless `drive` names another. Its owner and the custodian of a
+        Silicon that owns it see everything in its bin; anyone else sees what they created there and what was shared
+        with them.
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/ContentsLimit'
+      - $ref: '#/components/parameters/Drive'
       responses:
         '200':
           description: Deleted entries visible to the actor
@@ -1402,14 +1157,13 @@ paths:
                 $ref: '#/components/schemas/EntryPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /bin/{entry_id}/restore:
     post:
       tags:
       - Bin
       operationId: restoreEntry
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -1426,12 +1180,14 @@ paths:
       tags:
       - Storage
       operationId: configureOrganizationBucket
+      summary: Configure a drive's bring-your-own S3 bucket
+      description: Configures storage for the caller's own drive, or with `drive` for a Silicon it looks after. Only
+        the drive's owner and that custodian may (403 otherwise). Briefcase checks the bucket with a test upload,
+        read, update and delete before it is used. The STS External ID Briefcase presents when it assumes the role is
+        derived from the drive and stored with the configuration; name it in the role's trust policy.
       security:
       - bearerAuth: []
-      - bearerAuth: []
-        testingEnvironmentKey: []
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - name: Idempotency-Key
         in: header
         required: false
@@ -1456,38 +1212,31 @@ paths:
                 $ref: '#/components/schemas/BucketConfigurationStatus'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
-  /org/{org_id}/{path}:
-    servers:
-    - url: https://backend.briefcase.teamofsilicons.com
+      x-operation-version: 2.0.0
+  /paths/{owner}/{path}:
     get:
       tags:
       - Entries
       operationId: resolvePermanentUrl
-      summary: Resolve the clean permanent URL of an entry
-      description: The path segment mirrors the folder structure exactly, for example `/org/tos/private/cos:tos/top_secret/this_secret.md`.
-        The organization segment must match `X-Org-ID`. Without `disposition` the entry and its effective access
-        are returned; with `disposition` the file bytes are streamed. Anything the caller cannot read answers `404`.
+      summary: Resolve an entry's permanent address
+      description: The address mirrors the folder structure below the drive's owner, for example
+        `/paths/c:ada/notes/2026/plan.md` for https://briefcase.teamofsilicons.com/c:ada/notes/2026/plan.md. The owner
+        is a `c:`/`si:` id or the account's uuid (entries' `content_url` uses the uuid, so it survives id changes).
+        Without `disposition` the entry and the caller's effective access are returned; with it the file bytes are
+        streamed. Without `Authorization` only what anyone with the link may read is served. An id the owner gave up
+        answers `308` with the address under its current id. Anything the caller cannot read answers `404`.
+      security:
+      - bearerAuth: []
+      - {}
       parameters:
-      - in: query
-        name: test_environment
-        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
-        schema:
-          type: string
-          format: uuid
-      - $ref: '#/components/parameters/OrgId'
-      - name: org_id
-        in: path
-        required: true
-        schema:
-          type: string
+      - $ref: '#/components/parameters/Owner'
       - name: path
         in: path
         required: true
         schema:
           type: string
           maxLength: 2048
-        description: Organization-relative entry path
+        description: Drive-relative entry path
       - name: disposition
         in: query
         schema:
@@ -1510,17 +1259,126 @@ paths:
                 format: binary
         '206':
           $ref: '#/components/responses/PartialFileContent'
+        '308':
+          $ref: '#/components/responses/Moved'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.1.0
+      x-operation-version: 2.0.0
+  /paths/{owner}:
+    get:
+      tags:
+      - Entries
+      operationId: resolveDriveTop
+      summary: Resolve the top of a drive
+      description: The drive's own address (https://briefcase.teamofsilicons.com/c:ada). Its owner and the custodian of
+        a Silicon that owns it see the top folder; someone with a share inside sees a traversal entry; anyone else gets
+        `404`. The top of a drive never has a link, so this always takes an access token. An id the owner gave up
+        answers `308`.
+      parameters:
+      - $ref: '#/components/parameters/Owner'
+      responses:
+        '200':
+          description: The drive's top folder
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entry'
+        '308':
+          $ref: '#/components/responses/Moved'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /org/{org_id}/{path}:
+    servers:
+    - url: https://api.briefcase.teamofsilicons.com
+    get:
+      tags:
+      - Entries
+      operationId: resolveLegacyPermanentUrl
+      deprecated: true
+      summary: Resolve an address from before personal drives
+      description: Addresses such as `/org/tos/public/handbook/guide.md` keep working after the move to personal
+        drives. They resolve through the aliases the cutover recorded when it moved each file (an address below a moved
+        folder resolves through the folder) and answer exactly like `GET /paths/{owner}/{path}` for the entry's current
+        place, whose `permanent_url` the response carries. Without `Authorization` only link-shared entries are served.
+      security:
+      - bearerAuth: []
+      - {}
+      parameters:
+      - name: org_id
+        in: path
+        required: true
+        description: The first segment of the old address, such as `tos` in `/org/tos/…`.
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9_-]{3,50}$
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 2048
+      - name: disposition
+        in: query
+        schema:
+          type: string
+          enum:
+          - inline
+          - attachment
+      - $ref: '#/components/parameters/Range'
+      responses:
+        '200':
+          description: Entry metadata, or complete file bytes when a disposition is requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entry'
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          $ref: '#/components/responses/PartialFileContent'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
+  /entries/{entry_id}/archive:
+    get:
+      tags:
+      - Entries
+      operationId: listArchiveContents
+      summary: List what an archive holds
+      description: Lists the entries of a zip, tar, tar.gz, tar.zst or 7z file without extracting anything, for
+        anyone who may read the file. Zip archives are listed from their central directory whatever their size; tar
+        archives are read as a stream (up to 1 GiB of archive); 7z archives up to 512 MiB. At most `limit` entries are
+        returned; `truncated` says when there are more. Any other file answers 422 `not_an_archive`; an unreadable or
+        encrypted archive answers 422 `archive_unreadable` or `archive_encrypted`.
+      parameters:
+      - $ref: '#/components/parameters/EntryId'
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 10000
+      responses:
+        '200':
+          description: The archive's entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArchiveListing'
+        default:
+          $ref: '#/components/responses/Error'
+      x-operation-version: 1.0.0
   /entries/{entry_id}/invitations:
     get:
       operationId: listInvitations
-      summary: List current member and dynamic tag invitations
+      summary: List the live shares on an entry
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - name: cursor
         in: query
@@ -1540,11 +1398,17 @@ paths:
       x-operation-version: 1.0.0
     post:
       operationId: createInvitation
-      summary: Invite a current member by ID, verified email, or IAM tag
+      summary: Share with a Carbon or Silicon named by id
+      description: Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian,
+        the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT
+        /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only
+        the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
+        `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
+        by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are
+        retired (422 `email_recipients_retired`, `tag_recipients_retired`).
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
@@ -1562,15 +1426,14 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/InvitationCreate'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
   /entries/{entry_id}/invitations/{grant_id}:
     delete:
       operationId: revokeInvitation
-      summary: Revoke a member or tag invitation
+      summary: Revoke a share (including one made to a tag before personal drives)
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - in: path
         name: grant_id
@@ -1595,7 +1458,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - in: path
         name: grant_id
@@ -1624,13 +1486,12 @@ paths:
     delete:
       operationId: makeEntryPermanent
       summary: Keep a self-destructing file
-      description: Stops the file's self-destruct timer. Only the file's creator, org admins and org owners may;
-        anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing`
+      description: Stops the file's self-destruct timer. Only the file's creator, the drive's owner, and the
+        custodian of either may; anyone else who can see the file gets 403. A file whose timer is not running is `not_self_destructing`
         (409).
       tags:
       - Entries
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '204':
@@ -1646,7 +1507,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
@@ -1661,10 +1521,11 @@ paths:
     put:
       operationId: setLinkAccess
       summary: Set anyone-with-link read/download access
+      description: Managed by the entry's creator, the drive's owner, and the custodian of either. The top of a drive
+        and its apps folders never get a link (422 `protected_folder`); anything inside them can.
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/IdempotencyKey'
       responses:
@@ -1682,7 +1543,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/LinkAccessUpdate'
-      x-operation-version: 1.1.0
+      x-operation-version: 1.2.0
   /entries/{entry_id}/logs:
     get:
       operationId: listEntryLogs
@@ -1690,7 +1551,6 @@ paths:
       tags:
       - Permissions
       parameters:
-      - $ref: '#/components/parameters/OrgId'
       - $ref: '#/components/parameters/EntryId'
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/Limit'
@@ -1704,20 +1564,25 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 2.0.0
-  /public/{org_id}/{path}:
+  /public/{owner}/{path}:
     get:
       operationId: readPublicEntry
       summary: Read or download a publicly shared file or folder
+      description: What anyone with the link may read, at `/public/{owner}/{path}`. The owner is a `c:`/`si:` id or
+        the account's uuid; the first segment of an address from before personal drives (`tos` in
+        `/public/tos/…`) also works, through the cutover's aliases.
+        An id the owner gave up answers `308` with the address under its current id.
       tags:
       - Permissions
       parameters:
-      - in: query
-        name: test_environment
-        description: Public sandbox UUID; unavailable or mismatched selectors never fall back to production.
+      - name: owner
+        in: path
+        required: true
+        description: The drive's owner (`c:`/`si:` id or account uuid), or the first segment of an address from
+          before personal drives.
         schema:
           type: string
-          format: uuid
-      - $ref: '#/components/parameters/OrgIdPath'
+          maxLength: 80
       - in: path
         name: path
         required: true
@@ -1734,7 +1599,6 @@ paths:
           - attachment
           default: metadata
       - $ref: '#/components/parameters/Cursor'
-      - $ref: '#/components/parameters/OptionalTestingEnvironmentKey'
       responses:
         '200':
           description: Success
@@ -1752,18 +1616,18 @@ paths:
               schema:
                 type: string
                 format: binary
+        '308':
+          $ref: '#/components/responses/Moved'
         default:
           $ref: '#/components/responses/Error'
       security: []
-      x-operation-version: 1.1.0
+      x-operation-version: 2.0.0
   /obo/invitations:
     post:
       operationId: inviteOnBehalfOfMember
-      summary: Critical IAM-approved operation inside the calling app subtree
+      summary: Share or link an entry for the account, inside the issuing app's folder
       tags:
       - Permissions
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
       responses:
         '200':
           description: Success
@@ -1780,23 +1644,16 @@ paths:
             schema:
               $ref: '#/components/schemas/DelegatedInvite'
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      x-iam-endpoint-id: briefcase.invitations.create
-      x-iam-critical: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary invitation permissions and logical idempotency.
+      - proofAuth: []
+      x-proof-scope: briefcase.invitations.create
+      description: Requires a User verification proof with scope briefcase.invitations.create from an app allowed for it. Ordinary invitation permissions and logical idempotency apply.
       x-operation-version: 3.0.0
   /obo/link-access:
     post:
       operationId: setLinkAccessOnBehalfOfMember
-      summary: Critical IAM-approved operation inside the calling app subtree
+      summary: Share or link an entry for the account, inside the issuing app's folder
       tags:
       - Permissions
-      parameters:
-      - $ref: '#/components/parameters/OboOrgId'
       responses:
         '200':
           description: Success
@@ -1813,14 +1670,9 @@ paths:
             schema:
               $ref: '#/components/schemas/DelegatedLinkAccess'
       security:
-      - oboAccess: []
-        appId: []
-      - oboAccess: []
-        appId: []
-        testingEnvironmentKey: []
-      x-iam-endpoint-id: briefcase.link_access.update
-      x-iam-critical: true
-      description: Critical OBO endpoint requiring post-login user consent. Verify the reusable OBO token for this receiving endpoint, then apply ordinary link-sharing permissions and logical idempotency.
+      - proofAuth: []
+      x-proof-scope: briefcase.link_access.update
+      description: Requires a User verification proof with scope briefcase.link_access.update from an app allowed for it. Ordinary link-sharing permissions and logical idempotency apply.
       x-operation-version: 3.0.0
 components:
   securitySchemes:
@@ -1832,53 +1684,58 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: IAM access token
-    oboAccess:
-      type: apiKey
-      in: header
-      name: X-IAM-OBO-Access-Token
-      description: Reusable IAM OBO access token (oba_), verified online for the receiving endpoint
-    appId:
-      type: apiKey
-      in: header
-      name: X-App-ID
-      description: Originating application identifier required together with an OBO access token
-    testingEnvironmentKey:
-      type: apiKey
-      in: header
-      name: X-Briefcase-App-Secret
-      description: 'IAM test Application secret: ask_ followed by 43 URL-safe characters. Selects an already provisioned
-        and registered Briefcase testing environment.'
+      bearerFormat: JWT
+      description: A Silicon Accounts access token issued to Briefcase (EdDSA JWT, `aud` = `briefcase`, `iss` = the
+        Silicon Accounts URL), verified locally against the published keys. Sharing changes, deletion, version
+        restore, self-destruct keep and storage configuration also confirm the token with Silicon Accounts.
+    proofAuth:
+      type: http
+      scheme: Proof
+      description: '`Authorization: Proof sap_…` — a Silicon Accounts User verification proof whose receiving app
+        is `briefcase`, issued to an app the operator allows for the route''s scope (`x-proof-scope`,
+        `BRIEFCASE_PROOF_ISSUERS`). The request runs as the account the proof speaks for, and what it creates records
+        the issuing app. Apps reach only `apps/{issuing app}/` in that account''s own drive, except the first-party
+        apps the operator lists (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS`), which reach everything the account can
+        through these routes.'
   parameters:
-    OrgId:
-      name: X-Org-ID
-      in: header
+    Drive:
+      name: drive
+      in: query
+      schema:
+        type: string
+        maxLength: 80
+      description: The drive to act in, named by its owner's `c:`/`si:` id or account uuid; the caller's own by
+        default. In another account's drive the caller reaches only what was shared with it and what it (or a
+        Silicon it looks after) created there; a Carbon holds the owner's rights in the drives of the Silicons it
+        looks after.
+    Silicon:
+      name: silicon
+      in: path
       required: true
       schema:
         type: string
-    OboOrgId:
+        maxLength: 80
+      description: The Silicon, by `si:` id or uuid
+    UploadTenant:
       name: X-Org-ID
       in: header
       required: false
+      deprecated: true
+      description: Optional, for older clients. When sent, the uuid of the account the reservation belongs to; the
+        drive is otherwise found from the reservation. The capability, not this value, authorizes the bytes.
       schema:
         type: string
-      description: Optional; IAM derives the organization and any supplied value must agree
-    OrgIdPath:
-      name: org_id
+        pattern: ^([A-Za-z0-9]{3,32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
+    Owner:
+      name: owner
       in: path
       required: true
+      description: The drive's owner, by `c:`/`si:` id (`c:ada`) or account uuid.
       schema:
         type: string
-        pattern: ^[a-z0-9_-]{3,50}$
+        maxLength: 80
     EntryId:
       name: entry_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-    TestingEnvironmentIdPath:
-      name: environment_id
       in: path
       required: true
       schema:
@@ -1892,22 +1749,6 @@ components:
         type: string
         minLength: 8
         maxLength: 255
-    AuthIdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      description: Stable key for recovering the same IAM token exchange
-      schema:
-        type: string
-        minLength: 16
-        maxLength: 255
-    OptionalTestingEnvironmentKey:
-      name: X-Briefcase-App-Secret
-      in: header
-      required: false
-      description: Selects a Briefcase test plane; omission selects production
-      schema:
-        $ref: '#/components/schemas/TestingEnvironmentKeyValue'
     IfMatch:
       name: If-Match
       in: header
@@ -1994,7 +1835,200 @@ components:
           schema:
             type: string
             format: binary
+    Moved:
+      description: The owner gave up the id the address used; the same address under the owner's current id
+      headers:
+        Location:
+          schema:
+            type: string
+            format: uri
+          description: The API address under the current id, query kept
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Moved'
   schemas:
+    AccountSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - uuid
+      - kind
+      properties:
+        uuid:
+          type: string
+          description: Permanent, case-sensitive account identifier
+        id:
+          type:
+          - string
+          - 'null'
+          description: Current public id, such as c:ada or si:scout (it can change)
+        kind:
+          type: string
+          enum:
+          - carbon
+          - silicon
+        display_name:
+          type:
+          - string
+          - 'null'
+        pfp_url:
+          type:
+          - string
+          - 'null'
+    Drive:
+      type: object
+      additionalProperties: false
+      required:
+      - owner
+      - relation
+      - root_id
+      - permanent_url
+      properties:
+        owner:
+          $ref: '#/components/schemas/AccountSummary'
+        relation:
+          type: string
+          enum:
+          - own
+          - custodial
+          description: '`own` for the caller''s drive; `custodial` for the drive of a Silicon the caller looks after'
+        root_id:
+          type: string
+          format: uuid
+          description: The drive’s root folder.
+        storage_external_id:
+          type: string
+          description: Stable STS External ID for this drive, supplied in the storage role trust policy.
+        permanent_url:
+          type: string
+          format: uri
+    DriveList:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Drive'
+    SharedEntry:
+      type: object
+      additionalProperties: false
+      required:
+      - owner
+      - shared_at
+      - entry
+      properties:
+        owner:
+          $ref: '#/components/schemas/AccountSummary'
+        shared_at:
+          type: string
+          format: date-time
+          description: When the newest live share on the entry was made
+        entry:
+          $ref: '#/components/schemas/Entry'
+    SharedPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SharedEntry'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    AllowedAccounts:
+      type: object
+      additionalProperties: false
+      required:
+      - silicon
+      - items
+      properties:
+        silicon:
+          $ref: '#/components/schemas/AccountSummary'
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - account
+            - allowed_at
+            properties:
+              account:
+                $ref: '#/components/schemas/AccountSummary'
+              allowed_at:
+                type: string
+                format: date-time
+    AccountsInfo:
+      type: object
+      additionalProperties: false
+      required:
+      - app_id
+      - accounts_url
+      - delegated_scopes
+      properties:
+        app_id:
+          type: string
+          description: Briefcase's app id at Silicon Accounts (the audience of its access tokens)
+        accounts_url:
+          type: string
+          format: uri
+          description: The Silicon Accounts URL, which is also the issuer of the access tokens
+        delegated_scopes:
+          type: array
+          description: Scopes another app may hold in a User verification proof to act for an account here
+          items:
+            type: string
+    Account:
+      type: object
+      additionalProperties: false
+      required:
+      - uuid
+      - kind
+      properties:
+        uuid:
+          type: string
+          description: Permanent, case-sensitive account identifier
+        id:
+          type:
+          - string
+          - 'null'
+          description: Current public id, such as c:ada or si:scout (it can change)
+        kind:
+          type: string
+          enum:
+          - carbon
+          - silicon
+        display_name:
+          type:
+          - string
+          - 'null'
+        pfp_url:
+          type:
+          - string
+          - 'null'
+        custodian:
+          description: A Silicon's custodian (a Carbon); null for Carbons
+          oneOf:
+          - type: 'null'
+          - type: object
+            additionalProperties: false
+            required:
+            - uuid
+            properties:
+              uuid:
+                type: string
+              id:
+                type:
+                - string
+                - 'null'
     DelegatedReserveUpload:
       type: object
       additionalProperties: false
@@ -2146,6 +2180,13 @@ components:
           - 'null'
           minLength: 1
           description: Alternative parent path; must not be blank
+        drive:
+          type:
+          - string
+          - 'null'
+          maxLength: 80
+          description: First-party apps only. The drive to list or resolve `path` in, by its owner's `c:`/`si:` id
+            or uuid; the account's own by default. Ignored with `parent_id`.
         filter:
           type:
           - string
@@ -2194,405 +2235,6 @@ components:
         entry_id:
           type: string
           format: uuid
-    ShortLivedTokenExchange:
-      type: object
-      additionalProperties: false
-      required:
-      - slt
-      properties:
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-          description: Selected organization. Required for a testing actor with more than one membership; must match an issued login code.
-        slt:
-          type: string
-          description: IAM-issued login code for the selected plane, or the existing Carbon/Silicon public ID when a test app secret is supplied.
-          oneOf:
-          - pattern: ^oac_[A-Za-z0-9_-]{43}$
-          - pattern: ^[a-z1-9_-]{3,30}$
-          - pattern: ^[a-z0-9_-]{3,50}:[a-z0-9_-]{3,50}$
-    ApplicationSessionRefresh:
-      type: object
-      additionalProperties: false
-      required:
-      - refresh_token
-      properties:
-        refresh_token:
-          type: string
-          pattern: ^ort_[A-Za-z0-9_-]{43}$
-    IamInfo:
-      type: object
-      additionalProperties: false
-      required:
-      - app_id
-      - test_environment_id
-      - iam_environment_id
-      properties:
-        app_id:
-          type: string
-        test_environment_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        iam_environment_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-    LoginStatus:
-      type: object
-      additionalProperties: false
-      required:
-      - authenticated
-      - actor
-      - organizations
-      - expires_at
-      properties:
-        authenticated:
-          type: boolean
-        actor:
-          oneOf:
-          - type: 'null'
-          - type: object
-            additionalProperties: false
-            required:
-            - principal_id
-            - type
-            - public_id
-            properties:
-              principal_id:
-                type: string
-                format: uuid
-              type:
-                type: string
-                enum:
-                - carbon
-                - silicon
-              public_id:
-                type:
-                - string
-                - 'null'
-                description: Public identity from active organization snapshots; otherwise null. The principal UUID
-                  is always available when authenticated.
-        organizations:
-          type: array
-          items:
-            type: string
-        expires_at:
-          type:
-          - integer
-          - 'null'
-          format: int64
-          description: Access-token expiry as a Unix timestamp.
-    ApplicationSessionActor:
-      type: object
-      additionalProperties: false
-      required:
-      - principal_id
-      - type
-      - public_id
-      properties:
-        principal_id:
-          type: string
-          format: uuid
-        type:
-          type: string
-          enum:
-          - carbon
-          - silicon
-        public_id:
-          type: string
-          minLength: 1
-          maxLength: 255
-    ApplicationSessionTokens:
-      type: object
-      additionalProperties: false
-      required:
-      - access_token
-      - refresh_token
-      - token_type
-      - expires_in
-      - scope
-      - actor
-      - org_id
-      - organizations
-      properties:
-        access_token:
-          type: string
-          pattern: ^oat_[A-Za-z0-9_-]{43}$
-        refresh_token:
-          type: string
-          pattern: ^ort_[A-Za-z0-9_-]{43}$
-        token_type:
-          type: string
-          const: Bearer
-        expires_in:
-          type: integer
-          const: 1800
-        scope:
-          type: string
-        actor:
-          $ref: '#/components/schemas/ApplicationSessionActor'
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-        organizations:
-          type: array
-          minItems: 1
-          maxItems: 1
-          description: The single organization selected for this account session.
-          items:
-            type: string
-            pattern: ^[a-z0-9_-]{3,50}$
-    TestingEnvironmentCreator:
-      type: object
-      additionalProperties: false
-      required:
-      - type
-      - id
-      properties:
-        type:
-          type: string
-          enum:
-          - carbon
-          - silicon
-        id:
-          type: string
-          minLength: 1
-          maxLength: 255
-    TestingEnvironment:
-      type: object
-      required:
-      - id
-      - org_id
-      - name
-      - description
-      - status
-      - iam_environment_id
-      - iam_app_id
-      - created_by
-      - key_generation
-      - key_rotated_at
-      - last_activity_at
-      - cleaned_at
-      - deleted_at
-      - purge_after
-      - version
-      - created_at
-      - updated_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        org_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}$
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        status:
-          type: string
-          enum:
-          - active
-          - deleted
-        iam_environment_id:
-          type: string
-          format: uuid
-        iam_app_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$
-        created_by:
-          $ref: '#/components/schemas/TestingEnvironmentCreator'
-        key_generation:
-          type: integer
-          minimum: 1
-        key_rotated_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        last_activity_at:
-          type: string
-          format: date-time
-        cleaned_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        deleted_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        purge_after:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        version:
-          type: integer
-          minimum: 1
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    TestingEnvironmentPage:
-      type: object
-      additionalProperties: false
-      required:
-      - items
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/TestingEnvironment'
-    TestingEnvironmentCreate:
-      type: object
-      additionalProperties: false
-      required:
-      - name
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        iam_test_key:
-          $ref: '#/components/schemas/IamTestingEnvironmentKeyValue'
-    TestingEnvironmentPatch:
-      type: object
-      additionalProperties: false
-      minProperties: 1
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-    TestingEnvironmentIamPairing:
-      type: object
-      additionalProperties: false
-      required:
-      - iam_environment_id
-      - iam_environment_key
-      - iam_app_id
-      - iam_app_secret
-      properties:
-        iam_environment_id:
-          type: string
-          format: uuid
-        iam_environment_key:
-          $ref: '#/components/schemas/IamTestingEnvironmentKeyValue'
-        iam_app_id:
-          type: string
-          pattern: ^[a-z0-9_-]{3,50}>[a-z][a-z0-9_-]{2,79}$
-        iam_app_secret:
-          type: string
-          pattern: ^ask_[A-Za-z0-9_-]{43}$
-    TestingEnvironmentKeyValue:
-      type: string
-      pattern: ^ask_[A-Za-z0-9_-]{43}$
-      description: IAM testing Application secret selecting the paired Briefcase environment. Never use a production
-        secret.
-    IamTestingEnvironmentKeyValue:
-      type: string
-      pattern: ^[A-Za-z0-9]{32}$
-      description: Root key for the separately created IAM testing environment; stored encrypted and sent only to
-        IAM.
-    TestingEnvironmentWithKey:
-      allOf:
-      - $ref: '#/components/schemas/TestingEnvironment'
-      - type: object
-        required:
-        - key
-        properties:
-          key:
-            $ref: '#/components/schemas/TestingEnvironmentKeyValue'
-    TestingEnvironmentKey:
-      type: object
-      additionalProperties: false
-      required:
-      - environment_id
-      - key_generation
-      - key_rotated_at
-      - key
-      properties:
-        environment_id:
-          type: string
-          format: uuid
-        key_generation:
-          type: integer
-          minimum: 1
-        key_rotated_at:
-          type:
-          - string
-          - 'null'
-          format: date-time
-        key:
-          $ref: '#/components/schemas/TestingEnvironmentKeyValue'
-    TestingEnvironmentSelf:
-      type: object
-      additionalProperties: false
-      required:
-      - id
-      - name
-      - description
-      - key_generation
-      - created_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        description:
-          type:
-          - string
-          - 'null'
-          maxLength: 1000
-        key_generation:
-          type: integer
-          minimum: 1
-        created_at:
-          type: string
-          format: date-time
-    TestingEnvironmentCleaning:
-      type: object
-      additionalProperties: false
-      required:
-      - environment_id
-      - erased_rows
-      - cleaned_at
-      properties:
-        environment_id:
-          type: string
-          format: uuid
-        erased_rows:
-          type: integer
-          minimum: 0
-          description: Database rows logically removed after provider cleanup was durably queued.
-        cleaned_at:
-          type: string
-          format: date-time
     ActorRef:
       type: object
       required:
@@ -2607,6 +2249,9 @@ components:
           - application
         id:
           type: string
+        public_id:
+          type: string
+          description: Optional current account label on invitation listings; id remains the immutable authority key.
     FolderCreate:
       type: object
       required:
@@ -2621,16 +2266,32 @@ components:
           - string
           - 'null'
           format: uuid
+        parent_path:
+          type:
+          - string
+          - 'null'
+          maxLength: 2048
+          description: Destination folder path within the drive, as an alternative to parent_id
+        drive:
+          type:
+          - string
+          - 'null'
+          maxLength: 80
+          description: The drive for parent_path or the top-level folder (its owner's `c:`/`si:` id or uuid); refused with
+            parent_id
         root_type:
           type: string
           enum:
           - public
           - private
           - tag
-          description: Required only when creating at organization root
+          deprecated: true
+          description: Accepted for compatibility with `private` only; every drive is private. `public` and `tag` are
+            refused.
         tag:
           type: string
-          description: Required for a tag root
+          deprecated: true
+          description: Retired; tags no longer exist (refused with tags_retired)
         invitees:
           type: array
           items:
@@ -2735,7 +2396,7 @@ components:
       - effective_access
       description: 'A `traversal` entry is a folder the caller reaches only because something inside it was shared.
         It can be opened and lists what was shared; its owner, timestamps, and effective access are withheld. The
-        reserved Public, Private, and tag containers carry no `owner`: they are structure IAM reconciliation maintains
+        reserved Public, Private, and tag containers carry no `owner`: they are structure Briefcase reconciliation maintains
         rather than any member''s property.'
       properties:
         id:
@@ -2801,7 +2462,8 @@ components:
         permanent_url:
           type: string
           format: uri
-          description: Clean permanent URL that shows the folder structure
+          description: Clean permanent URL that shows the folder structure below the drive owner's current id, such as
+            https://briefcase.teamofsilicons.com/c:ada/notes/plan.md
         content_url:
           type:
           - string
@@ -2859,6 +2521,10 @@ components:
       required:
       - items
       properties:
+        folder:
+          allOf:
+          - $ref: '#/components/schemas/Entry'
+          description: Delegated listings of a confined app's own root include that folder, even when it has no children. Ordinary listings omit this field.
         items:
           type: array
           items:
@@ -2867,27 +2533,6 @@ components:
           type:
           - string
           - 'null'
-    MultipartUpload:
-      type: object
-      required:
-      - upload_id
-      - part_size
-      - part_count
-      - expires_at
-      properties:
-        upload_id:
-          type: string
-        part_size:
-          type: integer
-          minimum: 8388608
-          maximum: 5368709120
-        part_count:
-          type: integer
-          minimum: 1
-          maximum: 10000
-        expires_at:
-          type: string
-          format: date-time
     AccessRight:
       type: string
       description: One independent right. `update` never implies `delete`, `write` never implies `update`, and every
@@ -2919,6 +2564,10 @@ components:
           items:
             type: string
             maxLength: 2048
+        drive:
+          type: string
+          maxLength: 80
+          description: The drive the paths are in (its owner's `c:`/`si:` id or uuid); the caller's own by default
     EffectivePermission:
       type: object
       required:
@@ -3056,6 +2705,10 @@ components:
         entry_id:
           type: string
           format: uuid
+        drive:
+          type: string
+          description: The drive holding the entry (its owner's account uuid); absent on notifications from before
+            personal drives
         name:
           type: string
         path:
@@ -3068,6 +2721,91 @@ components:
         permanent_url:
           type: string
           format: uri
+    Moved:
+      type: object
+      required:
+      - moved_to
+      - permanent_url
+      - owner
+      properties:
+        moved_to:
+          type: string
+          format: uri
+          description: The same API address under the owner's current id
+        permanent_url:
+          type: string
+          format: uri
+          description: The matching permanent address on the application host
+        owner:
+          type: object
+          required:
+          - uuid
+          - id
+          properties:
+            uuid:
+              type: string
+            id:
+              type: string
+    ArchiveListing:
+      type: object
+      required:
+      - format
+      - entries
+      - truncated
+      properties:
+        format:
+          type: string
+          enum:
+          - zip
+          - tar
+          - tar.gz
+          - tar.zst
+          - 7z
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArchiveItem'
+        truncated:
+          type: boolean
+          description: Whether the archive holds more than is listed
+        truncated_because:
+          type: string
+          enum:
+          - entry_limit
+          - directory_limit
+          - read_limit
+          - unreadable_rest
+    ArchiveItem:
+      type: object
+      required:
+      - path
+      - type
+      - size
+      properties:
+        path:
+          type: string
+          description: The entry's path inside the archive, as the archive spells it
+        type:
+          type: string
+          enum:
+          - file
+          - folder
+          - link
+          - other
+        size:
+          type: integer
+          minimum: 0
+          description: Bytes once extracted
+        compressed_size:
+          type: integer
+          minimum: 0
+          description: Bytes inside the archive (zip only)
+        modified_at:
+          type: string
+          format: date-time
+        encrypted:
+          type: boolean
+          description: Present and true when the entry's content is encrypted
     Notification:
       type: object
       required:
@@ -3195,6 +2933,10 @@ components:
       - aws_account_id
       - encryption_mode
       properties:
+        drive:
+          type: string
+          maxLength: 80
+          description: The drive to configure (its owner's `c:`/`si:` id or uuid); the caller's own by default
         bucket_name:
           type: string
         region:
@@ -3318,7 +3060,7 @@ components:
           type: string
           format: uuid
         principal:
-          $ref: '#/components/schemas/InvitationRecipient'
+          $ref: '#/components/schemas/ActorRef'
         access:
           type: array
           minItems: 1
@@ -3370,7 +3112,7 @@ components:
           - string
           - 'null'
           format: uri
-          description: Shareable file or folder website URL when effective is true; otherwise null. Testing URLs require the recipient to select the same testing environment.
+          description: Shareable file or folder website URL when effective is true; otherwise null.
         enabled:
           type: boolean
         effective:

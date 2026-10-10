@@ -28,6 +28,17 @@ pub enum AppError {
     /// Credential is absent, invalid, expired, or revoked.
     #[error("authentication is required")]
     Unauthenticated,
+    /// A refusal whose precise reason is safe and useful to tell the caller,
+    /// such as an expired access token or a proof without the needed scope.
+    #[error("{message}")]
+    Explained {
+        /// HTTP status of the refusal.
+        status: StatusCode,
+        /// Stable machine-readable reason.
+        code: Cow<'static, str>,
+        /// What happened, why, and what to do.
+        message: Cow<'static, str>,
+    },
     /// The authenticated actor lacks authority for the action.
     #[error("the actor is not authorized for this action")]
     Forbidden,
@@ -60,9 +71,6 @@ pub enum AppError {
         /// Seconds until the capacity returns, when waiting alone restores it.
         retry_after_seconds: Option<u64>,
     },
-    /// A sandbox reached its fixed two-GiB storage ceiling.
-    #[error("In test enviorment you are limited to a total storage of 2gb per enviorment.")]
-    TestingEnvironmentStorageLimit,
     /// A caller exceeded an abuse or capacity limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -138,6 +146,45 @@ impl AppError {
         Self::Conflict { code: code.into() }
     }
 
+    /// Refuses a credential (401) with an exact reason.
+    #[must_use]
+    pub fn unauthorized(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::Explained {
+            status: StatusCode::UNAUTHORIZED,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Refuses a verified caller (403) with an exact reason.
+    #[must_use]
+    pub fn refused(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::Explained {
+            status: StatusCode::FORBIDDEN,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Refuses well-formed input that names something invalid (422).
+    #[must_use]
+    pub fn unprocessable(
+        code: impl Into<Cow<'static, str>>,
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::Explained {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
     fn public_parts(&self) -> (StatusCode, Cow<'static, str>, Cow<'static, str>) {
         match self {
             Self::BadRequest { code } => (
@@ -155,6 +202,11 @@ impl AppError {
                 Cow::Borrowed("unauthenticated"),
                 Cow::Borrowed("Authentication is required."),
             ),
+            Self::Explained {
+                status,
+                code,
+                message,
+            } => (*status, code.clone(), message.clone()),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 Cow::Borrowed("forbidden"),
@@ -175,7 +227,7 @@ impl AppError {
             Self::Conflict { code } => (
                 StatusCode::CONFLICT,
                 code.clone(),
-                Cow::Borrowed(conflict_message(code)),
+                Cow::Borrowed("The request conflicts with the current resource state."),
             ),
             Self::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -188,13 +240,6 @@ impl AppError {
                 Cow::Borrowed("The requested byte range is outside the content."),
             ),
             Self::UploadLimitExhausted { limit, .. } => upload_limit_public_parts(*limit),
-            Self::TestingEnvironmentStorageLimit => (
-                StatusCode::INSUFFICIENT_STORAGE,
-                Cow::Borrowed("testing_environment_storage_limit_exhausted"),
-                Cow::Borrowed(
-                    "In test enviorment you are limited to a total storage of 2gb per enviorment.",
-                ),
-            ),
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Cow::Borrowed("rate_limited"),
@@ -238,18 +283,6 @@ impl AppError {
                 Cow::Borrowed("An internal service error occurred."),
             ),
         }
-    }
-}
-
-fn conflict_message(code: &str) -> &'static str {
-    if code == "testing_environment_managed_by_honeycomb" {
-        "Honeycomb manages shared testing environments. Use honeycomb environments or briefcase env manage; enter Briefcase with the environment's IAM app secret."
-    } else if code == "stale_honeycomb_discovery" {
-        "The testing environment changed while IAM was being checked. Retry with the current test application secret."
-    } else if code == "testing_environment_iam_rebind_requires_new_environment" {
-        "This sandbox already uses identities from its paired IAM environment. Create a new Briefcase sandbox to use a different IAM environment."
-    } else {
-        "The request conflicts with the current resource state."
     }
 }
 

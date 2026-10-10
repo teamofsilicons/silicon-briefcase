@@ -1,5 +1,5 @@
 //! Explicit bug report intake; no telemetry or external issue tracker required.
-use super::super::{auth::IamAction, extract, mapping::metadata_error, state::AppState};
+use super::super::{auth::Action, extract, mapping::metadata_error, state::AppState};
 use crate::{
     error::AppError,
     infrastructure::postgres::{PostgresRepository, ReportReceipt},
@@ -60,13 +60,10 @@ pub(crate) async fn submit(
     Json(body): Json<BugReport>,
 ) -> Result<Json<ReportReceipt>, AppError> {
     validate(&body)?;
-    let org = extract::organization_resource(&headers)?;
-    let context = extract::authenticate(&state, &headers, IamAction::SubmitReport, &org).await?;
+    let context = extract::authenticate(&state, &headers, Action::SubmitReport, "reports").await?;
+    let org = extract::tenant(&context);
     let metadata = extract::mutation(&headers, "submit_report", &org, &body, true)?;
-    let mut repository = PostgresRepository::new(state.database.clone());
-    if let Some(testing) = &state.testing {
-        repository = repository.with_test_pool(testing.test_pool().clone());
-    }
+    let repository = PostgresRepository::new(state.database.clone());
     let result = Box::pin(extract::scoped(
         &context,
         repository.submit_report(

@@ -1,7 +1,8 @@
 //! Silicon Briefcase backend library.
 //!
-//! Briefcase is an organization-scoped filesystem. Domain policy remains
-//! independent from HTTP, PostgreSQL, IAM, and S3 adapters so each boundary can
+//! Briefcase is the file system of Carbons and Silicons signed in with Silicon
+//! Accounts. Domain policy remains independent from HTTP, PostgreSQL, Silicon
+//! Accounts, and S3 adapters so each boundary can
 //! be tested and evolved without weakening tenant or authorization invariants.
 
 #![forbid(unsafe_code)]

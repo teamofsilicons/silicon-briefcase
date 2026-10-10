@@ -1,15 +1,11 @@
 //! Commands, repository snapshots, and safe service views.
 
-use std::collections::BTreeSet;
-
 use time::OffsetDateTime;
 
 use crate::{
     application::idempotency::IdempotencyKey,
     domain::{
-        actor::{
-            ActorRef, ApplicationId, OrganizationId, OrganizationRole, RequestAuthContext, TagName,
-        },
+        actor::{ActorRef, ApplicationId, OrganizationId, RequestAuthContext},
         entry::{EntryBoundary, EntryKind, EntryName, EntryPath, RootType, SystemEntryKind},
         filter::FilterQuery,
         ids::{EntryId, GrantId, VersionId},
@@ -198,7 +194,7 @@ impl AuthorizableEntry {
     /// Evaluates shared domain policy against this repository snapshot.
     #[must_use]
     pub fn authorization(&self, context: &RequestAuthContext) -> EffectiveAuthorization {
-        if let Some(app) = context.originating_application() {
+        if let Some(app) = context.confined_application() {
             let mut segments = self.entry.path.segments();
             if segments.next() != Some("apps") || segments.next() != Some(app.as_str()) {
                 return EffectiveAuthorization::hidden();
@@ -218,7 +214,6 @@ impl AuthorizableEntry {
             entry_id: self.entry.id,
             entry_kind: self.entry.kind,
             system_kind: self.system_kind,
-            boundary: &self.entry.boundary,
             owner: &self.entry.owner,
             origin_application_id: self.entry.origin_application_id.as_ref(),
             grants: &grants,
@@ -325,15 +320,15 @@ impl AuthorizableEntry {
     }
 }
 
-/// Query for the contents of a folder, or for a filtered organization view.
+/// Query for the contents of a folder, or for a filtered view of a drive.
 ///
-/// Without a filter the query browses one level: the organization roots, or
+/// Without a filter the query browses one level: the top of the drive, or
 /// the direct children of `parent_id`. With a filter and no `parent_id` it
-/// scans everything the caller may reach, which is what a `location:`
-/// predicate needs in order to select a subtree.
+/// scans everything in the drive the caller may reach, which is what a
+/// `location:` predicate needs in order to select a subtree.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListEntriesQuery {
-    /// Parent folder; omission means organization root or the whole tree.
+    /// Parent folder; omission means the top of the drive or the whole drive.
     pub parent_id: Option<EntryId>,
     /// Parsed filter expression, ordering, and chronological cap.
     pub filter: Option<FilterQuery>,
@@ -344,7 +339,7 @@ pub struct ListEntriesQuery {
 /// Initial grant attached atomically to a newly created folder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitialPermission {
-    /// Current organization member.
+    /// The account receiving the share.
     pub principal: ActorRef,
     /// Rights conveyed to the invitee.
     pub access: GrantedAccess,
@@ -357,33 +352,23 @@ pub struct InitialPermission {
 pub struct CreateFolderCommand {
     /// Folder name.
     pub name: EntryName,
-    /// Parent folder; omission creates a user root.
+    /// Parent folder; omission creates the folder at the top of the drive.
     pub parent_id: Option<EntryId>,
-    /// Required only for user-root creation and inherited otherwise.
-    pub root_boundary: Option<EntryBoundary>,
     /// Grants created in the same transaction.
     pub invitees: Vec<InitialPermission>,
 }
 
 impl CreateFolderCommand {
-    /// Validates root-boundary presence against parent semantics.
+    /// Validates the invitees.
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] unless a root boundary is present exactly
-    /// when `parent_id` is absent.
+    /// Returns [`ValidationError`] when an invitee would receive delete.
     pub fn new(
         name: EntryName,
         parent_id: Option<EntryId>,
-        root_boundary: Option<EntryBoundary>,
         invitees: Vec<InitialPermission>,
     ) -> Result<Self, ValidationError> {
-        if parent_id.is_none() != root_boundary.is_some() {
-            return Err(ValidationError::new(
-                "root_boundary",
-                "is required exactly when parent_id is omitted",
-            ));
-        }
         if invitees.iter().any(|invite| {
             invite
                 .access
@@ -394,7 +379,6 @@ impl CreateFolderCommand {
         Ok(Self {
             name,
             parent_id,
-            root_boundary,
             invitees,
         })
     }
@@ -407,7 +391,7 @@ pub struct CreateFolderMutation {
     pub entry_id: EntryId,
     /// Validated command.
     pub command: CreateFolderCommand,
-    /// Inherited or root-declared boundary.
+    /// Boundary inherited from the parent.
     pub boundary: EntryBoundary,
     /// Represented owner.
     pub owner: ActorRef,
@@ -457,7 +441,7 @@ impl UpdateEntryCommand {
 pub struct GrantPermissionCommand {
     /// Target entry.
     pub entry_id: EntryId,
-    /// Current organization member.
+    /// The account receiving the share.
     pub principal: ActorRef,
     /// Rights conveyed by the grant.
     pub access: GrantedAccess,
@@ -608,17 +592,6 @@ pub struct ListVersionsQuery {
     pub page: PageRequest,
 }
 
-/// Complete public identity and authority resolved from IAM's directory projection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectedIdentity {
-    /// Current public Carbon or Silicon reference.
-    pub actor: ActorRef,
-    /// Current organization role.
-    pub role: OrganizationRole,
-    /// Current IAM tags.
-    pub tags: BTreeSet<TagName>,
-}
-
 /// Number of history entries retained and returned for one entry.
 pub const ENTRY_ACTIVITY_HISTORY_SIZE: u16 = 100;
 
@@ -653,10 +626,7 @@ pub struct RestoreBinEntryCommand {
 mod tests {
     use std::error::Error;
 
-    use crate::domain::{
-        entry::{EntryBoundary, EntryName},
-        ids::EntryId,
-    };
+    use crate::domain::{entry::EntryName, ids::EntryId};
 
     use super::{CreateFolderCommand, PageRequest, SearchQuery};
 
@@ -669,21 +639,10 @@ mod tests {
     }
 
     #[test]
-    fn folder_boundary_is_present_exactly_for_user_roots() -> Result<(), Box<dyn Error>> {
+    fn a_folder_goes_at_the_top_of_the_drive_or_in_a_parent() -> Result<(), Box<dyn Error>> {
         let name = EntryName::new("Documents")?;
-        assert!(CreateFolderCommand::new(name.clone(), None, None, Vec::new()).is_err());
-        assert!(
-            CreateFolderCommand::new(
-                name.clone(),
-                Some(EntryId::new()),
-                Some(EntryBoundary::Private),
-                Vec::new(),
-            )
-            .is_err()
-        );
-        assert!(
-            CreateFolderCommand::new(name, None, Some(EntryBoundary::Private), Vec::new()).is_ok()
-        );
+        assert!(CreateFolderCommand::new(name.clone(), None, Vec::new()).is_ok());
+        assert!(CreateFolderCommand::new(name, Some(EntryId::new()), Vec::new()).is_ok());
         Ok(())
     }
 

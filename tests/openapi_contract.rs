@@ -4,26 +4,18 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 62] = [
+const EXPECTED_OPERATIONS: [&str; 57] = [
     "submitReport",
     "submitTelemetry",
     "cancelDelegatedUpload",
-    "cleanCurrentTestingEnvironment",
-    "cleanTestingEnvironment",
     "commitDelegatedUpload",
     "configureOrganizationBucket",
     "createFileOnBehalfOfMember",
     "createFolder",
     "createFolderOnBehalfOfMember",
-    "createTestingEnvironment",
-    "deleteTestingEnvironment",
-    "describeCurrentTestingEnvironment",
     "downloadEntry",
-    "exchangeShortLivedToken",
     "getDelegatedUploadStatus",
     "getEntry",
-    "getTestingEnvironment",
-    "getTestingEnvironmentKey",
     "grantPermission",
     "inspectEffectivePermissions",
     "listBin",
@@ -32,29 +24,27 @@ const EXPECTED_OPERATIONS: [&str; 62] = [
     "listEntriesOnBehalfOfMember",
     "listNotifications",
     "listPermissions",
-    "listTestingEnvironments",
     "listVersions",
     "moveEntryToBin",
+    "readAccount",
+    "readAccountsInfo",
     "readApiVersion",
-    "readIamInfo",
-    "readLoginStatus",
     "readEntryContent",
     "readFileOnBehalfOfMember",
     "readOrganizationUsage",
     "readNotifications",
-    "refreshApplicationSession",
-    "replaceTestingEnvironmentIamPairing",
     "reserveDelegatedUpload",
     "resolvePermanentUrl",
+    "resolveDriveTop",
+    "resolveLegacyPermanentUrl",
+    "listArchiveContents",
     "restoreEntry",
-    "restoreTestingEnvironment",
     "restoreVersion",
     "revokePermission",
     "searchFiles",
     "transferDelegatedUpload",
     "trashEntryOnBehalfOfMember",
     "updateEntry",
-    "updateTestingEnvironment",
     "uploadFile",
     "listInvitations",
     "createInvitation",
@@ -67,6 +57,11 @@ const EXPECTED_OPERATIONS: [&str; 62] = [
     "readPublicEntry",
     "inviteOnBehalfOfMember",
     "setLinkAccessOnBehalfOfMember",
+    "listDrives",
+    "listSharedWithMe",
+    "listSiliconAllowedAccounts",
+    "allowAccountToShareWithSilicon",
+    "disallowAccountToShareWithSilicon",
 ];
 
 #[test]
@@ -127,30 +122,63 @@ fn string_field<'a>(mapping: &'a Mapping, field: &str) -> anyhow::Result<&'a str
 /// would be unverifiable, and one in the registry but not the contract would
 /// promise a revision for something a client cannot call.
 #[test]
-fn the_served_operation_registry_matches_the_published_contract() {
+fn the_served_operation_registry_matches_the_published_contract() -> anyhow::Result<()> {
     let registry: BTreeSet<&str> = silicon_briefcase::api::versioning::OPERATIONS
         .iter()
         .map(|operation| operation.id)
         .collect();
     let published = EXPECTED_OPERATIONS.into_iter().collect::<BTreeSet<_>>();
     assert_eq!(registry, published);
+
+    // Each operation's method, path and revision agree too, so a client that
+    // trusts the served registry calls exactly what the document describes.
+    let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
+    let mut documented = BTreeSet::new();
+    for (path, item) in mapping_field(mapping(&document, "document root")?, "paths")? {
+        for (method, operation) in mapping(item, "path item")? {
+            let Some(id) = operation.get("operationId").and_then(Value::as_str) else {
+                continue;
+            };
+            documented.insert((
+                id.to_owned(),
+                method.as_str().unwrap_or_default().to_uppercase(),
+                path.as_str().unwrap_or_default().to_owned(),
+                operation
+                    .get("x-operation-version")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ));
+        }
+    }
+    let served: BTreeSet<_> = silicon_briefcase::api::versioning::OPERATIONS
+        .iter()
+        .map(|operation| {
+            (
+                operation.id.to_owned(),
+                operation.method.to_owned(),
+                operation.path.to_owned(),
+                operation.version.to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(served, documented);
+    Ok(())
 }
 
 #[test]
-fn testing_environment_listing_and_root_self_cache_contract_are_exact() -> anyhow::Result<()> {
+fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
     let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
-    assert!(
-        document["components"]["schemas"]["TestingEnvironmentPage"]["properties"]["items"]
-            ["maxItems"]
-            .is_null(),
-        "retained deleted environments make the result larger than the active limit"
-    );
+    assert_eq!(document["info"]["version"].as_str(), Some("4.0.0"));
     assert_eq!(
-        document["paths"]["/testing-environment"]["get"]["responses"]["200"]["headers"]
-            ["Cache-Control"]["schema"]["const"]
-            .as_str(),
-        Some("private, no-store")
+        document["info"]["version"].as_str(),
+        Some(silicon_briefcase::api::versioning::CONTRACT_VERSION)
     );
+    let schemes = &document["components"]["securitySchemes"];
+    assert_eq!(schemes["bearerAuth"]["scheme"].as_str(), Some("bearer"));
+    assert_eq!(schemes["proofAuth"]["scheme"].as_str(), Some("Proof"));
+    assert!(document["paths"]["/testing-environment"].is_null());
+    assert!(document["paths"]["/auth/slt"].is_null());
     Ok(())
 }
 

@@ -38,7 +38,6 @@ pub(super) struct ExtractionStats {
 #[derive(Debug, sqlx::FromRow)]
 struct PendingDocument {
     org_id: String,
-    testing_environment_id: Option<uuid::Uuid>,
     entry_id: uuid::Uuid,
     content_type: Option<String>,
     storage_backend: String,
@@ -49,6 +48,7 @@ struct PendingDocument {
     storage_encryption_mode: String,
     storage_kms_key_arn: Option<String>,
     storage_role_arn: Option<String>,
+    storage_external_id: Option<String>,
     object_key: String,
     object_version_id: Option<String>,
 }
@@ -69,16 +69,15 @@ where
     O: ObjectStore + ?Sized,
 {
     let pending = sqlx::query_as::<_, PendingDocument>(
-        "SELECT document.org_id, organization.testing_environment_id, \
+        "SELECT document.org_id, \
                 document.entry_id, entry.content_type, \
                 version.storage_backend, version.storage_config_id, version.bucket_name, \
                 version.storage_region, version.storage_prefix, \
                 version.storage_encryption_mode, version.storage_kms_key_arn, \
                 storage_config.role_arn AS storage_role_arn, \
+                storage_config.external_id AS storage_external_id, \
                 version.object_key, version.object_version_id \
            FROM briefcase.search_documents AS document \
-           JOIN briefcase.organizations AS organization \
-             ON organization.org_id = document.org_id \
            JOIN briefcase.entries AS entry \
              ON entry.org_id = document.org_id AND entry.entry_id = document.entry_id \
            JOIN briefcase.entry_versions AS version \
@@ -225,16 +224,13 @@ fn storage_location(document: &PendingDocument) -> Option<(StorageTarget, Object
         "sse_kms" if document.storage_kms_key_arn.is_some() => EncryptionMode::SseKms,
         _ => return None,
     };
-    // Briefcase derives the organization External ID itself and never reads it
-    // from a row, exactly as destructive cleanup does.
+    // A bring-your-own bucket is reached with the role and External ID
+    // persisted on its configuration, exactly as destructive cleanup does.
     let (role_arn, external_id) = match document.storage_backend.as_str() {
         "platform" if document.storage_config_id.is_none() => (None, None),
         "organization" if document.storage_config_id.is_some() => (
             Some(document.storage_role_arn.clone()?),
-            Some(super::storage_external_id(
-                &document.org_id,
-                document.testing_environment_id,
-            )?),
+            Some(document.storage_external_id.clone()?),
         ),
         _ => return None,
     };
@@ -312,7 +308,6 @@ mod tests {
     fn document(backend: &str, config: Option<uuid::Uuid>, role: Option<&str>) -> PendingDocument {
         PendingDocument {
             org_id: "tos".to_owned(),
-            testing_environment_id: None,
             entry_id: uuid::Uuid::now_v7(),
             content_type: Some("text/plain".to_owned()),
             storage_backend: backend.to_owned(),
@@ -323,6 +318,7 @@ mod tests {
             storage_encryption_mode: "sse_s3".to_owned(),
             storage_kms_key_arn: None,
             storage_role_arn: role.map(ToOwned::to_owned),
+            storage_external_id: role.map(|_| "b".repeat(64)),
             object_key: "entries/a/versions/b".to_owned(),
             object_version_id: None,
         }
@@ -337,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn organization_storage_derives_its_external_id() {
-        let source = document(
+    fn organization_storage_uses_its_persisted_external_id() {
+        let mut source = document(
             "organization",
             Some(uuid::Uuid::now_v7()),
             Some("arn:aws:iam::1:role/briefcase"),
@@ -349,7 +345,9 @@ mod tests {
             target.role_arn.as_deref(),
             Some("arn:aws:iam::1:role/briefcase")
         );
-        assert!(target.external_id.is_some());
+        assert_eq!(target.external_id, Some("b".repeat(64)));
+        source.storage_external_id = None;
+        assert!(storage_location(&source).is_none());
     }
 
     #[test]

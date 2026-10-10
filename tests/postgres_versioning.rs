@@ -24,17 +24,15 @@ use silicon_briefcase::{
         idempotency::IdempotencyKey,
         ports::{ObjectChecksum, ObjectChecksumAlgorithm, ObjectChecksumType, StoredObject},
         service::{
-            ListBinQuery, ListEntriesQuery, ListVersionsQuery, MetadataRepository,
-            MutationMetadata, PageRequest,
+            ListBinQuery, ListVersionsQuery, MetadataRepository, MutationMetadata, PageRequest,
         },
     },
     config::{DatabaseSettings, S3Encryption, S3Settings},
     domain::{
         actor::{
-            ActorId, ActorKind, ActorRef, AuthenticationMode, OrganizationId, OrganizationRole,
-            RequestAuthContext,
+            ActorId, ActorKind, ActorRef, AuthenticationMode, DriveAccess, RequestAuthContext,
         },
-        entry::{EntryName, EntryPath},
+        entry::EntryName,
         ids::EntryId,
         permission::Capability,
         quota::{DEFAULT_DAILY_UPLOAD_LIMIT_BYTES, DEFAULT_STORAGE_LIMIT_BYTES},
@@ -44,7 +42,6 @@ use silicon_briefcase::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const ACTOR_ID: &str = "cos:tos";
 const FILE_NAME: &str = "report.md";
 
 fn database_settings(url: String) -> DatabaseSettings {
@@ -72,41 +69,34 @@ fn storage_settings() -> S3Settings {
     }
 }
 
-fn execution_context(organization: &str) -> anyhow::Result<ExecutionContext> {
-    let organization_id = OrganizationId::new(organization.to_owned())?;
-    let actor = ActorRef::new(ActorKind::Carbon, ActorId::new(ACTOR_ID)?);
+/// A fresh drive key: the uuid of the account that owns it.
+fn drive_key() -> String {
+    format!("Ver{}", &Uuid::now_v7().simple().to_string()[12..])
+}
+
+/// The drive's owner acting in its own drive.
+fn execution_context(drive: &str) -> anyhow::Result<ExecutionContext> {
+    let owner = ActorRef::new(ActorKind::Carbon, ActorId::new(drive)?);
     Ok(ExecutionContext::new(
-        RequestAuthContext::new(
-            organization_id,
-            actor,
-            OrganizationRole::Owner,
-            Vec::new(),
+        RequestAuthContext::for_drive(
+            owner.clone(),
+            owner,
+            DriveAccess::Owner,
             AuthenticationMode::Bearer,
-        ),
+        )?,
         "postgres-versioning-test",
     ))
 }
 
-/// Returns the caller's own private folder, which the first request reconciles.
+/// Returns the drive's root folder, which the first request creates.
 async fn private_root(
     metadata: &PostgresRepository,
     context: &ExecutionContext,
 ) -> anyhow::Result<EntryId> {
-    metadata
-        .list_active_children(
-            context,
-            &ListEntriesQuery {
-                parent_id: None,
-                filter: None,
-                page: PageRequest::new(None, 100)?,
-            },
-        )
-        .await?;
-    let path = EntryPath::new(format!("private/{ACTOR_ID}"))?;
     let root = metadata
-        .find_active_entry_by_path(context, &path)
+        .find_drive_root(context)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("the caller's private folder must be reconciled"))?;
+        .ok_or_else(|| anyhow::anyhow!("the drive's root folder must exist"))?;
     Ok(root.entry.id)
 }
 
@@ -206,7 +196,7 @@ async fn re_uploading_a_name_versions_the_same_file_and_the_bin_pages() -> anyho
     let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
 
     // A fresh organization per run keeps the test additive.
-    let organization = format!("test-{}", Uuid::now_v7().simple());
+    let organization = drive_key();
     let context = execution_context(&organization)?;
 
     let parent = private_root(&metadata, &context).await?;
@@ -301,7 +291,7 @@ async fn purging_the_bin_returns_the_space_that_binning_alone_still_holds() -> a
     let metadata = PostgresRepository::new(pool.clone());
     let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
 
-    let organization = format!("test-{}", Uuid::now_v7().simple());
+    let organization = drive_key();
     let context = execution_context(&organization)?;
     let parent = private_root(&metadata, &context).await?;
 
@@ -374,7 +364,7 @@ async fn usage_tracks_uploads_and_storage_and_refuses_what_exceeds_a_limit() -> 
     let metadata = PostgresRepository::new(pool.clone());
     let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
 
-    let organization = format!("test-{}", Uuid::now_v7().simple());
+    let organization = drive_key();
     let context = execution_context(&organization)?;
     let parent = private_root(&metadata, &context).await?;
 
@@ -505,7 +495,7 @@ async fn all_versions_and_content_hashes_survive_beyond_fifty_uploads() -> anyho
     postgres::migrate(&pool).await?;
     let metadata = PostgresRepository::new(pool.clone());
     let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
-    let context = execution_context(&format!("v1-{}", Uuid::now_v7().simple()))?;
+    let context = execution_context(&drive_key())?;
     let parent = private_root(&metadata, &context).await?;
     let first = publish(&files, &context, parent, "version-0", b"original").await?;
     for n in 1..55 {

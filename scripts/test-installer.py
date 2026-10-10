@@ -42,7 +42,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(calls[0][:3], ['rustup', 'toolchain', 'install'])
         self.assertEqual(calls[1], ['cargo', '+1.98.0', 'install', 'briefcase-cli', '--root', calls[1][calls[1].index('--root') + 1], '--locked', '--version', '=2.0.0', '--bin', 'briefcase', '--force'])
         self.assertEqual(len(calls), 2)
-        self.assertIn('Manage future updates through Honeycomb.', result.stdout)
+        self.assertIn('Use Silicon Apps for managed installs and updates.', result.stdout)
 
     def test_source_paths_are_single_arguments(self):
         source = '/tmp/briefcase source with spaces'

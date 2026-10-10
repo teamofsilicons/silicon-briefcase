@@ -1,660 +1,243 @@
 //! Turning a parsed command into calls on the package.
 
-use std::{
-    collections::HashSet,
-    io::{BufRead as _, IsTerminal as _, Read as _},
-};
+use std::collections::HashSet;
 
 use briefcase_client::{
-    AccessRight, BucketConfiguration, Client, Config, Destination, Entry, EntryPage,
-    EnvironmentKey, ExpiryChange, IdempotencyKey, ListEntries, NewFolder, NewGrant,
-    OnBehalfOfUpload, PermissionQuery, Upload, guess_content_type,
+    AccessRight, BucketConfiguration, Client, Destination, Entry, EntryPage, ExpiryChange,
+    IdempotencyKey, ListEntries, NewFolder, NewGrant, PermissionQuery, Upload, guess_content_type,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
+pub use crate::error::{CliError, Result};
 use crate::{
     cli::{
-        AppCommand, BinCommand, Cli, Command, ConfigCommand, EnvCommand, ExpiryArgs, FindArgs,
-        GetArgs, GlobalArgs, KeepArgs, Lifetime, LoginArgs, LsArgs, MkdirArgs, MvArgs, PutArgs,
-        RestoreArgs, RmArgs, SearchArgs, ShareArgs, StorageCommand, SystemCommand, Target,
+        AllowCommand, AppCommand, BinCommand, Cli, Command, ConfigCommand, DriveArg, ExpiryArgs,
+        FindArgs, GetArgs, GlobalArgs, KeepArgs, Lifetime, LoginCommand, LsArgs, MkdirArgs, MvArgs,
+        PutArgs, RestoreArgs, RmArgs, SearchArgs, ShareArgs, SharedArgs, StorageCommand, Target,
         TargetArgs, UnshareArgs,
     },
-    render::{Output, deadline, human_size},
-    state::{CredentialScope, PendingMutation, Profile, StateDirectory, StoredSession},
+    render::{Labels, Output, deadline, human_size},
+    session::{self, Context},
+    signin,
+    state::{PendingMutation, StateDirectory},
 };
 
 mod delegated;
-
-/// Keep timestamps embedded in JSON values consistent with the API and store.
-#[derive(Serialize)]
-struct JsonTimestamp(#[serde(with = "time::serde::rfc3339")] time::OffsetDateTime);
-
-/// Everything that can stop a command, with the exit code it deserves.
-#[derive(Debug, thiserror::Error)]
-pub enum CliError {
-    /// Briefcase refused, or could not be reached.
-    #[error(transparent)]
-    Client(#[from] briefcase_client::Error),
-    /// Briefcase refused, and the CLI knows what that refusal means here.
-    #[error("{source}; {hint}")]
-    Explained {
-        /// The refusal itself, which still decides the exit code.
-        #[source]
-        source: Box<briefcase_client::Error>,
-        /// What it means for this command, and what to do instead.
-        hint: String,
-    },
-    /// Checking or installing a crates.io release failed.
-    #[error(transparent)]
-    Update(#[from] briefcase_client::update::UpdateError),
-    /// Local state could not be read or written.
-    #[error(transparent)]
-    State(#[from] crate::state::StateError),
-    /// The command as typed cannot be carried out.
-    #[error("{0}")]
-    Usage(String),
-    /// The storage probe completed, but did not activate the proposed bucket.
-    #[error(
-        "storage validation failed; the previous configuration remains selected. After fixing the bucket or role, use a new operation ID to validate again"
-    )]
-    StorageValidationFailed,
-    /// A local file could not be read or written.
-    #[error("{path}: {source}")]
-    Io {
-        /// The file involved.
-        path: String,
-        /// What went wrong.
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-impl CliError {
-    /// Returns the process exit code this failure deserves.
-    ///
-    /// Distinct codes let a script tell "not yours to see" from "the server is
-    /// down" without parsing English.
-    #[must_use]
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            Self::Usage(_) => 2,
-            _ => match self.refusal() {
-                Some(error) if error.is_not_found() => 3,
-                Some(error) if error.is_forbidden() || error.is_unauthenticated() => 4,
-                _ => 1,
-            },
-        }
-    }
-
-    /// Returns Briefcase's own answer, when the failure is one.
-    fn refusal(&self) -> Option<&briefcase_client::Error> {
-        match self {
-            Self::Client(error) => Some(error),
-            Self::Explained { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-
-    fn usage(message: impl Into<String>) -> Self {
-        Self::Usage(message.into())
-    }
-
-    /// Attaches what a refusal means for this command, when `hint` knows,
-    /// keeping the exit code the refusal itself deserves.
-    fn explained(
-        error: briefcase_client::Error,
-        hint: impl FnOnce(&briefcase_client::Error) -> Option<String>,
-    ) -> Self {
-        match hint(&error) {
-            Some(hint) => Self::Explained {
-                source: Box::new(error),
-                hint,
-            },
-            None => Self::Client(error),
-        }
-    }
-}
-
-type Result<T> = std::result::Result<T, CliError>;
 
 /// Runs one parsed invocation.
 ///
 /// # Errors
 ///
 /// Returns whatever stopped the command, carrying the exit code it deserves.
-pub async fn run(mut cli: Cli, testing: &mut Option<String>) -> Result<()> {
-    if let Some(id) = cli.global.test {
-        *testing = Some(id.to_string());
-    }
-    if let Some(secret) = cli.global.app_secret.take() {
-        let state = StateDirectory::locate()?;
-        let saved = state.configuration()?;
-        let profile_name = cli
-            .global
-            .profile
-            .clone()
-            .unwrap_or_else(|| saved.current_profile.clone());
-        let profile = saved.profiles.get(&profile_name);
-        let url = deployment_url(&cli.global, profile);
-        let environment_key = EnvironmentKey::new(secret)?;
-        let probe = Client::new_unchecked(
-            Config::for_sign_in(&url)?
-                .with_environment(environment_key.clone())
-                .with_auto_update(false)
-                .with_telemetry(crate::telemetry::enabled())
-                .with_telemetry_source(briefcase_client::telemetry::Source::Cli),
-        )?;
-        let environment = probe.current_testing_environment().await?;
-        *testing = Some(format!("{} ({})", environment.name, environment.id));
-        let _lock = state.lock_credentials()?;
-        let mut credentials = state.credentials()?;
-        credentials.set_testing_environment_key(&profile_name, environment.id, environment_key);
-        let org = cli
-            .global
-            .org
-            .clone()
-            .or_else(|| profile.map(|p| p.org.clone()))
-            .unwrap_or_default();
-        let scope = if org.is_empty() {
-            scope_for_unscoped(&url)?
-        } else {
-            scope_for(&url, &org)?
-        };
-        credentials.set_credential_scope(&profile_name, Some(environment.id), scope);
-        state.save_credentials(&credentials)?;
-        cli.global.test = Some(environment.id);
-    }
-
+pub async fn run(cli: Cli) -> Result<()> {
+    refuse_retired(&cli)?;
     let output = Output::new(cli.global.json);
+    let global = &cli.global;
     match cli.command {
         Command::Login(args) => match args.command {
-            Some(crate::cli::LoginCommand::Status) => login_status(&cli.global, output).await,
-            None => login(&cli.global, &args, output).await,
+            Some(LoginCommand::Status { offline }) => {
+                signin::login_status(global, offline, output).await
+            }
+            None => signin::login(global, &args, output).await,
         },
-        Command::Iam => iam(&cli.global, output).await,
-        Command::Logout => logout(&cli.global, output),
-        Command::Status => status(&cli.global, output).await,
-        Command::Ls(args) => list(&cli.global, &args, output).await,
-        Command::Find(args) => find(&cli.global, &args, output).await,
-        Command::Search(args) => search(&cli.global, &args, output).await,
-        Command::Stat(args) => stat(&cli.global, &args, output).await,
-        Command::Mkdir(args) => mkdir(&cli.global, &args, output).await,
-        Command::Put(args) => put(&cli.global, &args, output).await,
-        Command::Get(args) => get(&cli.global, &args, output).await,
-        Command::Cat(args) => cat(&cli.global, &args, output).await,
-        Command::Mv(args) => move_entry(&cli.global, &args, output).await,
-        Command::Rm(args) => remove(&cli.global, &args, output).await,
-        Command::Keep(args) => keep(&cli.global, &args, output).await,
-        Command::Bin(command) => bin(&cli.global, &command, output).await,
-        Command::Versions { target, cursor } => {
-            versions(&cli.global, &target, cursor.as_deref(), output).await
+        Command::Logout => signin::logout(global, output).await,
+        Command::Accounts | Command::Iam => {
+            signin::accounts(global, output);
+            Ok(())
         }
-        Command::Restore(args) => restore_version(&cli.global, &args, output).await,
-        Command::History(args) => history(&cli.global, &args, output).await,
+        Command::Status => signin::status(global, output).await,
+        Command::Drives => drives(global, output).await,
+        Command::Shared(args) => shared(global, &args, output).await,
+        Command::Allow(command) => allow(global, &command, output).await,
+        Command::Ls(args) => list(global, &args, output).await,
+        Command::Find(args) => find(global, &args, output).await,
+        Command::Search(args) => search(global, &args, output).await,
+        Command::Stat(args) => stat(global, &args, output).await,
+        Command::Mkdir(args) => mkdir(global, &args, output).await,
+        Command::Put(args) => put(global, &args, output).await,
+        Command::Get(args) => get(global, &args, output).await,
+        Command::Cat(args) => cat(global, &args, output).await,
+        Command::Archive(args) => {
+            let mut context = session::connect(global).await?;
+            let id = entry_id(&mut context, &args.target).await?;
+            output.archive(&context.client.archive_contents(id, args.limit).await?);
+            Ok(())
+        }
+        Command::Mv(args) => move_entry(global, &args, output).await,
+        Command::Rm(args) => remove(global, &args, output).await,
+        Command::Keep(args) => keep(global, &args, output).await,
+        Command::Bin(command) => bin(global, &command, output).await,
+        Command::Versions { target, cursor } => {
+            versions(global, &target, cursor.as_deref(), output).await
+        }
+        Command::Restore(args) => restore_version(global, &args, output).await,
+        Command::History(args) => {
+            let mut context = session::connect(global).await?;
+            let id = entry_id(&mut context, &args.target).await?;
+            let events = context.client.activity(id).await?;
+            output.history(&events, &labels(&context));
+            Ok(())
+        }
         Command::Logs { target, cursor } => {
-            let client = connect(&cli.global).await?;
-            let id = entry_id(&client, &target).await?;
-            output.json(&client.logs(id, cursor.as_deref()).await?);
+            let mut context = session::connect(global).await?;
+            let id = entry_id(&mut context, &target).await?;
+            output.json(&context.client.logs(id, cursor.as_deref()).await?);
             Ok(())
         }
         Command::Link {
             target,
             enabled,
             expires_after,
-        } => link(&cli.global, &target, enabled, expires_after, output).await,
-        Command::Share(args) => share(&cli.global, &args, output).await,
-        Command::Unshare(args) => unshare(&cli.global, &args, output).await,
-        Command::Expiry(args) => change_expiring_share(&cli.global, &args, output).await,
+        } => link(global, &target, enabled, expires_after, output).await,
+        Command::Share(args) => share(global, &args, output).await,
+        Command::Unshare(args) => unshare(global, &args, output).await,
+        Command::Expiry(args) => change_expiring_share(global, &args, output).await,
         Command::Shares { target, cursor } => {
-            shares(&cli.global, &target, cursor.as_deref(), output).await
+            let mut context = session::connect(global).await?;
+            let id = entry_id(&mut context, &target).await?;
+            output.invitations(&context.client.invitations(id, cursor.as_deref()).await?);
+            Ok(())
         }
-        Command::Access(args) => access(&cli.global, &args.targets, output).await,
-        Command::Inbox(args) => inbox(&cli.global, args.read, output).await,
-        Command::Usage => usage(&cli.global, output).await,
-        Command::Storage(command) => storage(&cli.global, &command, output).await,
-        Command::App(command) => application(&cli.global, &command, output).await,
-        Command::Env(command) => environment(&cli.global, &command, output).await,
-        Command::Config(command) => configure(&cli.global, &command, output),
-        Command::System(command) => system(&command),
-        Command::Report { message, pr } => report(&cli.global, message, pr, output).await,
-        Command::Daemon(command) => crate::daemon::command(command, output).await,
+        Command::Access(args) => access(global, &args.targets, output).await,
+        Command::Inbox(args) => {
+            let context = session::connect(global).await?;
+            let inbox = if args.read {
+                context.client.mark_notifications_read().await?
+            } else {
+                context.client.notifications().await?
+            };
+            output.inbox(&inbox, &labels(&context));
+            Ok(())
+        }
+        Command::Usage { drive } => usage(global, drive.as_ref(), output).await,
+        Command::Storage(command) => storage(global, &command, output).await,
+        Command::App(command) => application(global, &command, output).await,
+        Command::Config(command) => configure(global, &command, output),
+        Command::Report { message, pr } => report(global, message, pr, output).await,
+        Command::Daemon(command) => crate::daemon::command(&command, output).await,
         Command::Docs { topic } => crate::manual::show(topic.as_deref(), output),
-        Command::Version => version(&cli.global, output).await,
+        Command::Version => version(global, output).await,
+        Command::Env { .. } => Err(CliError::retired(
+            "`briefcase env`",
+            "Testing environments no longer exist. Test against a local Briefcase and a local Silicon Accounts: \
+             `briefcase --url http://127.0.0.1:4101/api/v1/ --accounts-url http://localhost:9590 login --save-as local`.",
+        )),
+        Command::System { .. } => Err(CliError::retired(
+            "`briefcase system`",
+            "Silicon Apps installs and updates briefcase (`silicon-apps install briefcase`); there is nothing to update by hand.",
+        )),
     }
 }
 
-// ---- session ------------------------------------------------------------
-
-/// Hosted deployment used when no explicit or saved deployment is selected.
-const DEFAULT_API_URL: &str = "https://backend.briefcase.teamofsilicons.com/api/v1/";
-
-fn deployment_url(global: &GlobalArgs, saved: Option<&Profile>) -> String {
-    // Resolve the default here, not in clap: a parser default would override
-    // a saved local/private deployment and change where credentials are sent.
-    global
-        .url
-        .clone()
-        .or_else(|| saved.map(|profile| profile.url.clone()))
-        .unwrap_or_else(|| DEFAULT_API_URL.to_owned())
+/// Commands that never contact Briefcase or Silicon Accounts.
+const fn is_local(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Accounts
+            | Command::Iam
+            | Command::Docs { .. }
+            | Command::Config(_)
+            | Command::Daemon(_)
+            | Command::Env { .. }
+            | Command::System { .. }
+    )
 }
 
-/// Resolved deployment, plane, and authentication for one invocation.
-struct ResolvedSession {
-    verified_login: Option<briefcase_client::LoginStatus>,
-    profile_name: String,
-    url: String,
-    org: String,
-    environment_id: Option<Uuid>,
-    environment_key: Option<EnvironmentKey>,
-    token: Option<String>,
-    stored_session: Option<StoredSession>,
-    credential_scope: CredentialScope,
-}
-
-/// Resolves only the destination and optional test root for an operation that
-/// authenticates with its own request-scoped credential, such as an OBO proof.
-fn anonymous_session(global: &GlobalArgs) -> Result<ResolvedSession> {
-    resolve_session(global, false, true)
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "destination and credential bindings are resolved together before any network call"
-)]
-fn resolve_session(
-    global: &GlobalArgs,
-    include_bearer: bool,
-    require_org: bool,
-) -> Result<ResolvedSession> {
-    let state = StateDirectory::locate()?;
-    let configuration = state.configuration()?;
-    let profile_name = global
-        .profile
-        .clone()
-        .unwrap_or(configuration.current_profile.clone());
-    let saved = configuration.profiles.get(&profile_name);
-    let url = deployment_url(global, saved);
-    // A production OBO call needs no local credential material at all. Avoid
-    // even deserializing an unrelated member session; only bearer-backed or
-    // test-root-backed commands need the private credential store.
-    let credentials = if include_bearer || global.test.is_some() {
-        state.credentials()?
-    } else {
-        crate::state::Credentials::default()
-    };
-    let stored_session = include_bearer
-        .then(|| credentials.session(&profile_name, global.test).cloned())
-        .flatten();
-    let legacy_token = (include_bearer && global.test.is_none())
-        .then(|| credentials.tokens.get(&profile_name).cloned())
-        .flatten();
-    let org = global
-        .org
-        .clone()
-        .or_else(|| saved.filter(|profile| !profile.org.is_empty()).map(|profile| profile.org.clone()))
-        .or_else(|| stored_session.as_ref().and_then(|session| session.org_id.clone()))
-        .or_else(|| {
-            stored_session.as_ref().and_then(|session| {
-                (session.organizations.len() == 1).then(|| session.organizations[0].clone())
-            })
-        })
-        .or_else(|| (!require_org && global.test.is_none()).then(String::new))
-        .ok_or_else(|| {
-            if let Some(session) = stored_session.as_ref()
-                && !session.organizations.is_empty()
-            {
-                CliError::usage(format!(
-                    "this unscoped login reaches multiple organizations ({}); pass --org to choose one",
-                    session.organizations.join(", ")
-                ))
-            } else {
-                CliError::usage("no organization configured: run `briefcase login` or pass --org")
-            }
-        })?;
-    let credential_scope = if org.is_empty() {
-        scope_for_unscoped(&url)?
-    } else {
-        scope_for(&url, &org)?
-    };
-    let environment_key = match global.test {
-        Some(id) => {
-            let key = credentials
-                .testing_environment_key(&profile_name, id)
-                .cloned()
-                .ok_or_else(|| {
-                    CliError::usage(format!(
-                        "testing environment {id} is not known for profile {profile_name}; run `briefcase env key {id}` first"
-                    ))
-                })?;
-            ensure_stored_scope(
-                &credentials,
-                saved,
-                &profile_name,
-                Some(id),
-                &credential_scope,
-            )?;
-            Some(key)
-        }
-        None => None,
-    };
-    if include_bearer
-        && global.token.is_none()
-        && (stored_session.is_some() || legacy_token.is_some())
-    {
-        ensure_stored_scope(
-            &credentials,
-            saved,
-            &profile_name,
-            global.test,
-            &credential_scope,
-        )?;
-    }
-    let token = include_bearer.then(|| {
-        global
-            .token
-            .clone()
-            .or_else(|| {
-                stored_session
-                    .as_ref()
-                    .map(|session| session.access_token.clone())
-            })
-            .or(legacy_token)
-    });
-
-    Ok(ResolvedSession {
-        verified_login: None,
-        profile_name,
-        url,
-        org,
-        environment_id: global.test,
-        environment_key,
-        token: token.flatten(),
-        stored_session,
-        credential_scope,
-    })
-}
-
-fn scope_for(url: &str, org: &str) -> Result<CredentialScope> {
-    let config = Config::new(url, org)?;
-    Ok(CredentialScope {
-        deployment_origin: config.origin().as_str().to_owned(),
-        organization: config.organization().to_owned(),
-    })
-}
-
-fn scope_for_unscoped(url: &str) -> Result<CredentialScope> {
-    let config = Config::for_sign_in(url)?;
-    Ok(CredentialScope {
-        deployment_origin: config.origin().as_str().to_owned(),
-        organization: String::new(),
-    })
-}
-
-fn ensure_stored_scope(
-    credentials: &crate::state::Credentials,
-    saved: Option<&Profile>,
-    profile: &str,
-    environment: Option<Uuid>,
-    effective: &CredentialScope,
-) -> Result<()> {
-    let legacy_scope = saved
-        .filter(|saved| !saved.org.is_empty())
-        .map(|saved| scope_for(&saved.url, &saved.org))
-        .transpose()?;
-    let bound = credentials
-        .credential_scope(profile, environment)
-        .or(legacy_scope.as_ref())
-        .ok_or_else(|| {
-            CliError::usage(format!(
-                "stored credentials for profile {profile} have no destination binding; sign in again before using them"
-            ))
-        })?;
-    if credentials
-        .session(profile, environment)
-        .is_some_and(|session| session.org_id.as_deref() != Some(effective.organization.as_str()))
-    {
-        return Err(CliError::usage(
-            "This saved session needs an IAM 5 sign-in for the selected organization; refusing to send its credentials. Use a separate profile for each account and organization.",
+/// Refuses options and settings from before Silicon Accounts, saying what replaced them.
+fn refuse_retired(cli: &Cli) -> Result<()> {
+    if cli.global.org.is_some() {
+        return Err(CliError::retired(
+            "`--org`",
+            "Every Carbon and Silicon has its own drive now. Name another drive with @ and its owner's id, \
+             such as `briefcase ls @c:ada/plans`.",
         ));
     }
-    if bound.deployment_origin != effective.deployment_origin
-        || bound.organization != effective.organization
-    {
-        return Err(CliError::usage(format!(
-            "stored credentials for profile {profile} are bound to {} organization {}; refusing to send them to {} organization {}",
-            bound.deployment_origin,
-            bound.organization,
-            effective.deployment_origin,
-            effective.organization,
-        )));
+    if cli.global.test.is_some() || cli.global.app_secret.is_some() {
+        return Err(CliError::retired(
+            "`--test` / `--app-secret`",
+            "Testing environments no longer exist. Test against a local Briefcase and a local Silicon Accounts \
+             with their own profile (`--url`, `--accounts-url`, `login --save-as local`).",
+        ));
     }
-    Ok(())
-}
-
-fn testing_environment_for_login(
-    credentials: &crate::state::Credentials,
-    saved: Option<&Profile>,
-    profile: &str,
-    environment_id: Uuid,
-    effective: &CredentialScope,
-) -> Result<EnvironmentKey> {
-    let environment = credentials
-        .testing_environment_key(profile, environment_id)
-        .cloned()
-        .ok_or_else(|| {
-            CliError::usage(format!(
-                "testing environment {environment_id} is not known for profile {profile}; run `briefcase env key {environment_id}` first"
-            ))
-        })?;
-    ensure_stored_scope(credentials, saved, profile, Some(environment_id), effective)?;
-    Ok(environment)
-}
-
-fn config(session: &ResolvedSession) -> Result<Config> {
-    let mut config = if session.org.is_empty() {
-        Config::for_sign_in(&session.url)?
-    } else {
-        Config::new(&session.url, &session.org)?
-    }
-    .with_auto_update(false)
-    .with_telemetry(crate::telemetry::enabled())
-    .with_telemetry_source(briefcase_client::telemetry::Source::Cli);
-    if let Some(environment) = &session.environment_key {
-        config = config.with_environment(environment.clone());
-    }
-    Ok(config)
-}
-
-fn refresh_config(session: &ResolvedSession, stored: &StoredSession) -> Result<Config> {
-    let mut config = if let Some(org) = &stored.org_id {
-        Config::new(&session.url, org)?
-            .with_auto_update(false)
-            .with_telemetry(crate::telemetry::enabled())
-            .with_telemetry_source(briefcase_client::telemetry::Source::Cli)
-    } else {
-        Config::for_sign_in(&session.url)?
-            .with_auto_update(false)
-            .with_telemetry(crate::telemetry::enabled())
-            .with_telemetry_source(briefcase_client::telemetry::Source::Cli)
-    };
-    if let Some(environment) = &session.environment_key {
-        config = config.with_environment(environment.clone());
-    }
-    Ok(config)
-}
-
-async fn connect(global: &GlobalArgs) -> Result<Client> {
-    Ok(connect_resolved(global).await?.0)
-}
-
-async fn connect_resolved(global: &GlobalArgs) -> Result<(Client, ResolvedSession)> {
-    connect_with_scope(global, true).await
-}
-
-// Advertised expiry is only an upper bound: IAM can invalidate access while
-// its refresh family stays active. Check before any command side effect, so
-// uploads and multi-step mutations are not replayed to recover a saved login.
-async fn probe_stored_access(global: &GlobalArgs, resolved: &mut ResolvedSession) -> Result<bool> {
-    if resolved
-        .stored_session
-        .as_ref()
-        .is_none_or(StoredSession::needs_refresh)
-    {
-        return Ok(false);
-    }
-    let mut probe_config = config(resolved)?;
-    if let Some(token) = resolved.token.clone() {
-        probe_config = probe_config.with_token(token);
-    }
-    let probe = if global.no_verify {
-        Client::new_unchecked(probe_config)?
-    } else {
-        Client::connect(probe_config).await?
-    };
-    match probe.login_status().await {
-        Ok(status) => {
-            let inactive = !status.authenticated;
-            if status.authenticated {
-                resolved.verified_login = Some(status);
-            }
-            Ok(inactive)
-        }
-        Err(error) if error.is_unauthenticated() => Ok(true),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn ensure_refresh_identity(
-    stored: &StoredSession,
-    refreshed: &briefcase_client::SessionTokens,
-) -> Result<()> {
-    if refreshed.org_id != stored.org_id || refreshed.actor != stored.actor {
-        return Err(CliError::usage(
-            "IAM refresh changed the account or organization; sign in again.",
+    let testing = std::env::var("BRIEFCASE_TEST").is_ok_and(|value| !value.trim().is_empty());
+    let offline_status = matches!(
+        &cli.command,
+        Command::Login(args) if matches!(args.command, Some(LoginCommand::Status { offline: true }))
+    );
+    if testing && !is_local(&cli.command) && !offline_status {
+        return Err(CliError::refused(
+            "testing_environments_retired",
+            "BRIEFCASE_TEST is set, but testing environments no longer exist; refusing to run against a real deployment in its place.",
+            Some(
+                "Unset BRIEFCASE_TEST. Test against a local Briefcase with its own profile (`--url`, `--accounts-url`)."
+                    .to_owned(),
+            ),
+            2,
         ));
     }
     Ok(())
 }
 
-async fn connect_with_scope(
-    global: &GlobalArgs,
-    require_org: bool,
-) -> Result<(Client, ResolvedSession)> {
-    let mut resolved = resolve_session(global, true, require_org)?;
-    if global.token.is_none() {
-        let state = StateDirectory::locate()?;
-        let credentials_lock = state.lock_credentials()?;
-        // Another process may have refreshed or logged out while this process
-        // waited for the lock. Re-resolve from the authoritative atomic file.
-        resolved = resolve_session(global, true, require_org)?;
-        let mut credentials = state.credentials()?;
-        // Persist the original token-family destination, never the workspace
-        // selected for this request. Otherwise refresh narrows an unscoped login.
-        let stored_scope = credentials
-            .credential_scope(&resolved.profile_name, resolved.environment_id)
-            .cloned()
-            .unwrap_or_else(|| resolved.credential_scope.clone());
-        let mut force_refresh = probe_stored_access(global, &mut resolved).await?;
-        for _ in 0..2 {
-            let Some(stored) = resolved
-                .stored_session
-                .clone()
-                .filter(|stored| force_refresh || stored.needs_refresh())
-            else {
-                break;
-            };
-            force_refresh = false;
-            let mut pending = stored.clone();
-            let started_at = pending.refresh_started_at.unwrap_or_else(|| {
-                if pending.refresh_idempotency_key.is_some() {
-                    time::OffsetDateTime::UNIX_EPOCH
-                } else {
-                    time::OffsetDateTime::now_utc()
-                }
-            });
-            let refresh_key = pending
-                .refresh_idempotency_key
-                .clone()
-                .unwrap_or_else(|| IdempotencyKey::random().as_str().to_owned());
-            if pending.refresh_idempotency_key.is_none() || pending.refresh_started_at.is_none() {
-                pending.refresh_idempotency_key = Some(refresh_key.clone());
-                pending.refresh_started_at = Some(started_at);
-                credentials.set_session(
-                    &resolved.profile_name,
-                    resolved.environment_id,
-                    pending.clone(),
-                );
-                credentials.set_credential_scope(
-                    &resolved.profile_name,
-                    resolved.environment_id,
-                    stored_scope.clone(),
-                );
-                state.save_credentials(&credentials)?;
-                resolved.stored_session = Some(pending);
-            }
-            let refresh_key = IdempotencyKey::new(refresh_key)?;
-            let refresh_client = if global.no_verify {
-                Client::new_unchecked(refresh_config(&resolved, &stored)?)?
-            } else {
-                // Verify the destination before presenting a rotating,
-                // single-use refresh credential to it.
-                Client::connect(refresh_config(&resolved, &stored)?).await?
-            };
-            let refreshed = refresh_client
-                .refresh_session_with_key(&stored.refresh_token, &refresh_key)
-                .await?;
-            ensure_refresh_identity(&stored, &refreshed)?;
-            let mut saved = StoredSession::from_tokens(&refreshed);
-            saved.expires_at = started_at
-                + time::Duration::seconds(i64::try_from(refreshed.expires_in).unwrap_or(i64::MAX));
-            let refreshed = saved;
-            credentials.set_session(
-                &resolved.profile_name,
-                resolved.environment_id,
-                refreshed.clone(),
-            );
-            credentials.set_credential_scope(
-                &resolved.profile_name,
-                resolved.environment_id,
-                stored_scope.clone(),
-            );
-            state.save_credentials(&credentials)?;
-            resolved.token = Some(refreshed.access_token.clone());
-            resolved.stored_session = Some(refreshed);
-        }
-        if resolved
-            .stored_session
-            .as_ref()
-            .is_some_and(StoredSession::needs_refresh)
-        {
-            return Err(CliError::usage(
-                "refreshed access token has no usable lifetime; retry the command",
-            ));
-        }
-        drop(credentials_lock);
-    }
+// ---- targets ----------------------------------------------------------------
 
-    let mut config = config(&resolved)?;
-    if let Some(token) = resolved.token.clone() {
-        config = config.with_token(token);
+/// Ids by uuid for what the CLI already knows: the signed-in account.
+fn labels(context: &Context) -> Labels {
+    let mut labels = Labels::default();
+    if let Some(account) = context.account() {
+        labels.learn(&account.uuid, account.display_id());
     }
-    let client = if global.no_verify {
-        Client::new_unchecked(config)?
-    } else {
-        Client::connect(config).await?
-    };
-    Ok((client, resolved))
+    labels
+}
+
+/// Learns that a drive named by id holds `entries`.
+fn learn_drive(labels: &mut Labels, target: Option<&Target>, entries: &[Entry]) {
+    if let Some(drive) = target.and_then(Target::drive)
+        && drive.contains(':')
+        && let Some(entry) = entries.first()
+    {
+        labels.learn(&entry.drive, drive);
+    }
+}
+
+/// Resolves a target to the entry it names.
+async fn resolve_entry(context: &mut Context, target: &Target) -> Result<Entry> {
+    match target {
+        Target::Id(id) => Ok(context.client.entry(*id).await?),
+        Target::Path { drive, path } => {
+            let owner = match drive {
+                Some(drive) => drive.clone(),
+                None => context.own_uuid().await?,
+            };
+            Ok(context.client.entry_at(&owner, path).await?)
+        }
+        Target::Legacy { organization, path } => Ok(context
+            .client
+            .entry_at_legacy_address(organization, path)
+            .await?),
+    }
 }
 
 /// Resolves a target to an entry identifier, looking a path up when needed.
-async fn entry_id(client: &Client, target: &Target) -> Result<Uuid> {
+async fn entry_id(context: &mut Context, target: &Target) -> Result<Uuid> {
     match target {
         Target::Id(id) => Ok(*id),
-        Target::Path(path) => Ok(client.entry_at(path).await?.id),
+        _ => Ok(resolve_entry(context, target).await?.id),
     }
+}
+
+/// A folder target in the shape the package takes.
+async fn destination(context: &mut Context, target: &Target) -> Result<Destination> {
+    Ok(match target {
+        Target::Id(id) => Destination::Id(*id),
+        Target::Path { drive, path } => Destination::Path {
+            drive: drive.clone(),
+            path: path.clone(),
+        },
+        Target::Legacy { .. } => Destination::Id(resolve_entry(context, target).await?.id),
+    })
 }
 
 /// Splits `a/b/c` into the parent path `a/b` and the name `c`.
@@ -666,195 +249,12 @@ fn split_path(path: &str) -> (Option<String>, String) {
     )
 }
 
-// ---- commands -----------------------------------------------------------
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "login keeps its locked one-time exchange and atomic state transition together"
-)]
-async fn login(global: &GlobalArgs, args: &LoginArgs, output: Output) -> Result<()> {
-    if global.token.is_some() {
-        return Err(CliError::usage(
-            "--token is an access-token override, not a login method; give `briefcase login` an IAM short-lived token",
-        ));
-    }
-    let state = StateDirectory::locate()?;
-    let slt = if args.slt_stdin {
-        read_secret_stdin()?
-    } else {
-        match args.slt_positional.as_ref().or(args.slt.as_ref()) {
-            Some(slt) => slt.clone(),
-            None => prompt_secret(if global.test.is_some() {
-                "IAM test SLT or Carbon/Silicon ID: "
-            } else {
-                "IAM short-lived token: "
-            })?,
-        }
-    };
-    if slt.is_empty() {
-        return Err(CliError::usage("the SLT or test actor ID was empty"));
-    }
-
-    // A login can replace a rotating session. Serialize the complete
-    // read/exchange/write sequence so concurrent logins and refreshes cannot
-    // resurrect an older token pair. Secret input happens before taking the
-    // lock, so an unattended prompt cannot block another CLI process.
-    let credentials_lock = state.lock_credentials()?;
-    let mut configuration = state.configuration()?;
-    let profile_name = args
-        .save_as
-        .clone()
-        .or_else(|| global.profile.clone())
-        .unwrap_or_else(|| configuration.current_profile.clone());
-    let url = deployment_url(global, configuration.profiles.get(&profile_name));
-    let mut credentials = state.credentials()?;
-    if let Some(previous) = configuration.profiles.get(&profile_name)
-        && !previous.org.is_empty()
-    {
-        let previous_scope = scope_for(&previous.url, &previous.org)?;
-        credentials.bind_legacy_profile_scope(&profile_name, &previous_scope);
-    }
-    let mut login_scope = global
-        .org
-        .as_deref()
-        .map(|org| scope_for(&url, org))
-        .transpose()?;
-    if let Some(environment_id) = global.test
-        && login_scope.is_none()
-    {
-        // The root's tenant binding is independent of the IAM session's
-        // optional organization. Check its saved origin before dispatch, but
-        // do not turn an unscoped login into an organization-bound exchange.
-        let bound = credentials.credential_scope(&profile_name, Some(environment_id))
-            .ok_or_else(|| CliError::usage(format!(
-                "testing environment {environment_id} has no destination binding; run `briefcase env key {environment_id}` first"
-            )))?;
-        login_scope = Some(scope_for(&url, &bound.organization)?);
-    }
-    let mut login_config = Config::for_sign_in(&url)?
-        .with_auto_update(false)
-        .with_telemetry(crate::telemetry::enabled())
-        .with_telemetry_source(briefcase_client::telemetry::Source::Cli);
-    if let Some(environment_id) = global.test {
-        let environment = testing_environment_for_login(
-            &credentials,
-            configuration.profiles.get(&profile_name),
-            &profile_name,
-            environment_id,
-            login_scope
-                .as_ref()
-                .ok_or_else(|| CliError::usage("test login requires an organization"))?,
-        )?;
-        login_config = login_config.with_environment(environment);
-    }
-    if let Some(scope) = &login_scope {
-        login_config = login_config.with_organization(&scope.organization)?;
-    }
-    let client = if global.no_verify {
-        Client::new_unchecked(login_config)?
-    } else {
-        Client::connect(login_config).await?
-    };
-    let scope = format!("login:{}", plane_scope(&profile_name, global.test));
-    let fingerprint = request_fingerprint(&serde_json::json!({
-        "operation": "login",
-        "profile": profile_name,
-        "url": url,
-        "org": global.org,
-        "testing_environment_id": global.test,
-        "slt": slt,
-    }))?;
-    let pending = prepare_pending_mutation(&state, &mut credentials, &scope, &fingerprint, None)?;
-    let idempotency_key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-    let tokens = client
-        .login_with_slt_with_key(&slt, &idempotency_key)
-        .await?;
-    let stored = StoredSession::from_tokens(&tokens);
-    let login_scope = if global.test.is_some() {
-        login_scope.ok_or_else(|| CliError::usage("test root has no destination binding"))?
-    } else {
-        match tokens.org_id.as_deref() {
-            Some(org) => scope_for(&url, org)?,
-            None => scope_for_unscoped(&url)?,
-        }
-    };
-    let org = global
-        .org
-        .clone()
-        .or_else(|| tokens.org_id.clone())
-        .or_else(|| global.test.map(|_| login_scope.organization.clone()))
-        .or_else(|| (tokens.organizations.len() == 1).then(|| tokens.organizations[0].clone()))
-        .unwrap_or_default();
-
-    configuration.profiles.insert(
-        profile_name.clone(),
-        Profile {
-            url: url.clone(),
-            org: org.clone(),
-        },
-    );
-    configuration.current_profile.clone_from(&profile_name);
-    state.save_configuration(&configuration)?;
-
-    credentials.set_session(&profile_name, global.test, stored.clone());
-    credentials.set_credential_scope(&profile_name, global.test, login_scope);
-    if global.test.is_none() {
-        credentials.tokens.remove(&profile_name);
-    }
-    credentials.clear_pending_mutation(&scope, &pending.idempotency_key);
-    state.save_credentials(&credentials)?;
-    drop(credentials_lock);
-
-    if output.is_json() {
-        output.json(&serde_json::json!({
-            "profile": profile_name,
-            "url": url,
-            "org": org,
-            "organizations": stored.organizations,
-            "test_environment_id": global.test,
-            "actor": stored.actor,
-            "expires_at": JsonTimestamp(stored.expires_at),
-        }));
-    } else {
-        output.note(&format!(
-            "signed in as {}:{} on profile {}{}\nrotating session stored in {}",
-            stored.actor.actor_type.as_str(),
-            stored.actor.public_id,
-            profile_name,
-            global
-                .test
-                .map_or_else(String::new, |id| format!(" in test environment {id}")),
-            state.credentials_path().display()
-        ));
-    }
-    Ok(())
-}
-
-fn plane_scope(profile: &str, environment: Option<Uuid>) -> String {
-    environment.map_or_else(
-        || format!("{profile}:production"),
-        |id| format!("{profile}:test:{id}"),
-    )
-}
+// ---- durable retries ----------------------------------------------------------
 
 fn request_fingerprint(intent: &impl Serialize) -> Result<String> {
     let body = serde_json::to_vec(intent)
         .map_err(|error| CliError::usage(format!("could not identify retry intent: {error}")))?;
     Ok(format!("{:x}", Sha256::digest(body)))
-}
-
-fn prepare_pending_mutation(
-    state: &StateDirectory,
-    credentials: &mut crate::state::Credentials,
-    scope: &str,
-    fingerprint: &str,
-    expected_version: Option<i64>,
-) -> Result<PendingMutation> {
-    let pending = credentials.prepare_mutation(scope, fingerprint, expected_version);
-    // Save even when this is a retry: a previous CLI release may have loaded
-    // legacy state, and the fsync is the boundary before the mutation begins.
-    state.save_credentials(credentials)?;
-    Ok(pending)
 }
 
 /// Reads the stable resources selected by an earlier uncertain attempt.
@@ -872,11 +272,9 @@ fn pending_resource_id(scope: &str, fingerprint: &str) -> Result<Option<Uuid>> {
     Ok(durable_pending(scope, fingerprint)?.and_then(|pending| pending.resource_id))
 }
 
-/// Persists a normal content mutation before allowing its request to start.
-///
-/// Unlike generated-secret lifecycle changes, these requests do not need the
-/// state lock held while the network is slow: a matching concurrent command
-/// may safely reuse the same server-side idempotency identity.
+/// Persists a content mutation's retry identity before its request starts, so
+/// rerunning the exact command after an uncertain result recovers the
+/// original answer instead of applying it twice.
 fn prepare_durable_mutation(
     scope: &str,
     fingerprint: &str,
@@ -886,7 +284,7 @@ fn prepare_durable_mutation(
     let state = StateDirectory::locate()?;
     let _state_lock = state.lock_credentials()?;
     let mut credentials = state.credentials()?;
-    let mut pending = credentials.prepare_mutation(scope, fingerprint, None);
+    let mut pending = credentials.prepare_mutation(scope, fingerprint);
     if pending.resource_id.is_none()
         && let Some(resource_id) = resource_id
     {
@@ -913,15 +311,10 @@ fn finish_durable_mutation(scope: &str, pending: &PendingMutation) -> Result<()>
     Ok(())
 }
 
-fn destination_identity(destination: &Destination) -> String {
-    match destination {
-        Destination::Id(id) => format!("id:{id}"),
-        Destination::Path(path) => format!("path:{path}"),
-    }
-}
-
+/// The folder a destination names, by identifier, reusing the one an earlier
+/// uncertain attempt resolved.
 async fn stable_destination_id(
-    client: &Client,
+    context: &mut Context,
     destination: &Destination,
     recovered: Option<&PendingMutation>,
 ) -> Result<Uuid> {
@@ -930,18 +323,24 @@ async fn stable_destination_id(
     }
     match destination {
         Destination::Id(id) => Ok(*id),
-        Destination::Path(path) => Ok(client.entry_at(path).await?.id),
+        Destination::Path { drive, path } => {
+            let owner = match drive {
+                Some(drive) => drive.clone(),
+                None => context.own_uuid().await?,
+            };
+            Ok(context.client.entry_at(&owner, path).await?.id)
+        }
     }
 }
 
 async fn stable_upload_destination_id(
-    client: &Client,
+    context: &mut Context,
     upload: &Upload,
     recovered: Option<&PendingMutation>,
 ) -> Result<Uuid> {
-    match stable_destination_id(client, &upload.destination, recovered).await {
+    match stable_destination_id(context, &upload.destination, recovered).await {
         Err(CliError::Client(parent_error)) if parent_error.is_not_found() => {
-            let Destination::Path(parent_path) = &upload.destination else {
+            let Destination::Path { drive, path } = &upload.destination else {
                 return Err(parent_error.into());
             };
             let file_name = upload.file_name.trim();
@@ -951,12 +350,19 @@ async fn stable_upload_destination_id(
             {
                 return Err(parent_error.into());
             }
-            // A shared file may be readable/updatable while its parent is not
-            // independently readable. Its metadata supplies the same stable
-            // parent UUID without granting access to new sibling files. The
-            // backend still authorizes replacement versus creation atomically.
-            let path = format!("{}/{file_name}", parent_path.trim_matches('/'));
-            let existing = match client.entry_at(&path).await {
+            // A shared file may be readable and updatable while its folder is
+            // not; the file names the same folder without granting access to
+            // new siblings. Briefcase still decides replacement versus creation.
+            let owner = match drive {
+                Some(drive) => drive.clone(),
+                None => context.own_uuid().await?,
+            };
+            let file_path = if path.is_empty() {
+                file_name.to_owned()
+            } else {
+                format!("{path}/{file_name}")
+            };
+            let existing = match context.client.entry_at(&owner, &file_path).await {
                 Ok(existing) if !existing.is_folder() => existing,
                 Ok(_) => return Err(parent_error.into()),
                 Err(error) if error.is_not_found() => return Err(parent_error.into()),
@@ -1002,242 +408,147 @@ async fn file_identity(path: &std::path::Path) -> Result<(String, String)> {
     ))
 }
 
-const MAXIMUM_SECRET_BYTES: u64 = 64 * 1024;
+// ---- drives -------------------------------------------------------------------
 
-fn prompt_secret(label: &str) -> Result<String> {
-    if std::io::stdin().is_terminal() {
-        let secret = rpassword::prompt_password(label).map_err(|source| CliError::Io {
-            path: "terminal".to_owned(),
-            source,
-        })?;
-        return bounded_secret(&secret);
-    }
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .take(MAXIMUM_SECRET_BYTES + 1)
-        .read_line(&mut line)
-        .map_err(|source| CliError::Io {
-            path: "standard input".to_owned(),
-            source,
-        })?;
-    bounded_secret(&line)
-}
-
-fn read_secret_stdin() -> Result<String> {
-    let mut buffer = String::new();
-    std::io::stdin()
-        .take(MAXIMUM_SECRET_BYTES + 1)
-        .read_to_string(&mut buffer)
-        .map_err(|source| CliError::Io {
-            path: "standard input".to_owned(),
-            source,
-        })?;
-    bounded_secret(&buffer)
-}
-
-fn bounded_secret(value: &str) -> Result<String> {
-    if value.len() as u64 > MAXIMUM_SECRET_BYTES {
-        return Err(CliError::usage("secret input is limited to 64 KiB"));
-    }
-    Ok(value.trim().to_owned())
-}
-
-fn logout(global: &GlobalArgs, output: Output) -> Result<()> {
-    let state = StateDirectory::locate()?;
-    let configuration = state.configuration()?;
-    let profile = global
-        .profile
-        .clone()
-        .unwrap_or(configuration.current_profile.clone());
-    let _credentials_lock = state.lock_credentials()?;
-    let mut credentials = state.credentials()?;
-    let had_session = credentials.remove_session(&profile, global.test);
-    let had_legacy_token = if global.test.is_none() {
-        credentials.tokens.remove(&profile).is_some()
-    } else {
-        false
-    };
-    state.save_credentials(&credentials)?;
-    output.note(if had_session || had_legacy_token {
-        "session removed"
-    } else {
-        "no session was stored for this profile and plane"
-    });
+async fn drives(global: &GlobalArgs, output: Output) -> Result<()> {
+    let context = session::connect(global).await?;
+    output.drives(&context.client.drives().await?);
     Ok(())
 }
 
-async fn iam(global: &GlobalArgs, output: Output) -> Result<()> {
-    let resolved = resolve_session(global, false, false)?;
-    let client = if global.no_verify {
-        Client::new_unchecked(config(&resolved)?)?
-    } else {
-        Client::connect(config(&resolved)?).await?
-    };
-    let info = client.iam_info().await?;
-    if output.is_json() {
-        output.json(&info);
-    } else {
-        println!("app_id      {}", info.app_id);
-        println!("deployment  {}", resolved.url);
-        if let Some(id) = info.iam_environment_id {
-            println!("IAM test    {id}");
-            println!(
-                "In this test environment, SLT can be an IAM-issued test login code or a Carbon/Silicon ID. Run `briefcase login <actor-id>` with the same test selection."
-            );
-        } else {
-            println!(
-                "Get a short-lived token for this app from IAM, then run `briefcase login <slt>`."
-            );
+async fn shared(global: &GlobalArgs, args: &SharedArgs, output: Output) -> Result<()> {
+    let context = session::connect(global).await?;
+    let mut page = context
+        .client
+        .shared(args.cursor.as_deref(), args.limit)
+        .await?;
+    if args.all {
+        let mut seen = HashSet::new();
+        if let Some(cursor) = &args.cursor {
+            seen.insert(cursor.clone());
+        }
+        while let Some(cursor) = unique_next_cursor(&mut seen, page.next_cursor.take())? {
+            let next = context.client.shared(Some(&cursor), args.limit).await?;
+            page.items.extend(next.items);
+            page.next_cursor = next.next_cursor;
         }
     }
+    output.shared(&page);
     Ok(())
 }
 
-async fn login_status(global: &GlobalArgs, output: Output) -> Result<()> {
-    let resolved = resolve_session(global, true, false)?;
-    let status = if resolved.token.is_none() {
-        briefcase_client::LoginStatus::default()
-    } else {
-        match connect_with_scope(global, false).await {
-            Ok((client, connected)) => match connected.verified_login {
-                Some(status) => status,
-                None => client.login_status().await?,
-            },
-            Err(CliError::Client(error)) if error.is_unauthenticated() => {
-                briefcase_client::LoginStatus::default()
+/// The Silicon an allow-list command is for: `--for`, or the signed-in Silicon.
+async fn allow_target(context: &mut Context, silicon: Option<&DriveArg>) -> Result<String> {
+    if let Some(silicon) = silicon {
+        return Ok(silicon.0.clone());
+    }
+    context.own_uuid().await?;
+    match context.account() {
+        Some(account) if account.kind == briefcase_client::AccountKind::Silicon => {
+            Ok(account.uuid.clone())
+        }
+        _ => Err(CliError::usage(
+            "name the Silicon with --for <si:id>: a Carbon manages the allow list of a Silicon it looks after",
+        )),
+    }
+}
+
+async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> Result<()> {
+    let mut context = session::connect(global).await?;
+    match command {
+        AllowCommand::List { silicon } => {
+            let silicon = allow_target(&mut context, silicon.as_ref()).await?;
+            output.allowed(&context.client.allowed_accounts(&silicon).await?);
+        }
+        AllowCommand::Add { account, silicon } => {
+            let silicon = allow_target(&mut context, silicon.as_ref()).await?;
+            context
+                .client
+                .allow_account(&silicon, &account.0.id)
+                .await?;
+            let allowed = context.client.allowed_accounts(&silicon).await?;
+            if output.is_json() {
+                output.json(&allowed);
+            } else {
+                output.note(&format!(
+                    "{} may now share with {}.",
+                    account.0.id,
+                    allowed.silicon.display_id()
+                ));
             }
-            Err(error) => return Err(error),
         }
-    };
-    if output.is_json() {
-        output.json(&serde_json::json!({
-            "authenticated": status.authenticated,
-            "actor": status.actor,
-            "organizations": status.organizations,
-            "expires_at": status.expires_at,
-            "profile": resolved.profile_name,
-            "url": resolved.url,
-            "test_environment_id": resolved.environment_id,
-        }));
-    } else if let Some(actor) = status.actor {
-        println!(
-            "authenticated as {}:{}",
-            actor.actor_type.as_str(),
-            actor
-                .public_id
-                .unwrap_or_else(|| actor.principal_id.to_string())
-        );
-        println!("organizations {}", status.organizations.join(", "));
-    } else {
-        println!("not authenticated; run `briefcase login <slt>`");
+        AllowCommand::Remove { account, silicon } => {
+            let silicon = allow_target(&mut context, silicon.as_ref()).await?;
+            context
+                .client
+                .disallow_account(&silicon, &account.0.id)
+                .await?;
+            let allowed = context.client.allowed_accounts(&silicon).await?;
+            if output.is_json() {
+                output.json(&allowed);
+            } else {
+                output.note(&format!(
+                    "{} may no longer share with {}; shares it already made stay until they are revoked.",
+                    account.0.id,
+                    allowed.silicon.display_id()
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
-    let session = resolve_session(global, true, false)?;
-    let mut client_config = config(&session)?;
-    if let Some(token) = session.token.clone() {
-        client_config = client_config.with_token(token);
-    }
-    let client = Client::new_unchecked(client_config)?;
-    let served = client.version().await?;
-    let agreement = served.check_compatibility();
-
-    if output.is_json() {
-        output.json(&serde_json::json!({
-            "profile": session.profile_name,
-            "url": session.url,
-            "org": session.org,
-            "organizations": session.stored_session.as_ref().map(|stored| &stored.organizations),
-            "test_environment_id": session.environment_id,
-            "authenticated": session.token.is_some(),
-            "session_expires_at": session.stored_session.as_ref().map(|stored| JsonTimestamp(stored.expires_at)),
-            "service": served.service,
-            "build": served.build,
-            "contract_version": served.contract_version,
-            "supported_api_versions": served.supported_api_versions,
-            "compatible": agreement.is_ok(),
-        }));
-        return Ok(());
-    }
-    println!("profile     {}", session.profile_name);
-    println!("state       {}", StateDirectory::locate()?.path().display());
-    println!("deployment  {}", session.url);
-    println!("organization {}", session.org);
-    if let Some(stored) = &session.stored_session {
-        println!(
-            "login scope  {}",
-            stored
-                .org_id
-                .as_deref()
-                .unwrap_or("unscoped (IAM-selected grants)")
-        );
-        println!("available    {}", stored.organizations.join(", "));
-    }
-    println!(
-        "plane       {}",
-        session
-            .environment_id
-            .map_or_else(|| "production".to_owned(), |id| format!("test {id}"))
-    );
-    println!(
-        "session     {}",
-        if session.token.is_some() {
-            "stored"
-        } else {
-            "none — commands that need one will be refused"
-        }
-    );
-    println!(
-        "service     {} build {} contract {}",
-        served.service, served.build, served.contract_version
-    );
-    match agreement {
-        Ok(()) => println!("contract    agreed on {}", served.selected_api_version),
-        Err(error) => println!("contract    MISMATCH: {error}"),
-    }
-    Ok(())
-}
+// ---- browsing -----------------------------------------------------------------
 
 async fn list(global: &GlobalArgs, args: &LsArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let mut context = session::connect(global).await?;
+    let parent = match &args.target {
+        Some(target) => Some(destination(&mut context, target).await?),
+        None => None,
+    };
     let query = ListEntries {
-        parent: args.target.as_ref().map(Target::destination),
+        parent,
         cursor: args.cursor.clone(),
         limit: args.limit,
         ..ListEntries::default()
     };
     let page = if args.all {
         EntryPage {
-            items: list_every_entry(&client, query).await?,
+            items: list_every_entry(&context.client, query).await?,
             next_cursor: None,
         }
     } else {
-        client.list_entries(&query).await?
+        context.client.list_entries(&query).await?
     };
-    output.entry_page(&page, args.long);
+    let mut labels = labels(&context);
+    learn_drive(&mut labels, args.target.as_ref(), &page.items);
+    output.entry_page(&page, args.long, &labels);
     Ok(())
 }
 
 async fn find(global: &GlobalArgs, args: &FindArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let mut context = session::connect(global).await?;
+    let parent = match &args.in_folder {
+        Some(target) => Some(destination(&mut context, target).await?),
+        None => None,
+    };
     let query = ListEntries {
-        parent: args.in_folder.as_ref().map(Target::destination),
+        parent,
         cursor: args.cursor.clone(),
         limit: args.limit,
         ..ListEntries::matching(&args.filter)
     };
     let page = if args.all {
         EntryPage {
-            items: list_every_entry(&client, query).await?,
+            items: list_every_entry(&context.client, query).await?,
             next_cursor: None,
         }
     } else {
-        client.list_entries(&query).await?
+        context.client.list_entries(&query).await?
     };
-    output.entry_page(&page, true);
+    let mut labels = labels(&context);
+    learn_drive(&mut labels, args.in_folder.as_ref(), &page.items);
+    output.entry_page(&page, true, &labels);
     Ok(())
 }
 
@@ -1274,45 +585,45 @@ fn unique_next_cursor(
 }
 
 async fn search(global: &GlobalArgs, args: &SearchArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let results = client.search(&args.query, args.limit).await?;
+    let context = session::connect(global).await?;
+    let results = context.client.search(&args.query, args.limit).await?;
     output.search(&results);
     Ok(())
 }
 
 async fn stat(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let entry = resolve_entry(&client, &args.target).await?;
-    output.entry(&entry);
+    let mut context = session::connect(global).await?;
+    let entry = resolve_entry(&mut context, &args.target).await?;
+    let mut labels = labels(&context);
+    learn_drive(
+        &mut labels,
+        Some(&args.target),
+        std::slice::from_ref(&entry),
+    );
+    output.entry(&entry, &labels);
     Ok(())
 }
 
-async fn resolve_entry(client: &Client, target: &Target) -> Result<Entry> {
-    match target {
-        Target::Id(id) => Ok(client.entry(*id).await?),
-        Target::Path(path) => Ok(client.entry_at(path).await?),
-    }
-}
+// ---- creating and moving bytes ----------------------------------------------------
 
 async fn mkdir(global: &GlobalArgs, args: &MkdirArgs, output: Output) -> Result<()> {
-    let (client, resolved) = connect_resolved(global).await?;
-    let (parent, name) = split_path(&args.path);
+    let Target::Path { drive, path } = &args.path else {
+        return Err(CliError::usage(
+            "mkdir takes the new folder's path, such as notes/2026 or @si:scout/reports",
+        ));
+    };
+    let (parent, name) = split_path(path);
     if name.is_empty() {
         return Err(CliError::usage("a folder name is required"));
     }
-    let mut folder = if let Some(parent) = parent {
-        NewFolder::in_folder(name, Destination::path(parent))
-    } else {
-        let root_type = args.root_type.ok_or_else(|| {
-            CliError::usage("a folder at the organization base needs --type public, private or tag")
-        })?;
-        let mut folder = NewFolder::at_base(name, root_type.into());
-        folder.tag.clone_from(&args.tag);
-        if matches!(root_type, crate::cli::RootTypeArg::Tag) && folder.tag.is_none() {
-            return Err(CliError::usage("--tag is required for a tag folder"));
-        }
-        folder
-    };
+    let mut context = session::connect(global).await?;
+    let mut folder = NewFolder::in_folder(
+        name,
+        Destination::Path {
+            drive: drive.clone(),
+            path: parent.clone().unwrap_or_default(),
+        },
+    );
     folder.invitees = args
         .invites
         .iter()
@@ -1321,47 +632,35 @@ async fn mkdir(global: &GlobalArgs, args: &MkdirArgs, output: Output) -> Result<
         })
         .collect();
 
-    let parent = folder.parent.as_ref().map(destination_identity);
     let fingerprint = request_fingerprint(&serde_json::json!({
         "operation": "create-folder",
-        "profile": &resolved.profile_name,
-        "url": &resolved.url,
-        "org": &resolved.org,
-        "testing_environment_id": resolved.environment_id,
+        "profile": &context.profile,
+        "url": context.client.config().api_base().as_str(),
+        "drive": drive,
         "name": &folder.name,
-        "parent": parent,
-        "root_type": folder.root_type,
-        "tag": &folder.tag,
+        "parent": &parent,
         "invitees": &folder.invitees,
     }))?;
-    let address = request_fingerprint(&serde_json::json!({
-        "path": &args.path,
-        "testing_environment_id": resolved.environment_id,
-    }))?;
-    let scope = format!(
-        "entry:mkdir:{}:{address}",
-        plane_scope(&resolved.profile_name, resolved.environment_id)
-    );
+    let address = request_fingerprint(&serde_json::json!({"drive": drive, "path": path}))?;
+    let scope = format!("entry:mkdir:{}:{address}", context.profile);
     let recovered = durable_pending(&scope, &fingerprint)?;
-    let destination_id = match &folder.parent {
-        Some(destination) => {
-            Some(stable_destination_id(&client, destination, recovered.as_ref()).await?)
-        }
-        None => None,
-    };
-    let pending = prepare_durable_mutation(&scope, &fingerprint, None, destination_id)?;
-    if folder.parent.is_some() {
-        folder.parent = Some(Destination::Id(pending.destination_id.ok_or_else(
-            || CliError::usage("the pending folder creation has no destination identifier"),
-        )?));
-    }
+    let parent_destination = folder.parent.clone().unwrap_or_else(Destination::top);
+    let destination_id =
+        stable_destination_id(&mut context, &parent_destination, recovered.as_ref()).await?;
+    let pending = prepare_durable_mutation(&scope, &fingerprint, None, Some(destination_id))?;
+    folder.parent = Some(Destination::Id(pending.destination_id.ok_or_else(
+        || CliError::usage("the pending folder creation has no destination identifier"),
+    )?));
     folder.idempotency_key = Some(IdempotencyKey::new(pending.idempotency_key.clone())?);
-    let created = client.create_folder(&folder).await?;
+    let created = context.client.create_folder(&folder).await?;
     finish_durable_mutation(&scope, &pending)?;
     if output.is_json() {
         output.json(&created);
     } else {
-        output.note(&format!("created {}", created.path));
+        output.note(&format!(
+            "created {} ({})",
+            created.path, created.permanent_url
+        ));
     }
     Ok(())
 }
@@ -1370,10 +669,11 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
     if args.name.is_some() && args.sources.len() > 1 {
         return Err(CliError::usage("--name works with a single file"));
     }
-    let (client, resolved) = connect_resolved(global).await?;
+    let mut context = session::connect(global).await?;
+    let target_destination = destination(&mut context, &args.destination).await?;
     let mut stored = Vec::with_capacity(args.sources.len());
     for source in &args.sources {
-        let mut upload = Upload::file(args.destination.destination(), source.clone())?;
+        let mut upload = Upload::file(target_destination.clone(), source.clone())?;
         if let Some(name) = &args.name {
             upload = upload.named(name.clone());
         }
@@ -1387,45 +687,37 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
         upload = upload.with_content_type(content_type);
 
         let (canonical_source, content_sha256) = file_identity(source).await?;
-        let destination = destination_identity(&upload.destination);
+        let destination = args.destination.to_string();
         let address = request_fingerprint(&serde_json::json!({
             "source": &canonical_source,
             "destination": &destination,
             "file_name": &upload.file_name,
-            "testing_environment_id": resolved.environment_id,
         }))?;
-        let scope = format!(
-            "entry:put:{}:{address}",
-            plane_scope(&resolved.profile_name, resolved.environment_id)
-        );
+        let scope = format!("entry:put:{}:{address}", context.profile);
         let mut intent = serde_json::json!({
             "operation": "upload-file",
-            "profile": &resolved.profile_name,
-            "url": &resolved.url,
-            "org": &resolved.org,
-            "testing_environment_id": resolved.environment_id,
+            "profile": &context.profile,
+            "url": context.client.config().api_base().as_str(),
             "source": canonical_source,
             "destination": destination,
             "file_name": &upload.file_name,
             "content_type": &upload.content_type,
             "content_sha256": content_sha256,
         });
-        // Only present when asked for, so a pending ordinary upload recorded by
-        // an earlier release still replays under the same identity.
         if let Some(minutes) = upload.self_destruct_minutes {
             intent["self_destruct_minutes"] = minutes.into();
         }
         let fingerprint = request_fingerprint(&intent)?;
         let recovered = durable_pending(&scope, &fingerprint)?;
         let destination_id =
-            stable_upload_destination_id(&client, &upload, recovered.as_ref()).await?;
+            stable_upload_destination_id(&mut context, &upload, recovered.as_ref()).await?;
         let pending = prepare_durable_mutation(&scope, &fingerprint, None, Some(destination_id))?;
         upload.destination =
             Destination::Id(pending.destination_id.ok_or_else(|| {
                 CliError::usage("the pending upload has no destination identifier")
             })?);
         upload.idempotency_key = Some(IdempotencyKey::new(pending.idempotency_key.clone())?);
-        let entry = client.upload(&upload).await.map_err(|error| {
+        let entry = context.client.upload(&upload).await.map_err(|error| {
             CliError::explained(error, |error| {
                 (error.code() == Some("self_destruct_requires_new_file")).then(|| {
                     format!(
@@ -1459,16 +751,26 @@ async fn put(global: &GlobalArgs, args: &PutArgs, output: Output) -> Result<()> 
 }
 
 async fn get(global: &GlobalArgs, args: &GetArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let entry = resolve_entry(&client, &args.target).await?;
+    let mut context = session::connect(global).await?;
+    let entry = resolve_entry(&mut context, &args.target).await?;
     let destination = args.output.clone().unwrap_or_else(|| {
-        std::path::PathBuf::from(if entry.entry_type == briefcase_client::EntryType::Folder {
-            format!("{}.tar.zst", entry.name)
+        std::path::PathBuf::from(if entry.is_folder() {
+            format!(
+                "{}.tar.zst",
+                if entry.name.is_empty() {
+                    "drive"
+                } else {
+                    &entry.name
+                }
+            )
         } else {
             entry.name.clone()
         })
     });
-    let written = client.download_to_file(entry.id, &destination).await?;
+    let written = context
+        .client
+        .download_to_file(entry.id, &destination)
+        .await?;
     if output.is_json() {
         output.json(&serde_json::json!({
             "entry_id": entry.id,
@@ -1488,9 +790,9 @@ async fn get(global: &GlobalArgs, args: &GetArgs, output: Output) -> Result<()> 
 }
 
 async fn cat(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    let mut stream = client.read_content(id, None).await?;
+    let mut context = session::connect(global).await?;
+    let id = entry_id(&mut context, &args.target).await?;
+    let mut stream = context.client.read_content(id, None).await?;
     while let Some(chunk) = stream.chunk().await? {
         output.bytes(&chunk).map_err(|source| CliError::Io {
             path: "standard output".to_owned(),
@@ -1501,76 +803,88 @@ async fn cat(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<(
 }
 
 async fn move_entry(global: &GlobalArgs, args: &MvArgs, output: Output) -> Result<()> {
-    let (parent_path, name) = split_path(&args.destination);
+    let Target::Path {
+        drive: destination_drive,
+        path: destination_path,
+    } = &args.destination
+    else {
+        return Err(CliError::usage(
+            "the destination is the entry's new path, such as notes/renamed.md or @si:scout/archive/old.md",
+        ));
+    };
+    let (parent_path, name) = split_path(destination_path);
     if name.is_empty() {
         return Err(CliError::usage("a destination name is required"));
     }
-    let (client, resolved) = connect_resolved(global).await?;
+    let mut context = session::connect(global).await?;
     let address = request_fingerprint(&serde_json::json!({
         "target": args.target.to_string(),
-        "destination": &args.destination,
-        "testing_environment_id": resolved.environment_id,
+        "destination": args.destination.to_string(),
     }))?;
-    let scope = format!(
-        "entry:move:{}:{address}",
-        plane_scope(&resolved.profile_name, resolved.environment_id)
-    );
+    let scope = format!("entry:move:{}:{address}", context.profile);
     let fingerprint = request_fingerprint(&serde_json::json!({
         "operation": "update-entry",
-        "profile": &resolved.profile_name,
-        "url": &resolved.url,
-        "org": &resolved.org,
-        "testing_environment_id": resolved.environment_id,
+        "profile": &context.profile,
+        "url": context.client.config().api_base().as_str(),
         "target": args.target.to_string(),
-        "destination": &args.destination,
+        "destination": args.destination.to_string(),
     }))?;
     let recovered = durable_pending(&scope, &fingerprint)?;
     let (resource_id, original_path, original_parent_id) =
         if let Some(id) = recovered.as_ref().and_then(|pending| pending.resource_id) {
             (id, args.target.to_string(), None)
         } else {
-            let entry = resolve_entry(&client, &args.target).await?;
+            let entry = resolve_entry(&mut context, &args.target).await?;
             (entry.id, entry.path, entry.parent_id)
         };
-    // Reading a shared file does not imply that its parent is independently
-    // readable. A same-parent rename already has the destination UUID in the
-    // source metadata, so do not resolve that ancestor again. Persist/reuse
-    // the UUID exactly like a move so an uncertain retry keeps the same body.
+    // A rename in place already knows its folder (reading a shared file does not
+    // imply its folder is readable). That holds only when the destination names
+    // the same drive the same way as the target.
+    let same_drive = args.target.drive() == destination_drive.as_deref()
+        && !matches!(args.target, Target::Legacy { .. });
     let known_destination_id = recovered
         .as_ref()
         .and_then(|pending| pending.destination_id)
-        .or_else(|| original_parent_id.filter(|_| split_path(&original_path).0 == parent_path));
-    let destination_id = match parent_path {
-        Some(_) if known_destination_id.is_some() => known_destination_id,
-        Some(parent_path) => {
-            let destination = Destination::path(parent_path);
-            Some(stable_destination_id(&client, &destination, recovered.as_ref()).await?)
-        }
-        None => None,
+        .or_else(|| {
+            original_parent_id.filter(|_| same_drive && split_path(&original_path).0 == parent_path)
+        });
+    let destination_id = if let Some(id) = known_destination_id {
+        id
+    } else {
+        let parent = Destination::Path {
+            drive: destination_drive.clone(),
+            path: parent_path.clone().unwrap_or_default(),
+        };
+        stable_destination_id(&mut context, &parent, recovered.as_ref()).await?
     };
-    let pending =
-        prepare_durable_mutation(&scope, &fingerprint, Some(resource_id), destination_id)?;
+    let pending = prepare_durable_mutation(
+        &scope,
+        &fingerprint,
+        Some(resource_id),
+        Some(destination_id),
+    )?;
     let entry_id = pending.resource_id.unwrap_or(resource_id);
     let mut update = briefcase_client::EntryUpdate::rename(name);
     update.parent_id = pending.destination_id;
     let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-    let moved = client
+    let moved = context
+        .client
         .update_entry_with_key(entry_id, &update, &key)
         .await?;
     finish_durable_mutation(&scope, &pending)?;
     if output.is_json() {
         output.json(&moved);
     } else {
-        output.note(&format!("{} → {}", original_path, moved.path));
+        output.note(&format!("{original_path} → {}", moved.path));
     }
     Ok(())
 }
 
 async fn remove(global: &GlobalArgs, args: &RmArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let mut context = session::connect(global).await?;
     for target in &args.targets {
-        let entry = resolve_entry(&client, target).await?;
-        client.delete_entry(entry.id).await?;
+        let entry = resolve_entry(&mut context, target).await?;
+        context.client.delete_entry(entry.id).await?;
         if entry.self_destruct_at.is_some() {
             output.note(&format!(
                 "{} deleted permanently; a self-destructing file never enters the bin ({})",
@@ -1587,17 +901,17 @@ async fn remove(global: &GlobalArgs, args: &RmArgs, output: Output) -> Result<()
 }
 
 async fn keep(global: &GlobalArgs, args: &KeepArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let mut context = session::connect(global).await?;
     let mut kept = Vec::with_capacity(args.targets.len());
     for target in &args.targets {
-        let entry = resolve_entry(&client, target).await?;
+        let entry = resolve_entry(&mut context, target).await?;
         // A lost response needs no stored retry identity: stopping a stopped
         // timer is refused as `not_self_destructing`, never applied twice.
-        client.make_permanent(entry.id).await.map_err(|error| {
+        context.client.make_permanent(entry.id).await.map_err(|error| {
             CliError::explained(error, |error| {
                 if error.is_forbidden() {
                     Some(format!(
-                        "only the creator of {} and organization admins and owners can keep a self-destructing file",
+                        "only the creator of {}, its drive's owner, and the custodian of either can keep a self-destructing file",
                         entry.path
                     ))
                 } else if error.code() == Some("not_self_destructing") {
@@ -1623,35 +937,43 @@ async fn keep(global: &GlobalArgs, args: &KeepArgs, output: Output) -> Result<()
 }
 
 async fn bin(global: &GlobalArgs, command: &BinCommand, output: Output) -> Result<()> {
-    let (client, resolved) = connect_resolved(global).await?;
+    let context = session::connect(global).await?;
     match command {
-        BinCommand::List { limit, cursor, all } => {
-            let page = if *all {
-                EntryPage {
-                    items: list_every_bin_entry(&client, cursor.clone(), *limit).await?,
-                    next_cursor: None,
+        BinCommand::List {
+            drive,
+            limit,
+            cursor,
+            all,
+        } => {
+            let drive = drive.as_ref().map(|drive| drive.0.as_str());
+            let mut page = context.client.bin(drive, cursor.as_deref(), *limit).await?;
+            if *all {
+                let mut seen = HashSet::new();
+                if let Some(cursor) = cursor {
+                    seen.insert(cursor.clone());
                 }
-            } else {
-                client.bin(cursor.as_deref(), *limit).await?
-            };
-            output.entry_page(&page, true);
+                while let Some(next) = unique_next_cursor(&mut seen, page.next_cursor.take())? {
+                    let more = context.client.bin(drive, Some(&next), *limit).await?;
+                    page.items.extend(more.items);
+                    page.next_cursor = more.next_cursor;
+                }
+            }
+            output.entry_page(&page, true, &labels(&context));
         }
         BinCommand::Restore { entry_id } => {
-            let scope = format!(
-                "entry:restore-bin:{}:{entry_id}",
-                plane_scope(&resolved.profile_name, resolved.environment_id)
-            );
+            let scope = format!("entry:restore-bin:{}:{entry_id}", context.profile);
             let fingerprint = request_fingerprint(&serde_json::json!({
                 "operation": "restore-bin",
-                "profile": &resolved.profile_name,
-                "url": &resolved.url,
-                "org": &resolved.org,
-                "testing_environment_id": resolved.environment_id,
+                "profile": &context.profile,
+                "url": context.client.config().api_base().as_str(),
                 "entry_id": entry_id,
             }))?;
             let pending = prepare_durable_mutation(&scope, &fingerprint, Some(*entry_id), None)?;
             let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-            let entry = client.restore_from_bin_with_key(*entry_id, &key).await?;
+            let entry = context
+                .client
+                .restore_from_bin_with_key(*entry_id, &key)
+                .await?;
             finish_durable_mutation(&scope, &pending)?;
             if output.is_json() {
                 output.json(&entry);
@@ -1663,39 +985,19 @@ async fn bin(global: &GlobalArgs, command: &BinCommand, output: Output) -> Resul
     Ok(())
 }
 
-async fn list_every_bin_entry(
-    client: &Client,
-    mut cursor: Option<String>,
-    limit: Option<u16>,
-) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    let mut seen_cursors = HashSet::new();
-    if let Some(cursor) = &cursor {
-        seen_cursors.insert(cursor.clone());
-    }
-    loop {
-        let page = client.bin(cursor.as_deref(), limit).await?;
-        entries.extend(page.items);
-        let Some(next_cursor) = unique_next_cursor(&mut seen_cursors, page.next_cursor)? else {
-            return Ok(entries);
-        };
-        cursor = Some(next_cursor);
-    }
-}
-
 async fn versions(
     global: &GlobalArgs,
     target: &Target,
     cursor: Option<&str>,
     output: Output,
 ) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, target).await?;
-    let versions = client.versions_page(id, cursor).await?;
+    let mut context = session::connect(global).await?;
+    let id = entry_id(&mut context, target).await?;
+    let versions = context.client.versions_page(id, cursor).await?;
     if output.is_json() {
         output.json(&versions);
     } else {
-        output.versions(&versions.items);
+        output.versions(&versions.items, &labels(&context));
         if let Some(cursor) = versions.next_cursor {
             output.note(&format!("More versions available: {cursor}"));
         }
@@ -1704,33 +1006,28 @@ async fn versions(
 }
 
 async fn restore_version(global: &GlobalArgs, args: &RestoreArgs, output: Output) -> Result<()> {
-    let (client, resolved) = connect_resolved(global).await?;
+    let mut context = session::connect(global).await?;
     let address = request_fingerprint(&serde_json::json!({
         "target": args.target.to_string(),
         "version_id": args.version_id,
-        "testing_environment_id": resolved.environment_id,
     }))?;
-    let scope = format!(
-        "entry:restore-version:{}:{address}",
-        plane_scope(&resolved.profile_name, resolved.environment_id)
-    );
+    let scope = format!("entry:restore-version:{}:{address}", context.profile);
     let fingerprint = request_fingerprint(&serde_json::json!({
         "operation": "restore-version",
-        "profile": &resolved.profile_name,
-        "url": &resolved.url,
-        "org": &resolved.org,
-        "testing_environment_id": resolved.environment_id,
+        "profile": &context.profile,
+        "url": context.client.config().api_base().as_str(),
         "target": args.target.to_string(),
         "version_id": args.version_id,
     }))?;
     let id = match pending_resource_id(&scope, &fingerprint)? {
         Some(id) => id,
-        None => entry_id(&client, &args.target).await?,
+        None => entry_id(&mut context, &args.target).await?,
     };
     let pending = prepare_durable_mutation(&scope, &fingerprint, Some(id), None)?;
     let id = pending.resource_id.unwrap_or(id);
     let key = IdempotencyKey::new(pending.idempotency_key.clone())?;
-    let entry = client
+    let entry = context
+        .client
         .restore_version_with_key(id, args.version_id, &key)
         .await?;
     finish_durable_mutation(&scope, &pending)?;
@@ -1745,26 +1042,9 @@ async fn restore_version(global: &GlobalArgs, args: &RestoreArgs, output: Output
     Ok(())
 }
 
-async fn history(global: &GlobalArgs, args: &TargetArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, &args.target).await?;
-    let events = client.activity(id).await?;
-    output.history(&events);
-    Ok(())
-}
+// ---- sharing ------------------------------------------------------------------
 
 async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<()> {
-    let (kind, value) = args
-        .principal
-        .split_once(':')
-        .ok_or_else(|| CliError::usage("Use c:ID, si:ID, email:ADDRESS, or tag:TAG"))?;
-    let principal = match kind {
-        "c" => briefcase_client::Recipient::Carbon(args.principal.clone()),
-        "si" => briefcase_client::Recipient::Silicon(args.principal.clone()),
-        "email" => briefcase_client::Recipient::Email(value.into()),
-        "tag" => briefcase_client::Recipient::Tag(value.into()),
-        _ => return Err(CliError::usage("Unknown recipient type")),
-    };
     if args.expires_after.is_some()
         && args
             .access
@@ -1782,20 +1062,22 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
                 .join(",")
         )));
     }
-    if args.access.0.contains(&AccessRight::Delete) {
-        return Err(CliError::usage(
-            "Delete is reserved for creators and organization administrators",
-        ));
-    }
+    let principal = match args.principal.0.actor_type {
+        briefcase_client::ActorType::Silicon => {
+            briefcase_client::Recipient::Silicon(args.principal.0.id.clone())
+        }
+        _ => briefcase_client::Recipient::Carbon(args.principal.0.id.clone()),
+    };
     let grant = briefcase_client::Invite {
         principal,
         access: args.access.0.clone(),
         inherit: args.inherit,
         expires_in_minutes: args.expires_after.map(|Lifetime(minutes)| minutes),
     };
-    let (client, scope, pending, id) =
+    let (context, scope, pending, id) =
         sharing_mutation(global, &args.target, "invite", &grant).await?;
-    let invitation = client
+    let invitation = context
+        .client
         .invite(
             id,
             &grant,
@@ -1803,14 +1085,15 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
         )
         .await?;
     finish_durable_mutation(&scope, &pending)?;
-    output.invitation(&invitation);
+    output.invitation_to(&invitation, &args.principal.0.id);
     Ok(())
 }
 
 async fn unshare(global: &GlobalArgs, args: &UnshareArgs, output: Output) -> Result<()> {
-    let (client, scope, pending, id) =
+    let (context, scope, pending, id) =
         sharing_mutation(global, &args.target, "revoke-invitation", &args.grant_id).await?;
-    client
+    context
+        .client
         .revoke_invitation(
             id,
             args.grant_id,
@@ -1818,7 +1101,7 @@ async fn unshare(global: &GlobalArgs, args: &UnshareArgs, output: Output) -> Res
         )
         .await?;
     finish_durable_mutation(&scope, &pending)?;
-    output.note("Invitation revoked. Other inherited access still applies.");
+    output.note("Share revoked. Access the account holds by another route still applies.");
     Ok(())
 }
 
@@ -1836,14 +1119,15 @@ async fn change_expiring_share(
             ));
         }
     };
-    let (client, scope, pending, id) = sharing_mutation(
+    let (context, scope, pending, id) = sharing_mutation(
         global,
         &args.target,
         "change-expiring-share",
         &serde_json::json!({"grant_id": args.grant_id, "change": change}),
     )
     .await?;
-    let invitation = client
+    let invitation = context
+        .client
         .change_expiring_share(
             id,
             args.grant_id,
@@ -1855,12 +1139,12 @@ async fn change_expiring_share(
             CliError::explained(error, |error| {
                 if error.is_not_found() {
                     Some(format!(
-                        "grant {} is not a live share on {}: an expiring share that has ended is gone for good. List live grants with `briefcase shares {}`, or share again with `briefcase share {} <recipient> --expires-after <DURATION>`",
+                        "share {} is not live on {}: an expiring share that has ended is gone for good. List live shares with `briefcase shares {}`, or share again with `briefcase share {} <account> --expires-after <DURATION>`",
                         args.grant_id, args.target, args.target, args.target
                     ))
                 } else if error.code() == Some("not_an_expiring_share") {
                     Some(format!(
-                        "grant {} is permanent, so it has no timer to change; revoke it with `briefcase unshare {} {}`",
+                        "share {} is permanent, so it has no timer to change; revoke it with `briefcase unshare {} {}`",
                         args.grant_id, args.target, args.grant_id
                     ))
                 } else {
@@ -1887,14 +1171,15 @@ async fn link(
     output: Output,
 ) -> Result<()> {
     let value = if let Some(Lifetime(minutes)) = expires_after {
-        let (client, scope, pending, id) = sharing_mutation(
+        let (context, scope, pending, id) = sharing_mutation(
             global,
             target,
             "link-access",
             &serde_json::json!({"enabled": true, "expires_in_minutes": minutes}),
         )
         .await?;
-        let value = client
+        let value = context
+            .client
             .set_expiring_link_access(
                 id,
                 minutes,
@@ -1913,9 +1198,10 @@ async fn link(
         finish_durable_mutation(&scope, &pending)?;
         value
     } else if let Some(enabled) = enabled {
-        let (client, scope, pending, id) =
+        let (context, scope, pending, id) =
             sharing_mutation(global, target, "link-access", &enabled).await?;
-        let value = client
+        let value = context
+            .client
             .set_link_access(
                 id,
                 enabled,
@@ -1925,84 +1211,86 @@ async fn link(
         finish_durable_mutation(&scope, &pending)?;
         value
     } else {
-        let client = connect(global).await?;
-        client.link_access(entry_id(&client, target).await?).await?
+        let mut context = session::connect(global).await?;
+        let id = entry_id(&mut context, target).await?;
+        context.client.link_access(id).await?
     };
     output.link(&value);
     Ok(())
 }
 
-/// Bind a retry to its original entry ID even if the supplied path later moves.
+/// Binds a retry to its original entry ID even if the supplied path later moves.
 async fn sharing_mutation<T: Serialize>(
     global: &GlobalArgs,
     target: &Target,
     operation: &str,
     body: &T,
-) -> Result<(Client, String, PendingMutation, Uuid)> {
-    let (client, resolved) = connect_resolved(global).await?;
-    let fingerprint = request_fingerprint(
-        &serde_json::json!({"operation":operation,"target":target.to_string(),"body":body,"profile":resolved.profile_name,"url":resolved.url,"org":resolved.org,"testing_environment_id":resolved.environment_id}),
-    )?;
-    let scope = format!(
-        "entry:{operation}:{}:{fingerprint}",
-        plane_scope(&resolved.profile_name, resolved.environment_id)
-    );
+) -> Result<(Context, String, PendingMutation, Uuid)> {
+    let mut context = session::connect(global).await?;
+    let fingerprint = request_fingerprint(&serde_json::json!({
+        "operation": operation,
+        "target": target.to_string(),
+        "body": body,
+        "profile": &context.profile,
+        "url": context.client.config().api_base().as_str(),
+    }))?;
+    let scope = format!("entry:{operation}:{}:{fingerprint}", context.profile);
     let id = match pending_resource_id(&scope, &fingerprint)? {
         Some(id) => id,
-        None => entry_id(&client, target).await?,
+        None => entry_id(&mut context, target).await?,
     };
     let pending = prepare_durable_mutation(&scope, &fingerprint, Some(id), None)?;
-    Ok((client, scope, pending, id))
-}
-
-async fn shares(
-    global: &GlobalArgs,
-    target: &Target,
-    cursor: Option<&str>,
-    output: Output,
-) -> Result<()> {
-    let client = connect(global).await?;
-    let id = entry_id(&client, target).await?;
-    let grants = client.invitations(id, cursor).await?;
-    output.invitations(&grants);
-    Ok(())
+    Ok((context, scope, pending, id))
 }
 
 async fn access(global: &GlobalArgs, targets: &[Target], output: Output) -> Result<()> {
-    let client = connect(global).await?;
+    let mut context = session::connect(global).await?;
     let mut query = PermissionQuery::default();
+    let mut drive: Option<Option<String>> = None;
     for target in targets {
         match target {
             Target::Id(id) => query.entry_ids.push(*id),
-            Target::Path(path) => query.paths.push(path.clone()),
+            Target::Path { drive: named, path } => {
+                if drive.as_ref().is_some_and(|drive| drive != named) {
+                    return Err(CliError::usage(
+                        "`briefcase access` reports on paths in one drive at a time; run it once per drive (IDs may be mixed in freely)",
+                    ));
+                }
+                drive = Some(named.clone());
+                query.paths.push(path.clone());
+            }
+            Target::Legacy { .. } => query
+                .entry_ids
+                .push(resolve_entry(&mut context, target).await?.id),
         }
     }
-    let inspection = client.effective_access(&query).await?;
+    query.drive = drive.flatten();
+    let inspection = context.client.effective_access(&query).await?;
     output.inspection(&inspection);
     Ok(())
 }
 
-async fn inbox(global: &GlobalArgs, mark_read: bool, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let inbox = if mark_read {
-        client.mark_notifications_read().await?
-    } else {
-        client.notifications().await?
-    };
-    output.inbox(&inbox);
-    Ok(())
-}
-
-async fn usage(global: &GlobalArgs, output: Output) -> Result<()> {
-    let client = connect(global).await?;
-    let usage = client.usage().await?;
-    output.usage(&usage);
+async fn usage(global: &GlobalArgs, drive: Option<&DriveArg>, output: Output) -> Result<()> {
+    let context = session::connect(global).await?;
+    let drive = drive.map(|drive| drive.0.as_str());
+    let usage = context.client.usage(drive).await?;
+    let name = drive.map_or_else(
+        || {
+            context.account().map_or_else(
+                || "yours".to_owned(),
+                |account| format!("@{} (yours)", account.display_id()),
+            )
+        },
+        |drive| format!("@{drive}"),
+    );
+    output.usage(&usage, &name);
     Ok(())
 }
 
 async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) -> Result<()> {
     let StorageCommand::Configure(args) = command;
     let configuration = BucketConfiguration {
+        drive: args.drive.as_ref().map(|drive| drive.0.clone()),
         bucket_name: args.bucket.clone(),
         region: args.region.clone(),
         role_arn: args.role_arn.clone(),
@@ -2015,11 +1303,12 @@ async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) 
     if operation.is_nil() {
         return Err(CliError::usage("--operation-id must be a non-nil UUID"));
     }
-    let client = connect(global).await?;
+    let context = session::connect(global).await?;
     eprintln!(
         "Storage operation ID: {operation}. Reuse --operation-id {operation} with the same configuration after a lost response."
     );
-    let status = client
+    let status = context
+        .client
         .configure_storage_with_key(&configuration, &IdempotencyKey::new(operation.to_string())?)
         .await?;
     if output.is_json() {
@@ -2028,7 +1317,7 @@ async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) 
         match status.status {
             briefcase_client::BucketConfigurationState::Configured => {
                 println!(
-                    "configured; the organization's files now go to {}",
+                    "configured; new files in the drive now go to {}",
                     args.bucket
                 );
             }
@@ -2050,20 +1339,20 @@ async fn storage(global: &GlobalArgs, command: &StorageCommand, output: Output) 
 }
 
 async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) -> Result<()> {
-    let (app_id, proof, proof_stdin, file) = match command {
-        AppCommand::Request(args) => return delegated::run(global, args, output).await,
+    match command {
+        AppCommand::Request(args) => delegated::run(global, args, output).await,
         AppCommand::PrepareUpload {
             file,
             operation_id,
             parent_path,
-        } => return delegated::prepare_upload(*operation_id, parent_path, file, output).await,
+        } => delegated::prepare_upload(*operation_id, parent_path, file, output).await,
         AppCommand::Transfer {
             upload_id,
             file,
             capability_file,
             capability_stdin,
         } => {
-            return delegated::transfer(
+            delegated::transfer(
                 global,
                 *upload_id,
                 file,
@@ -2071,82 +1360,9 @@ async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) 
                 *capability_stdin,
                 output,
             )
-            .await;
-        }
-        AppCommand::Upload {
-            app_id,
-            proof,
-            proof_stdin,
-            file,
-        } => (app_id, proof, proof_stdin, file),
-    };
-    // An OBO proof is the complete actor credential for this operation. Never
-    // load or rotate an unrelated member session that will not be sent.
-    let session = anonymous_session(global)?;
-    let client = if global.no_verify {
-        Client::new_unchecked(config(&session)?)?
-    } else {
-        Client::connect(config(&session)?).await?
-    };
-    let proof = if *proof_stdin {
-        read_secret_stdin()?
-    } else {
-        match proof {
-            Some(proof) => proof.clone(),
-            None => prompt_secret("IAM OBO access proof: ")?,
-        }
-    };
-    if proof.is_empty() {
-        return Err(CliError::usage("the OBO access proof was empty"));
-    }
-    let entry = client
-        .create_file_on_behalf_of(&OnBehalfOfUpload::file(
-            app_id.to_string(),
-            proof,
-            file.clone(),
-        ))
-        .await?;
-    if output.is_json() {
-        output.json(&entry);
-    } else {
-        output.note(&format!("created {}", entry.path));
-    }
-    Ok(())
-}
-
-async fn environment(global: &GlobalArgs, command: &EnvCommand, output: Output) -> Result<()> {
-    match command {
-        EnvCommand::Manage { arguments } => {
-            if global.test.is_some() || global.app_secret.is_some() || global.token.is_some() {
-                return Err(CliError::usage(
-                    "Honeycomb uses its own session; omit Briefcase test secrets/tokens and pass Honeycomb options after `env manage`",
-                ));
-            }
-            briefcase_client::honeycomb::manage_environment(arguments)?;
-        }
-        EnvCommand::Current => {
-            if global.test.is_none() {
-                return Err(CliError::usage(
-                    "select a test environment with --test or BRIEFCASE_APP_SECRET",
-                ));
-            }
-            let client = connect(global).await?;
-            let current = client.current_testing_environment().await?;
-            if output.is_json() {
-                output.json(&current);
-            } else {
-                println!("id             {}", current.id);
-                println!("name           {}", current.name);
-                println!("key generation {}", current.key_generation);
-            }
-        }
-        _ => {
-            return Err(CliError::usage(
-                "Honeycomb manages shared environments. Use `briefcase env manage create <org> <name>`, `briefcase env manage list`, or `briefcase env manage action <id> <action> --revision <revision>`. Enter Briefcase with BRIEFCASE_APP_SECRET and your test SLT.",
-            ));
+            .await
         }
     }
-    Ok(())
 }
 
 fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Result<()> {
@@ -2159,36 +1375,40 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
         return Ok(());
     }
     let state = StateDirectory::locate()?;
-    // Writers lock before reading so concurrent setting changes merge instead
-    // of replacing one another with snapshots taken at the same time.
+    // Writers lock before reading so concurrent setting changes merge.
     let _state_lock = match command {
         ConfigCommand::Set { .. } | ConfigCommand::Unset { .. } => Some(state.lock_credentials()?),
-        ConfigCommand::Show => None,
-        ConfigCommand::Home { .. } => unreachable!("home was handled before locating state"),
+        ConfigCommand::Show | ConfigCommand::Home { .. } => None,
     };
     let mut configuration = state.configuration()?;
+    let unknown = |key: &str| {
+        CliError::usage(format!(
+            "unknown setting `{key}`; the only setting is `telemetry` (Silicon Apps keeps briefcase up to date, so there is no update setting)"
+        ))
+    };
     match command {
         ConfigCommand::Show => {
+            let profile = global
+                .profile
+                .as_deref()
+                .unwrap_or(&configuration.current_profile);
             if output.is_json() {
                 output.json(&serde_json::json!({
-                    "profile": global.profile.as_deref().unwrap_or(&configuration.current_profile),
-                    "auto_update": false,
-                    "update_manager": "honeycomb",
+                    "profile": profile,
                     "telemetry": configuration.telemetry,
+                    "state": state.path().display().to_string(),
+                    "profiles": configuration.profiles,
                 }));
             } else {
-                println!(
-                    "profile     {}",
-                    global
-                        .profile
-                        .as_deref()
-                        .unwrap_or(&configuration.current_profile)
-                );
+                println!("profile     {profile}");
                 println!(
                     "telemetry   {}",
                     if configuration.telemetry { "on" } else { "off" }
                 );
-                println!("auto-update off (managed by Honeycomb)");
+                println!("state       {}", state.path().display());
+                for (name, saved) in &configuration.profiles {
+                    println!("  {name:<10} {}", saved.url);
+                }
             }
         }
         ConfigCommand::Set { key, value } if key == "telemetry" => {
@@ -2205,25 +1425,8 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
             state.save_configuration(&configuration)?;
             output.note("telemetry restored to the default: on");
         }
-        ConfigCommand::Set { key, value } if key == "auto-update" => {
-            if parse_switch(value)? {
-                return Err(update_migration_error());
-            }
-            configuration.auto_update = false;
-            state.save_configuration(&configuration)?;
-            output.note("Briefcase self-updates are disabled; Honeycomb manages updates.");
-        }
-        ConfigCommand::Unset { key } if key == "auto-update" => {
-            configuration.auto_update = false;
-            state.save_configuration(&configuration)?;
-            output.note("Briefcase self-updates remain disabled; Honeycomb manages updates.");
-        }
-        ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => {
-            return Err(CliError::usage(format!(
-                "unknown setting `{key}`; supported settings: auto-update, telemetry"
-            )));
-        }
-        ConfigCommand::Home { .. } => unreachable!("home was handled before reading configuration"),
+        ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => return Err(unknown(key)),
+        ConfigCommand::Home { .. } => {}
     }
     Ok(())
 }
@@ -2236,38 +1439,22 @@ fn parse_switch(value: &str) -> Result<bool> {
     }
 }
 
-fn update_migration_error() -> CliError {
-    CliError::Usage(
-        "Honeycomb manages Briefcase installation and updates; run `honeycomb update 'briefcase'`."
-            .into(),
-    )
-}
-
-fn system(command: &SystemCommand) -> Result<()> {
-    match command {
-        SystemCommand::Update => Err(update_migration_error()),
-    }
-}
-
 async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
-    let session = match resolve_session(global, true, false) {
-        Ok(session) => Some(session),
-        Err(error) if global.test.is_some() => return Err(error),
+    let api_url = session::select(global).map_or_else(
+        |_| session::normalize_api_url(global.url.as_deref().unwrap_or(session::DEFAULT_API_URL)),
+        |selection| selection.api_url,
+    );
+    let served = match briefcase_client::Config::new(&api_url)
+        .and_then(|config| Client::new_unchecked(config.with_telemetry(false)))
+    {
+        Ok(client) => client.version().await.ok(),
         Err(_) => None,
     };
-    let client = match &session {
-        Some(session) => Client::new_unchecked(config(session)?).ok(),
-        None => None,
-    };
-    let served = match &client {
-        Some(client) => client.version().await.ok(),
-        None => None,
-    };
-
     if output.is_json() {
         output.json(&serde_json::json!({
             "client": env!("CARGO_PKG_VERSION"),
             "client_api_version": briefcase_client::API_VERSION,
+            "client_contract_version": briefcase_client::CONTRACT_VERSION,
             "server": served.as_ref().map(|version| serde_json::json!({
                 "build": version.build,
                 "contract_version": version.contract_version,
@@ -2277,8 +1464,9 @@ async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
         return Ok(());
     }
     println!(
-        "briefcase {} (contract {})",
+        "briefcase {} (contract {}, API {})",
         env!("CARGO_PKG_VERSION"),
+        briefcase_client::CONTRACT_VERSION,
         briefcase_client::API_VERSION
     );
     match served {
@@ -2288,7 +1476,7 @@ async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
             version.contract_version,
             version.supported_api_versions.join(", ")
         ),
-        None => println!("server    not reachable"),
+        None => println!("server    not reachable ({api_url})"),
     }
     Ok(())
 }
@@ -2309,14 +1497,17 @@ async fn report(
             .ok()
             .filter(|value| !value.trim().is_empty()),
     };
-    let (client, session) = connect_resolved(global).await?;
-    let intent = serde_json::json!({"operation": "submit-report", "url": session.url, "org": session.org, "environment": session.environment_id, "report": body});
+    let context = session::connect(global).await?;
+    let intent = serde_json::json!({
+        "operation": "submit-report",
+        "url": context.client.config().api_base().as_str(),
+        "report": body,
+    });
     let encoded =
         serde_json::to_vec(&intent).map_err(|error| CliError::Usage(error.to_string()))?;
-    // Stable across process retries, scoped to the current actor as well as the
-    // deployment, organization and environment by the server's idempotency key.
+    // Stable across process retries; the server scopes the key to the account.
     let key = IdempotencyKey::new(format!("report-{:x}", Sha256::digest(&encoded)))?;
-    let receipt = client.submit_report_with_key(&body, &key).await?;
+    let receipt = context.client.submit_report_with_key(&body, &key).await?;
     output.json(&receipt);
     if body.pr.is_none() {
         eprintln!(
@@ -2328,62 +1519,19 @@ async fn report(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CliError, ensure_stored_scope, scope_for, split_path, testing_environment_for_login,
-        unique_next_cursor,
-    };
-    use crate::state::{Credentials, Profile};
-    use uuid::Uuid;
+    use super::{split_path, unique_next_cursor};
 
     #[test]
     fn a_path_splits_into_a_parent_and_a_name() {
         assert_eq!(
-            split_path("public/handbook/onboarding"),
-            (Some("public/handbook".to_owned()), "onboarding".to_owned())
+            split_path("notes/2026/onboarding"),
+            (Some("notes/2026".to_owned()), "onboarding".to_owned())
         );
         assert_eq!(split_path("handbook"), (None, "handbook".to_owned()));
         assert_eq!(
-            split_path("/private/cos:tos/notes/"),
-            (Some("private/cos:tos".to_owned()), "notes".to_owned())
+            split_path("/notes/plans/"),
+            (Some("notes".to_owned()), "plans".to_owned())
         );
-    }
-
-    #[test]
-    fn exit_codes_tell_a_script_what_happened() {
-        assert_eq!(CliError::usage("nope").exit_code(), 2);
-        assert_eq!(
-            CliError::Client(briefcase_client::Error::Configuration("x".into())).exit_code(),
-            1
-        );
-    }
-
-    #[test]
-    fn an_explained_refusal_keeps_the_exit_code_of_the_refusal() {
-        let refusal = |status: u16| {
-            briefcase_client::Error::Api(briefcase_client::ApiError {
-                status,
-                code: "forbidden".to_owned(),
-                message: "Not allowed".to_owned(),
-                request_id: None,
-                retry_after: None,
-                unsatisfied_range_length: None,
-            })
-        };
-        let explained = CliError::explained(refusal(403), |_| Some("ask the creator".to_owned()));
-        assert_eq!(explained.exit_code(), 4);
-        assert_eq!(
-            explained.to_string(),
-            "Not allowed (forbidden); ask the creator"
-        );
-        assert_eq!(
-            CliError::explained(refusal(404), |_| Some("gone".to_owned())).exit_code(),
-            3
-        );
-        // Without a hint the refusal is reported exactly as before.
-        assert!(matches!(
-            CliError::explained(refusal(409), |_| None),
-            CliError::Client(_)
-        ));
     }
 
     #[test]
@@ -2396,100 +1544,5 @@ mod tests {
         let error = unique_next_cursor(&mut seen, Some("first".to_owned())).unwrap_err();
         assert!(error.to_string().contains("repeated a pagination cursor"));
         assert_eq!(unique_next_cursor(&mut seen, None).unwrap(), None);
-    }
-
-    #[test]
-    fn stored_bearers_refuse_url_and_organization_overrides() {
-        let mut credentials = Credentials::default();
-        let bound = scope_for("https://briefcase.example/api/v1/", "tos").unwrap();
-        credentials.set_credential_scope("work", None, bound);
-        let saved = Profile {
-            url: "https://briefcase.example/api/v1/".to_owned(),
-            org: "tos".to_owned(),
-        };
-
-        let other_url = scope_for("https://attacker.example/api/v1/", "tos").unwrap();
-        let error = ensure_stored_scope(&credentials, Some(&saved), "work", None, &other_url)
-            .expect_err("a stored bearer must never follow a URL override");
-        assert!(error.to_string().contains("refusing to send"));
-
-        let other_org = scope_for("https://briefcase.example/api/v1/", "other").unwrap();
-        let error = ensure_stored_scope(&credentials, Some(&saved), "work", None, &other_org)
-            .expect_err("a stored bearer must never follow an organization override");
-        assert!(error.to_string().contains("organization other"));
-    }
-
-    #[test]
-    fn test_login_never_sends_a_stored_root_to_an_overridden_destination() {
-        let environment_id = Uuid::from_u128(91);
-        let root = "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-        let mut credentials = Credentials::default();
-        credentials.set_testing_environment_key(
-            "work",
-            environment_id,
-            briefcase_client::EnvironmentKey::new(root).unwrap(),
-        );
-        credentials.set_credential_scope(
-            "work",
-            Some(environment_id),
-            scope_for("https://briefcase.example/api/v1/", "tos").unwrap(),
-        );
-        let saved = Profile {
-            url: "https://briefcase.example/api/v1/".to_owned(),
-            org: "tos".to_owned(),
-        };
-        let overridden = scope_for("https://attacker.example/api/v1/", "tos").unwrap();
-
-        let error = testing_environment_for_login(
-            &credentials,
-            Some(&saved),
-            "work",
-            environment_id,
-            &overridden,
-        )
-        .expect_err("test login must reject the override before constructing a client");
-        assert!(error.to_string().contains("refusing to send"));
-        assert!(!error.to_string().contains(root));
-    }
-
-    #[test]
-    fn legacy_credentials_inherit_only_their_existing_profile_scope() {
-        let environment_id = Uuid::from_u128(92);
-        let mut credentials = Credentials::default();
-        credentials.set_testing_environment_key(
-            "work",
-            environment_id,
-            briefcase_client::EnvironmentKey::new(
-                "ask_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
-            )
-            .unwrap(),
-        );
-        let saved = Profile {
-            url: "https://briefcase.example/api/v1/".to_owned(),
-            org: "tos".to_owned(),
-        };
-        let original = scope_for(&saved.url, &saved.org).unwrap();
-        assert!(
-            testing_environment_for_login(
-                &credentials,
-                Some(&saved),
-                "work",
-                environment_id,
-                &original,
-            )
-            .is_ok()
-        );
-
-        let overridden = scope_for("https://attacker.example/api/v1/", "tos").unwrap();
-        assert!(
-            testing_environment_for_login(
-                &credentials,
-                Some(&saved),
-                "work",
-                environment_id,
-                &overridden,
-            )
-            .is_err()
-        );
     }
 }

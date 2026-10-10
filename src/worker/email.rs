@@ -42,12 +42,7 @@ impl Sender {
         org: &str,
         id: uuid::Uuid,
         payload: &Value,
-        test: bool,
     ) -> Result<(), &'static str> {
-        // Test environments exercise the outbox without contacting real inboxes.
-        if test {
-            return Ok(());
-        }
         let token = self.token.as_ref().ok_or("postmark_unconfigured")?;
         let recipient_type = payload["recipient_type"]
             .as_str()
@@ -55,16 +50,37 @@ impl Sender {
         let recipient_id = payload["recipient_id"]
             .as_str()
             .ok_or("invitation_payload_invalid")?;
-        let email:Option<String>=sqlx::query_scalar("SELECT c.email FROM briefcase.member_contacts c JOIN briefcase.organization_members m USING(org_id,actor_type,actor_id) WHERE c.org_id=$1 AND c.actor_type=$2 AND c.actor_id=$3 AND m.membership_status='active'")
-            .bind(org).bind(recipient_type).bind(recipient_id).fetch_optional(pool).await.map_err(|_|"invitation_contact_lookup_failed")?;
+        // Email goes only to an account that shared its email with Briefcase
+        // when it signed in, and only while that account is active.
+        let email: Option<String> = sqlx::query_scalar(
+            "SELECT email FROM briefcase.accounts \
+              WHERE account_uuid = $1 AND kind = $2 AND status = 'active' AND email IS NOT NULL",
+        )
+        .bind(recipient_id)
+        .bind(recipient_type)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| "invitation_contact_lookup_failed")?
+        .flatten();
         let email = email.ok_or("invitation_contact_unavailable")?;
-        let body = self.message(org, id, payload, &email)?;
+        // The notification lives in the recipient's inbox; the entry lives in
+        // the drive its details name (older rows: the inbox's own drive).
+        let drive = payload["details"]["drive"].as_str().unwrap_or(org);
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT public_id FROM briefcase.accounts WHERE account_uuid = $1")
+                .bind(drive)
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| "invitation_contact_lookup_failed")?
+                .flatten();
+        let body = self.message(drive, owner.as_deref(), id, payload, &email)?;
         self.deliver(&body, token).await
     }
 
     fn message(
         &self,
-        org: &str,
+        drive: &str,
+        owner: Option<&str>,
         id: uuid::Uuid,
         payload: &Value,
         email: &str,
@@ -74,18 +90,26 @@ impl Sender {
             .as_str()
             .ok_or("invitation_payload_invalid")?;
         {
+            // The entry's permanent address: its drive named by the owner's
+            // current id (or uuid while unknown), then its path.
             let mut segments = link
                 .path_segments_mut()
                 .map_err(|()| "invitation_url_invalid")?;
-            segments.pop_if_empty().extend(["org", org]);
-            segments.extend(path.split('/'));
-            segments.push("");
+            segments.pop_if_empty().push(owner.unwrap_or(drive));
+            if !path.is_empty() && path != "." {
+                segments.extend(path.split('/'));
+            }
         }
         let name = payload["details"]["name"]
             .as_str()
             .unwrap_or("a file or folder");
-        let body = json!({"From":"briefcase@teamofsilicons.com","To":email,"Subject":"You've been invited to a Briefcase file or folder",
-            "TextBody":format!("You have been invited to {name} in {org}.\n\nOpen Briefcase to view your current permissions:\n{link}\n"),
+        let place = owner.map_or_else(
+            || "someone's Briefcase".to_owned(),
+            |owner| format!("{owner}'s Briefcase"),
+        );
+        let opener = format!("{name} in {place} was shared with you.");
+        let body = json!({"From":"briefcase@teamofsilicons.com","To":email,"Subject":"A Briefcase file or folder was shared with you",
+            "TextBody":format!("{opener}\n\nOpen Briefcase to view it and your current access:\n{link}\n"),
             "MessageStream":"outbound","TrackOpens":false,"TrackLinks":"None","Metadata":{"invitation_id":id.to_string()}});
         Ok(body)
     }
@@ -149,19 +173,24 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let body = sender
             .message(
-                "tos",
+                "Ada1",
+                Some("c:ada"),
                 id,
-                &json!({"details":{"path":"private/me:tos/a report.md","name":"A report"}}),
+                &json!({"details":{"path":"reports/a report.md","name":"A report","drive":"Ada1"}}),
                 "verified@example.com",
             )
             .map_err(anyhow::Error::msg)?;
         assert_eq!(body["From"], "briefcase@teamofsilicons.com");
         assert_eq!(body["To"], "verified@example.com");
         assert_eq!(body["TrackOpens"], false);
+        let text = body["TextBody"].as_str().unwrap_or_default();
         assert!(
-            body["TextBody"]
-                .as_str()
-                .is_some_and(|text| text.contains("/org/tos/private/me:tos/a%20report.md/"))
+            text.contains("https://briefcase.teamofsilicons.com/c:ada/reports/a%20report.md\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("A report in c:ada's Briefcase was shared with you."),
+            "{text}"
         );
         for (status, response, expected) in [
             (200, json!({"ErrorCode":0}), Ok(())),

@@ -1,4 +1,9 @@
 //! What a caller asks for, in the shapes the operations accept.
+//!
+//! Every account has its own drive. A path names an entry inside one drive:
+//! the caller's own unless the request names another by its owner's `c:`/`si:`
+//! id (or uuid) — a drive shared with the caller, or the drive of a Silicon it
+//! looks after.
 
 use std::path::PathBuf;
 
@@ -7,98 +12,67 @@ use uuid::Uuid;
 
 use crate::{
     client::IdempotencyKey,
-    config::{ApplicationId, IamApplicationSecret, IamEnvironmentKey},
-    models::{AccessRight, ActorRef, RootType},
+    models::{AccessRight, ActorRef},
 };
 
-/// Creates an empty Briefcase plane coupled to one IAM testing plane.
-#[derive(Clone, Debug, Serialize)]
-pub struct TestingEnvironmentCreate {
-    /// Human-readable environment name.
-    pub name: String,
-    /// Optional purpose or run description.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Optionally join an existing IAM dependency testing environment.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iam_test_key: Option<IamEnvironmentKey>,
-}
-
-impl TestingEnvironmentCreate {
-    /// Provisions IAM and Briefcase together with a single request.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: None,
-            iam_test_key: None,
-        }
-    }
-
-    /// Adds a description.
-    #[must_use]
-    pub fn described(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-}
-
-/// Atomically replaces every IAM credential paired with a Briefcase test plane.
-#[derive(Clone, Debug, Serialize)]
-pub struct TestingEnvironmentIamPairing {
-    /// Public UUID of the replacement IAM testing environment.
-    pub iam_environment_id: Uuid,
-    /// Replacement IAM testing-environment root key.
-    pub iam_environment_key: IamEnvironmentKey,
-    /// Canonical test-only Briefcase Application ID inside IAM.
-    pub iam_app_id: ApplicationId,
-    /// Fresh test-only Application secret returned by IAM.
-    pub iam_app_secret: IamApplicationSecret,
-}
-
-impl TestingEnvironmentIamPairing {
-    /// Builds a replacement pairing from one complete IAM credential set.
-    #[must_use]
-    pub fn new(
-        iam_environment_id: Uuid,
-        iam_environment_key: IamEnvironmentKey,
-        iam_app_id: ApplicationId,
-        iam_app_secret: IamApplicationSecret,
-    ) -> Self {
-        Self {
-            iam_environment_id,
-            iam_environment_key,
-            iam_app_id,
-            iam_app_secret,
-        }
-    }
-}
-
-/// Renames or re-describes a live testing environment.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct TestingEnvironmentUpdate {
-    /// Replacement name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Replacement description.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-}
-
-/// How a folder is named: by identifier, or by the path its URL shows.
+/// How a folder is named: by identifier, or by its path inside a drive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Destination {
-    /// The folder's stable identifier.
+    /// The folder's stable identifier (its drive comes with it).
     Id(Uuid),
-    /// The folder's organization-relative path, such as `private/cos:tos/notes`.
-    Path(String),
+    /// A path inside a drive; an empty path is the top of the drive.
+    Path {
+        /// The drive's owner, as a `c:`/`si:` id or uuid; the caller's own when absent.
+        drive: Option<String>,
+        /// The path within that drive, such as `notes/2026`.
+        path: String,
+    },
 }
 
 impl Destination {
-    /// Names a folder by path.
+    /// A folder in the caller's own drive, by path.
     #[must_use]
     pub fn path(path: impl Into<String>) -> Self {
-        Self::Path(path.into())
+        Self::Path {
+            drive: None,
+            path: normalize(&path.into()),
+        }
+    }
+
+    /// A folder in another account's drive, such as `in_drive("si:scout", "reports")`.
+    #[must_use]
+    pub fn in_drive(drive: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::Path {
+            drive: Some(drive.into()),
+            path: normalize(&path.into()),
+        }
+    }
+
+    /// The top of the caller's own drive.
+    #[must_use]
+    pub const fn top() -> Self {
+        Self::Path {
+            drive: None,
+            path: String::new(),
+        }
+    }
+
+    /// The top of another account's drive.
+    #[must_use]
+    pub fn top_of(drive: impl Into<String>) -> Self {
+        Self::Path {
+            drive: Some(drive.into()),
+            path: String::new(),
+        }
+    }
+
+    /// The drive this names, when it names one other than the caller's own.
+    #[must_use]
+    pub fn drive(&self) -> Option<&str> {
+        match self {
+            Self::Id(_) => None,
+            Self::Path { drive, .. } => drive.as_deref(),
+        }
     }
 }
 
@@ -108,12 +82,16 @@ impl From<Uuid> for Destination {
     }
 }
 
+fn normalize(path: &str) -> String {
+    path.trim().trim_matches('/').to_owned()
+}
+
 /// Which entries to list, and how many.
 #[derive(Clone, Debug, Default)]
 pub struct ListEntries {
-    /// Folder to browse; omitted lists the organization base.
+    /// Folder to browse; the top of the caller's own drive when omitted.
     pub parent: Option<Destination>,
-    /// Filter expression; with one and no parent, the whole tree is searched.
+    /// Filter expression, applied within the folder's drive.
     pub filter: Option<String>,
     /// Cursor from a previous page.
     pub cursor: Option<String>,
@@ -131,7 +109,7 @@ impl ListEntries {
         }
     }
 
-    /// Filters everything the caller can reach.
+    /// Filters the caller's own drive.
     #[must_use]
     pub fn matching(filter: impl Into<String>) -> Self {
         Self {
@@ -155,14 +133,14 @@ impl ListEntries {
     }
 }
 
-/// A grant to create, either on its own or with a new folder.
+/// A share to create, either on its own or with a new folder.
 #[derive(Clone, Debug, Serialize)]
 pub struct NewGrant {
-    /// The member receiving access.
+    /// The account receiving access, named by its `c:`/`si:` id (or uuid).
     pub principal: ActorRef,
-    /// Rights to convey; read is always included.
+    /// Rights to convey; read is always included. Delete is never shared.
     pub access: Vec<AccessRight>,
-    /// Whether the grant reaches descendants.
+    /// Whether the share reaches descendants.
     pub inherit: bool,
     /// Makes this a read-only expiring share that ends after 1 to 43,200 minutes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,7 +148,7 @@ pub struct NewGrant {
 }
 
 impl NewGrant {
-    /// Grants a member a set of rights on the entry itself.
+    /// Shares the entry itself with an account.
     #[must_use]
     pub fn new(principal: ActorRef, access: impl IntoIterator<Item = AccessRight>) -> Self {
         Self {
@@ -181,15 +159,15 @@ impl NewGrant {
         }
     }
 
-    /// Makes the grant an expiring share: read-only, and gone after `minutes`
-    /// (1 to 43,200). It never replaces a permanent grant the member holds.
+    /// Makes the share an expiring share: read-only, and gone after `minutes`
+    /// (1 to 43,200). It never replaces a permanent share the account holds.
     #[must_use]
     pub const fn expires_after(mut self, minutes: u32) -> Self {
         self.expires_in_minutes = Some(minutes);
         self
     }
 
-    /// Extends the grant to everything inside the entry.
+    /// Extends the share to everything inside the entry.
     #[must_use]
     pub const fn inheriting(mut self) -> Self {
         self.inherit = true;
@@ -202,13 +180,9 @@ impl NewGrant {
 pub struct NewFolder {
     /// Display name.
     pub name: String,
-    /// Destination folder; omitted creates at the organization base.
+    /// Destination folder; the top of the caller's own drive when omitted.
     pub parent: Option<Destination>,
-    /// Which container to create in, required at the organization base.
-    pub root_type: Option<RootType>,
-    /// IAM tag, required when `root_type` is [`RootType::Tag`].
-    pub tag: Option<String>,
-    /// Members invited as the folder is created.
+    /// Accounts invited as the folder is created.
     pub invitees: Vec<NewGrant>,
     /// Key that makes a retry return the same folder.
     pub idempotency_key: Option<IdempotencyKey>,
@@ -221,39 +195,23 @@ impl NewFolder {
         Self {
             name: name.into(),
             parent: Some(parent.into()),
-            root_type: None,
-            tag: None,
             invitees: Vec::new(),
             idempotency_key: None,
         }
     }
 
-    /// Creates a typed folder at the organization base.
-    ///
-    /// The folder is a sibling of the reserved containers. Its type defines
-    /// access, not its location; use `in_folder` for an explicit parent.
+    /// Creates a folder at the top of the caller's own drive.
     #[must_use]
-    pub fn at_base(name: impl Into<String>, root_type: RootType) -> Self {
+    pub fn at_top(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             parent: None,
-            root_type: Some(root_type),
-            tag: None,
             invitees: Vec::new(),
             idempotency_key: None,
         }
     }
 
-    /// Creates a folder at the organization base with the given tag boundary.
-    #[must_use]
-    pub fn in_tag(name: impl Into<String>, tag: impl Into<String>) -> Self {
-        Self {
-            tag: Some(tag.into()),
-            ..Self::at_base(name, RootType::Tag)
-        }
-    }
-
-    /// Invites members as the folder is created.
+    /// Invites accounts as the folder is created.
     #[must_use]
     pub fn inviting(mut self, invitees: impl IntoIterator<Item = NewGrant>) -> Self {
         self.invitees = invitees.into_iter().collect();
@@ -268,13 +226,13 @@ impl NewFolder {
     }
 }
 
-/// A rename, a move, or both.
+/// A rename, a move within the same drive, or both.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct EntryUpdate {
     /// New display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// New parent folder.
+    /// New parent folder, in the same drive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<Uuid>,
 }
@@ -289,7 +247,7 @@ impl EntryUpdate {
         }
     }
 
-    /// Moves an entry into another folder, keeping its name.
+    /// Moves an entry into another folder of its drive, keeping its name.
     #[must_use]
     pub const fn move_to(parent_id: Uuid) -> Self {
         Self {
@@ -320,10 +278,10 @@ pub enum UploadSource {
 /// There is one upload operation for every size: Briefcase decides internally
 /// whether the bytes travel as one provider request or a durable multipart
 /// transfer. Uploading a name an active file already carries publishes that
-/// file's next version.
+/// file's next version. The bytes count against the drive they land in.
 #[derive(Clone, Debug)]
 pub struct Upload {
-    /// Folder to upload into.
+    /// Folder to upload into; [`Destination::top`] for the top of the drive.
     pub destination: Destination,
     /// Name the file takes in that folder.
     pub file_name: String,
@@ -449,8 +407,12 @@ impl ByteRange {
 pub struct PermissionQuery {
     /// Targets addressed by identifier.
     pub entry_ids: Vec<Uuid>,
-    /// Targets addressed by path.
+    /// Targets addressed by path, inside `drive`.
     pub paths: Vec<String>,
+    /// The drive the paths are in (its owner's `c:`/`si:` id or uuid); the
+    /// caller's own when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
 }
 
 impl PermissionQuery {
@@ -459,16 +421,16 @@ impl PermissionQuery {
     pub fn entries(entry_ids: impl IntoIterator<Item = Uuid>) -> Self {
         Self {
             entry_ids: entry_ids.into_iter().collect(),
-            paths: Vec::new(),
+            ..Self::default()
         }
     }
 
-    /// Asks about entries by path.
+    /// Asks about entries by path in the caller's own drive.
     #[must_use]
     pub fn paths(paths: impl IntoIterator<Item = String>) -> Self {
         Self {
-            entry_ids: Vec::new(),
             paths: paths.into_iter().collect(),
+            ..Self::default()
         }
     }
 
@@ -478,78 +440,21 @@ impl PermissionQuery {
         self.paths.extend(paths);
         self
     }
-}
 
-/// A file an application creates for the member it represents.
-///
-/// The destination, name, and media type travel inside the IAM proof rather
-/// than in this request: an application cannot redirect a proof it legitimately
-/// obtained to somewhere else.
-#[derive(Clone)]
-pub struct OnBehalfOfUpload {
-    /// The application's own IAM identifier.
-    pub app_id: String,
-    /// The single-use access proof IAM minted for these exact bytes.
-    pub proof: String,
-    /// The bytes the proof was minted over.
-    pub source: UploadSource,
-}
-
-impl std::fmt::Debug for OnBehalfOfUpload {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let source = match &self.source {
-            UploadSource::File(path) => format!("file {}", path.display()),
-            UploadSource::Bytes(bytes) => format!("{} bytes", bytes.len()),
-        };
-        formatter
-            .debug_struct("OnBehalfOfUpload")
-            .field("app_id", &self.app_id)
-            .field("proof", &"<redacted>")
-            .field("source", &source)
-            .finish()
-    }
-}
-
-impl OnBehalfOfUpload {
-    /// Creates a file from a local file's bytes.
+    /// Resolves the paths in another account's drive.
     #[must_use]
-    pub fn file(
-        app_id: impl Into<String>,
-        proof: impl Into<String>,
-        path: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            app_id: app_id.into(),
-            proof: proof.into(),
-            source: UploadSource::File(path.into()),
-        }
-    }
-
-    /// Creates a file from bytes already in hand.
-    #[must_use]
-    pub fn bytes(
-        app_id: impl Into<String>,
-        proof: impl Into<String>,
-        bytes: impl Into<Vec<u8>>,
-    ) -> Self {
-        Self {
-            app_id: app_id.into(),
-            proof: proof.into(),
-            source: UploadSource::Bytes(bytes.into()),
-        }
+    pub fn in_drive(mut self, drive: impl Into<String>) -> Self {
+        self.drive = Some(drive.into());
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteRange, Destination, ListEntries, NewFolder, NewGrant, OnBehalfOfUpload,
-        TestingEnvironmentIamPairing, Upload,
+        ByteRange, Destination, ListEntries, NewFolder, NewGrant, PermissionQuery, Upload,
     };
-    use crate::{
-        config::{ApplicationId, IamApplicationSecret, IamEnvironmentKey},
-        models::{AccessRight, ActorRef, RootType},
-    };
+    use crate::models::{AccessRight, ActorRef};
 
     #[test]
     fn a_range_reads_as_the_header_a_player_sends() {
@@ -558,63 +463,55 @@ mod tests {
     }
 
     #[test]
-    fn an_upload_takes_the_local_file_name_unless_told_otherwise() {
-        let upload = Upload::file(Destination::path("public"), "/tmp/report.pdf").unwrap();
-        assert_eq!(upload.file_name, "report.pdf");
-        assert_eq!(upload.named("q3.pdf").file_name, "q3.pdf");
-        assert!(Upload::file(Destination::path("public"), "/").is_err());
+    fn destinations_name_a_drive_only_when_it_is_not_the_callers_own() {
+        assert_eq!(
+            Destination::path("/notes/2026/"),
+            Destination::Path {
+                drive: None,
+                path: "notes/2026".to_owned()
+            }
+        );
+        assert_eq!(Destination::path("notes").drive(), None);
+        assert_eq!(
+            Destination::in_drive("si:scout", "reports").drive(),
+            Some("si:scout")
+        );
+        assert_eq!(
+            Destination::top_of("c:ada"),
+            Destination::Path {
+                drive: Some("c:ada".to_owned()),
+                path: String::new()
+            }
+        );
     }
 
     #[test]
-    fn folder_builders_carry_the_container_they_name() {
-        let public = NewFolder::at_base("handbook", RootType::Public);
-        assert!(public.parent.is_none());
-        assert_eq!(public.root_type, Some(RootType::Public));
+    fn an_upload_takes_the_local_file_name_unless_told_otherwise() {
+        let upload = Upload::file(Destination::path("notes"), "/tmp/report.pdf").unwrap();
+        assert_eq!(upload.file_name, "report.pdf");
+        assert_eq!(upload.named("q3.pdf").file_name, "q3.pdf");
+        assert!(Upload::file(Destination::top(), "/").is_err());
+    }
 
-        let tagged = NewFolder::in_tag("specs", "engineering");
-        assert_eq!(tagged.tag.as_deref(), Some("engineering"));
-        assert_eq!(tagged.root_type, Some(RootType::Tag));
-
-        let invited = NewFolder::in_folder("drafts", Destination::path("public/handbook"))
-            .inviting([
-                NewGrant::new(ActorRef::carbon("cos:tos"), [AccessRight::Read]).inheriting(),
-            ]);
+    #[test]
+    fn folder_builders_carry_their_place_and_invitees() {
+        let top = NewFolder::at_top("handbook");
+        assert!(top.parent.is_none());
+        let invited = NewFolder::in_folder("drafts", Destination::in_drive("si:scout", "notes"))
+            .inviting([NewGrant::new(ActorRef::carbon("c:ada"), [AccessRight::Read]).inheriting()]);
         assert_eq!(invited.invitees.len(), 1);
         assert!(invited.invitees[0].inherit);
     }
 
     #[test]
-    fn listing_builders_compose() {
+    fn listing_and_inspection_builders_compose() {
         let query = ListEntries::matching("is:md").limit(5).after("cursor");
         assert_eq!(query.filter.as_deref(), Some("is:md"));
         assert_eq!(query.limit, Some(5));
         assert_eq!(query.cursor.as_deref(), Some("cursor"));
-    }
-
-    #[test]
-    fn obo_debug_redacts_the_single_use_proof_and_content() {
-        let request =
-            OnBehalfOfUpload::bytes("notes", "obo_secret_proof", b"secret file body".to_vec());
-        let rendered = format!("{request:?}");
-        assert!(!rendered.contains("obo_secret_proof"));
-        assert!(!rendered.contains("secret file body"));
-        assert!(rendered.contains("<redacted>"));
-    }
-
-    #[test]
-    fn iam_pairing_debug_redacts_both_secrets() {
-        let root = "a2345678901234567890123456789012";
-        let app_secret = format!("ask_{}", "b".repeat(43));
-        let request = TestingEnvironmentIamPairing::new(
-            uuid::Uuid::from_u128(1),
-            IamEnvironmentKey::new(root).unwrap(),
-            ApplicationId::new("briefcase").unwrap(),
-            IamApplicationSecret::new(app_secret.clone()).unwrap(),
-        );
-        let rendered = format!("{request:?}");
-
-        assert!(!rendered.contains(root));
-        assert!(!rendered.contains(&app_secret));
-        assert_eq!(rendered.matches("<redacted>").count(), 2);
+        let inspection = PermissionQuery::paths(["notes".to_owned()]).in_drive("c:ada");
+        let body = serde_json::to_value(&inspection).unwrap();
+        assert_eq!(body["drive"], "c:ada");
+        assert!(serde_json::to_value(PermissionQuery::default()).unwrap()["drive"].is_null());
     }
 }

@@ -33,8 +33,8 @@ use crate::{
 };
 
 use super::super::{
-    auth::{self, IamAction},
-    delivery,
+    auth::{self, Action},
+    delivery, drives,
     dto::{
         BucketConfigurationDto, BucketConfigurationStateDto, BucketConfigurationStatusDto,
         EncryptionModeDto, EntryDto, FileVersionPageDto, PageQuery,
@@ -76,10 +76,11 @@ async fn serve_entry_content(
 ) -> Result<Response, AppError> {
     let resource = entry_id.to_string();
     let action = match intent {
-        ContentIntent::Render => IamAction::ReadContent,
-        ContentIntent::Download => IamAction::DownloadFile,
+        ContentIntent::Render => Action::ReadContent,
+        ContentIntent::Download => Action::DownloadFile,
     };
     let context = extract::authenticate(state, headers, action, &resource).await?;
+    let context = drives::for_entry(state, context, entry_id).await?;
     serve(state, headers, &context, entry_id, intent).await
 }
 
@@ -123,14 +124,20 @@ pub(crate) async fn upload(
     // Verify the credential shape before admitting a single byte of body.
     auth::require_bearer_shape(&headers)?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
-    let organization = extract::organization_resource(&headers)?;
-    let context =
-        extract::authenticate(&state, &headers, IamAction::UploadFile, &organization).await?;
+    let context = extract::authenticate(&state, &headers, Action::UploadFile, "uploads").await?;
     let parts = parse_upload(
         extract::multipart(multipart)?,
         state.temporary_directory.clone(),
     )
     .await?;
+    let context = match &parts.destination {
+        UploadDestination::Folder(parent_id) => {
+            drives::for_entry(&state, context, *parent_id).await?
+        }
+        UploadDestination::Path(_) | UploadDestination::DriveRoot => {
+            drives::named(&state, context, parts.drive.as_deref()).await?
+        }
+    };
     let parent_id = destination_folder(&state, &context, &parts.destination).await?;
     let resource = parent_id.to_string();
     let request_hash = with_self_destruct(
@@ -163,7 +170,7 @@ pub(crate) async fn upload(
     let entry = extract::scoped(&context, state.metadata.get_entry(&context, entry_id))
         .await
         .map_err(metadata_error)?;
-    Ok((StatusCode::CREATED, Json(state.mapper.entry(entry)?)))
+    Ok((StatusCode::CREATED, Json(state.entry_dto(entry).await?)))
 }
 
 pub(crate) async fn list_versions(
@@ -174,8 +181,8 @@ pub(crate) async fn list_versions(
 ) -> Result<Json<FileVersionPageDto>, AppError> {
     let entry_id = extract::entry_id(extract::path(path)?)?;
     let resource = entry_id.to_string();
-    let context =
-        extract::authenticate(&state, &headers, IamAction::ListVersions, &resource).await?;
+    let context = extract::authenticate(&state, &headers, Action::ListVersions, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let page = extract::scoped(
         &context,
         state.metadata.list_versions(
@@ -205,7 +212,8 @@ pub(crate) async fn restore_version(
     let version_id = extract::version_id(&version_text)?;
     let resource = version_id.to_string();
     let context =
-        extract::authenticate(&state, &headers, IamAction::RestoreVersion, &resource).await?;
+        extract::authenticate(&state, &headers, Action::RestoreVersion, &resource).await?;
+    let context = drives::for_entry(&state, context, entry_id).await?;
     let idempotency_key = extract::required_idempotency_key(&headers)?;
     let request_hash =
         extract::request_fingerprint("restore_version", &resource, &(entry_uuid, &version_text))?;
@@ -228,7 +236,7 @@ pub(crate) async fn restore_version(
     )
     .await
     .map_err(metadata_error)?;
-    Ok(Json(state.mapper.entry(entry)?))
+    Ok(Json(state.entry_dto(entry).await?))
 }
 
 pub(crate) async fn configure_storage(
@@ -239,7 +247,8 @@ pub(crate) async fn configure_storage(
     let body = extract::json(body)?;
     extract::validation(validation::bucket_configuration(&body))?;
     let context =
-        extract::authenticate_bearer(&state, &headers, IamAction::ConfigureStorage).await?;
+        extract::authenticate(&state, &headers, Action::ConfigureStorage, "storage").await?;
+    let context = drives::named(&state, context, body.drive.as_deref()).await?;
     let resource = context.authorization().organization_id().as_str();
     let idempotency = extract::idempotency_key(&headers)?
         .map(|key| {
@@ -280,12 +289,15 @@ pub(crate) async fn configure_storage(
 enum UploadDestination {
     /// Destination folder identifier.
     Folder(EntryId),
-    /// Destination folder path, resolved from the organization base.
+    /// Destination folder path, within the named (or the caller's) drive.
     Path(EntryPath),
+    /// The top of the named (or the caller's) drive.
+    DriveRoot,
 }
 
 struct UploadParts {
     destination: UploadDestination,
+    drive: Option<String>,
     name: EntryName,
     content_type: String,
     file: StagedUpload,
@@ -300,6 +312,12 @@ async fn destination_folder(
 ) -> Result<EntryId, AppError> {
     match destination {
         UploadDestination::Folder(entry_id) => Ok(*entry_id),
+        UploadDestination::DriveRoot => {
+            let root = extract::scoped(context, state.metadata.drive_root(context))
+                .await
+                .map_err(metadata_error)?;
+            Ok(root.entry.id)
+        }
         UploadDestination::Path(path) => {
             let parent = extract::scoped(context, state.metadata.get_entry_by_path(context, path))
                 .await
@@ -317,6 +335,7 @@ async fn parse_upload(
     temporary_directory: std::path::PathBuf,
 ) -> Result<UploadParts, AppError> {
     let mut destination = None;
+    let mut drive = None;
     let mut file = None;
     let mut self_destruct = None;
 
@@ -347,6 +366,16 @@ async fn parse_upload(
                 let path =
                     EntryPath::new(&value).map_err(|_| AppError::validation("invalid_path"))?;
                 destination = Some(UploadDestination::Path(path));
+            }
+            "drive" => {
+                if drive.is_some() {
+                    return Err(AppError::bad_request("duplicate_drive"));
+                }
+                let value = read_text_field(field, 80).await?;
+                if value.trim().is_empty() {
+                    return Err(AppError::validation("invalid_drive"));
+                }
+                drive = Some(value.trim().to_owned());
             }
             "file" => {
                 if file.is_some() {
@@ -390,10 +419,15 @@ async fn parse_upload(
         }
     }
 
-    let destination = destination.ok_or_else(|| AppError::bad_request("missing_destination"))?;
+    // Without a folder the file goes at the top of the drive.
+    let destination = destination.unwrap_or(UploadDestination::DriveRoot);
+    if drive.is_some() && matches!(destination, UploadDestination::Folder(_)) {
+        return Err(AppError::validation("drive_with_parent_id"));
+    }
     let (name, content_type, file) = file.ok_or_else(|| AppError::bad_request("missing_file"))?;
     Ok(UploadParts {
         destination,
+        drive,
         name,
         content_type,
         file,

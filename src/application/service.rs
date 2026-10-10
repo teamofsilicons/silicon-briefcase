@@ -24,7 +24,7 @@ use crate::{
 
 pub use error::{MetadataServiceError, ValidationError};
 pub use model::*;
-pub use repository::{MetadataRepository, MetadataRepositoryError, TokenAuthorizationQuery};
+pub use repository::{MetadataRepository, MetadataRepositoryError};
 
 /// Reusable application service for Briefcase's contracted metadata domains.
 #[derive(Clone)]

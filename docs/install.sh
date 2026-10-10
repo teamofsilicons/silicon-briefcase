@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bootstrap Briefcase from Cargo; IAM sign-in is separate.
+# Bootstrap Briefcase from Cargo; Silicon Accounts sign-in is separate.
 set -eu
 case "$(uname -s)" in
   Darwin|Linux) ;;
@@ -27,4 +27,4 @@ elif [ -n "${BRIEFCASE_INSTALL_VERSION:-}" ]; then
 else
   cargo "+$BRIEFCASE_RUST_VERSION" install briefcase-cli --root "$BRIEFCASE_INSTALL_ROOT" --locked --bin briefcase --force
 fi
-printf '%s\n' 'Briefcase is installed. Manage future updates through Honeycomb.' 'Next: briefcase iam --json' 'Then: briefcase login <IAM-short-lived-token>' 'Offline documentation: briefcase docs cli'
+printf '%s\n' 'Briefcase is installed. Use Silicon Apps for managed installs and updates.' 'Next: briefcase accounts --json' 'Then: briefcase login' 'Offline documentation: briefcase docs cli'

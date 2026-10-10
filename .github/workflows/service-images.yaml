@@ -1,8 +1,13 @@
 name: Build service image candidates
 on:
   push:
-    branches: [release/public-identifiers-20260923]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      web_only:
+        description: Build only the website candidate
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -12,23 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - component: backend
-            dockerfile: Dockerfile
-          - component: web
-            dockerfile: Dockerfile.browser
-          - component: docs
-            dockerfile: Dockerfile.docs
+        include: ${{ fromJSON(inputs.web_only && '[{"component":"web","dockerfile":"Dockerfile.browser"}]' || '[{"component":"backend","dockerfile":"Dockerfile"},{"component":"web","dockerfile":"Dockerfile.browser"},{"component":"docs","dockerfile":"Dockerfile.docs"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         if: matrix.component != 'backend'
         with:
           node-version: 24
-      - name: Build browser assets
-        if: matrix.component == 'web'
-        run: npm ci && npm run build
-        working-directory: web
       - name: Build documentation assets
         if: matrix.component == 'docs'
         run: npm ci && npm run build && npm run check

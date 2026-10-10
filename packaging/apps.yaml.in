@@ -1,0 +1,7 @@
+schema_version: 1
+app_id: briefcase
+version: @VERSION@
+command: briefcase
+targets:
+  @TARGET@:
+    binary: bin/@BINARY@

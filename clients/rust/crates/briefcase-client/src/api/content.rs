@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::{
     client::{Client, IdempotencyKey},
     error::{Error, Result, io, transport},
-    models::{Entry, FileVersionPage},
-    requests::{ByteRange, Destination, OnBehalfOfUpload, Upload, UploadSource},
+    models::{ArchiveListing, Entry, FileVersionPage},
+    requests::{ByteRange, Destination, Upload, UploadSource},
 };
 
 /// A file's bytes, arriving as they are read.
@@ -129,9 +129,10 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error when the destination is not writable, the file is not
-    /// readable locally, the organization's daily upload allowance is spent
+    /// readable locally, the drive's daily upload allowance is spent
     /// (`daily_upload_limit_exhausted`, retryable after the reported delay), or
-    /// its storage is full (`storage_limit_exhausted`).
+    /// its storage is full (`storage_limit_exhausted`). The bytes count against
+    /// the drive they land in, whoever uploads them.
     pub async fn upload(&self, upload: &Upload) -> Result<Entry> {
         let key = upload
             .idempotency_key
@@ -159,7 +160,17 @@ impl Client {
 
         let mut form = match &upload.destination {
             Destination::Id(id) => Form::new().text("parent_id", id.to_string()),
-            Destination::Path(path) => Form::new().text("path", path.clone()),
+            Destination::Path { drive, path } => {
+                let mut form = Form::new();
+                if let Some(drive) = drive {
+                    form = form.text("drive", drive.clone());
+                }
+                // Without a folder the file goes to the top of the drive.
+                if !path.is_empty() {
+                    form = form.text("path", path.clone());
+                }
+                form
+            }
         };
         if let Some(minutes) = upload.self_destruct_minutes {
             form = form.text("self_destruct_minutes", minutes.to_string());
@@ -177,7 +188,7 @@ impl Client {
     /// Opens a file's bytes for reading, optionally one range of them.
     ///
     /// Briefcase relays the bytes itself rather than signing a provider URL,
-    /// so every read stays bound to the caller's current IAM identity.
+    /// so every read stays bound to the caller's current sign-in.
     ///
     /// # Errors
     ///
@@ -212,16 +223,48 @@ impl Client {
         self.download(entry_id).await?.write_to_file(path).await
     }
 
-    /// Opens the bytes behind a permanent URL path.
+    /// Opens the bytes at an address: the drive owner's `c:`/`si:` id or uuid
+    /// and the file's path in that drive. Follows one `308` when the owner's id
+    /// moved.
     ///
     /// # Errors
     ///
     /// Returns a not-found error when nothing readable sits at that path, or
     /// when the path names a folder rather than a file.
-    pub async fn read_content_at(&self, path: &str) -> Result<ContentStream> {
-        let mut url = self.permanent_url(path)?;
-        url.query_pairs_mut().append_pair("disposition", "inline");
-        self.open_content(url, None).await
+    pub async fn read_content_at(&self, owner: &str, path: &str) -> Result<ContentStream> {
+        let response = self
+            .resolve_address(owner, path, |client, mut url| {
+                url.query_pairs_mut().append_pair("disposition", "inline");
+                client
+                    .request(Method::GET, url)
+                    .timeout(client.transfer_timeout())
+            })
+            .await?;
+        Ok(ContentStream::new(response))
+    }
+
+    /// Lists what an archive file holds without extracting it (zip, tar,
+    /// tar.gz, tar.zst, 7z), up to `limit` entries (at most 10,000).
+    ///
+    /// # Errors
+    ///
+    /// Returns a not-found error when the file is not visible, and
+    /// `not_an_archive`, `archive_unreadable`, `archive_encrypted` or
+    /// `archive_too_large_to_list` when Briefcase cannot list it.
+    pub async fn archive_contents(
+        &self,
+        entry_id: Uuid,
+        limit: Option<u32>,
+    ) -> Result<ArchiveListing> {
+        let mut url = self.api_url(&["entries", &entry_id.to_string(), "archive"])?;
+        if let Some(limit) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        let request = self
+            .request(Method::GET, url)
+            .timeout(self.transfer_timeout());
+        self.receive_json(request).await
     }
 
     async fn open_content(&self, url: url::Url, range: Option<ByteRange>) -> Result<ContentStream> {
@@ -316,23 +359,5 @@ impl Client {
             .header("idempotency-key", idempotency_key.as_str())
             .timeout(self.transfer_timeout());
         self.receive_json(request).await
-    }
-
-    /// Retired raw upload retained only as a source-compatible migration error.
-    /// Use `reserve_delegated_upload`, `transfer_delegated_upload` and
-    /// `commit_delegated_upload` with reusable endpoint access tokens.
-    ///
-    /// # Errors
-    /// Always returns a configuration error without transmitting credentials or bytes.
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "retain the public async signature while refusing the retired operation locally"
-    )]
-    pub async fn create_file_on_behalf_of(&self, upload: &OnBehalfOfUpload) -> Result<Entry> {
-        crate::ApplicationId::new(upload.app_id.clone())?;
-        Err(crate::Error::Configuration(
-            "Raw OBO uploads are retired; use reserve, content and commit".into(),
-        ))
     }
 }

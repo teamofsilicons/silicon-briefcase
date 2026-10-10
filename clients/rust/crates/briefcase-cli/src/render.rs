@@ -6,10 +6,12 @@
 
 use std::io::Write as _;
 
+use std::collections::HashMap;
+
 use briefcase_client::{
-    ActivityEvent, Entry, EntryPage, EntryType, EntryVisibility, FileVersion, Invitation,
-    InvitationPage, LinkAccess, Notification, NotificationInbox, OrganizationUsage,
-    PermissionInspection, Recipient, SearchResult,
+    ActivityEvent, AllowedAccounts, ArchiveListing, DriveList, DriveRelation, DriveUsage, Entry,
+    EntryPage, EntryType, EntryVisibility, FileVersion, Invitation, InvitationPage, LinkAccess,
+    Notification, NotificationInbox, PermissionInspection, Recipient, SearchResult, SharedPage,
 };
 use serde::Serialize;
 use time::{
@@ -20,6 +22,29 @@ use time::{
 
 const TIMESTAMP: &[BorrowedFormatItem<'_>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]");
+
+/// Account ids by uuid, for showing owners and actors the way people name them.
+///
+/// Briefcase answers with account uuids (ids can change); the CLI shows the id
+/// when it knows one — the signed-in account's, a drive owner's — and the uuid
+/// otherwise. JSON output always keeps the uuid.
+#[derive(Clone, Debug, Default)]
+pub struct Labels(HashMap<String, String>);
+
+impl Labels {
+    /// Remembers that `uuid` is currently `id`.
+    pub fn learn(&mut self, uuid: &str, id: &str) {
+        if !uuid.is_empty() && !id.is_empty() {
+            self.0.insert(uuid.to_owned(), id.to_owned());
+        }
+    }
+
+    /// The id for a uuid, or the uuid itself.
+    #[must_use]
+    pub fn name<'a>(&'a self, uuid: &'a str) -> &'a str {
+        self.0.get(uuid).map_or(uuid, String::as_str)
+    }
+}
 
 /// How results are printed.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +71,15 @@ impl Output {
         print_json(value);
     }
 
+    /// Prints a value as one line of JSON, for streams a script reads line by line.
+    pub fn json_line<T: Serialize>(self, value: &T) {
+        let _ = self;
+        match serde_json::to_string(value) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(error) => eprintln!("briefcase: the answer could not be rendered: {error}"),
+        }
+    }
+
     /// Prints a one-line confirmation, unless JSON was asked for.
     pub fn note(self, message: &str) {
         if !self.json {
@@ -54,7 +88,7 @@ impl Output {
     }
 
     /// Prints a listing of entries.
-    pub fn entries(self, entries: &[Entry], long: bool) {
+    pub fn entries(self, entries: &[Entry], long: bool, labels: &Labels) {
         if self.json {
             self.json(&entries);
             return;
@@ -87,7 +121,7 @@ impl Output {
                     entry
                         .owner
                         .as_ref()
-                        .map_or_else(|| "-".to_owned(), ToString::to_string),
+                        .map_or_else(|| "-".to_owned(), |owner| labels.name(&owner.id).to_owned()),
                 );
                 row.push(access_summary(entry));
                 row.push(entry.path.clone());
@@ -105,12 +139,12 @@ impl Output {
     }
 
     /// Prints one entry page and preserves its continuation cursor.
-    pub fn entry_page(self, page: &EntryPage, long: bool) {
+    pub fn entry_page(self, page: &EntryPage, long: bool, labels: &Labels) {
         if self.json {
             self.json(page);
             return;
         }
-        self.entries(&page.items, long);
+        self.entries(&page.items, long, labels);
         if let Some(cursor) = &page.next_cursor {
             eprintln!(
                 "(more entries remain; continue with --cursor {cursor}, or pass --all to follow every page)"
@@ -119,7 +153,7 @@ impl Output {
     }
 
     /// Prints one entry in full.
-    pub fn entry(self, entry: &Entry) {
+    pub fn entry(self, entry: &Entry, labels: &Labels) {
         if self.json {
             self.json(entry);
             return;
@@ -134,11 +168,8 @@ impl Output {
                 },
             ),
             ("id", entry.id.to_string()),
-            ("boundary", format!("{:?}", entry.root_type).to_lowercase()),
+            ("drive", labels.name(&entry.drive).to_owned()),
         ];
-        if let Some(tag) = &entry.tag {
-            fields.push(("tag", tag.clone()));
-        }
         if let Some(size) = entry.size {
             fields.push(("size", format!("{} ({size} bytes)", human_size(size))));
         }
@@ -149,7 +180,7 @@ impl Output {
             fields.push(("renderer", format!("{render:?}").to_lowercase()));
         }
         if let Some(owner) = &entry.owner {
-            fields.push(("owner", owner.to_string()));
+            fields.push(("created by", labels.name(&owner.id).to_owned()));
         }
         if let Some(app) = &entry.origin_app_id {
             fields.push(("created by app", app.clone()));
@@ -265,7 +296,7 @@ impl Output {
     }
 
     /// Prints a file's retained versions.
-    pub fn versions(self, versions: &[FileVersion]) {
+    pub fn versions(self, versions: &[FileVersion], labels: &Labels) {
         if self.json {
             self.json(&versions);
             return;
@@ -280,7 +311,7 @@ impl Output {
                 vec![
                     version.number.to_string(),
                     human_size(version.size),
-                    version.created_by.to_string(),
+                    labels.name(&version.created_by.id).to_owned(),
                     timestamp(version.created_at),
                     version.id.to_string(),
                 ]
@@ -290,7 +321,7 @@ impl Output {
     }
 
     /// Prints an entry's recorded history.
-    pub fn history(self, events: &[ActivityEvent]) {
+    pub fn history(self, events: &[ActivityEvent], labels: &Labels) {
         if self.json {
             self.json(&events);
             return;
@@ -305,7 +336,7 @@ impl Output {
                 vec![
                     timestamp(event.occurred_at),
                     event.action.clone(),
-                    event.actor.to_string(),
+                    labels.name(&event.actor.id).to_owned(),
                     event.app_id.clone().unwrap_or_else(|| "-".to_owned()),
                 ]
             })
@@ -314,7 +345,7 @@ impl Output {
     }
 
     /// Prints the notification inbox.
-    pub fn inbox(self, inbox: &NotificationInbox) {
+    pub fn inbox(self, inbox: &NotificationInbox, labels: &Labels) {
         if self.json {
             self.json(inbox);
             return;
@@ -327,16 +358,21 @@ impl Output {
         if inbox.items.is_empty() {
             return;
         }
-        let rows: Vec<Vec<String>> = inbox.items.iter().map(notification_row).collect();
+        let rows: Vec<Vec<String>> = inbox
+            .items
+            .iter()
+            .map(|notification| notification_row(notification, labels))
+            .collect();
         print_table(&["", "WHEN", "WHAT", "WHO", "ENTRY"], &rows);
     }
 
-    /// Prints what the organization is consuming.
-    pub fn usage(self, usage: &OrganizationUsage) {
+    /// Prints what a drive is consuming.
+    pub fn usage(self, usage: &DriveUsage, drive: &str) {
         if self.json {
             self.json(usage);
             return;
         }
+        println!("drive          {drive}");
         println!(
             "storage        {} of {} used, {} left",
             human_size(usage.storage.used_bytes),
@@ -352,6 +388,149 @@ impl Output {
         );
     }
 
+    /// Prints the drives the caller opens with the owner's rights.
+    pub fn drives(self, drives: &DriveList) {
+        if self.json {
+            self.json(drives);
+            return;
+        }
+        let rows: Vec<Vec<String>> = drives
+            .items
+            .iter()
+            .map(|drive| {
+                vec![
+                    format!("@{}", drive.owner.display_id()),
+                    match drive.relation {
+                        DriveRelation::Own => "yours".to_owned(),
+                        DriveRelation::Custodial => "a Silicon you look after".to_owned(),
+                    },
+                    drive.owner.display_name.clone().unwrap_or_default(),
+                    drive.permanent_url.to_string(),
+                ]
+            })
+            .collect();
+        print_table(&["DRIVE", "WHOSE", "NAME", "ADDRESS"], &rows);
+        println!(
+            "(list one with `briefcase ls @<id>`; what others shared with you is in `briefcase shared`)"
+        );
+    }
+
+    /// Prints what others shared with the caller, grouped by drive owner.
+    pub fn shared(self, page: &SharedPage) {
+        if self.json {
+            self.json(page);
+            return;
+        }
+        if page.items.is_empty() {
+            println!("(nothing is shared with you)");
+            return;
+        }
+        let mut owners: Vec<&str> = Vec::new();
+        for item in &page.items {
+            let owner = item.owner.display_id();
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        for owner in owners {
+            let items: Vec<_> = page
+                .items
+                .iter()
+                .filter(|item| item.owner.display_id() == owner)
+                .collect();
+            let name = items
+                .first()
+                .and_then(|item| item.owner.display_name.as_deref())
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default();
+            println!("{}{}", terminal_text(owner), terminal_text(&name));
+            let rows: Vec<Vec<String>> = items
+                .iter()
+                .map(|item| {
+                    vec![
+                        kind_marker(&item.entry).to_owned(),
+                        format!("@{owner}/{}", item.entry.path),
+                        access_summary(&item.entry),
+                        timestamp(item.shared_at),
+                    ]
+                })
+                .collect();
+            print_table(&["", "ENTRY", "YOU MAY", "SHARED"], &rows);
+        }
+        if let Some(cursor) = &page.next_cursor {
+            eprintln!("(more shares remain; continue with --cursor {cursor}, or pass --all)");
+        }
+    }
+
+    /// Prints a Silicon's allow list.
+    pub fn allowed(self, allowed: &AllowedAccounts) {
+        if self.json {
+            self.json(allowed);
+            return;
+        }
+        println!(
+            "Besides its custodian and the custodian's other Silicons, {} accepts shares from:",
+            allowed.silicon.display_id()
+        );
+        if allowed.items.is_empty() {
+            println!("(nobody else)");
+            return;
+        }
+        let rows: Vec<Vec<String>> = allowed
+            .items
+            .iter()
+            .map(|item| {
+                vec![
+                    item.account.display_id().to_owned(),
+                    item.account.display_name.clone().unwrap_or_default(),
+                    timestamp(item.allowed_at),
+                ]
+            })
+            .collect();
+        print_table(&["ACCOUNT", "NAME", "ALLOWED"], &rows);
+    }
+
+    /// Prints what an archive holds.
+    pub fn archive(self, listing: &ArchiveListing) {
+        if self.json {
+            self.json(listing);
+            return;
+        }
+        let rows: Vec<Vec<String>> = listing
+            .entries
+            .iter()
+            .map(|item| {
+                vec![
+                    match item.item_type {
+                        briefcase_client::ArchiveItemType::Folder => "d",
+                        briefcase_client::ArchiveItemType::Link => "l",
+                        briefcase_client::ArchiveItemType::File => "-",
+                        briefcase_client::ArchiveItemType::Other => "?",
+                    }
+                    .to_owned(),
+                    human_size(item.size),
+                    item.modified_at.map_or_else(|| "-".to_owned(), timestamp),
+                    if item.encrypted {
+                        format!("{} (encrypted)", item.path)
+                    } else {
+                        item.path.clone()
+                    },
+                ]
+            })
+            .collect();
+        print_table(&["", "SIZE", "MODIFIED", "PATH"], &rows);
+        if listing.truncated {
+            eprintln!(
+                "({} archive; listing stopped early: {})",
+                listing.format,
+                listing
+                    .truncated_because
+                    .as_deref()
+                    .unwrap_or("more entries remain")
+            );
+        }
+    }
+
     /// Prints one invitation as JSON, then says on stderr when an expiring share
     /// ends, unless JSON was asked for.
     ///
@@ -359,14 +538,21 @@ impl Output {
     /// never passed `--json` keeps parsing it.
     pub fn invitation(self, invitation: &Invitation) {
         self.json(invitation);
-        self.expiring_note(invitation);
+        self.expiring_note(invitation, None);
+    }
+
+    /// Like [`Self::invitation`], naming the recipient by the id the command was
+    /// given (answers name accounts by uuid).
+    pub fn invitation_to(self, invitation: &Invitation, recipient_id: &str) {
+        self.json(invitation);
+        self.expiring_note(invitation, Some(recipient_id));
     }
 
     /// Prints a page of invitations as JSON, then notes each expiring share's end.
     pub fn invitations(self, page: &InvitationPage) {
         self.json(page);
         for invitation in &page.items {
-            self.expiring_note(invitation);
+            self.expiring_note(invitation, None);
         }
     }
 
@@ -381,12 +567,15 @@ impl Output {
         }
     }
 
-    fn expiring_note(self, invitation: &Invitation) {
+    fn expiring_note(self, invitation: &Invitation, recipient_id: Option<&str>) {
         if let Some(expires_at) = &invitation.expires_at {
             self.aside(&format!(
                 "expiring share {} for {} ends {}",
                 invitation.id,
-                recipient(&invitation.invitation.principal),
+                recipient_id.map_or_else(
+                    || recipient(&invitation.invitation.principal),
+                    ToOwned::to_owned
+                ),
                 rfc3339_deadline(expires_at)
             ));
         }
@@ -412,7 +601,7 @@ impl Output {
     }
 }
 
-fn notification_row(notification: &Notification) -> Vec<String> {
+fn notification_row(notification: &Notification, labels: &Labels) -> Vec<String> {
     let what = match notification.kind {
         briefcase_client::NotificationKind::AccessGranted => "access granted",
         briefcase_client::NotificationKind::AccessRevoked => "access revoked",
@@ -430,7 +619,7 @@ fn notification_row(notification: &Notification) -> Vec<String> {
         notification
             .actor
             .as_ref()
-            .map_or_else(|| "-".to_owned(), ToString::to_string),
+            .map_or_else(|| "-".to_owned(), |actor| labels.name(&actor.id).to_owned()),
         notification
             .subject
             .as_ref()
@@ -441,8 +630,10 @@ fn notification_row(notification: &Notification) -> Vec<String> {
 fn recipient(principal: &Recipient) -> String {
     match principal {
         Recipient::Carbon(id) | Recipient::Silicon(id) => id.clone(),
-        Recipient::Email(address) => format!("email:{address}"),
-        Recipient::Tag(tag) => format!("tag:{tag}"),
+        Recipient::Email(address) => {
+            format!("{address} (a share by email from before personal accounts)")
+        }
+        Recipient::Tag(tag) => format!("{tag} (a group share from before personal accounts)"),
     }
 }
 

@@ -27,7 +27,7 @@ pub struct ReportReceipt {
 }
 
 impl Client {
-    /// Submits a bug report in this client's organization and environment.
+    /// Submits a bug report as the signed-in account.
     ///
     /// # Errors
     /// Returns authentication, validation, or transport errors. Use

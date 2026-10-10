@@ -1,6 +1,8 @@
 [package]
 name = "briefcase-cli"
 description = "Command-line client for the Silicon Briefcase file service."
+# Silicon Apps is the only distribution channel (`silicon-apps install briefcase`).
+publish = false
 categories = ["command-line-utilities", "filesystem"]
 keywords = ["briefcase", "silicon", "files", "storage", "cli"]
 readme = "README.md"
@@ -17,15 +19,14 @@ authors.workspace = true
 name = "briefcase"
 path = "src/main.rs"
 
-[features]
-# Release archives opt in at build time, including when run outside the installer.
-honeycomb-managed = []
-
 [dependencies]
-briefcase-client.workspace = true
+base64 = "0.22.1"
+briefcase-client = { workspace = true, features = ["accounts"] }
 clap = { version = "4.5.51", features = ["derive", "env", "wrap_help"] }
 fs2 = "0.4.3"
+percent-encoding = "2.3.2"
 rpassword = "7.4.0"
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
@@ -33,6 +34,7 @@ tempfile = "3.23.0"
 thiserror.workspace = true
 time = { workspace = true, features = ["local-offset", "macros"] }
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "net", "time", "signal", "sync"] }
+url.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [target.'cfg(unix)'.dependencies]

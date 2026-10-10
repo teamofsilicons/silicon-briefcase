@@ -1,0 +1,1297 @@
+//! Silicon Accounts authentication, the account cache, the custodian rule, the
+//! webhook and proofs, exercised through the router against PostgreSQL and a
+//! Silicon Accounts stand-in.
+//!
+//! ```bash
+//! BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig \
+//!   cargo test --lib api::accounts_tests -- --test-threads=1
+//! ```
+
+use axum::{
+    Router,
+    body::Body,
+    http::{Method, Request, StatusCode, header},
+};
+use serde_json::{Value, json};
+use time::OffsetDateTime;
+use tower::ServiceExt as _;
+use uuid::Uuid;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{body_string_contains, method, path},
+};
+
+use super::{
+    router,
+    state::AppState,
+    tests::{TEST_WEBHOOK_SECRET, test_accounts_settings, test_state_with_store},
+};
+use crate::infrastructure::accounts::test_support::{
+    TestIssuer, carbon_summary, signed_delivery, silicon_summary, valid_proof,
+};
+
+pub(super) struct Fixture {
+    pub(super) server: MockServer,
+    pub(super) issuer: TestIssuer,
+    pub(super) router: Router,
+    pub(super) state: AppState,
+    pub(super) admin: sqlx::PgPool,
+    suffix: String,
+}
+
+/// Builds the API against the test database and a Silicon Accounts stand-in,
+/// or returns `None` when `BRIEFCASE_TEST_DATABASE_URL` is unset.
+pub(super) async fn fixture(proof_issuers: &str) -> anyhow::Result<Option<Fixture>> {
+    fixture_with(proof_issuers, "").await
+}
+
+/// [`fixture`] with first-party apps (`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS`).
+pub(super) async fn fixture_with(
+    proof_issuers: &str,
+    first_party: &str,
+) -> anyhow::Result<Option<Fixture>> {
+    fixture_with_store(proof_issuers, first_party, None).await
+}
+
+/// [`fixture_with`] serving file bytes from `store`.
+pub(super) async fn fixture_with_store(
+    proof_issuers: &str,
+    first_party: &str,
+    store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,
+) -> anyhow::Result<Option<Fixture>> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
+        return Ok(None);
+    };
+    fixture_at(&url, proof_issuers, first_party, store)
+        .await
+        .map(Some)
+}
+
+async fn fixture_at(
+    url: &str,
+    proof_issuers: &str,
+    first_party: &str,
+    store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,
+) -> anyhow::Result<Fixture> {
+    let admin = sqlx::PgPool::connect_with(
+        url.parse::<sqlx::postgres::PgConnectOptions>()?
+            .options([("search_path", "public")]),
+    )
+    .await?;
+    crate::infrastructure::postgres::migrate(&admin).await?;
+    let api = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET ROLE briefcase_api")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with((*admin.connect_options()).clone())
+        .await?;
+    let server = MockServer::start().await;
+    let issuer = TestIssuer::new(11, "k-test", &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issuer.jwks_json()))
+        .mount(&server)
+        .await;
+    let mut settings = test_accounts_settings(&server.uri(), proof_issuers)?;
+    settings.proof_issuers = settings
+        .proof_issuers
+        .with_first_party(first_party)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+    let (state, server_settings, webhook) =
+        test_state_with_store(api, &settings, Some(issuer.jwks()), store)?;
+    let router = router(state.clone(), &server_settings, &webhook);
+    Ok(Fixture {
+        server,
+        issuer,
+        router,
+        state,
+        admin,
+        suffix: Uuid::new_v4().simple().to_string()[..12].to_owned(),
+    })
+}
+
+impl Fixture {
+    /// A uuid unique to this test run, such as `Ada3f2a…`.
+    pub(super) fn uuid(&self, prefix: &str) -> String {
+        if prefix == "Ada" {
+            format!("00000000-0000-4000-8000-{}", self.suffix)
+        } else {
+            format!("{prefix}{}", self.suffix)
+        }
+    }
+
+    /// A public id unique to this test run, such as `c:ada-3f2a…`.
+    pub(super) fn id(&self, prefix: &str) -> String {
+        format!("{prefix}-{}", self.suffix)
+    }
+
+    pub(super) async fn send(
+        &self,
+        method: Method,
+        uri: &str,
+        authorization: Option<&str>,
+        body: Option<Value>,
+        extra: &[(&str, &str)],
+    ) -> anyhow::Result<(StatusCode, Value)> {
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        for (name, value) in extra {
+            request = request.header(*name, *value);
+        }
+        let request = match body {
+            Some(body) => request
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+            None => request.body(Body::empty())?,
+        };
+        let response = self.router.clone().oneshot(request).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        Ok((status, value))
+    }
+
+    pub(super) async fn bearer(
+        &self,
+        method: Method,
+        uri: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> anyhow::Result<(StatusCode, Value)> {
+        let idempotency = Uuid::new_v4().to_string();
+        self.send(
+            method,
+            uri,
+            Some(&format!("Bearer {token}")),
+            body,
+            &[("idempotency-key", idempotency.as_str())],
+        )
+        .await
+    }
+
+    /// Delivers a signed webhook event and returns the status.
+    pub(super) async fn deliver(
+        &self,
+        event_type: &str,
+        occurred_at: OffsetDateTime,
+        data: &Value,
+    ) -> anyhow::Result<StatusCode> {
+        let event_id = Uuid::now_v7().to_string();
+        self.deliver_event(&event_id, event_type, occurred_at, data)
+            .await
+    }
+
+    pub(super) async fn deliver_event(
+        &self,
+        event_id: &str,
+        event_type: &str,
+        occurred_at: OffsetDateTime,
+        data: &Value,
+    ) -> anyhow::Result<StatusCode> {
+        let delivery =
+            signed_delivery(TEST_WEBHOOK_SECRET, event_id, event_type, occurred_at, data);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/webhook/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-accounts-timestamp", delivery.timestamp.as_str())
+            .header("x-accounts-signature", delivery.signature.as_str())
+            .header("x-accounts-event-id", delivery.event_id.as_str())
+            .header("x-accounts-event-type", event_type)
+            .body(Body::from(delivery.body))?;
+        Ok(self.router.clone().oneshot(request).await?.status())
+    }
+
+    /// Serves `GET /v1/userinfo` for a Carbon.
+    pub(super) async fn stub_userinfo(&self, uuid: &str, id: &str, name: &str) {
+        Mock::given(method("GET"))
+            .and(path("/v1/userinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "uuid": uuid, "membership_id": format!("briefcase:{uuid}"), "kind": "carbon",
+                "id": id, "display_name": name, "pfp_url": "https://pfp.example/a.png",
+                "version": 4, "sub": uuid,
+            })))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Serves `POST /v1/oauth/introspect` with one answer.
+    pub(super) async fn stub_introspection(&self, active: bool, subject: &str) {
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "active": active, "sub": subject })),
+            )
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Serves `GET /v1/accounts/by-id/{id}` and `GET /v1/accounts/{uuid}`.
+    pub(super) async fn stub_account(&self, uuid: &str, id: &str, summary: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/accounts/by-id/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(summary.clone()))
+            .mount(&self.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/accounts/{uuid}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(summary))
+            .mount(&self.server)
+            .await;
+    }
+
+    pub(super) async fn me(&self, token: &str) -> anyhow::Result<(StatusCode, Value)> {
+        self.bearer(Method::GET, "/api/v1/me", token, None).await
+    }
+
+    pub(super) async fn account_row(&self, uuid: &str) -> anyhow::Result<Value> {
+        let row: Option<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(account) FROM briefcase.accounts AS account WHERE account_uuid = $1",
+        )
+        .bind(uuid)
+        .fetch_optional(&self.admin)
+        .await?;
+        Ok(row.unwrap_or(Value::Null))
+    }
+}
+
+fn error_code(body: &Value) -> &str {
+    body["error"]["code"].as_str().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn me_verifies_access_tokens_and_records_the_account() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    f.stub_userinfo(&ada, &ada_id, "Ada Lovelace").await;
+
+    let token = f.issuer.token(&ada, "carbon", &ada_id);
+    let (status, body) = f.bearer(Method::GET, "/api/v1/me", &token, None).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["uuid"], ada.as_str());
+    assert_eq!(body["id"], ada_id.as_str());
+    assert_eq!(body["kind"], "carbon");
+    assert_eq!(body["display_name"], "Ada Lovelace");
+    assert!(body["custodian"].is_null());
+    let row = f.account_row(&ada).await?;
+    assert_eq!(row["kind"], "carbon");
+    assert_eq!(row["public_id"], ada_id.as_str());
+    assert_eq!(row["status"], "active");
+
+    for (claims_change, code) in [
+        (json!({"aud": "remind"}), "token_wrong_audience"),
+        (
+            json!({"iss": "https://accounts.example"}),
+            "token_wrong_issuer",
+        ),
+        (json!({"exp": 1_000_000_000_i64}), "token_expired"),
+        (json!({"kind": null}), "token_missing_kind"),
+        (json!({"sub": "not a uuid"}), "token_invalid_subject"),
+    ] {
+        let mut claims = f.issuer.claims(&ada, "carbon", &ada_id, 0, 1_800);
+        if let (Some(target), Some(change)) = (claims.as_object_mut(), claims_change.as_object()) {
+            for (key, value) in change {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        let (status, body) = f
+            .bearer(Method::GET, "/api/v1/me", &f.issuer.sign(&claims), None)
+            .await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{code}: {body}");
+        assert_eq!(error_code(&body), code, "{body}");
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_access_token_works_in_the_accounts_own_drive() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let token = f.issuer.token(&ada, "carbon", &ada_id);
+    // Without a parent a folder goes at the top of the caller's own drive.
+    let (status, body) = f
+        .bearer(
+            Method::POST,
+            "/api/v1/entries",
+            &token,
+            Some(json!({ "name": "notes" })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["path"], "notes");
+    assert_eq!(
+        body["org_id"],
+        ada.as_str(),
+        "the drive key is the owner's uuid"
+    );
+    let (status, listing) = f
+        .bearer(Method::GET, "/api/v1/entries", &token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        listing["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["name"] == "notes"))
+    );
+    // Another account never sees it: not in its own drive, and not when it
+    // names Ada's drive.
+    let bob = f.uuid("Bob");
+    let other = f.issuer.token(&bob, "carbon", &f.id("c:bob"));
+    let (status, _) = f
+        .bearer(Method::GET, "/api/v1/entries?path=notes", &other, None)
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = f
+        .bearer(
+            Method::GET,
+            &format!("/api/v1/entries?drive={ada}&path=notes"),
+            &other,
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn sharing_resolves_ids_through_accounts_and_sensitive_changes_introspect()
+-> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let (bob, bob_id) = (f.uuid("Bob"), f.id("c:bob"));
+    f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/accounts/by-id/{}", f.id("c:nobody"))))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "code": "account_not_found", "message": "No account has that id." }
+        })))
+        .mount(&f.server)
+        .await;
+    let token = f.issuer.token(&ada, "carbon", &ada_id);
+    let (status, folder) = f
+        .bearer(
+            Method::POST,
+            "/api/v1/entries",
+            &token,
+            Some(json!({ "name": "shared" })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    let entry = folder["id"].as_str().unwrap_or_default().to_owned();
+    let invitations = format!("/api/v1/entries/{entry}/invitations");
+
+    // Sharing is sensitive: a token Silicon Accounts no longer considers
+    // active is refused even though it still verifies locally.
+    f.stub_introspection(false, &ada).await;
+    let (status, body) = f
+        .bearer(
+            Method::POST,
+            &invitations,
+            &token,
+            Some(json!({ "principal": { "type": "carbon", "id": bob_id } })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(error_code(&body), "token_revoked");
+
+    f.server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(f.issuer.jwks_json()))
+        .mount(&f.server)
+        .await;
+    f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
+        .await;
+    f.stub_introspection(true, &ada).await;
+    // A fresh token, so the earlier inactive answer is not reused.
+    let token = f
+        .issuer
+        .sign(&f.issuer.claims(&ada, "carbon", &ada_id, 1, 1_800));
+    let (status, grant) = f
+        .bearer(
+            Method::POST,
+            &invitations,
+            &token,
+            Some(json!({ "principal": { "type": "carbon", "id": bob_id.to_uppercase() } })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{grant}");
+    assert_eq!(grant["principal"]["id"], bob.as_str(), "stored by uuid");
+
+    for (principal, code) in [
+        (
+            json!({ "type": "carbon", "id": f.id("c:nobody") }),
+            "unknown_account",
+        ),
+        (
+            json!({ "type": "silicon", "id": bob_id }),
+            "principal_kind_mismatch",
+        ),
+        (
+            json!({ "type": "tag", "id": "research" }),
+            "tag_recipients_retired",
+        ),
+        (
+            json!({ "type": "email", "id": "bob@example.test" }),
+            "email_recipients_retired",
+        ),
+        (
+            json!({ "type": "carbon", "id": "bob smith" }),
+            "invalid_account_id",
+        ),
+    ] {
+        let (status, body) = f
+            .bearer(
+                Method::POST,
+                &invitations,
+                &token,
+                Some(json!({ "principal": principal })),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{code}: {body}");
+        assert_eq!(error_code(&body), code, "{body}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn the_webhook_verifies_signatures_and_applies_each_event_once() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let now = OffsetDateTime::now_utc();
+    // No signature headers, a wrong signature, and a stale timestamp: 401.
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/webhook/",
+            None,
+            Some(json!({"type": "ping"})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "webhook_signature_missing");
+    let delivery = signed_delivery(
+        "whsec_some_other_secret_0123456789",
+        "e-1",
+        "ping",
+        now,
+        &json!({}),
+    );
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/webhook/",
+            None,
+            Some(serde_json::from_str(&delivery.body)?),
+            &[
+                ("x-accounts-timestamp", delivery.timestamp.as_str()),
+                ("x-accounts-signature", delivery.signature.as_str()),
+            ],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "webhook_signature_invalid");
+    let stale = (now - time::Duration::minutes(10)).unix_timestamp();
+    let body_text = json!({"event_id": "e-2", "type": "ping", "data": {}}).to_string();
+    let signature =
+        silicon_accounts_client::sign_webhook(TEST_WEBHOOK_SECRET, stale, body_text.as_bytes());
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/webhook/")
+        .header("x-accounts-timestamp", stale.to_string())
+        .header("x-accounts-signature", signature)
+        .body(Body::from(body_text))?;
+    assert_eq!(
+        f.router.clone().oneshot(request).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // A correctly signed body that is not an event: 400.
+    let timestamp = now.unix_timestamp();
+    let garbage = b"{\"not\":\"an event\"}";
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/webhook/")
+        .header("x-accounts-timestamp", timestamp.to_string())
+        .header(
+            "x-accounts-signature",
+            silicon_accounts_client::sign_webhook(TEST_WEBHOOK_SECRET, timestamp, garbage),
+        )
+        .body(Body::from(&garbage[..]))?;
+    assert_eq!(
+        f.router.clone().oneshot(request).await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // ping and an unknown type are acknowledged and recorded as ignored.
+    let ping = Uuid::now_v7().to_string();
+    assert_eq!(
+        f.deliver_event(&ping, "ping", now, &json!({})).await?,
+        StatusCode::NO_CONTENT
+    );
+    let unknown = Uuid::now_v7().to_string();
+    assert_eq!(
+        f.deliver_event(
+            &unknown,
+            "account.something_new",
+            now,
+            &json!({"uuid": "Zz9"})
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    // The same event delivered twice is applied once.
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let renamed = f.id("c:ada-king");
+    let changed = Uuid::now_v7().to_string();
+    let data = json!({"uuid": ada, "membership_id": format!("briefcase:{ada}"), "kind": "carbon", "old_id": ada_id, "new_id": renamed});
+    assert_eq!(
+        f.deliver_event(&changed, "account.id_changed", now, &data)
+            .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        f.deliver_event(&changed, "account.id_changed", now, &data)
+            .await?,
+        StatusCode::NO_CONTENT
+    );
+    let outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_id, outcome FROM briefcase.accounts_webhook_receipts \
+          WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(vec![ping.clone(), unknown.clone(), changed.clone()])
+    .fetch_all(&f.admin)
+    .await?;
+    let outcome = |id: &str| {
+        outcomes
+            .iter()
+            .find(|(event, _)| event == id)
+            .map(|(_, outcome)| outcome.clone())
+    };
+    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+    assert_eq!(outcome(&ping).as_deref(), Some("ignored"));
+    assert_eq!(outcome(&unknown).as_deref(), Some("ignored"));
+    assert_eq!(outcome(&changed).as_deref(), Some("applied"));
+    assert_eq!(f.account_row(&ada).await?["public_id"], renamed.as_str());
+    Ok(())
+}
+
+#[tokio::test]
+async fn sign_outs_removals_and_deletion_refuse_older_tokens() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    f.stub_userinfo(&ada, &ada_id, "Ada").await;
+    let membership = json!({"uuid": ada, "membership_id": format!("briefcase:{ada}")});
+    let at = |offset: i64| {
+        f.issuer
+            .sign(&f.issuer.claims(&ada, "carbon", &ada_id, offset, 3_600))
+    };
+    let early = at(-120);
+    assert_eq!(f.me(&early).await?.0, StatusCode::OK);
+
+    // Briefcase's own sign-out of one session leaves the others alone.
+    let now = OffsetDateTime::now_utc();
+    let mut signed_out = membership.clone();
+    signed_out["reason"] = json!("app_revoked");
+    assert_eq!(
+        f.deliver(
+            "membership.signed_out",
+            now - time::Duration::seconds(60),
+            &signed_out
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(f.me(&early).await?.0, StatusCode::OK);
+
+    // Any other sign-out ends every token issued before it.
+    signed_out["reason"] = json!("stk_rotated");
+    assert_eq!(
+        f.deliver(
+            "membership.signed_out",
+            now - time::Duration::seconds(60),
+            &signed_out
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = f.me(&early).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "token_revoked");
+    assert_eq!(
+        f.me(&at(-30)).await?.0,
+        StatusCode::OK,
+        "a later sign-in works"
+    );
+
+    // Removing Briefcase's access refuses older tokens until a new sign-in.
+    assert_eq!(
+        f.deliver("membership.access_removed", now, &membership)
+            .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(f.account_row(&ada).await?["status"], "access_removed");
+    assert_eq!(f.me(&at(-30)).await?.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(f.me(&at(5)).await?.0, StatusCode::OK);
+    assert_eq!(f.account_row(&ada).await?["status"], "active");
+
+    // A deleted account is refused whatever its token, and forgotten.
+    assert_eq!(
+        f.deliver(
+            "account.deleted",
+            now + time::Duration::seconds(10),
+            &membership
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    // Issued after the deletion (and within the 30-second clock leeway).
+    let (status, body) = f.me(&at(20)).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "account_deleted");
+    let row = f.account_row(&ada).await?;
+    assert_eq!(row["status"], "deleted");
+    assert!(row["display_name"].is_null() && row["email"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn profile_events_keep_the_newest_state_whatever_the_order() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, first, second) = (f.uuid("Ada"), f.id("c:ada"), f.id("c:ada-two"));
+    let now = OffsetDateTime::now_utc();
+    let changed = |old: &str, new: &str| json!({"uuid": ada, "membership_id": format!("briefcase:{ada}"), "kind": "carbon", "old_id": old, "new_id": new});
+    // The newer rename arrives first; the older one must not undo it.
+    f.deliver("account.id_changed", now, &changed(&first, &second))
+        .await?;
+    f.deliver(
+        "account.id_changed",
+        now - time::Duration::minutes(5),
+        &changed("c:ada-zero", &first),
+    )
+    .await?;
+    assert_eq!(f.account_row(&ada).await?["public_id"], second.as_str());
+    let history: Vec<String> = sqlx::query_scalar(
+        "SELECT public_id FROM briefcase.account_id_history WHERE account_uuid = $1 ORDER BY public_id",
+    )
+    .bind(&ada)
+    .fetch_all(&f.admin)
+    .await?;
+    let mut expected = vec!["c:ada-zero".to_owned(), first.clone()];
+    expected.sort();
+    assert_eq!(history, expected, "byte order (COLLATE \"C\")");
+
+    let updated = |version: i64, name: &str| {
+        json!({"uuid": ada, "membership_id": format!("briefcase:{ada}"), "changed": ["display_name"],
+               "account": {"uuid": ada, "membership_id": format!("briefcase:{ada}"), "kind": "carbon",
+                           "id": second, "display_name": name, "pfp_url": "https://pfp.example/x.png", "version": version}})
+    };
+    f.deliver("account.updated", now, &updated(3, "Ada v3"))
+        .await?;
+    f.deliver("account.updated", now, &updated(2, "Ada v2"))
+        .await?;
+    let row = f.account_row(&ada).await?;
+    assert_eq!(row["display_name"], "Ada v3");
+    assert_eq!(row["profile_version"], 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn custodians_come_from_lookups_and_webhooks_and_define_the_circle() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let (bob, bob_id) = (f.uuid("Bob"), f.id("c:bob"));
+    let (scout, scout_id) = (f.uuid("Sct"), f.id("si:scout"));
+    let (pilot, pilot_id) = (f.uuid("Plt"), f.id("si:pilot"));
+    f.stub_account(
+        &scout,
+        &scout_id,
+        silicon_summary(&scout, &scout_id, (&ada, &ada_id)),
+    )
+    .await;
+    f.stub_account(
+        &pilot,
+        &pilot_id,
+        silicon_summary(&pilot, &pilot_id, (&ada, &ada_id)),
+    )
+    .await;
+    f.stub_account(&ada, &ada_id, carbon_summary(&ada, &ada_id))
+        .await;
+    f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
+        .await;
+    f.stub_userinfo(&scout, &scout_id, "Scout").await;
+
+    // A Silicon's first sign-in looks its custodian up.
+    let token = f.issuer.token(&scout, "silicon", &scout_id);
+    let (status, body) = f.bearer(Method::GET, "/api/v1/me", &token, None).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["custodian"]["uuid"], ada.as_str());
+    assert_eq!(f.account_row(&scout).await?["custodian_uuid"], ada.as_str());
+
+    let directory = &f.state.accounts;
+    let uuid = |value: &str| crate::domain::account::AccountUuid::new(value);
+    assert!(directory.same_circle(&uuid(&scout)?, &uuid(&ada)?).await?);
+    assert!(
+        directory
+            .same_circle(&uuid(&scout)?, &uuid(&pilot)?)
+            .await?
+    );
+    assert!(!directory.same_circle(&uuid(&ada)?, &uuid(&bob)?).await?);
+    assert!(
+        directory
+            .is_custodian_of(&uuid(&ada)?, &uuid(&scout)?)
+            .await?
+    );
+    assert_eq!(directory.custodial_silicons(&uuid(&ada)?).await?.len(), 2);
+
+    // A transfer moves the Silicon into its new custodian's circle.
+    let transfer = json!({"uuid": scout, "membership_id": format!("briefcase:{scout}"),
+                          "from": {"uuid": ada, "id": ada_id}, "to": {"uuid": bob, "id": bob_id}});
+    assert_eq!(
+        f.deliver(
+            "silicon.custodian_changed",
+            OffsetDateTime::now_utc(),
+            &transfer
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        directory
+            .is_custodian_of(&uuid(&bob)?, &uuid(&scout)?)
+            .await?
+    );
+    assert!(
+        !directory
+            .is_custodian_of(&uuid(&ada)?, &uuid(&scout)?)
+            .await?
+    );
+    assert!(
+        !directory
+            .same_circle(&uuid(&scout)?, &uuid(&pilot)?)
+            .await?
+    );
+    assert!(directory.same_circle(&uuid(&scout)?, &uuid(&bob)?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn proofs_act_for_the_account_inside_the_issuing_apps_folder() -> anyhow::Result<()> {
+    let Some(f) =
+        fixture("briefcase.folders.create=interface briefcase.entries.list=interface|waveform")
+            .await?
+    else {
+        return Ok(());
+    };
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let user = (ada.as_str(), ada_id.as_str(), "carbon");
+    let proofs = [
+        (
+            "sap_interface_ok",
+            valid_proof(
+                "interface",
+                "briefcase",
+                user,
+                &["briefcase.folders.create", "briefcase.entries.list"],
+            ),
+        ),
+        (
+            "sap_other_receiver",
+            valid_proof("interface", "remind", user, &["briefcase.folders.create"]),
+        ),
+        (
+            "sap_read_only",
+            valid_proof("interface", "briefcase", user, &["briefcase.files.read"]),
+        ),
+        (
+            "sap_extend",
+            valid_proof("extend", "briefcase", user, &["briefcase.folders.create"]),
+        ),
+        ("sap_revoked", json!({"valid": false, "expires_at": null})),
+    ];
+    for (token, answer) in &proofs {
+        Mock::given(method("POST"))
+            .and(path("/v1/proofs/verify"))
+            .and(body_string_contains(*token))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer.clone()))
+            .mount(&f.server)
+            .await;
+    }
+    let mut app_proof = valid_proof(
+        "interface",
+        "briefcase",
+        user,
+        &["briefcase.folders.create"],
+    );
+    app_proof["kind"] = json!("app_verification");
+    app_proof["user"] = Value::Null;
+    Mock::given(method("POST"))
+        .and(path("/v1/proofs/verify"))
+        .and(body_string_contains("sap_app_level"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(app_proof))
+        .mount(&f.server)
+        .await;
+
+    let create =
+        |name: &str| json!({"operation_id": Uuid::now_v7(), "parent_path": "", "name": name});
+    let proof = |token: &str| format!("Proof {token}");
+    let (status, folder) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/folders/create",
+            Some(&proof("sap_interface_ok")),
+            Some(create("reports")),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    assert!(
+        folder["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("apps/interface/")),
+        "{folder}"
+    );
+    let (status, listing) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some(&proof("sap_interface_ok")),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        listing["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["name"] == "reports"))
+    );
+
+    for (token, status, code) in [
+        ("sap_revoked", StatusCode::UNAUTHORIZED, "proof_invalid"),
+        (
+            "sap_other_receiver",
+            StatusCode::UNAUTHORIZED,
+            "proof_invalid",
+        ),
+        (
+            "sap_read_only",
+            StatusCode::FORBIDDEN,
+            "proof_scope_missing",
+        ),
+        (
+            "sap_extend",
+            StatusCode::FORBIDDEN,
+            "proof_issuer_not_allowed",
+        ),
+        (
+            "sap_app_level",
+            StatusCode::FORBIDDEN,
+            "proof_kind_not_accepted",
+        ),
+    ] {
+        let (actual, body) = f
+            .send(
+                Method::POST,
+                "/api/v1/obo/folders/create",
+                Some(&proof(token)),
+                Some(create("x")),
+                &[],
+            )
+            .await?;
+        assert_eq!(actual, status, "{token}: {body}");
+        assert_eq!(error_code(&body), code, "{token}: {body}");
+    }
+    // Each kind of route takes exactly its own credential.
+    let bearer = format!("Bearer {}", f.issuer.token(&ada, "carbon", &ada_id));
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/folders/create",
+            Some(&bearer),
+            Some(create("x")),
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        (status, error_code(&body)),
+        (StatusCode::UNAUTHORIZED, "proof_required")
+    );
+    let (status, body) = f
+        .send(
+            Method::GET,
+            "/api/v1/me",
+            Some(&proof("sap_interface_ok")),
+            None,
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        (status, error_code(&body)),
+        (StatusCode::UNAUTHORIZED, "proof_not_accepted_here")
+    );
+
+    // Once the account removes Briefcase's access, no app acts for it here.
+    let membership = json!({"uuid": ada, "membership_id": format!("briefcase:{ada}")});
+    f.deliver(
+        "membership.access_removed",
+        OffsetDateTime::now_utc(),
+        &membership,
+    )
+    .await?;
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some(&proof("sap_interface_ok")),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        (status, error_code(&body)),
+        (StatusCode::FORBIDDEN, "account_access_removed")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ids_resolve_at_silicon_accounts_and_fall_back_to_a_fresh_cache() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (bob, bob_id) = (f.uuid("Bob"), f.id("c:bob"));
+    let (cleo_id, dan_id) = (f.id("c:cleo"), f.id("c:dan"));
+    f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
+        .await;
+    for id in [&cleo_id, &dan_id] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/accounts/by-id/{id}")))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": { "code": "unavailable", "message": "maintenance" }
+            })))
+            .mount(&f.server)
+            .await;
+    }
+    let directory = &f.state.accounts;
+    assert_eq!(directory.resolve(&bob_id).await?.uuid, bob);
+
+    // Silicon Accounts unreachable: a fresh cached account still resolves...
+    let cleo = f.uuid("Cle");
+    sqlx::query(
+        "INSERT INTO briefcase.accounts (account_uuid, kind, public_id, public_id_observed_at) \
+         VALUES ($1, 'carbon', $2, clock_timestamp())",
+    )
+    .bind(&cleo)
+    .bind(&cleo_id)
+    .execute(&f.admin)
+    .await?;
+    assert_eq!(directory.resolve(&cleo_id).await?.uuid, cleo);
+    // ...and an id the cache does not know is a dependency failure, never a guess.
+    assert!(matches!(
+        directory.resolve(&dan_id).await,
+        Err(crate::error::AppError::DependencyUnavailable { .. })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_account_never_acts_in_a_legacy_organization_its_uuid_spells() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    // A lowercase uuid is also a valid organization handle (`tos` is both).
+    let handle = format!("lg{}", &f.uuid("x")[1..]).to_ascii_lowercase();
+    sqlx::query(
+        "INSERT INTO briefcase.organizations (org_id, iam_version, lifecycle_status) \
+         VALUES ($1, 3, 'active')",
+    )
+    .bind(&handle)
+    .execute(&f.admin)
+    .await?;
+    let token = f.issuer.token(&handle, "carbon", &f.id("c:collider"));
+    for (method, uri, body) in [
+        (Method::GET, "/api/v1/entries".to_owned(), None),
+        (
+            Method::POST,
+            "/api/v1/entries".to_owned(),
+            Some(json!({ "name": "x", "parent_path": format!("private/{handle}") })),
+        ),
+    ] {
+        let (status, body) = f.bearer(method, &uri, &token, body).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+    }
+    let members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM briefcase.organization_members WHERE org_id = $1")
+            .bind(&handle)
+            .fetch_one(&f.admin)
+            .await?;
+    assert_eq!(
+        members, 0,
+        "the account never became a member of the legacy tenant"
+    );
+
+    // Its own, unclaimed key works and records the owner.
+    let (ada, ada_id) = (f.uuid("Ada"), f.id("c:ada"));
+    let token = f.issuer.token(&ada, "carbon", &ada_id);
+    let (status, _) = f
+        .bearer(Method::GET, "/api/v1/entries", &token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner_account_uuid FROM briefcase.organizations WHERE org_id = $1",
+    )
+    .bind(&ada)
+    .fetch_one(&f.admin)
+    .await?;
+    assert_eq!(owner.as_deref(), Some(ada.as_str()));
+    Ok(())
+}
+
+/// Real PostgreSQL ownership migration, with signed Accounts tokens and an
+/// unchanged object-store key. The Accounts/S3 transports are local stand-ins.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn uuid_backfill_rejects_old_credentials_and_preserves_file_access() -> anyhow::Result<()> {
+    use crate::{application::ports::ObjectKey, infrastructure::postgres::rekey_accounts};
+    use sqlx::Executor as _;
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let admin = sqlx::PgPool::connect(&url).await?;
+    let database = format!("briefcase_uuid_api_{}", Uuid::new_v4().simple());
+    admin
+        .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+        .await?;
+    let mut database_url = url::Url::parse(&url)?;
+    database_url.set_path(&database);
+    let store = super::memory_store::MemoryStore::default();
+    let f = fixture_at(
+        database_url.as_str(),
+        "briefcase.entries.list=waveform",
+        "",
+        Some(std::sync::Arc::new(store.clone())),
+    )
+    .await?;
+    let (old, new) = ("Old1", "12345678-1234-4234-8234-123456789abc");
+    let token = f.issuer.token(old, "carbon", "c:stable");
+    f.stub_account(old, "c:stable", carbon_summary(old, "c:stable"))
+        .await;
+    let (status, folder) = f
+        .bearer(
+            Method::POST,
+            "/api/v1/entries",
+            &token,
+            Some(json!({"name":"keep"})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    let folder_id = Uuid::parse_str(
+        folder["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("folder ID missing"))?,
+    )?;
+    sqlx::query("INSERT INTO briefcase.organization_storage_configs(org_id,storage_config_id,status,bucket_name,region,role_arn,bucket_prefix,aws_account_id,encryption_mode,created_by_type,created_by_id,external_id) VALUES($1,$2,'active','retained-trust','us-east-1','arn:aws:iam::123456789012:role/briefcase-access','objects/','123456789012','sse_s3','carbon',$1,repeat('b',64))")
+        .bind(old).bind(Uuid::now_v7()).execute(&f.admin).await?;
+    let file_id = Uuid::now_v7();
+    let version_id = Uuid::now_v7();
+    let key = ObjectKey::new("objects/Old1/immutable-key")?;
+    let bytes = b"same file bytes after canonical UUID migration\n";
+    store.insert(&key, bytes.to_vec());
+    let mut tx = f.admin.begin().await?;
+    sqlx::query("INSERT INTO briefcase.entries(org_id,entry_id,parent_id,entry_type,name,root_type,owner_type,owner_id,content_type,size_bytes,current_version_id,created_by_type,created_by_id,updated_by_type,updated_by_id) VALUES($1,$2,$3,'file','proof.txt','private','carbon',$1,'text/plain',$4,$5,'carbon',$1,'carbon',$1)")
+        .bind(old).bind(file_id).bind(folder_id).bind(i64::try_from(bytes.len())?).bind(version_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO briefcase.entry_versions(org_id,entry_id,version_id,version_number,source,storage_backend,bucket_name,storage_region,storage_prefix,storage_encryption_mode,object_key,checksum_algorithm,checksum_type,checksum_value,size_bytes,content_type,created_by_type,created_by_id,content_sha256) VALUES($1,$2,$3,1,'upload','platform','unchanged-bucket','us-east-1','organizations/Old1','sse_s3',$4,'sha256','full_object','checksum',$5,'text/plain','carbon',$1,repeat('a',64))")
+        .bind(old).bind(file_id).bind(version_id).bind(key.as_str()).bind(i64::try_from(bytes.len())?).execute(&mut *tx).await?;
+    tx.commit().await?;
+    let download = |token: String| {
+        Request::builder()
+            .uri(format!("/api/v1/entries/{file_id}/content"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+    };
+    let response = f.router.clone().oneshot(download(token.clone())?).await?;
+    let response_status = response.status();
+    let response_bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+    assert_eq!(
+        response_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    assert_eq!(response_bytes.as_ref(), bytes);
+    Mock::given(method("POST"))
+        .and(path("/v1/proofs/verify"))
+        .and(body_string_contains("sap_before_migration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(valid_proof(
+            "waveform",
+            "briefcase",
+            (old, "c:stable", "carbon"),
+            &["briefcase.entries.list"],
+        )))
+        .mount(&f.server)
+        .await;
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some("Proof sap_before_migration"),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Stand in for a stopped/drained worker; this test sends no notifications.
+    sqlx::query("UPDATE briefcase.outbox_events SET status='dead_letter',last_error='test_worker_drained' WHERE status='pending'")
+        .execute(&f.admin).await?;
+    let mapping =
+        rekey_accounts::parse_mapping(&format!("old_uuid,new_uuid,kind\n{old},{new},carbon\n"))?;
+    rekey_accounts::apply(&f.admin, &mapping, false).await?;
+    for endpoint in [
+        "/api/v1/me",
+        "/api/v1/entries",
+        &format!("/api/v1/entries/{file_id}/content"),
+    ] {
+        let (status, body) = f.bearer(Method::GET, endpoint, &token, None).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(error_code(&body), "account_uuid_migrated");
+    }
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some("Proof sap_before_migration"),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(error_code(&body), "account_uuid_migrated");
+    // Even a valid, newly delivered old signed profile cannot resurrect it.
+    assert_eq!(
+        f.deliver(
+            "account.updated",
+            OffsetDateTime::now_utc(),
+            &json!({"uuid":old,"changed":["display_name"],"account":carbon_summary(old,"c:stable")})
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert!(f.account_row(old).await?.is_null());
+    let silicon = "22345678-1234-4234-8234-123456789abc";
+    sqlx::query("INSERT INTO briefcase.accounts(account_uuid,kind,public_id,custodian_uuid) VALUES($1,'silicon','si:stable',$2)")
+        .bind(silicon).bind(new).execute(&f.admin).await?;
+    for (event_type, data) in [
+        (
+            "account.updated",
+            json!({"uuid":silicon,"changed":["custodian"],"account":silicon_summary(silicon,"si:stable",(old,"c:stable"))}),
+        ),
+        (
+            "silicon.custodian_changed",
+            json!({"uuid":silicon,"to":{"uuid":old,"id":"c:stable"}}),
+        ),
+    ] {
+        assert_eq!(
+            f.deliver(event_type, OffsetDateTime::now_utc(), &data)
+                .await?,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(f.account_row(silicon).await?["custodian_uuid"], new);
+        assert!(f.account_row(old).await?.is_null());
+    }
+
+    f.stub_account(new, "c:stable", carbon_summary(new, "c:stable"))
+        .await;
+    let new_token = f.issuer.token(new, "carbon", "c:stable");
+    let (status, drives) = f
+        .bearer(Method::GET, "/api/v1/drives", &new_token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{drives}");
+    assert_eq!(drives["items"][0]["storage_external_id"], "b".repeat(64));
+    let response = f
+        .router
+        .clone()
+        .oneshot(download(new_token.clone())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 4096)
+            .await?
+            .as_ref(),
+        bytes
+    );
+    let (status, listing) = f
+        .bearer(Method::GET, "/api/v1/entries?path=keep", &new_token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        listing["items"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == file_id.to_string()))
+    );
+    let preserved: (String,String,String)=sqlx::query_as("SELECT bucket_name,storage_prefix,object_key FROM briefcase.entry_versions WHERE version_id=$1")
+        .bind(version_id).fetch_one(&f.admin).await?;
+    assert_eq!(
+        preserved,
+        (
+            "unchanged-bucket".into(),
+            "organizations/Old1".into(),
+            key.as_str().into()
+        )
+    );
+    let (status, _) = f
+        .bearer(
+            Method::GET,
+            &format!("/api/v1/entries/{file_id}/content"),
+            &f.issuer.token("Out1", "carbon", "c:outside"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    f.admin.close().await;
+    drop(f);
+    admin
+        .execute(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
+        .await?;
+    admin.close().await;
+    Ok(())
+}

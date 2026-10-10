@@ -1,7 +1,7 @@
 //! Retirement response for the former metadata-only raw OBO upload route.
 //!
 //! Current OBO uploads use reserve, capability transfer, and commit. Reject
-//! legacy uploads before staging bytes or making any upstream IAM request.
+//! legacy uploads before staging bytes or verifying any credential.
 
 use axum::{
     Json,

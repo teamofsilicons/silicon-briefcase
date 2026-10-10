@@ -1,10 +1,8 @@
-//! The command grammar, as `briefcase -h` shows it.
+//! The command grammar, as `briefcase --help` shows it.
 
 use std::{path::PathBuf, str::FromStr};
 
-use briefcase_client::{
-    AccessRight, ActorRef, ActorType, ApplicationId, Destination, EncryptionMode, RootType,
-};
+use briefcase_client::{AccessRight, ActorRef, EncryptionMode};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
@@ -13,16 +11,28 @@ use uuid::Uuid;
 #[command(
     name = "briefcase",
     version,
-    about = "Work with Silicon Briefcase from the command line.",
-    long_about = "Browse, upload, download, and share organization files.\n\n\
-                  Entries are addressed by the path their permanent URL shows, \
-                  such as private/cos:tos/notes/report.pdf, or by their identifier. \
-                  Run `briefcase login <slt>` once, then everything else uses the saved profile.\n\n\
-                  Getting started:\n  briefcase iam --json\n  briefcase login <slt>\n  briefcase login status --json\n  briefcase --org tos ls\n\n\
-                  Run `briefcase <command> --help` for full command usage and options.\n\
-                  State defaults to $SILICON_HOME/.briefcase when SILICON_HOME is set,\n\
-                  otherwise $HOME/.briefcase. Use `briefcase config home <directory>` to configure it.",
-    after_help = "Offline guides: briefcase docs cli | client | testing\nRepository: https://github.com/teamofsilicons/silicon-briefcase\nDocs: https://docs.briefcase.teamofsilicons.com/\nRust package: https://crates.io/crates/briefcase-client",
+    about = "Silicon Briefcase from the command line: your files, for every Carbon and Silicon.",
+    long_about = "Silicon Briefcase from the command line: browse, upload, download and share files.\n\n\
+        Every Carbon and every Silicon has its own drive. A path names an entry in your own drive \
+        (notes/plan.md); put @ and an account id in front to name another drive — one something was \
+        shared from, or the drive of a Silicon you look after (@c:ada/plans, @si:scout/reports). \
+        An entry's identifier and its permanent address (https://briefcase.teamofsilicons.com/c:ada/plans) \
+        work too.\n\n\
+        Sign in first:\n  \
+        Carbons:   briefcase login                (shows a code to approve on the account site)\n  \
+        Silicons:  silicon-accounts login --app briefcase -q | briefcase login --slt-stdin\n\n\
+        Then:\n  \
+        briefcase login status --json       who you are signed in as\n  \
+        briefcase drives                    your drive and the drives of the Silicons you look after\n  \
+        briefcase shared                    what others shared with you\n  \
+        briefcase ls notes                  a folder in your drive\n  \
+        briefcase put ./report.pdf notes    upload\n  \
+        briefcase share notes/report.pdf c:ada --access read,update\n\n\
+        Run `briefcase <command> --help` for what a command is for, how it combines with others, and its options.\n\
+        State lives in $SILICON_HOME/.briefcase when SILICON_HOME is set, otherwise $HOME/.briefcase \
+        (`briefcase config home <directory>` moves it). Silicon Apps installs and updates briefcase \
+        (`silicon-apps install briefcase`).",
+    after_help = "Offline guides: briefcase docs cli | client\nRepository: https://github.com/teamofsilicons/silicon-briefcase\nDocs: https://docs.briefcase.teamofsilicons.com/\nRust package: https://crates.io/crates/briefcase-client",
     propagate_version = true,
     disable_help_subcommand = true
 )]
@@ -37,40 +47,25 @@ pub struct Cli {
 }
 
 /// Options accepted by every command.
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug)]
 pub struct GlobalArgs {
-    /// Optional API URL override for local or private deployments.
+    /// Briefcase API URL, for a local or private deployment.
     ///
-    /// Uses the saved profile, or <https://backend.briefcase.teamofsilicons.com/api/v1/>
-    /// automatically. Normal hosted use does not need this option.
+    /// Default: the saved profile's, else <https://api.briefcase.teamofsilicons.com/api/v1/>.
+    /// A saved sign-in is never sent to another URL than the one it was made for.
     #[arg(long, global = true, env = "BRIEFCASE_URL", value_name = "URL")]
     pub url: Option<String>,
 
-    /// Organization to act in, overriding the saved profile.
-    #[arg(long, global = true, env = "BRIEFCASE_ORG", value_name = "ORG")]
-    pub org: Option<String>,
+    /// Silicon Accounts URL to sign in at, for a local or private deployment.
+    ///
+    /// Default: the saved profile's, else <https://accounts.teamofsilicons.com>. Plain http is
+    /// accepted only for this machine (`localhost`, `127.0.0.1`, `::1`).
+    #[arg(long, global = true, env = "ACCOUNTS_URL", value_name = "URL")]
+    pub accounts_url: Option<String>,
 
-    /// Run the same command inside a testing environment, by public UUID.
-    #[arg(
-        long,
-        global = true,
-        env = "BRIEFCASE_TEST",
-        value_name = "ENVIRONMENT_ID",
-        value_parser = parse_testing_environment_id
-    )]
-    pub test: Option<Uuid>,
-
-    /// Select an IAM testing application directly by its secret.
-    #[arg(
-        long,
-        global = true,
-        env = "BRIEFCASE_APP_SECRET",
-        hide_env_values = true,
-        conflicts_with = "test"
-    )]
-    pub app_secret: Option<String>,
-
-    /// IAM access token, overriding the saved one.
+    /// Use this Briefcase access token instead of the saved sign-in (for scripts).
+    ///
+    /// It is never refreshed or saved. `briefcase login` saves a sign-in that refreshes itself.
     #[arg(
         long,
         global = true,
@@ -80,43 +75,87 @@ pub struct GlobalArgs {
     )]
     pub token: Option<String>,
 
-    /// Saved profile to use.
+    /// Saved profile to use: one sign-in and deployment each (default: the current profile).
     #[arg(long, global = true, env = "BRIEFCASE_PROFILE", value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Print JSON instead of a table.
+    /// Print JSON instead of a table; errors become JSON on standard error.
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Skip the contract check this client performs before its first call.
+    /// Skip the contract check this client makes before its first call.
     #[arg(long, global = true)]
     pub no_verify: bool,
+
+    /// Retired: every account has its own drive; name another drive with @c:id or @si:id.
+    #[arg(long, global = true, hide = true, value_name = "ORG")]
+    pub org: Option<String>,
+
+    /// Retired: testing environments no longer exist.
+    #[arg(long, global = true, hide = true, value_name = "ENVIRONMENT")]
+    pub test: Option<String>,
+
+    /// Retired: testing environments no longer exist.
+    #[arg(long, global = true, hide = true, value_name = "SECRET")]
+    pub app_secret: Option<String>,
 }
 
 /// Everything the CLI can do.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Exchange an IAM short-lived token and save the rotating session.
+    /// Sign in: a device code for Carbons, a short-lived token for Silicons.
     #[command(
-        long_about = "Sign in to Silicon Briefcase with an IAM short-lived token.\n\n\
-        The hosted backend is selected automatically; --url is only needed to override it \
-        for a local or private deployment. Existing profiles keep their saved deployment.\n\n\
-        Use `briefcase login status --json` to check authentication and identity.\n\n\
-        Use `briefcase login <slt>` for a direct exchange, or omit the token to use the hidden prompt. `--org` is optional for normal login and is only needed when selecting a workspace or test plane.\n\n\
-        In a test environment selected by --test or --app-secret, SLT can be an IAM-issued test login code or the existing test Carbon or Silicon ID, for example `alice` or `worker:tos`. IAM signs you in as that test actor."
+        long_about = "Sign in to Briefcase with your Silicon account and save the sign-in.\n\n\
+        Carbons run `briefcase login` with nothing else: it prints a code and a page on the account \
+        site, waits while you approve it there, and saves the sign-in (add --open to open the page). \
+        Silicons never see a page: mint a short-lived token and hand it over on standard input:\n\n  \
+        silicon-accounts login --app briefcase -q | briefcase login --slt-stdin\n\n\
+        `briefcase login <SLT>` and `--slt <SLT>` take the token as an argument instead (it then shows \
+        in shell history and process lists; prefer --slt-stdin). A short-lived token works once, for \
+        two minutes, and only for Briefcase; a refused one is used up, so mint a fresh one.\n\n\
+        The sign-in is saved for the profile (--profile, or --save-as to name a new one) in \
+        credentials.json, readable only by you, and refreshes itself. Check it with \
+        `briefcase login status --json`; end it with `briefcase logout`.\n\n\
+        Examples:\n  briefcase login\n  briefcase login --open --label \"build machine\"\n  \
+        silicon-accounts login --app briefcase -q | briefcase login --slt-stdin --save-as scout"
     )]
     Login(LoginArgs),
-    /// Show the deployment's public IAM app ID before signing in.
-    Iam,
-    /// Forget the saved session for this profile and plane.
+    /// End this profile's sign-in at Silicon Accounts and forget it.
+    #[command(long_about = "End this profile's sign-in and forget its tokens.\n\n\
+        The refresh token is revoked at Silicon Accounts, so it can never be used again; only this \
+        sign-in ends (other machines and the website stay signed in). When Silicon Accounts cannot \
+        be reached the sign-in is still forgotten here and the answer says it was not revoked.")]
     Logout,
-    /// Show the current profile and whether the deployment agrees with it.
+    /// Show how Briefcase signs accounts in (app id, URLs), without signing in.
+    #[command(
+        long_about = "Show Briefcase's app id at Silicon Accounts, the Silicon Accounts and API URLs this \
+        command uses, and how Carbons and Silicons sign in. Works signed out and offline.\n\n\
+        Example:\n  briefcase accounts --json"
+    )]
+    Accounts,
+    /// Retired name of `accounts`, kept for older Silicon runtimes.
+    #[command(hide = true)]
+    Iam,
+    /// Show the profile, the saved sign-in, and whether the deployment's contract matches.
     Status,
-    /// List a folder, or the organization base.
+    /// List your drive and the drives of the Silicons you look after.
+    #[command(
+        long_about = "List the drives you open with the owner's rights: your own and, for a Carbon, \
+        one per Silicon you look after (you can read, add, change, delete and share everything in \
+        them). Address one with @ and its owner's id: `briefcase ls @si:scout`.\n\n\
+        What others shared with you is in `briefcase shared`."
+    )]
+    Drives,
+    /// List what other accounts shared with you, grouped by whose drive it is in.
+    Shared(SharedArgs),
+    /// Choose who besides you and your custodian's Silicons may share with a Silicon.
+    #[command(subcommand)]
+    Allow(AllowCommand),
+    /// List a folder: the top of your drive when no target is given.
     Ls(LsArgs),
-    /// Filter everything you can reach with the filter language.
+    /// Filter a drive with the filter language.
     Find(FindArgs),
-    /// Search filenames and extracted document text.
+    /// Search filenames and document text in your drive, your Silicons' and what was shared with you.
     Search(SearchArgs),
     /// Show one entry and what you may do with it.
     Stat(TargetArgs),
@@ -124,35 +163,38 @@ pub enum Command {
     Mkdir(MkdirArgs),
     /// Upload one or more local files.
     Put(PutArgs),
-    /// Download a file or a folder as tar.zst.
+    /// Download a file, or a folder as tar.zst.
     Get(GetArgs),
     /// Write a file's bytes to standard output.
     Cat(TargetArgs),
-    /// Rename or move an entry.
+    /// List what an archive (zip, tar, tar.gz, tar.zst, 7z) holds without extracting it.
+    Archive(ArchiveArgs),
+    /// Rename an entry or move it within its drive.
     Mv(MvArgs),
     /// Move entries to the recoverable bin.
     #[command(
-        long_about = "Move entries to the recoverable bin, where they stay restorable for 45 days \
-        with `briefcase bin restore <entry-id>`.\n\n\
-        A self-destructing file is the exception: removing it deletes it permanently, at once, \
-        and it never enters the bin. Check with `briefcase stat <target>` (a `self-destructs` line) \
-        before removing, and use `briefcase keep <target>` first if it should survive."
+        long_about = "Move entries to their drive's bin, where they stay restorable for 45 days with \
+        `briefcase bin restore <entry-id>`.\n\n\
+        Only an entry's creator, its drive's owner and their custodians may delete; it is never shared. \
+        A self-destructing file is the exception: removing it deletes it permanently, at once, and it \
+        never enters the bin. Check with `briefcase stat <target>` (a `self-destructs` line) before \
+        removing, and use `briefcase keep <target>` first if it should survive."
     )]
     Rm(RmArgs),
     /// Keep a self-destructing file: stop its timer so it is never deleted.
     #[command(
         long_about = "Keep a self-destructing file: stop its timer so it is never deleted.\n\n\
-        A file uploaded with `briefcase put --self-destruct <DURATION>` is deleted permanently \
-        when its timer runs out; it never enters the bin and cannot be restored. `keep` makes it \
-        an ordinary, permanent file again. Only the file's creator and organization admins and \
-        owners may keep it; anyone else is refused (exit code 4).\n\n\
-        Find files whose timer is running with `briefcase find is:self-destruct`, and check one \
-        with `briefcase stat <target>`. Keeping a file that has no running timer is refused with \
+        A file uploaded with `briefcase put --self-destruct <DURATION>` is deleted permanently when its \
+        timer runs out; it never enters the bin and cannot be restored. `keep` makes it an ordinary, \
+        permanent file again. The file's creator, the drive's owner and the custodian of either may \
+        keep it; anyone else is refused (exit code 4).\n\n\
+        Find files whose timer is running with `briefcase find is:self-destruct`, and check one with \
+        `briefcase stat <target>`. Keeping a file that has no running timer is refused with \
         `not_self_destructing`, which is also what a retry after a lost response sees.\n\n\
-        Example:\n  briefcase keep private/si:cos/notes/draft.md"
+        Example:\n  briefcase keep notes/draft.md"
     )]
     Keep(KeepArgs),
-    /// Work with the recoverable bin.
+    /// Work with a drive's recoverable bin.
     #[command(subcommand)]
     Bin(BinCommand),
     /// List a file's retained versions.
@@ -175,23 +217,21 @@ pub enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
-    /// Read or change anyone-with-link access, permanent or expiring.
+    /// Read or change anyone-with-the-link access, permanent or expiring.
     #[command(
-        long_about = "Read or change anyone-with-link access: anyone holding the link can view and \
+        long_about = "Read or change anyone-with-the-link access: anyone holding the link can view and \
         download the file or folder.\n\n\
-        With no option, prints the entry's link setting as JSON, including `expires_at` when its \
-        own link is an expiring link. `--enabled true` turns on a permanent link, `--enabled false` \
-        turns the link off, and `--expires-after <DURATION>` turns on an expiring link that stops working after \
-        1 minute to 30 days.\n\n\
+        With no option, prints the entry's link setting as JSON, including `expires_at` when its own \
+        link is an expiring link. `--enabled true` turns on a permanent link, `--enabled false` turns \
+        the link off, and `--expires-after <DURATION>` turns on an expiring link that stops working \
+        after 1 minute to 30 days. The entry's creator, its drive's owner and their custodians may \
+        change it; the top of a drive, `apps/` and `apps/<app>/` never get a link.\n\n\
         An expiring link is read-only and its expiry is strict: the link stops working the moment the \
-        time passes. While it is live, `--expires-after` again restarts the clock (extend or shorten), \
-        `--enabled true` makes it permanent, and `--enabled false` ends it early. Nobody is \
-        notified when it ends; creating, changing and ending it are recorded in `briefcase logs`. \
-        A permanent link must be turned off before it can become an expiring link \
-        (`link_already_permanent`).\n\n\
-        Examples:\n  briefcase link public/handbook/report.pdf --expires-after 2h\n  \
-        briefcase link public/handbook/report.pdf\n  \
-        briefcase link public/handbook/report.pdf --enabled true"
+        time passes. While it is live, `--expires-after` again restarts the clock, `--enabled true` makes \
+        it permanent, and `--enabled false` ends it early. A permanent link must be turned off before \
+        it can become an expiring link (`link_already_permanent`).\n\n\
+        Examples:\n  briefcase link notes/report.pdf --expires-after 2h\n  \
+        briefcase link notes/report.pdf\n  briefcase link notes/report.pdf --enabled true"
     )]
     Link {
         /// File or folder path or ID.
@@ -210,81 +250,79 @@ pub enum Command {
         #[arg(long, value_name = "DURATION", conflicts_with = "enabled")]
         expires_after: Option<Lifetime>,
     },
-    /// Grant a member, contact or tag access to an entry, permanent or expiring.
+    /// Share an entry with a Carbon or Silicon by id, permanently or for a while.
     #[command(
-        long_about = "Grant a member (c:ID, si:ID), a verified email contact (email:ADDRESS) or an \
-        IAM tag (tag:TAG) access to a file or folder. The answer is the new grant as JSON; its \
-        `id` is what `briefcase unshare` and `briefcase expiry` take.\n\n\
-        With `--expires-after <DURATION>` the grant is an expiring share: read-only (view and download), and \
-        gone 1 minute to 30 days after it is created. An expiring share is its own grant. When it ends, \
-        only that access goes; access the recipient holds through another share, a tag, or a \
-        public folder stays. Expiry is strict: access stops the moment the time passes. Before \
-        then, `briefcase expiry` extends, shortens or makes it permanent, and `briefcase unshare` \
-        ends it early. Nobody is notified when it ends; creating, changing and ending it are \
-        recorded in `briefcase logs`. For anyone-with-the-link access, use \
-        `briefcase link <target> --expires-after <DURATION>`.\n\n\
-        Examples:\n  briefcase share private/si:cos/notes c:cos --access read,write --inherit\n  \
-        briefcase share private/si:cos/notes/report.pdf email:alex@example.com --expires-after 2h\n  \
-        briefcase share private/si:cos/notes tag:engineering --inherit --expires-after 7d"
+        long_about = "Share a file or folder with an account, named by its id (c:ada, si:scout). The \
+        answer is the new share as JSON; its `id` is what `briefcase unshare` and `briefcase expiry` take.\n\n\
+        The share applies at once (nothing to accept). The recipient gets a notification in \
+        `briefcase inbox`, and an email when it shared its email with Briefcase. Rights are read, write \
+        (add content) and update (change content); delete is never shared. Only the entry's creator, \
+        its drive's owner and their custodians may share it.\n\n\
+        A Silicon accepts shares only from its custodian, the custodian's other Silicons, and accounts \
+        it (or its custodian) allowed with `briefcase allow add`; anything else is refused with \
+        `silicon_not_open`. Anyone signed in may share with a Carbon.\n\n\
+        With `--expires-after <DURATION>` the share is an expiring share: read-only, and gone 1 minute \
+        to 30 days after it is created. When it ends only that access goes. Before then, \
+        `briefcase expiry` extends, shortens or makes it permanent, and `briefcase unshare` ends it early. \
+        For anyone-with-the-link access, use `briefcase link <target> --expires-after <DURATION>`.\n\n\
+        Examples:\n  briefcase share notes c:ada --access read,write --inherit\n  \
+        briefcase share notes/report.pdf si:scout --expires-after 2h\n  \
+        briefcase share @si:scout/reports c:bob --access read --inherit"
     )]
     Share(ShareArgs),
-    /// Revoke one grant, including an expiring share before it ends.
+    /// Revoke one share, including an expiring share before it ends.
     #[command(
-        long_about = "Revoke one grant, as `briefcase shares <target>` lists it.\n\n\
-        This also ends an expiring share early. Revoking sends no notification to the recipient. \
-        Only the revoked grant goes: access the recipient holds through another grant, a tag, \
-        an inherited share or a public folder still applies."
+        long_about = "Revoke one share, as `briefcase shares <target>` lists it.\n\n\
+        This also ends an expiring share early. Revoking sends no notification. Only the revoked share \
+        goes: access the account holds through another share, an inherited share, creating the entry, \
+        or owning (or looking after) the drive still applies."
     )]
     Unshare(UnshareArgs),
     /// Extend, shorten, or make permanent a live expiring share.
     #[command(
-        long_about = "Change a live expiring share, as `briefcase shares <target>` lists it (a grant \
+        long_about = "Change a live expiring share, as `briefcase shares <target>` lists it (a share \
         with an `expires_at`).\n\n\
-        `--expires-in <DURATION>` restarts the share's clock: it now ends DURATION from now, \
-        which extends or shortens it (1 minute to 30 days). `--permanent` keeps the read access \
-        for good; when the recipient already holds a permanent grant on the entry, the share \
-        folds into it. To end it early, use `briefcase unshare <target> <grant-id>`. For an expiring \
-        link, use `briefcase link <target> --expires-after <DURATION>` or `--enabled true` instead.\n\n\
-        A share that has already ended is gone and reads as not found (exit code 3); create a new \
-        one with `briefcase share <target> <recipient> --expires-after <DURATION>`. A permanent grant has \
-        no timer and is refused with `not_an_expiring_share`. Changes are recorded in \
-        `briefcase logs`; nobody is notified.\n\n\
-        Examples:\n  briefcase expiry private/si:cos/notes \"$GRANT_ID\" --expires-in 3d\n  \
-        briefcase expiry private/si:cos/notes \"$GRANT_ID\" --permanent"
+        `--expires-in <DURATION>` restarts the share's clock: it now ends DURATION from now, which \
+        extends or shortens it (1 minute to 30 days). `--permanent` keeps the read access for good; \
+        when the recipient already holds a permanent share on the entry, the expiring one folds into \
+        it. To end it early, use `briefcase unshare <target> <grant-id>`.\n\n\
+        A share that has already ended is gone and reads as not found (exit code 3). A permanent share \
+        has no timer and is refused with `not_an_expiring_share`.\n\n\
+        Examples:\n  briefcase expiry notes \"$GRANT_ID\" --expires-in 3d\n  \
+        briefcase expiry notes \"$GRANT_ID\" --permanent"
     )]
     Expiry(ExpiryArgs),
-    /// List the explicit grants on an entry; expiring shares carry `expires_at`.
+    /// List the live shares on an entry; expiring shares carry `expires_at`.
     Shares {
         /// File/folder UUID or path.
         target: Target,
-        /// Continue listing invitations from an opaque cursor.
+        /// Continue listing shares from an opaque cursor.
         #[arg(long)]
         cursor: Option<String>,
     },
     /// Show what you may do with named entries.
     Access(AccessArgs),
-    /// Read the notification inbox.
+    /// Read your notification inbox.
     Inbox(InboxArgs),
-    /// Show what the organization is consuming.
-    Usage,
-    /// Configure organization-owned storage.
+    /// Show what a drive is consuming: your own unless you name a Silicon's you look after.
+    Usage {
+        /// The drive, by its owner's id (`@si:scout` or `si:scout`); your own when omitted.
+        drive: Option<DriveArg>,
+    },
+    /// Bring your own S3 bucket for a drive's new files.
     #[command(subcommand)]
     Storage(StorageCommand),
-    /// Act as an application, on behalf of a member.
+    /// Act for an account as another app, with a Silicon Accounts proof.
     #[command(subcommand)]
     App(AppCommand),
-    /// Disposable, IAM-coupled testing environments.
-    #[command(subcommand)]
-    Env(EnvCommand),
-    /// Stored CLI settings.
+    /// Stored CLI settings and the state directory.
     #[command(subcommand)]
     Config(ConfigCommand),
-    /// Installation and update guidance.
-    #[command(subcommand)]
-    System(SystemCommand),
     /// Submit a bug report, optionally linking a proposed fix.
     #[command(
-        long_about = "Submit reproduction steps, expected behavior, and actual behavior. Nothing is attached automatically.\n\nExample: briefcase report \"Upload fails when the filename contains a tab\" --pr https://github.com/teamofsilicons/silicon-briefcase/pull/42\n\nReports go to the selected deployment and test reports remain inside testing. A PR is optional."
+        long_about = "Submit reproduction steps, expected behavior, and actual behavior. Nothing is attached automatically.\n\n\
+        Example: briefcase report \"Upload fails when the filename contains a tab\" --pr https://github.com/teamofsilicons/silicon-briefcase/pull/42\n\n\
+        Reports go to the deployment you are signed in to, as your account. A PR is optional."
     )]
     Report {
         /// Description and reproduction steps (1–16384 bytes).
@@ -293,7 +331,7 @@ pub enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Manage the shared background service. Honeycomb manages updates.
+    /// Remove the retired background service an older briefcase installed.
     #[command(subcommand)]
     Daemon(DaemonCommand),
     /// Read bundled usage or development documentation without network access.
@@ -303,6 +341,20 @@ pub enum Command {
     },
     /// Show the client and deployment contract versions.
     Version,
+    /// Retired: testing environments no longer exist.
+    #[command(hide = true)]
+    Env {
+        /// Ignored.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Retired: Silicon Apps installs and updates briefcase.
+    #[command(hide = true)]
+    System {
+        /// Ignored.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
 }
 
 /// Arguments for `login`.
@@ -312,38 +364,115 @@ pub enum Command {
     subcommand_precedence_over_arg = true
 )]
 pub struct LoginArgs {
-    /// Inspect the current login without exchanging a short-lived token.
+    /// Inspect the current sign-in instead of signing in.
     #[command(subcommand)]
     pub command: Option<LoginCommand>,
 
-    /// IAM short-lived token; in testing, the Carbon or Silicon ID.
+    /// A short-lived token (slt_…) from `silicon-accounts login --app briefcase -q`.
+    ///
+    /// Without one, a Carbon signs in with a device code.
     #[arg(index = 1, value_name = "SLT", conflicts_with_all = ["slt", "slt_stdin"])]
     pub slt_positional: Option<String>,
 
-    /// IAM SLT or test actor ID. Prompted for when omitted.
+    /// A short-lived token (slt_…); prefer --slt-stdin, which keeps it out of shell history.
     #[arg(long, value_name = "SLT", conflicts_with = "slt_stdin")]
     pub slt: Option<String>,
 
-    /// Read the IAM SLT or test actor ID from standard input.
+    /// Read the short-lived token from standard input.
     #[arg(long, conflicts_with = "slt")]
     pub slt_stdin: bool,
 
-    /// Name to save this deployment under.
+    /// Device sign-in: open the approval page in the browser as well as printing it.
+    #[arg(long, conflicts_with_all = ["slt", "slt_stdin", "slt_positional"])]
+    pub open: bool,
+
+    /// Device sign-in: the name shown on the approval page and in your sessions list.
+    ///
+    /// Default: `briefcase CLI on <host name>`.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["slt", "slt_stdin", "slt_positional"])]
+    pub label: Option<String>,
+
+    /// Device sign-in: details to share with Briefcase, space-separated.
+    ///
+    /// Default: `email` when Briefcase asks for it (invitation emails reach you only then).
+    #[arg(long, value_name = "DETAILS", conflicts_with_all = ["slt", "slt_stdin", "slt_positional"])]
+    pub scope: Option<String>,
+
+    /// Save the sign-in under this profile name and make it the current profile.
     #[arg(long, value_name = "NAME")]
     pub save_as: Option<String>,
 }
 
-/// Login inspection commands.
+/// Sign-in inspection.
 #[derive(Subcommand)]
 pub enum LoginCommand {
-    /// Verify the current session with IAM and show its Carbon or Silicon identity.
-    Status,
+    /// Show whether this profile is signed in, and as which Carbon or Silicon.
+    #[command(
+        long_about = "Show whether this profile is signed in, and as which Carbon or Silicon.\n\n\
+        Signed out it answers {\"authenticated\":false} (with `reason` when there is one to give); \
+        signed in it gives the account's uuid, id and kind and when the sign-in expires. Briefcase \
+        verifies the sign-in (refreshing it when needed) unless --offline is given; `verified` says \
+        which. With --json the exit code is always 0; without, 1 when signed out."
+    )]
+    Status {
+        /// Read only the saved sign-in: no refresh, no network.
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+/// Arguments for `shared`.
+#[derive(Args, Debug)]
+pub struct SharedArgs {
+    /// Entries per page, 1 through 100.
+    #[arg(short = 'n', long, value_name = "COUNT")]
+    pub limit: Option<u16>,
+
+    /// Continue after an opaque cursor returned by an earlier page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+
+    /// Follow pages until everything shared with you is listed.
+    #[arg(short, long)]
+    pub all: bool,
+}
+
+/// A Silicon's allow list.
+#[derive(Debug, Subcommand)]
+pub enum AllowCommand {
+    /// List the accounts allowed to share with a Silicon.
+    List {
+        /// The Silicon (a custodian names one of its Silicons); yourself when you are a Silicon.
+        #[arg(long = "for", value_name = "SILICON")]
+        silicon: Option<DriveArg>,
+    },
+    /// Allow an account to share with a Silicon.
+    #[command(long_about = "Allow an account to share with a Silicon.\n\n\
+        A Silicon acts on what it receives, so only its custodian, the custodian's other Silicons and \
+        the accounts on this list can share with it. The Silicon itself or its custodian manages the list.\n\n\
+        Examples:\n  briefcase allow add c:bob                    (a Silicon allowing c:bob)\n  \
+        briefcase allow add c:bob --for si:scout     (a custodian, for its Silicon)")]
+    Add {
+        /// The account to allow, by id (c:bob, si:helper).
+        account: Principal,
+        /// The Silicon; yourself when you are a Silicon.
+        #[arg(long = "for", value_name = "SILICON")]
+        silicon: Option<DriveArg>,
+    },
+    /// Stop allowing an account; shares it already made stay until revoked.
+    Remove {
+        /// The account, by id.
+        account: Principal,
+        /// The Silicon; yourself when you are a Silicon.
+        #[arg(long = "for", value_name = "SILICON")]
+        silicon: Option<DriveArg>,
+    },
 }
 
 /// Arguments for `ls`.
 #[derive(Args, Debug)]
 pub struct LsArgs {
-    /// Folder to list; the organization base when omitted.
+    /// Folder to list (`notes`, `@si:scout/reports`, an ID); the top of your drive when omitted.
     pub target: Option<Target>,
 
     /// Show size, owner, and what you may do.
@@ -366,16 +495,15 @@ pub struct LsArgs {
 /// Arguments for `find`.
 #[derive(Args, Debug)]
 pub struct FindArgs {
-    /// Filter expression, such as `is:md location:'public' after:01-01-2026`.
+    /// Filter expression, such as `is:md location:'notes' after:01-01-2026`.
     ///
-    /// Beyond file kinds and extensions, `is:expiring` matches files and folders
-    /// with an active expiring share (one that gives you access, or one you can
-    /// manage), and `is:self-destruct` matches files whose self-destruct timer
-    /// is still running.
+    /// Beyond file kinds and extensions, `is:expiring` matches entries with an active expiring
+    /// share, `is:self-destruct` files whose self-destruct timer is running, and
+    /// `from:c:ada` / `to:si:scout` / `for:@si:scout` name accounts by id.
     pub filter: String,
 
-    /// Folder to filter inside; everything you can reach when omitted.
-    #[arg(long, value_name = "TARGET")]
+    /// Folder or drive to filter inside (`@si:scout`, `notes`); the top of your drive when omitted.
+    #[arg(long = "in", value_name = "TARGET")]
     pub in_folder: Option<Target>,
 
     /// Entries per page, 1 through 100.
@@ -405,28 +533,20 @@ pub struct SearchArgs {
 /// One entry, addressed by path or identifier.
 #[derive(Args, Debug)]
 pub struct TargetArgs {
-    /// Entry path, such as `private/cos:tos/notes/report.pdf`, or its identifier.
+    /// Entry: `notes/report.pdf` (your drive), `@c:ada/plans/q3.md`, an ID, or a permanent address.
     pub target: Target,
 }
 
 /// Arguments for `mkdir`.
 #[derive(Args, Debug)]
 pub struct MkdirArgs {
-    /// Path of the folder to create, such as `public/handbook/onboarding`.
+    /// Path of the folder to create, such as `notes/2026` or `@si:scout/reports`.
     ///
-    /// A single segment creates at the organization base, which needs `--type`.
-    pub path: String,
+    /// A single segment creates the folder at the top of the drive.
+    pub path: Target,
 
-    /// Access boundary for a folder created at the organization base.
-    #[arg(long = "type", value_name = "KIND")]
-    pub root_type: Option<RootTypeArg>,
-
-    /// IAM tag, required when the type is `tag`.
-    #[arg(long)]
-    pub tag: Option<String>,
-
-    /// Invite a member as the folder is created, as `c:cos=read,write`.
-    #[arg(long = "invite", value_name = "PRINCIPAL=RIGHTS")]
+    /// Share the new folder with an account as it is created, as `c:ada=read,write`.
+    #[arg(long = "invite", value_name = "ACCOUNT=RIGHTS")]
     pub invites: Vec<Invitation>,
 }
 
@@ -437,7 +557,7 @@ pub struct PutArgs {
     #[arg(required = true, value_name = "LOCAL")]
     pub sources: Vec<PathBuf>,
 
-    /// Destination folder, by path or identifier.
+    /// Destination folder: a path, `@c:ada/shared`, an ID, or `/` for the top of your drive.
     pub destination: Target,
 
     /// Store the file under this name instead of its local one.
@@ -466,12 +586,23 @@ pub struct PutArgs {
 /// Arguments for `get`.
 #[derive(Args, Debug)]
 pub struct GetArgs {
-    /// File to download.
+    /// File or folder to download.
     pub target: Target,
 
-    /// Where to write it; the file's own name in the working directory by default.
+    /// Where to write it; the entry's own name in the working directory by default.
     #[arg(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
+}
+
+/// Arguments for `archive`.
+#[derive(Args, Debug)]
+pub struct ArchiveArgs {
+    /// The archive file.
+    pub target: Target,
+
+    /// List at most this many entries (1 to 10000).
+    #[arg(short = 'n', long, value_name = "COUNT")]
+    pub limit: Option<u32>,
 }
 
 /// Arguments for `mv`.
@@ -480,8 +611,10 @@ pub struct MvArgs {
     /// Entry to rename or move.
     pub target: Target,
 
-    /// New path, such as `public/handbook/renamed.md`.
-    pub destination: String,
+    /// New path in the same drive, such as `notes/renamed.md` or `@si:scout/archive/old.md`.
+    ///
+    /// Entries move only within their drive; to copy into another drive, download and upload.
+    pub destination: Target,
 }
 
 /// Arguments for `rm`.
@@ -500,11 +633,14 @@ pub struct KeepArgs {
     pub targets: Vec<Target>,
 }
 
-/// The recoverable bin.
+/// A drive's recoverable bin.
 #[derive(Debug, Subcommand)]
 pub enum BinCommand {
-    /// List entries waiting in the bin.
+    /// List entries waiting in a drive's bin.
     List {
+        /// The drive, by its owner's id; your own when omitted.
+        #[arg(long, value_name = "DRIVE")]
+        drive: Option<DriveArg>,
         /// Entries per page, 1 through 100.
         #[arg(short = 'n', long, value_name = "COUNT")]
         limit: Option<u16>,
@@ -515,7 +651,7 @@ pub enum BinCommand {
         #[arg(short, long)]
         all: bool,
     },
-    /// Restore an entry from the bin.
+    /// Restore an entry from the bin, with everything that was inside it.
     Restore {
         /// Entry identifier, as `briefcase bin list` shows it.
         entry_id: Uuid,
@@ -538,14 +674,14 @@ pub struct ShareArgs {
     /// Entry to share.
     pub target: Target,
 
-    /// Recipient: c:ID, si:ID, email:ADDRESS, or tag:TAG.
-    pub principal: String,
+    /// Who to share with: an account id such as `c:ada` or `si:scout`.
+    pub principal: Principal,
 
-    /// Rights to convey, comma separated. Read is always included.
+    /// Rights to convey, comma separated: read, write, update. Read is always included.
     #[arg(long, value_name = "RIGHTS", default_value = "read")]
     pub access: Rights,
 
-    /// Extend the grant to everything inside a folder.
+    /// Extend the share to everything inside a folder.
     #[arg(long)]
     pub inherit: bool,
 
@@ -561,21 +697,21 @@ pub struct ShareArgs {
 /// Arguments for `unshare`.
 #[derive(Args, Debug)]
 pub struct UnshareArgs {
-    /// Entry the grant is on.
+    /// Entry the share is on.
     pub target: Target,
 
-    /// Grant identifier, as `briefcase shares` shows it.
+    /// Share identifier, as `briefcase shares` shows it.
     pub grant_id: Uuid,
 }
 
-/// Arguments for `expiring`.
+/// Arguments for `expiry`.
 #[derive(Args, Debug)]
 #[command(group(ArgGroup::new("change").required(true).args(["expires_in", "permanent"])))]
 pub struct ExpiryArgs {
     /// Entry the expiring share is on.
     pub target: Target,
 
-    /// Grant identifier of the expiring share, as `briefcase shares` shows it.
+    /// Identifier of the expiring share, as `briefcase shares` shows it.
     pub grant_id: Uuid,
 
     /// End the share DURATION from now instead, extending or shortening it.
@@ -593,7 +729,7 @@ pub struct ExpiryArgs {
 /// Arguments for `access`.
 #[derive(Args, Debug)]
 pub struct AccessArgs {
-    /// Entries to report on, up to a hundred.
+    /// Entries to report on, up to a hundred, all in one drive.
     #[arg(required = true)]
     pub targets: Vec<Target>,
 }
@@ -606,16 +742,26 @@ pub struct InboxArgs {
     pub read: bool,
 }
 
-/// Organization storage.
+/// Bring-your-own storage.
 #[derive(Debug, Subcommand)]
 pub enum StorageCommand {
-    /// Point the organization's files at a bucket it owns.
+    /// Point a drive's new files at an S3 bucket its owner brings.
+    #[command(
+        long_about = "Point a drive's new files at an S3 bucket its owner brings.\n\n\
+        Briefcase assumes the role and probes create, read, update and delete; the bucket becomes \
+        active only when every check passes, and a failed probe keeps the previous configuration. \
+        Existing versions stay where they are. Only the drive's owner (or the custodian of the \
+        Silicon that owns it) may configure it."
+    )]
     Configure(StorageConfigureArgs),
 }
 
 /// Arguments for `storage configure`.
 #[derive(Args, Debug)]
 pub struct StorageConfigureArgs {
+    /// The drive to configure, by its owner's id; your own when omitted.
+    #[arg(long, value_name = "DRIVE")]
+    pub drive: Option<DriveArg>,
     /// Reuse this UUID with the exact same configuration after a lost response.
     /// A completed failed probe needs a new UUID to run the checks again.
     #[arg(long)]
@@ -643,15 +789,17 @@ pub struct StorageConfigureArgs {
     pub kms_key_arn: Option<String>,
 }
 
-/// Application operations.
+/// Calls another app makes for an account, with a Silicon Accounts proof.
 #[derive(Subcommand)]
 pub enum AppCommand {
-    /// Prepare or send one exact, IAM-authorized delegated JSON operation.
+    /// Prepare or send one delegated JSON operation with a User verification proof.
     ///
-    /// First use --describe to see the endpoint and SHA-256 to give IAM.
-    /// Mint a fresh proof, then repeat without --describe and paste the proof
-    /// at the hidden prompt. Retrying a mutation requires the same body and
-    /// `operation_id` but a new proof; no member login session is used.
+    /// An app acting for an account obtains a User verification proof from Silicon Accounts
+    /// (receiving app `briefcase`, the operation's scope) and sends it here. First run with
+    /// --describe to see the route, its scope and the body's SHA-256 without sending anything;
+    /// then send it with the proof on standard input (--proof-stdin) or at the hidden prompt.
+    /// Retrying a mutation keeps the same body and `operation_id`; nothing is retried
+    /// automatically and no saved sign-in is used.
     Request(AppRequestArgs),
     /// Hash a local file and print a reservation manifest without contacting a server.
     PrepareUpload {
@@ -660,11 +808,11 @@ pub enum AppCommand {
         /// Stable logical upload UUID, retained for reserve, status, commit, and cancel.
         #[arg(long)]
         operation_id: Uuid,
-        /// Existing destination folder path; empty selects the member's private app folder.
+        /// Existing destination folder path; empty selects the app's own folder.
         #[arg(long, default_value = "")]
         parent_path: String,
     },
-    /// Transfer bytes into private staging; a separate fresh-proof commit publishes them.
+    /// Transfer bytes into private staging; a separate commit with a proof publishes them.
     Transfer {
         /// Reservation UUID returned by upload-reserve.
         upload_id: Uuid,
@@ -677,50 +825,36 @@ pub enum AppCommand {
         #[arg(long, conflicts_with = "capability_file")]
         capability_stdin: bool,
     },
-    /// Create a file for the member an IAM proof represents.
-    Upload {
-        /// The application's IAM identifier.
-        #[arg(long)]
-        app_id: ApplicationId,
-        /// The single-use proof minted over exactly these bytes. Prompted for when omitted.
-        #[arg(long, conflicts_with = "proof_stdin")]
-        proof: Option<String>,
-        /// Read the single-use proof from standard input.
-        #[arg(long, conflicts_with = "proof")]
-        proof_stdin: bool,
-        /// Local file whose bytes the proof was minted over.
-        file: PathBuf,
-    },
 }
 
 /// Exact-body delegated operation supported by `app request`.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum DelegatedOperation {
-    /// Create one folder under an existing path or the private app folder.
+    /// Create one folder (scope `briefcase.folders.create`).
     FolderCreate,
-    /// List one authorized page; pagination inputs are bound into the body.
+    /// List one page (scope `briefcase.entries.list`); pagination inputs are part of the body.
     EntriesList,
-    /// Read a file, with an optional body-bound byte range.
+    /// Read a file (scope `briefcase.files.read`), with an optional byte range in the body.
     FileRead,
-    /// Move one entry to the recoverable bin using a stable operation UUID.
+    /// Move an entry the app created to the bin (scope `briefcase.entries.trash`).
     EntryTrash,
-    /// Invite a member using a critical IAM-approved proof.
+    /// Share an entry with an account (scope `briefcase.invitations.create`).
     ///
     /// Add `"expires_in_minutes"` (1 to 43200) inside `invitation` to make a
     /// read-only expiring share.
     Invite,
-    /// Change anonymous read access using a critical IAM-approved proof.
+    /// Change anyone-with-the-link access (scope `briefcase.link_access.update`).
     ///
     /// Add `"expires_in_minutes"` (1 to 43200) with `"enabled": true` to turn
     /// on an expiring link.
     LinkAccess,
-    /// Reserve an exact private upload and save its capability in a new private file.
+    /// Reserve a private upload and save its capability in a new private file (`briefcase.uploads.reserve`).
     UploadReserve,
-    /// Publish staged bytes using a fresh proof and the original logical UUID.
+    /// Publish staged bytes with the original logical UUID (`briefcase.uploads.commit`).
     UploadCommit,
-    /// Reconcile an upload using its original logical UUID and fresh authority.
+    /// Reconcile an upload by its logical UUID (`briefcase.uploads.status`).
     UploadStatus,
-    /// Cancel unpublished staging using its logical UUID and fresh authority.
+    /// Cancel unpublished staging by its logical UUID (`briefcase.uploads.cancel`).
     UploadCancel,
 }
 
@@ -733,16 +867,13 @@ pub struct AppRequestArgs {
     /// UTF-8 JSON file containing the operation inputs, not credentials.
     #[arg(long, value_name = "JSON_FILE")]
     pub body: PathBuf,
-    /// Print the canonical body and IAM binding without reading credentials or calling a server.
-    #[arg(long, conflicts_with_all = ["app_id", "proof", "proof_stdin", "output", "force", "capability_file"])]
+    /// Print the route, its proof scope and the canonical body without reading a proof or calling a server.
+    #[arg(long, conflicts_with_all = ["proof", "proof_stdin", "output", "force", "capability_file"])]
     pub describe: bool,
-    /// Issuing application's canonical IAM identifier; required when sending.
-    #[arg(long, required_unless_present = "describe")]
-    pub app_id: Option<ApplicationId>,
-    /// Single-use proof; prefer the hidden prompt or --proof-stdin over shell history.
+    /// The proof (sap_…); prefer the hidden prompt or --proof-stdin over shell history.
     #[arg(long, conflicts_with = "proof_stdin")]
     pub proof: Option<String>,
-    /// Read a freshly minted, single-use proof from standard input.
+    /// Read the proof from standard input.
     #[arg(long, conflicts_with = "proof")]
     pub proof_stdin: bool,
     /// Local destination for file-read; required when sending that operation.
@@ -756,177 +887,58 @@ pub struct AppRequestArgs {
     pub capability_file: Option<PathBuf>,
 }
 
-/// Testing-environment lifecycle and key-authorized self operations.
-#[derive(Subcommand)]
-pub enum EnvCommand {
-    /// Manage shared environments through Honeycomb; arguments follow `honeycomb environments`.
-    Manage {
-        /// Honeycomb arguments, e.g. `create tos sandbox` or `action ID clean --revision 3`.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        arguments: Vec<String>,
-    },
-    /// List active or recoverable environments.
-    List {
-        /// `active`, `deleted`, or `all`.
-        #[arg(long)]
-        status: Option<String>,
-    },
-    /// Provision paired IAM and Briefcase testing environments.
-    Create {
-        /// Human-readable environment name.
-        name: String,
-        /// Optional purpose or run description.
-        #[arg(long)]
-        description: Option<String>,
-        /// Optional IAM root key for joining a dependency testing environment.
-        #[arg(long, env = "BRIEFCASE_IAM_TEST_KEY", hide_env_values = true)]
-        iam_test_key: Option<String>,
-    },
-    /// Show one environment without disclosing its key.
-    Show {
-        /// Public environment UUID.
-        environment_id: Uuid,
-    },
-    /// Rename or re-describe an environment.
-    Update {
-        /// Public environment UUID.
-        environment_id: Uuid,
-        /// Replacement name.
-        #[arg(long)]
-        name: Option<String>,
-        /// Replacement description.
-        #[arg(long, conflicts_with = "clear_description")]
-        description: Option<String>,
-        /// Clear the current description.
-        #[arg(long)]
-        clear_description: bool,
-    },
-    /// Retire an environment for its recovery window.
-    Delete {
-        /// Public environment UUID.
-        environment_id: Uuid,
-    },
-    /// Restore a retired environment before it is purged.
-    Restore {
-        /// Public environment UUID.
-        environment_id: Uuid,
-    },
-    /// Retrieve and securely remember an environment's IAM app secret.
-    Key {
-        /// Public environment UUID.
-        environment_id: Uuid,
-    },
-    /// Replace the paired IAM test plane without erasing Briefcase data.
-    PairIam {
-        /// Public Briefcase environment UUID.
-        environment_id: Uuid,
-        /// Public UUID from the replacement IAM testing environment.
-        #[arg(long)]
-        iam_environment_id: Uuid,
-        /// Replacement IAM environment root key. Prompted for when omitted.
-        #[arg(long, env = "BRIEFCASE_IAM_ENVIRONMENT_KEY", hide_env_values = true)]
-        iam_environment_key: Option<String>,
-        /// Canonical IAM ID of the imported Briefcase app (`org>handle`).
-        #[arg(long)]
-        iam_app_id: ApplicationId,
-        /// Fresh test-only imported IAM Application secret. Prompted for when omitted.
-        #[arg(long, env = "BRIEFCASE_IAM_APP_SECRET", hide_env_values = true)]
-        iam_app_secret: Option<String>,
-    },
-    /// Erase disposable contents; omit the UUID to use the `--test` key.
-    Clean {
-        /// Managed environment UUID; omit for the selected `--test` plane.
-        environment_id: Option<Uuid>,
-    },
-    /// Describe the selected testing environment using its IAM app secret.
-    Current,
-}
-
 /// Stored CLI settings.
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show the current settings and profile.
+    /// Show the current settings, profile and state directory.
     Show,
     /// Set the parent directory for the private `.briefcase` state directory.
     Home {
         /// Existing directory to use as the configured home.
         location: PathBuf,
     },
-    /// Set a supported setting.
+    /// Set a supported setting: `telemetry on|off`.
     Set {
-        /// `auto-update` (off only) or `telemetry`.
+        /// `telemetry`.
         key: String,
         /// `on` or `off`.
         value: String,
     },
     /// Restore a supported setting to its default.
     Unset {
-        /// `auto-update` (off only) or `telemetry`.
+        /// `telemetry`.
         key: String,
     },
 }
 
-/// Shared background service lifecycle.
+/// The background service older releases installed.
 #[derive(Subcommand)]
 pub enum DaemonCommand {
-    /// Run in the foreground under a supervisor; registers this Silicon home.
-    Run,
-    /// Start a background process and register this Silicon home.
-    Start,
-    /// Show whether the daemon is responding and its registered homes.
-    Status,
-    /// Stop the shared daemon (a service supervisor may restart it).
-    Stop,
-    /// Install and start the current user's login service (macOS/Linux).
-    Install,
-    /// Uninstall the login service and stop its daemon.
+    /// Stop the retired background service and remove its login service (launchd/systemd).
+    #[command(
+        long_about = "Stop the background service an older briefcase installed and remove its login \
+        service (a launchd agent on macOS, a systemd user unit on Linux). briefcase no longer runs \
+        one: Silicon Apps keeps the CLI up to date. Safe to run when nothing is installed."
+    )]
     Uninstall,
+    /// What an old login service runs; it now removes that service and exits.
+    #[command(hide = true)]
+    Run,
+    /// Retired.
+    #[command(hide = true)]
+    Start,
+    /// Retired.
+    #[command(hide = true)]
+    Status,
+    /// Retired.
+    #[command(hide = true)]
+    Stop,
+    /// Retired.
+    #[command(hide = true)]
+    Install,
 }
 
-/// Installed-CLI update guidance.
-#[derive(Subcommand)]
-pub enum SystemCommand {
-    /// Show migration guidance for Honeycomb-managed updates.
-    Update,
-}
-
-/// Accepts only a hyphenated UUID, never an IAM app secret.
-fn parse_testing_environment_id(value: &str) -> Result<Uuid, String> {
-    let bytes = value.as_bytes();
-    let hyphenated = bytes.len() == 36
-        && [8, 13, 18, 23]
-            .into_iter()
-            .all(|index| bytes.get(index) == Some(&b'-'));
-    if !hyphenated {
-        return Err(
-            "expected a hyphenated testing-environment UUID, never its app secret".to_owned(),
-        );
-    }
-    Uuid::parse_str(value).map_err(|_| "expected a valid testing-environment UUID".to_owned())
-}
-
-/// Access boundary for a user-created top-level folder.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum RootTypeArg {
-    /// Readable by every organization member.
-    Public,
-    /// Private to its owner unless explicitly shared.
-    Private,
-    /// Readable and writable by members of the specified IAM tag.
-    Tag,
-}
-
-impl From<RootTypeArg> for RootType {
-    fn from(value: RootTypeArg) -> Self {
-        match value {
-            RootTypeArg::Public => Self::Public,
-            RootTypeArg::Private => Self::Private,
-            RootTypeArg::Tag => Self::Tag,
-        }
-    }
-}
-
-/// Server-side encryption for an organization bucket.
+/// Server-side encryption for a bring-your-own bucket.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum EncryptionArg {
     /// S3-managed keys.
@@ -944,22 +956,49 @@ impl From<EncryptionArg> for EncryptionMode {
     }
 }
 
-/// An entry named by path or by identifier.
+/// Whether a value names an account: a `c:`/`si:` id or a uuid.
+pub fn is_account_reference(value: &str) -> bool {
+    if let Some((kind, handle)) = value.split_once(':') {
+        return matches!(kind, "c" | "si")
+            && !handle.is_empty()
+            && !handle.contains(['/', ':', '@'])
+            && !handle.contains(char::is_whitespace);
+    }
+    ((3..=32).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        || (value.len() == 36
+            && Uuid::parse_str(value).is_ok_and(|id| id.hyphenated().to_string() == value))
+}
+
+/// An entry named by identifier, by path inside a drive, or by an address
+/// from before personal drives.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Target {
     /// A stable entry identifier.
     Id(Uuid),
-    /// An organization-relative path.
-    Path(String),
+    /// A path inside a drive (the caller's own when `drive` is absent); an empty
+    /// path is the top of the drive.
+    Path {
+        /// The drive's owner, as a `c:`/`si:` id or uuid.
+        drive: Option<String>,
+        /// The path within the drive.
+        path: String,
+    },
+    /// A permanent address from before personal drives (`/org/{org}/{path}`).
+    Legacy {
+        /// The old organization.
+        organization: String,
+        /// The path within it.
+        path: String,
+    },
 }
 
 impl Target {
-    /// Returns the destination form the package accepts.
+    /// The drive this names, when it names one other than the caller's own.
     #[must_use]
-    pub fn destination(&self) -> Destination {
+    pub fn drive(&self) -> Option<&str> {
         match self {
-            Self::Id(id) => Destination::Id(*id),
-            Self::Path(path) => Destination::Path(path.clone()),
+            Self::Path { drive, .. } => drive.as_deref(),
+            _ => None,
         }
     }
 }
@@ -968,9 +1007,28 @@ impl std::fmt::Display for Target {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Id(id) => write!(formatter, "{id}"),
-            Self::Path(path) => formatter.write_str(path),
+            Self::Path {
+                drive: Some(drive),
+                path,
+            } if path.is_empty() => write!(formatter, "@{drive}"),
+            Self::Path {
+                drive: Some(drive),
+                path,
+            } => write!(formatter, "@{drive}/{path}"),
+            Self::Path { drive: None, path } if path.is_empty() => formatter.write_str("/"),
+            Self::Path { drive: None, path } => formatter.write_str(path),
+            Self::Legacy { organization, path } => write!(formatter, "/org/{organization}/{path}"),
         }
     }
+}
+
+const ADDRESS_FORMS: &str = "a path in your drive (notes/plan.md), @ and an account id for another drive \
+    (@c:ada/plans), an entry ID, or a permanent address (https://briefcase.teamofsilicons.com/c:ada/plans)";
+
+fn clean_path(path: &str) -> String {
+    let path = path.trim();
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.trim_matches('/').to_owned()
 }
 
 impl FromStr for Target {
@@ -979,18 +1037,105 @@ impl FromStr for Target {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
-            return Err("an entry path or identifier is required".to_owned());
+            return Err(format!("an entry is required: {ADDRESS_FORMS}"));
         }
-        // A path may contain colons, so an identifier is recognized by shape
-        // rather than by a prefix nobody would want to type.
-        Uuid::parse_str(trimmed).map_or_else(
-            |_| Ok(Self::Path(trimmed.trim_matches('/').to_owned())),
-            |id| Ok(Self::Id(id)),
-        )
+        if let Ok(id) = Uuid::parse_str(trimmed) {
+            return Ok(Self::Id(id));
+        }
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            return parse_address(trimmed);
+        }
+        if let Some(rest) = trimmed.strip_prefix('@') {
+            let (drive, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if !is_account_reference(drive) {
+                return Err(format!(
+                    "`@{drive}` does not name an account: write @ and an id such as @c:ada or @si:scout ({ADDRESS_FORMS})"
+                ));
+            }
+            return Ok(Self::Path {
+                drive: Some(drive.to_owned()),
+                path: clean_path(path),
+            });
+        }
+        Ok(Self::Path {
+            drive: None,
+            path: clean_path(trimmed),
+        })
     }
 }
 
-/// A member, as `c:saket` or `si:atlas`.
+/// The host of the hosted website, whose addresses are always Briefcase's.
+const WEB_HOST: &str = "briefcase.teamofsilicons.com";
+
+fn parse_address(value: &str) -> Result<Target, String> {
+    let url = url::Url::parse(value)
+        .map_err(|error| format!("`{value}` is not a URL ({error}); use {ADDRESS_FORMS}"))?;
+    // On the hosted website or this machine every address form is Briefcase's.
+    // Elsewhere only an owner's `c:`/`si:` id makes a URL unmistakably a
+    // Briefcase address; a uuid-looking word (`/about`) could be anything.
+    let known_host = match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            domain.eq_ignore_ascii_case(WEB_HOST) || domain.eq_ignore_ascii_case("localhost")
+        }
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    let segments: Vec<String> = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            percent_encoding::percent_decode_str(segment)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .collect();
+    match segments.as_slice() {
+        [org, organization, rest @ ..] if known_host && org == "org" => Ok(Target::Legacy {
+            organization: organization.clone(),
+            path: rest.join("/"),
+        }),
+        [owner, rest @ ..]
+            if is_account_reference(owner) && (known_host || owner.contains(':')) =>
+        {
+            Ok(Target::Path {
+                drive: Some(owner.clone()),
+                path: rest.join("/"),
+            })
+        }
+        _ => Err(format!(
+            "`{value}` is not a Briefcase permanent address: those look like https://{WEB_HOST}/<owner id>/<path>; \
+             for another deployment, write @<owner id>/<path>"
+        )),
+    }
+}
+
+/// A drive named by its owner: `@c:ada`, `si:scout`, or a uuid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriveArg(pub String);
+
+impl FromStr for DriveArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        let id = trimmed
+            .strip_prefix('@')
+            .unwrap_or(trimmed)
+            .trim_end_matches('/');
+        if is_account_reference(id) {
+            Ok(Self(id.to_owned()))
+        } else {
+            Err(format!(
+                "`{trimmed}` does not name a drive: name it by its owner's id, such as @c:ada or @si:scout"
+            ))
+        }
+    }
+}
+
+/// An account, as `c:ada` or `si:scout` (a leading `@` is accepted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Principal(pub ActorRef);
 
@@ -998,25 +1143,25 @@ impl FromStr for Principal {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (prefix, handle) = value
-            .split_once(':')
-            .ok_or_else(|| "a member is written c:<handle> or si:<handle>".to_owned())?;
-        let (actor_type, maximum) = match prefix {
-            "c" => (ActorType::Carbon, 30),
-            "si" => (ActorType::Silicon, 50),
-            _ => return Err("a member is written c:<handle> or si:<handle>".to_owned()),
-        };
-        if !(3..=maximum).contains(&handle.len())
-            || !handle.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-            })
-        {
-            return Err("invalid member handle".to_owned());
+        let trimmed = value.trim();
+        let id = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        if id.starts_with("email:") {
+            return Err(
+                "sharing by email address is retired: share with the account's id (c:<handle> or si:<handle>); \
+                 the recipient gets an email when it shared its email with Briefcase"
+                    .to_owned(),
+            );
         }
-        Ok(Self(ActorRef {
-            actor_type,
-            id: value.to_owned(),
-        }))
+        if id.starts_with("tag:") {
+            return Err(
+                "sharing with a tag is retired (accounts no longer have tags): share with each account by its id, \
+                 such as c:ada or si:scout"
+                    .to_owned(),
+            );
+        }
+        ActorRef::from_id(id).map(Self).ok_or_else(|| {
+            format!("`{trimmed}` is not an account id: write c:<handle> for a Carbon or si:<handle> for a Silicon")
+        })
     }
 }
 
@@ -1035,7 +1180,13 @@ impl FromStr for Rights {
                 continue;
             }
             let right = AccessRight::parse(part)
-                .ok_or_else(|| format!("{part} is not read, write, update or delete"))?;
+                .ok_or_else(|| format!("{part} is not read, write or update"))?;
+            if right == AccessRight::Delete {
+                return Err(
+                    "delete is never shared: only an entry's creator, its drive's owner and their custodians may delete"
+                        .to_owned(),
+                );
+            }
             if !rights.contains(&right) {
                 rights.push(right);
             }
@@ -1047,10 +1198,10 @@ impl FromStr for Rights {
     }
 }
 
-/// An invitation attached to a new folder, as `c:cos=read,write`.
+/// A share attached to a new folder, as `c:ada=read,write`.
 #[derive(Clone, Debug)]
 pub struct Invitation {
-    /// Member being invited.
+    /// Account being invited.
     pub principal: ActorRef,
     /// Rights they receive.
     pub access: Vec<AccessRight>,
@@ -1061,7 +1212,7 @@ impl FromStr for Invitation {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let (principal, rights) = value.split_once('=').ok_or_else(|| {
-            "an invitation is written principal=rights, such as c:cos=read,write".to_owned()
+            "a share is written account=rights, such as c:ada=read,write".to_owned()
         })?;
         Ok(Self {
             principal: principal.parse::<Principal>()?.0,
@@ -1174,9 +1325,16 @@ impl FromStr for Lifetime {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Invitation, Lifetime, Principal, Rights, Target};
+    use super::{Cli, DriveArg, Invitation, Lifetime, Principal, Rights, Target};
     use clap::{CommandFactory as _, Parser as _};
     use uuid::Uuid;
+
+    fn path(drive: Option<&str>, path: &str) -> Target {
+        Target::Path {
+            drive: drive.map(ToOwned::to_owned),
+            path: path.to_owned(),
+        }
+    }
 
     #[test]
     fn the_grammar_itself_is_valid() {
@@ -1184,50 +1342,152 @@ mod tests {
     }
 
     #[test]
-    fn a_target_is_an_identifier_only_when_it_looks_like_one() {
+    fn a_target_is_an_id_a_path_in_a_drive_or_an_address() {
         let id = Uuid::now_v7();
         assert_eq!(id.to_string().parse::<Target>().unwrap(), Target::Id(id));
         assert_eq!(
-            "private/cos:tos/notes.md".parse::<Target>().unwrap(),
-            Target::Path("private/cos:tos/notes.md".to_owned())
+            "notes/plan.md".parse::<Target>().unwrap(),
+            path(None, "notes/plan.md")
         );
-        // A leading slash is a habit, not an error.
+        // A leading slash is a habit, not an error; `/` alone is the top.
+        assert_eq!("/notes/".parse::<Target>().unwrap(), path(None, "notes"));
+        assert_eq!("/".parse::<Target>().unwrap(), path(None, ""));
+        assert_eq!("./@home".parse::<Target>().unwrap(), path(None, "@home"));
         assert_eq!(
-            "/public/handbook".parse::<Target>().unwrap(),
-            Target::Path("public/handbook".to_owned())
+            "@c:ada/plans/q3.md".parse::<Target>().unwrap(),
+            path(Some("c:ada"), "plans/q3.md")
+        );
+        assert_eq!(
+            "@si:scout".parse::<Target>().unwrap(),
+            path(Some("si:scout"), "")
+        );
+        assert_eq!(
+            "@zQo/notes".parse::<Target>().unwrap(),
+            path(Some("zQo"), "notes")
+        );
+        assert_eq!(
+            "https://briefcase.teamofsilicons.com/c:ada/plans/Q3%20plan.md"
+                .parse::<Target>()
+                .unwrap(),
+            path(Some("c:ada"), "plans/Q3 plan.md")
+        );
+        assert_eq!(
+            "https://briefcase.teamofsilicons.com/org/tos/public/handbook.md"
+                .parse::<Target>()
+                .unwrap(),
+            Target::Legacy {
+                organization: "tos".to_owned(),
+                path: "public/handbook.md".to_owned()
+            }
+        );
+        // A uuid at the top of the hosted website or a local one is an owner too.
+        assert_eq!(
+            "https://briefcase.teamofsilicons.com/zQo/notes"
+                .parse::<Target>()
+                .unwrap(),
+            path(Some("zQo"), "notes")
+        );
+        assert_eq!(
+            "http://localhost:4100/zQo/notes".parse::<Target>().unwrap(),
+            path(Some("zQo"), "notes")
+        );
+        // Another deployment's website: unmistakable only with a c:/si: id.
+        assert_eq!(
+            "https://files.example.com/si:scout/reports"
+                .parse::<Target>()
+                .unwrap(),
+            path(Some("si:scout"), "reports")
         );
         assert!("   ".parse::<Target>().is_err());
+        assert!("@email:a@b.c/x".parse::<Target>().is_err());
+        assert!("https://example.com/about".parse::<Target>().is_err());
+        assert!(
+            "https://example.com/org/tos/handbook.md"
+                .parse::<Target>()
+                .is_err()
+        );
+        assert!(
+            "https://example.com/about"
+                .parse::<Target>()
+                .unwrap_err()
+                .contains("@<owner id>/<path>")
+        );
+        for written in ["@c:ada/plans/q3.md", "@si:scout", "notes/a.md", "/"] {
+            assert_eq!(written.parse::<Target>().unwrap().to_string(), written);
+        }
     }
 
     #[test]
-    fn a_member_keeps_the_colons_in_their_own_identifier() {
-        let principal: Principal = "c:cos".parse().unwrap();
-        assert_eq!(principal.0.id, "c:cos");
+    fn drives_are_named_by_their_owners() {
+        assert_eq!("@si:scout".parse::<DriveArg>().unwrap().0, "si:scout");
+        assert_eq!("c:ada/".parse::<DriveArg>().unwrap().0, "c:ada");
+        assert_eq!("zQo".parse::<DriveArg>().unwrap().0, "zQo");
+        assert!("tos-org/x".parse::<DriveArg>().is_err());
+        assert!("x".parse::<DriveArg>().is_err());
+    }
+
+    #[test]
+    fn an_account_keeps_the_colon_in_its_id_and_retired_recipients_say_why() {
+        let principal: Principal = "c:ada".parse().unwrap();
+        assert_eq!(principal.0.id, "c:ada");
         assert_eq!(principal.0.actor_type.as_str(), "carbon");
-        assert!("person:cos:tos".parse::<Principal>().is_err());
-        assert!("carbon".parse::<Principal>().is_err());
+        assert_eq!("@si:scout".parse::<Principal>().unwrap().0.id, "si:scout");
+        assert!("person:cos".parse::<Principal>().is_err());
+        assert!(
+            "email:alex@example.com"
+                .parse::<Principal>()
+                .unwrap_err()
+                .contains("retired")
+        );
+        assert!(
+            "tag:engineering"
+                .parse::<Principal>()
+                .unwrap_err()
+                .contains("retired")
+        );
     }
 
     #[test]
-    fn rights_parse_as_a_set_and_reject_nonsense() {
+    fn rights_parse_as_a_set_and_never_include_delete() {
         let rights: Rights = "read, write ,read".parse().unwrap();
         assert_eq!(rights.0.len(), 2);
         assert!("manage".parse::<Rights>().is_err());
         assert!(",".parse::<Rights>().is_err());
+        assert!(
+            "read,delete"
+                .parse::<Rights>()
+                .unwrap_err()
+                .contains("never shared")
+        );
     }
 
     #[test]
-    fn an_invitation_carries_a_member_and_their_rights() {
-        let invitation: Invitation = "si:atlas=read,update".parse().unwrap();
-        assert_eq!(invitation.principal.id, "si:atlas");
+    fn an_invitation_carries_an_account_and_its_rights() {
+        let invitation: Invitation = "si:scout=read,update".parse().unwrap();
+        assert_eq!(invitation.principal.id, "si:scout");
         assert_eq!(invitation.access.len(), 2);
-        assert!("si:atlas".parse::<Invitation>().is_err());
+        assert!("si:scout".parse::<Invitation>().is_err());
     }
 
     #[test]
-    fn retired_access_request_commands_are_rejected() {
+    fn retired_commands_and_options_still_parse_so_they_can_say_what_replaced_them() {
         for args in [
-            vec!["briefcase", "request", "private/cos:owner/notes.md"],
+            vec!["briefcase", "--org", "tos", "ls"],
+            vec![
+                "briefcase",
+                "--test",
+                "01a067ce-7f19-7790-820a-0be6b3d4f800",
+                "ls",
+            ],
+            vec!["briefcase", "env", "list"],
+            vec!["briefcase", "system", "update"],
+            vec!["briefcase", "iam", "--json"],
+            vec!["briefcase", "daemon", "run"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        }
+        for args in [
+            vec!["briefcase", "request", "notes.md"],
             vec![
                 "briefcase",
                 "decide",
@@ -1241,87 +1501,63 @@ mod tests {
     }
 
     #[test]
-    fn common_invocations_parse() {
-        let cli = Cli::try_parse_from(["briefcase", "ls", "public", "--long"]).unwrap();
-        assert!(matches!(cli.command, super::Command::Ls(_)));
-
-        let cli =
-            Cli::try_parse_from(["briefcase", "put", "a.txt", "b.txt", "public/handbook"]).unwrap();
-        match cli.command {
-            super::Command::Put(args) => {
-                assert_eq!(args.sources.len(), 2);
-                assert_eq!(args.destination, Target::Path("public/handbook".to_owned()));
-            }
-            _ => panic!("expected put"),
-        }
-
-        assert!(Cli::try_parse_from(["briefcase", "put", "only-one-argument"]).is_err());
-
-        let id = Uuid::from_u128(8).to_string();
-        let iam_id = Uuid::from_u128(9).to_string();
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "env",
-            "pair-iam",
-            &id,
-            "--iam-environment-id",
-            &iam_id,
-            "--iam-app-id",
-            "briefcase",
-        ])
-        .unwrap();
+    fn login_takes_a_short_lived_token_three_ways_or_none() {
+        let positional = Cli::try_parse_from(["briefcase", "login", "slt_abc"]).unwrap();
+        let super::Command::Login(args) = positional.command else {
+            panic!("expected login");
+        };
+        assert_eq!(args.slt_positional.as_deref(), Some("slt_abc"));
+        let status = Cli::try_parse_from(["briefcase", "login", "status", "--offline"]).unwrap();
+        let super::Command::Login(args) = status.command else {
+            panic!("expected login");
+        };
         assert!(matches!(
-            cli.command,
-            super::Command::Env(super::EnvCommand::PairIam { .. })
+            args.command,
+            Some(super::LoginCommand::Status { offline: true })
         ));
+        assert!(Cli::try_parse_from(["briefcase", "login", "--slt-stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["briefcase", "login", "--open", "--label", "laptop"]).is_ok());
+        assert!(Cli::try_parse_from(["briefcase", "login", "--slt", "a", "--slt-stdin"]).is_err());
+        assert!(Cli::try_parse_from(["briefcase", "login", "slt_a", "--open"]).is_err());
     }
 
     #[test]
-    fn every_paginated_entry_command_accepts_a_cursor_and_exhaustive_walk() {
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "ls",
-            "public",
-            "--cursor",
-            "next-page",
-            "--all",
-        ])
-        .unwrap();
-        let super::Command::Ls(args) = cli.command else {
-            panic!("expected ls");
-        };
-        assert_eq!(args.cursor.as_deref(), Some("next-page"));
-        assert!(args.all);
+    fn common_invocations_parse() {
+        let cli = Cli::try_parse_from(["briefcase", "ls", "@si:scout/reports", "--long"]).unwrap();
+        assert!(matches!(cli.command, super::Command::Ls(_)));
 
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "find",
-            "is:md",
-            "--cursor",
-            "next-filter-page",
-            "--all",
-        ])
-        .unwrap();
-        let super::Command::Find(args) = cli.command else {
-            panic!("expected find");
+        let cli =
+            Cli::try_parse_from(["briefcase", "put", "a.txt", "b.txt", "@c:ada/shared"]).unwrap();
+        let super::Command::Put(args) = cli.command else {
+            panic!("expected put");
         };
-        assert_eq!(args.cursor.as_deref(), Some("next-filter-page"));
-        assert!(args.all);
+        assert_eq!(args.sources.len(), 2);
+        assert_eq!(args.destination, path(Some("c:ada"), "shared"));
+        assert!(Cli::try_parse_from(["briefcase", "put", "only-one-argument"]).is_err());
 
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "bin",
-            "list",
-            "--cursor",
-            "next-bin-page",
-            "--all",
-        ])
-        .unwrap();
-        let super::Command::Bin(super::BinCommand::List { cursor, all, .. }) = cli.command else {
-            panic!("expected bin list");
-        };
-        assert_eq!(cursor.as_deref(), Some("next-bin-page"));
-        assert!(all);
+        let cli = Cli::try_parse_from(["briefcase", "usage", "@si:scout"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            super::Command::Usage { drive: Some(_) }
+        ));
+        let cli = Cli::try_parse_from(["briefcase", "allow", "add", "c:bob", "--for", "si:scout"])
+            .unwrap();
+        assert!(matches!(cli.command, super::Command::Allow(_)));
+        let cli =
+            Cli::try_parse_from(["briefcase", "find", "is:pdf", "--in", "@si:scout"]).unwrap();
+        assert!(matches!(cli.command, super::Command::Find(_)));
+    }
+
+    #[test]
+    fn every_paginated_command_accepts_a_cursor_and_exhaustive_walk() {
+        for args in [
+            vec!["briefcase", "ls", "notes", "--cursor", "next", "--all"],
+            vec!["briefcase", "find", "is:md", "--cursor", "next", "--all"],
+            vec!["briefcase", "bin", "list", "--cursor", "next", "--all"],
+            vec!["briefcase", "shared", "--cursor", "next", "--all"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        }
     }
 
     #[test]
@@ -1390,90 +1626,11 @@ mod tests {
     }
 
     #[test]
-    fn expiring_and_self_destruct_options_parse_into_minutes() {
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "share",
-            "private/cos:tos/notes",
-            "email:alex@example.com",
-            "--expires-after",
-            "2h",
-        ])
-        .unwrap();
-        let super::Command::Share(args) = cli.command else {
-            panic!("expected share");
-        };
-        assert_eq!(args.expires_after, Some(Lifetime(120)));
-        assert_eq!(
-            args.access,
-            Rights(vec![briefcase_client::AccessRight::Read])
-        );
-
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "link",
-            "public/report.pdf",
-            "--expires-after",
-            "7d",
-        ])
-        .unwrap();
-        let super::Command::Link {
-            expires_after,
-            enabled,
-            ..
-        } = cli.command
-        else {
-            panic!("expected link");
-        };
-        assert_eq!((expires_after, enabled), (Some(Lifetime(10_080)), None));
-
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "put",
-            "draft.md",
-            "private/cos:tos",
-            "--self-destruct",
-            "90",
-        ])
-        .unwrap();
-        let super::Command::Put(args) = cli.command else {
-            panic!("expected put");
-        };
-        assert_eq!(args.self_destruct, Some(Lifetime(90)));
-
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "keep",
-            "private/cos:tos/a.md",
-            "private/cos:tos/b.md",
-        ])
-        .unwrap();
-        let super::Command::Keep(args) = cli.command else {
-            panic!("expected keep");
-        };
-        assert_eq!(args.targets.len(), 2);
-        assert!(Cli::try_parse_from(["briefcase", "keep"]).is_err());
-
-        // A lifetime is checked while parsing, before any network call.
-        let error = Cli::try_parse_from([
-            "briefcase",
-            "put",
-            "a.md",
-            "public",
-            "--self-destruct",
-            "31d",
-        ])
-        .err()
-        .unwrap();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
-    #[test]
     fn a_link_is_either_permanent_or_expiring_never_both() {
         let error = Cli::try_parse_from([
             "briefcase",
             "link",
-            "public/report.pdf",
+            "notes/report.pdf",
             "--enabled",
             "true",
             "--expires-after",
@@ -1485,40 +1642,19 @@ mod tests {
     }
 
     #[test]
-    fn changing_a_expiring_share_takes_exactly_one_new_lifetime() {
+    fn changing_an_expiring_share_takes_exactly_one_new_lifetime() {
         let grant = Uuid::from_u128(5).to_string();
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "expiry",
-            "private/cos:tos/notes",
-            &grant,
-            "--expires-in",
-            "3d",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["briefcase", "expiry", "notes", &grant, "--expires-in", "3d"])
+                .unwrap();
         let super::Command::Expiry(args) = cli.command else {
             panic!("expected expiry");
         };
-        assert_eq!(args.grant_id, Uuid::from_u128(5));
         assert_eq!(
             (args.expires_in, args.permanent),
             (Some(Lifetime(4_320)), false)
         );
-
-        let cli = Cli::try_parse_from([
-            "briefcase",
-            "expiry",
-            "private/cos:tos/notes",
-            &grant,
-            "--permanent",
-        ])
-        .unwrap();
-        let super::Command::Expiry(args) = cli.command else {
-            panic!("expected expiry");
-        };
-        assert_eq!((args.expires_in, args.permanent), (None, true));
-
-        let neither = Cli::try_parse_from(["briefcase", "expiry", "private/cos:tos/notes", &grant])
+        let neither = Cli::try_parse_from(["briefcase", "expiry", "notes", &grant])
             .err()
             .unwrap();
         assert_eq!(
@@ -1528,7 +1664,7 @@ mod tests {
         let both = Cli::try_parse_from([
             "briefcase",
             "expiry",
-            "private/cos:tos/notes",
+            "notes",
             &grant,
             "--expires-in",
             "1h",
@@ -1540,70 +1676,53 @@ mod tests {
     }
 
     #[test]
-    fn test_context_accepts_only_a_public_hyphenated_uuid() {
-        let id = Uuid::from_u128(7).to_string();
-        let cli = Cli::try_parse_from(["briefcase", "--test", &id, "status"]).unwrap();
-        assert_eq!(cli.global.test, Some(Uuid::from_u128(7)));
-        assert!(Cli::try_parse_from(["briefcase", "--test", &"a".repeat(32), "status"]).is_err());
+    fn expiring_and_self_destruct_options_parse_into_minutes() {
+        let cli = Cli::try_parse_from([
+            "briefcase",
+            "share",
+            "notes",
+            "c:alex",
+            "--expires-after",
+            "2h",
+        ])
+        .unwrap();
+        let super::Command::Share(args) = cli.command else {
+            panic!("expected share");
+        };
+        assert_eq!(args.expires_after, Some(Lifetime(120)));
+        let error = Cli::try_parse_from([
+            "briefcase",
+            "put",
+            "a.md",
+            "notes",
+            "--self-destruct",
+            "31d",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
+}
+
+#[cfg(test)]
+mod canonical_account_uuid_tests {
+    use super::{Target, is_account_reference};
 
     #[test]
-    fn canonical_application_ids_are_enforced_by_the_grammar() {
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "notes",
-                "--proof",
-                "proof",
-                "note.md",
-            ])
-            .is_ok()
+    fn accepts_canonical_drive_uuids_and_legacy_references() -> Result<(), String> {
+        let id = "0192a3b4-0000-4000-8000-000000000000";
+        assert!(is_account_reference(id));
+        assert!(is_account_reference("zQo"));
+        assert!(!is_account_reference(
+            "0192A3B4-0000-4000-8000-000000000000"
+        ));
+        assert_eq!(
+            format!("@{id}/notes").parse::<Target>()?,
+            Target::Path {
+                drive: Some(id.into()),
+                path: "notes".into()
+            }
         );
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "tos>notes",
-                "--proof",
-                "proof",
-                "note.md",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["briefcase", "app", "upload", "--app-id", "notes", "note.md",])
-                .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "notes",
-                "--proof-stdin",
-                "note.md",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "briefcase",
-                "app",
-                "upload",
-                "--app-id",
-                "notes",
-                "--proof",
-                "proof",
-                "--proof-stdin",
-                "note.md",
-            ])
-            .is_err()
-        );
+        Ok(())
     }
 }

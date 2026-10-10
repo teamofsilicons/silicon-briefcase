@@ -14,8 +14,8 @@ use tokio::io::AsyncReadExt as _;
 use uuid::Uuid;
 
 use super::sealed::Operation as _;
-use super::{DelegatedManifest, DelegatedOperation, OboProof, non_nil, sealed};
-use crate::{ApplicationId, Client, Error, Result, UploadSource, guess_content_type};
+use super::{DelegatedManifest, DelegatedOperation, Proof, non_nil, sealed};
+use crate::{Client, Error, Result, UploadSource, guess_content_type};
 
 const MAX_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
@@ -25,7 +25,8 @@ const MAX_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 pub struct DelegatedReserveUpload {
     /// Stable non-nil UUID retained across logical retries and status calls.
     pub operation_id: Uuid,
-    /// Existing folder path; empty selects the represented member's app folder.
+    /// Existing folder path; empty selects the app's own folder,
+    /// `apps/{issuing app}/` in the account's drive.
     pub parent_path: String,
     /// One file name, not a path.
     pub name: String,
@@ -38,7 +39,7 @@ pub struct DelegatedReserveUpload {
 }
 
 impl DelegatedReserveUpload {
-    /// Hashes a local file with bounded memory before any proof is minted.
+    /// Hashes a local file with bounded memory before any proof is requested.
     ///
     /// The returned manifest contains no local path or credential. Keep the
     /// source immutable until transfer; the server checks its size and digest.
@@ -119,13 +120,13 @@ pub struct DelegatedCancelUpload {
 }
 
 macro_rules! upload_operation {
-    ($request:ty, $endpoint:literal, $path:literal) => {
+    ($request:ty, $scope:literal, $path:literal) => {
         impl DelegatedOperation for $request {
-            const ENDPOINT_ID: &'static str = $endpoint;
+            const SCOPE: &'static str = $scope;
             const PATH: &'static str = $path;
         }
         impl $request {
-            /// Freezes exact JSON bytes before obtaining a valid IAM OBO token.
+            /// Freezes the exact JSON bytes before the request is sent.
             ///
             /// # Errors
             ///
@@ -256,7 +257,7 @@ pub struct DelegatedUploadReservation {
     /// Narrow byte-staging capability, issued only when a transfer can start.
     ///
     /// Never a file-read or publication credential. Do not log or serialize it
-    /// into a general-purpose outbox; obtain a new one with fresh authority.
+    /// into a general-purpose outbox; reserve again to obtain a new one.
     pub capability: Option<UploadCapability>,
 }
 
@@ -308,19 +309,19 @@ impl<'de> Deserialize<'de> for UploadCapability {
 }
 
 impl Client {
-    /// Reserves a private upload with a valid IAM OBO token over the exact manifest.
+    /// Reserves a private upload for the account the proof speaks for.
     ///
     /// # Errors
     ///
     /// Returns current-authorization, quota, conflicting-manifest or transport errors.
-    /// An uncertain response needs a fresh status proof, never blind resubmission.
+    /// Reconcile an uncertain response with [`Client::delegated_upload_status`],
+    /// never by blind resubmission.
     pub async fn reserve_delegated_upload(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedReserveUpload>,
     ) -> Result<DelegatedUploadReservation> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
@@ -330,30 +331,28 @@ impl Client {
     /// # Errors
     ///
     /// Returns authority, expiry, state, quota or transport errors. Reconcile
-    /// uncertain outcomes by stable operation UUID before retrying with fresh proof.
+    /// uncertain outcomes by stable operation UUID before retrying.
     pub async fn commit_delegated_upload(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedCommitUpload>,
     ) -> Result<DelegatedUploadStatus> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.transfer_timeout()))
             .await
     }
 
-    /// Reconciles one logical upload with freshly verified IAM authority.
+    /// Reconciles one logical upload; Briefcase verifies the proof again.
     ///
     /// # Errors
     ///
     /// Returns proof, visibility, identity-binding or transport errors without retry.
     pub async fn delegated_upload_status(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedUploadQuery>,
     ) -> Result<DelegatedUploadStatus> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
@@ -366,25 +365,25 @@ impl Client {
     /// and may remain pending after cancellation is accepted.
     pub async fn cancel_delegated_upload(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedCancelUpload>,
     ) -> Result<DelegatedUploadStatus> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
     /// Streams exact bytes to private staging using only a narrow capability.
     ///
-    /// Does not send an IAM bearer, parent token, proof or application secret.
-    /// The selected organization and test plane still apply. A successful
-    /// transfer is not publication; authorize publication with the current commit endpoint token separately.
+    /// Sends no bearer, proof or secret: Briefcase finds the drive from the
+    /// reservation. A successful transfer is not publication; publish with
+    /// [`Client::commit_delegated_upload`] and a proof.
     ///
     /// # Errors
     ///
     /// Returns local I/O, capability, length/digest, expiry, state or transport
-    /// errors. Never retries automatically; reconcile through fresh IAM status.
+    /// errors. Never retries automatically; reconcile with
+    /// [`Client::delegated_upload_status`].
     pub async fn transfer_delegated_upload(
         &self,
         upload_id: Uuid,
@@ -410,7 +409,6 @@ impl Client {
         let url = self.api_url(&["obo", "uploads", &upload_id.to_string(), "content"])?;
         let request = self
             .anonymous_request(Method::PUT, url)
-            .header("x-org-id", self.organization())
             .header("x-briefcase-upload-capability", capability.into_header()?)
             .header(CONTENT_LENGTH, size)
             .header(CONTENT_TYPE, "application/octet-stream")
@@ -447,7 +445,6 @@ impl Client {
         let url = self.api_url(&["obo", "uploads", &upload_id.to_string(), "content"])?;
         let request = self
             .anonymous_request(Method::PUT, url)
-            .header("x-org-id", self.organization())
             .header("x-briefcase-upload-capability", capability.into_header()?)
             .header(CONTENT_LENGTH, metadata.len())
             .header(CONTENT_TYPE, "application/octet-stream")
