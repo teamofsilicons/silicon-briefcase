@@ -322,3 +322,124 @@ so the bring-your-own validation path runs (and fails without credentials) inste
 `aws-smithy-async` is a dev-dependency only (already in the lock graph). MinIO no longer publishes binaries
 (HTTP 410 from dl.min.io), so uploads are tested through the content repository with a stored-object receipt, as
 the existing versioning tests do.
+
+## Service part 3 (delegated routes, addresses, the move), 2026-10-10
+
+### S38. One scope per delegated route, unchanged paths and bodies
+The ten `/api/v1/obo/*` routes keep their paths and JSON shapes, and each requires exactly one scope, its old
+endpoint id (`domain::delegation::DELEGATED_SCOPES`): `briefcase.folders.create`, `briefcase.entries.list`,
+`briefcase.files.read`, `briefcase.entries.trash`, `briefcase.uploads.reserve|commit|status|cancel`,
+`briefcase.invitations.create`, `briefcase.link_access.update`. That is the whole old catalogue: the retired
+`briefcase.files.create` (`POST /obo/files`, 410) is not a scope, so Waveform and Extend upload with
+reserve/transfer/commit. The byte transfer has no scope (its capability authorizes it). `operation_id`
+idempotency and the capability transfer are kept.
+
+### S39. First-party apps reach what the account can (resolves S4/S24)
+`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` (default empty; production `interface`) names apps whose allowed scopes reach
+everything the account can: its own drive outside `apps/{app}/`, entries shared with it in other drives, and the
+drives of the Silicons it looks after (a first-party app acting for a Carbon carries the Carbon's custodial
+powers, unlike every other app). It still uses only the delegated routes its scopes allow, needs an entry in
+`BRIEFCASE_PROOF_ISSUERS` for each scope, and what it creates records the app. Other issuers stay confined to
+`apps/{issuer}/` in the account's own drive, without custodial powers. `drive` in `POST /obo/entries/list` is
+accepted only from first-party apps (others: 422 `drive_not_delegated`). Default empty keeps "deny by default".
+
+### S40. An app trashes only what it created
+`briefcase.entries.trash` is "move an app-created entry to the bin": the route answers 403 `not_created_by_app`
+for an entry the issuing app did not create, whatever the account itself may delete (the subtree check already
+refused mixed subtrees with 409). First-party apps included.
+
+### S41. The byte transfer finds its drive
+`PUT /obo/uploads/{upload_id}/content` no longer needs `X-Org-ID`: the drive comes from the reservation through
+the definer function `briefcase.delegated_upload_drive` (migration 0050). A sent `X-Org-ID` is still honoured
+(it must name that drive) so 3.x-era clients keep working; OpenAPI marks it optional and deprecated.
+
+### S42. Permanent addresses name the drive by its owner's id
+- Site: `https://briefcase.teamofsilicons.com/{owner id}/{path}` (`/c:ada/notes/plan.md`; the top is `/c:ada`).
+  `permanent_url` in every response and the invitation email use it.
+- API: `GET /api/v1/paths/{owner}/{path}` and `GET /api/v1/paths/{owner}` (the top), owner as `c:`/`si:` id or
+  uuid. `content_url`/`download_url` name the drive by uuid (`/api/v1/paths/{uuid}/…?disposition=…`) so stored
+  content addresses survive id changes. While Briefcase has not learned an owner's id the site address uses the
+  uuid (rare: every drive owner has signed in or been looked up).
+- Without `Authorization` an address serves only link-shared entries; the top of a drive is never public (401).
+- Ids resolve cache-first: webhooks keep ids current, and a fresh single cached holder answers without a lookup
+  (permanent addresses are opened far more often than recipients are named; S11's lookup-first rule stays for
+  naming recipients). Otherwise Silicon Accounts is asked.
+- An id nobody holds any more answers `308` to the same address under the owner's current id (from
+  `account_id_history`), query kept, with `{moved_to, permanent_url, owner}` in the body. An id someone else took
+  since belongs to its new holder (old links then resolve in that drive, normally 404) — the readable scheme the
+  decision file chose accepts this.
+
+### S43. Addresses from before personal drives keep resolving
+`legacy_path_aliases(legacy_org, legacy_path) → (drive, entry_id)` holds every entry the cutover moved, every
+2.0.0 identifier alias of those entries, and each structural folder whose contents moved (`private/c:saket` →
+Saket's drive top, `public` → `tos-public`, …). `briefcase.resolve_legacy_location` takes the longest alias equal
+to or above the requested path, so links to files created later inside a moved folder resolve too.
+`GET /org/{org}/{path}` (deprecated `resolveLegacyPermanentUrl`) and `GET /api/v1/public/{org}/{path}` answer
+directly (no redirect, so bearer clients and anonymous links both work) for the entry's current place, whose new
+`permanent_url` is in the body; access is decided in the drive exactly as for the new address. A uuid-shaped
+segment that is a drive is read as that drive first (S10a guarantees no drive key equals an organization key).
+
+### S44. link-identities: what the command does
+`briefcase-migrate link-identities --file mapping.csv [--dry-run] [--json]`, in one transaction with every
+Briefcase table locked, row security and user triggers off and foreign keys deferred (restored exactly before
+commit):
+- Mapping: header `iam_principal_id,accounts_uuid[,kind][,accounts_id]`; the key is a legacy public id, an IAM
+  principal UUID (matched through `iam_identity_bindings`, `organization_members.principal_id` and
+  `delegated_uploads.iam_principal_id`, as the survey asked) or `org:{org}` (who receives that organization's
+  shared spaces). One legacy identity ↔ one account (refused otherwise); rows matching nothing are reported, not
+  guessed; an account uuid equal to an organization key is refused (S10a).
+- Re-key: every account column of pre-migration organizations (an explicit list; the command refuses to run while
+  the schema has an unlisted `X_type`/`X_id` pair). JSON snapshots in audit metadata and notification details keep
+  the original text.
+- Moves: `private/{m}/…` → m's drive top; `apps/{app}/private/{m}/…` → m's `apps/{app}/`; `public/…` →
+  `{org}-public/`, `{tag}/…` → `{org}-{tag}/`, `apps/{app}/public/…` → `apps/{app}/{org}-public/` in the owner's
+  drive; members without an account → `unclaimed/{legacy id}/` (apps content under `apps/{app}/` inside it), other
+  stray content → `unclaimed/{org}/`. Creators keep ownership. Names that collide get ` (from {org})` (and
+  `apps` at a drive's top is kept for apps). Entries keep their ids, versions, shares, logs, search documents,
+  link sharing and bin state; structural folders stay in the organization (empty), so nothing is deleted. A
+  container that was link-shared passes that to its new folder.
+- The owner: `org:` if given, else the single active `owner` member, who must be linked (refused otherwise).
+- Snapshot shares: each space is shared read+write, inheriting, with exactly the active members (with the tag, for
+  tag spaces) who are linked; written directly (they record access members had, so the "Silicons are not open to
+  the world" check does not apply). Tag shares become per-member shares with the same rights, inheritance and
+  expiry, merged into an existing permanent share (one per account and entry, the schema's rule), and the tag share
+  is kept, revoked. Removed members and members without an account get nothing (reported).
+- Also: notifications move to the recipient's drive (inbox) with their subject's new drive and path; a drive
+  holding versions stored in an organization's bucket gets a copy of that bucket's settings with the same External
+  ID (the owner's drive takes over the active settings unless it has its own; other copies are `superseded`, read
+  only); stored bytes are recomputed for every touched drive and organization and limit overrides move to the
+  owner's drive; linked accounts Briefcase never saw are recorded (kind, id) as stale so the service looks them up;
+  `identity_links` records every link.
+- Before commit, every touched drive's paths and closure rows are recomputed from the parent links and compared;
+  any difference aborts. The report lists links, unmatched lines, unlinked members, spaces with their share counts,
+  unclaimed areas, renames and counts; the run row stores it.
+
+### S45. Re-running: idempotent, and undone in place until the cutover
+Each run records a ledger (`identity_link_ledger`) of what it created and the values it changed. The same mapping
+again (same SHA-256) is a no-op ("already in place"). A different mapping first undoes the run in place — changes
+and moves newest first, then the rows it created (a second pass, because removing a copied tag or participant
+cascades) — and then applies the new mapping from the original state (tested: "A then B" leaves exactly the state
+"B" leaves on a fresh copy). Undoing is refused once Briefcase has been used in the drives that run filled
+(audit, entries, versions, shares, notifications newer than the run); then the backup taken before the run is the
+way back. A dry run does everything and rolls back.
+
+### S46. Archive listing
+`GET /api/v1/entries/{id}/archive` (`listArchiveContents`) for anyone who may read the file (same rule and audit as
+reading content). Formats by name, then media type: zip (central directory via ranged reads, zip64 aware, ≤ 64 MiB
+directory), tar / tar.gz / tar.zst (streamed, ≤ 1 GiB of archive read), 7z (index read from a private temporary
+copy, archives ≤ 512 MiB). At most 10,000 entries (`limit`), with `truncated` and `truncated_because`. Paths are
+decoded leniently and only displayed; encrypted entries are flagged; an encrypted 7z index answers 422
+`archive_encrypted`. The route has the upload deadline (it reads bytes before answering). New dependencies:
+`flate2` (rust backend) and `sevenz-rust2` (no default features); `zip` and the 7z encoder are test-only.
+
+### S47. Custodians find Silicons the cutover recorded
+The cutover records Silicons without their custodian. `GET /api/v1/drives` looks up up to 10 such Silicons per call
+(each at most once per cache lifetime), so a custodian sees its Silicons' drives before the Silicons sign in again;
+their own first request, a lookup or `silicon.custodian_changed` teach it too. Found by the live cutover run.
+
+### S48. Operation revisions (part 3)
+`resolvePermanentUrl` 2.0.0 (now `/paths/{owner}/{path}`), `readPublicEntry` 2.0.0 (owner ids, 308),
+`transferDelegatedUpload` 2.1.0, `listEntriesOnBehalfOfMember` 3.1.0, `trashEntryOnBehalfOfMember` 3.1.0; new
+`resolveDriveTop`, `resolveLegacyPermanentUrl` (deprecated) and `listArchiveContents` at 1.0.0. The new address
+format of `permanent_url`/`content_url` in every entry is covered by the contract major (4.0.0), like S36's
+rights changes. 57 operations.

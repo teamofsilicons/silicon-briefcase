@@ -289,3 +289,93 @@ is refused, ada's files are untouched.
   failed until `2b9dd98` added the new operations to its table; run the whole suite, not just the contract tests,
   after a contract change.
 - MinIO binaries are gone from dl.min.io (HTTP 410), so S3 paths are still not exercised locally.
+
+## 2026-10-10 — Service part 3 of 3: delegated routes, addresses, the move
+
+Scope: service stage steps 7, 9, 10 and 11 — delegated (proof) routes and first-party apps, permanent addresses by
+owner id with redirects for ids given up and the legacy `/org/{org}/` aliases, the archive listing for the web,
+migration 0050 (empty and upgrade path), the `link-identities` operator command, OpenAPI, the whole suite.
+Decisions S38–S48 in [decisions.md](decisions.md); runbook additions in [cutover.md](cutover.md); UNDERSTANDING
+proposals extended.
+
+### Hand-over check
+
+At 585b7ae (end of part 2) the suite was green as recorded: 206 passed, 0 failed, 2 ignored
+(`.mig/logs/p3-baseline.log`).
+
+### What changed
+
+Commits: `1fb52fd` Name drives by their owner's id in permanent addresses and widen first-party apps; `66da1c3` Add
+the link-identities operator command for the cutover to personal drives; `bc37d8d` List archive contents for the
+web and publish the part 3 contract changes; `5060817` Fix what the live cutover run found: v7 share ids and
+Silicons recorded without a custodian; and the commit adding this section.
+
+- **Delegated routes** (S38–S41): one scope per route as before (the old catalogue is complete); new
+  `BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` (`AuthenticationMode::FirstPartyOnBehalfOf`, `Actor::confined_app`): listed
+  apps reach everything the account can (other drives through shares, custodial drives, `drive` in
+  `/obo/entries/list`), everyone else stays in `apps/{app}/` of the account's own drive; `/obo/entries/trash`
+  refuses entries another app created (403 `not_created_by_app`); the byte transfer finds its drive from the
+  reservation (`briefcase.delegated_upload_drive`), `X-Org-ID` optional.
+- **Addresses** (S42, S43): `ResponseMapper` names drives by owner id (labels from the account cache per request;
+  `AppState::mapper_for`), content URLs by uuid; new `api/handlers/locations.rs` serves
+  `GET /api/v1/paths/{owner}[/{path}]`, `/api/v1/public/{owner}/{path}` and `/org/{org}/{path}`;
+  `AccountDirectory::drive_owner` resolves ids cache-first and sends ids given up to the current one (308);
+  `legacy_path_aliases` + `briefcase.resolve_legacy_location` (longest prefix). Invitation emails link the new
+  address.
+- **Migration 0050** (`identity_link_runs`, `identity_links`, `identity_link_ledger`, `legacy_path_aliases`, the
+  two definer functions and their grants, a definer policy on `delegated_uploads`). Additive only.
+- **link-identities** (S44, S45): `briefcase-migrate link-identities --file … [--dry-run] [--json]`; Rust side in
+  `infrastructure/postgres/link_identities/mod.rs` (mapping parser, runner on a detached connection, operator
+  summary), the program in ten SQL files there (setup and maintenance mode, resolution, undo, move primitive,
+  planning, after-move work, verification and report, main).
+- **Archive listing** (S46): `GET /api/v1/entries/{id}/archive`; parsers in `application/archive_listing.rs`,
+  handler in `api/handlers/archive_listing.rs`.
+- **Custodians after the cutover** (S47): `/drives` learns up to 10 unknown custodians per call.
+- **Diagnostics**: internal repository failures log their cause (`metadata_repository_failed`).
+- **OpenAPI** (S48): 57 operations; `openapi-spec-validator openapi.yaml`: OK; `docs/api/operations.md`
+  regenerated (`<scratch>/briefcase-operations-doc.py`); edits scripted in `<scratch>/briefcase-openapi-part3.py`.
+- **Docs**: `.env.example`, `docs/deployment.md` (first-party apps, the cutover command).
+
+### Tests
+
+| command | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | clean |
+| `.mig/test.sh` (= `BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig cargo test --locked --all-targets --all-features -- --test-threads=1`) | **229 passed, 0 failed, 2 ignored** (lib 212, openapi_contract 3 + 1 ignored, postgres_drive_roles 1, postgres_link_identities 5, postgres_metadata 3, postgres_versioning 4, s3_object_store 1; ignored: `telemetry_live_delivery`, the client cross-check) |
+| `cargo test --test postgres_link_identities` | 5 passed: upgrade path (origin/main's 0001–0047 + the legacy organization fixture, then 0048–0050, as a non-superuser NOBYPASSRLS migrator) and an empty database (50 migrations); the move (every destination, owners, snapshot and expanded shares, notification, bucket copies, usage, multipart, aliases, accounts, UUIDv7 ids, legacy resolution and drive visibility as `briefcase_api`); dry run and idempotent re-run; corrected mapping ≡ fresh run over the whole snapshot; refusals (unlinked owner, many-to-one, uuid = organization key, kind mismatch, work in flight, used since) |
+| `cargo test --lib api::locations_tests` | 3 passed (owner id and uuid addresses, top of a drive, link reads, 308 after `account.id_changed`, legacy aliases incl. prefix and anonymous links) |
+| `cargo test --lib api::delegation_tests` | 2 passed (first-party reach incl. custodial drive and `drive`, confinement, origin recorded, trash only app-created, one scope per route; transfer without `X-Org-ID`) |
+| `cargo test --lib api::archive_tests application::archive_listing` | 7 passed (zip incl. zip64 extra and zip64 end record, tar/tar.gz/tar.zst incl. long names, symlinks, caps, 7z, format detection; through the router with an in-memory object store: listings, limit, refusals, access) |
+| `cargo test --lib api::drives_tests` | 5 passed (incl. custodians finding Silicons the cutover recorded) |
+| `cargo deny --offline check licenses sources bans` | same 7 errors as origin/main; nothing new from `flate2`/`sevenz-rust2` |
+| `cd clients/rust && cargo test --locked --workspace --all-targets --all-features` (separate target dir; the client workspace is untouched) | 177 passed, 0 failed, 2 ignored (unchanged) |
+| end to end: `<scratch>/briefcase-e2e/e2e-cutover.py prepare|check RUN` with the real `briefcase-migrate` and `briefcase-api` (127.0.0.1:4101, `run-api-p3.py`) on `briefcase_p3cut` against the shared local Silicon Accounts stack | **25/25 passed** (run `d093745`): three real accounts; 0001–0047 + fixture, then 0048–0050; dry run (summary printed), apply, re-run (already in place); then saket's drives incl. Scout's, his moved files at the top, `/{id}/notes`, bob's Shared with me, bob reads his guide in saket's `tos-public`, `/org/tos/public/…` and `/api/v1/public/tos/…` anonymously, `/org/tos/private/c:saket/notes` for saket and bob, c:gone's file closed, custodian opens Scout's drive, Scout its own, Interface (first-party proof) lists bob's view of saket's drive, a real id change (`POST /v1/me/id`) → `account.id_changed` → `308` with the query kept → the new id resolves; webhook URL restored; no WARN/ERROR or 5xx in the API log |
+
+The first live run (`c093407`) failed 4 steps and found two defects the database tests could not: shares created
+with UUIDv4 ids (the domain requires v7) and Silicons recorded without a custodian missing from their custodian's
+drive list. Both fixed in `5060817`, with a test each.
+
+### Left for later stages
+
+- Client stage: `briefcase-client` 4.0.0 with the 57 operations and revisions (un-ignore
+  `official_client_consumes_the_exact_published_operations`); `@<id>/path` targets; the transfer without
+  `X-Org-ID`; `GET /paths/…` for permanent URLs; the archive listing.
+- Web stage: serve `/{owner}/{path}` (follow `308` to the body's `permanent_url`) and `/org/{org}/{path}`
+  (redirect to the entry's `permanent_url`); use `listArchiveContents` for the archive renderer.
+- Docs stage: `README.md`, `docs/api/delegated-uploads.md` (`X-Org-ID` is optional now), `docs/obo.md`,
+  `docs/sharing.md` and the IAM-era guides still describe organisations and IAM.
+- Cutover: Interface, Waveform, Extend, Browser, DM and Commit changes as listed in cutover.md.
+
+### Gotchas
+
+- The link program runs with user triggers off: it must keep every invariant the triggers keep (paths, closure,
+  participants, UUIDv7 ids). `link_verify` recomputes paths and closures; the UUIDv7 rule is asserted in the test.
+- Removing a row cascades immediately even when foreign keys are deferred (`ON DELETE CASCADE`): the undo removes
+  created rows only after every move is undone.
+- plpgsql: a record variable named like a column (`item` vs `identity_link_ledger.item`, `report`) is an error
+  ("column reference is ambiguous"); qualify columns or rename variables.
+- wiremock matches proof bodies by substring: never give one test proof token a prefix of another.
+- Throwaway databases on 5460 from these tests (`briefcase_link_*`) are dropped by the tests; `briefcase_p3cut`
+  (the e2e database) is kept for inspection. Test identities on the stack: `briefcase-p3-*-c093407`,
+  `briefcase-p3-*-d093745`.

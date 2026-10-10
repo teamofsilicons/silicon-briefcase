@@ -166,3 +166,46 @@ another invite, from the drive, or from creating it".
 > When a Carbon or Silicon deletes its account (or a custodian deletes its Silicon), everything in that account's
 > drive is deleted for good, including from its own S3 bucket, and every share to it ends. What it created in
 > other people's drives stays there; it belongs to those drives.
+
+## From service part 3 (addresses, other apps, the move), 2026-10-10
+
+### Replace "Url"
+
+> For each file there is a permanent url. Opening it asks for the person's sign-in and shows the file only if
+> they have access to it; otherwise it says file not found. Anything shared with anyone with the link opens for
+> everyone.
+>
+> The url is clean and shows the folder structure, starting with the id of the Carbon or Silicon whose drive it is
+> in. For a file `this_secret.md` in the folder `top_secret` of si:cos's drive:
+> `briefcase.teamofsilicons.com/si:cos/top_secret/this_secret.md`. The top of a drive is
+> `briefcase.teamofsilicons.com/si:cos`.
+>
+> Ids can change. When si:cos becomes si:cos_v2, its old urls keep working and lead to the new ones. If someone
+> else later takes the id si:cos, the url belongs to them.
+>
+> Urls from before personal drives (`briefcase.teamofsilicons.com/org/{org_id}/…`) keep working: they lead to
+> wherever that file or folder went.
+>
+> The backend is served on backend.briefcase.teamofsilicons.com but the permanent url is served from
+> briefcase.teamofsilicons.com.
+
+### In "How other apps would use Briefcase" (replacing the IAM/Honeycomb wording proposed in part 1 where they
+### overlap)
+
+> Each app works only inside its own folder (`apps/{app}/`) of the account it acts for, and only does what that
+> account could do there. Briefcase's operator can name first-party apps (the Silicon Interface) that work with
+> everything the account can reach — its own files, what was shared with it and the drives of the Silicons it
+> looks after — through the same endpoints. An app can move to the bin only what it created.
+
+### In "Files supported"
+
+> For any archive (zip, tar, tar.gz, tar.zst, 7z) show its contents without unpacking it. Very large tar archives
+> show their first entries and say there is more; 7z archives above 512 MB can only be downloaded.
+
+### New section: "Moving from organisations"
+
+> Files from before personal drives were moved once, when Briefcase switched to Silicon Accounts. Each member's
+> private files went to their own drive. Public, tag and app public folders went to the drive of the
+> organisation's owner as `{org}-public`, `{org}-{tag}` and `apps/{app}/{org}-public`, shared (read and write)
+> with exactly the members who could open them then. Whoever created a file still owns it. Files of members who
+> had no Silicon Accounts account wait in `unclaimed/{their old id}` in the owner's drive. Nothing was deleted.
