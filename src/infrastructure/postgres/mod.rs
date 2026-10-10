@@ -5,6 +5,7 @@ mod content;
 mod drives;
 pub use drives::SharedEntry;
 mod invitations;
+pub mod link_identities;
 mod metadata;
 mod models;
 mod quota;
