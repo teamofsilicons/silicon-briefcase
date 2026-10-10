@@ -308,7 +308,10 @@ At 585b7ae (end of part 2) the suite was green as recorded: 206 passed, 0 failed
 Commits: `1fb52fd` Name drives by their owner's id in permanent addresses and widen first-party apps; `66da1c3` Add
 the link-identities operator command for the cutover to personal drives; `bc37d8d` List archive contents for the
 web and publish the part 3 contract changes; `5060817` Fix what the live cutover run found: v7 share ids and
-Silicons recorded without a custodian; and the commit adding this section.
+Silicons recorded without a custodian; `be02193` Record the delegated routes, addresses and cutover stage of the
+migration; `3dde92e` Bound archive listings and keep the address docs in Briefcase's words (zip directory read
+≤ 8 MiB, at most four tar/7z listings at once); `1387563` Record that Briefcase needs no Ting adapter and issues no
+proofs (S49); and the commit adding this line.
 
 - **Delegated routes** (S38–S41): one scope per route as before (the old catalogue is complete); new
   `BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` (`AuthenticationMode::FirstPartyOnBehalfOf`, `Actor::confined_app`): listed
