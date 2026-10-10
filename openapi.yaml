@@ -1725,7 +1725,7 @@ components:
         drive is otherwise found from the reservation. The capability, not this value, authorizes the bytes.
       schema:
         type: string
-        pattern: ^[A-Za-z0-9]{3,32}$
+        pattern: ^([A-Za-z0-9]{3,32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
     Owner:
       name: owner
       in: path

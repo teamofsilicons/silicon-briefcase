@@ -269,7 +269,7 @@ fn is_ready(state: &DriveState, authorization: &RequestAuthContext) -> Result<bo
         && (!authorization.has_owner_rights() || (state.owner_participates && state.has_root)))
 }
 
-/// A drive's key is its owner's uuid. Account uuids are short base62
+/// A drive's key is its owner's uuid. Account uuids are canonical UUIDs or legacy base62
 /// strings, so one can spell a pre-migration organization handle (`tos`):
 /// such a tenant records no owner and is never entered as a drive.
 fn records_its_owner(state: &DriveState, authorization: &RequestAuthContext) -> bool {

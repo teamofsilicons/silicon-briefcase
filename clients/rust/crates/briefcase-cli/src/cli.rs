@@ -964,7 +964,9 @@ pub fn is_account_reference(value: &str) -> bool {
             && !handle.contains(['/', ':', '@'])
             && !handle.contains(char::is_whitespace);
     }
-    (3..=32).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    ((3..=32).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        || (value.len() == 36
+            && Uuid::parse_str(value).is_ok_and(|id| id.hyphenated().to_string() == value))
 }
 
 /// An entry named by identifier, by path inside a drive, or by an address
@@ -1699,5 +1701,28 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+}
+
+#[cfg(test)]
+mod canonical_account_uuid_tests {
+    use super::{Target, is_account_reference};
+
+    #[test]
+    fn accepts_canonical_drive_uuids_and_legacy_references() -> Result<(), String> {
+        let id = "0192a3b4-0000-4000-8000-000000000000";
+        assert!(is_account_reference(id));
+        assert!(is_account_reference("zQo"));
+        assert!(!is_account_reference(
+            "0192A3B4-0000-4000-8000-000000000000"
+        ));
+        assert_eq!(
+            format!("@{id}/notes").parse::<Target>()?,
+            Target::Path {
+                drive: Some(id.into()),
+                path: "notes".into()
+            }
+        );
+        Ok(())
     }
 }

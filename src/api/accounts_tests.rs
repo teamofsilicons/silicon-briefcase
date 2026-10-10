@@ -109,7 +109,11 @@ pub(super) async fn fixture_with_store(
 impl Fixture {
     /// A uuid unique to this test run, such as `Ada3f2a…`.
     pub(super) fn uuid(&self, prefix: &str) -> String {
-        format!("{prefix}{}", self.suffix)
+        if prefix == "Ada" {
+            format!("00000000-0000-4000-8000-{}", self.suffix)
+        } else {
+            format!("{prefix}{}", self.suffix)
+        }
     }
 
     /// A public id unique to this test run, such as `c:ada-3f2a…`.

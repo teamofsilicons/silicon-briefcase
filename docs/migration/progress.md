@@ -458,3 +458,25 @@ local bucket. These are S3-compatible local checks, not actual AWS integration.
 Real AWS AssumeRole/KMS/versioned buckets, native six-platform release runners,
 container build/deploy, Apps publication and production cutover remain release
 gates. No push, deployment, cutover or human-owned UNDERSTANDING edits occurred.
+
+
+## 2026-10-10 — Canonical account UUID acceptance
+
+The new Accounts requirement is a canonical lowercase128-bit UUID. Briefcase now
+accepts36-character hyphenated UUIDs in domain identities, tenant selection and CLI
+@drive targets, alongside legacy3–32-character identifiers until explicit backfill.
+Migration0051 replaces the five persisted shape checks and notification-recipient
+validation; applied migrations0048–0050 are untouched. The shared API fixture now
+uses a canonical UUID for Ada while its other accounts retain legacy identifiers,
+so auth, drives, cross-account sharing, notifications and custody exercise both.
+
+Full service suite230passed/1externalignored; client workspace143passed/2external
+ignored; web46unit tests and typecheckpassed (sealed-session UUID roundtrip added).
+Strict service clippy passed. Local proof logs: `.mig/logs/service-uuid.log`,
+`.mig/logs/client-uuid.log`, `.mig/logs/web-uuid.log`.
+
+All existing identities must also migrate using the Accounts-owned immutable CSV
+`old_uuid,new_uuid,kind`; that separate mapping consumer is pending. Existing S3
+keys/prefixes, stored BYOS external IDs and public IDs must not change. Briefcase
+uses provider-side encryption, with no account-derived application encryption AAD
+found. Production is untouched.

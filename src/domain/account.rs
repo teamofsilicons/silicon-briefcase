@@ -12,19 +12,19 @@ use thiserror::Error;
 
 use super::actor::{ActorKind, is_canonical_iam_organization_id};
 
-/// Shortest account uuid Silicon Accounts issues.
+/// Shortest legacy account identifier accepted during the UUID migration.
 pub const MIN_ACCOUNT_UUID_BYTES: usize = 3;
-/// Longest account uuid Briefcase accepts (Accounts issues at most 12 today).
-pub const MAX_ACCOUNT_UUID_BYTES: usize = 32;
+/// Longest canonical hyphenated account UUID accepted.
+pub const MAX_ACCOUNT_UUID_BYTES: usize = 36;
 /// Longest public id handle (`c:` / `si:` excluded) Briefcase accepts.
 pub const MAX_HANDLE_BYTES: usize = 64;
 
 /// Why a value is not an account uuid or public id.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum AccountIdentifierError {
-    /// The uuid is not 3 to 32 ASCII letters and digits.
+    /// The value is neither a canonical UUID nor a supported legacy identifier.
     #[error(
-        "`{0}` is not a Silicon Accounts uuid: a uuid is 3 to 32 ASCII letters and digits, such as `zQo`"
+        "`{0}` is not a Silicon Accounts uuid: use a canonical hyphenated UUID or a legacy 3 to 32 character account identifier"
     )]
     InvalidUuid(String),
     /// The id does not start with `c:` or `si:` followed by a handle.
@@ -36,7 +36,7 @@ pub enum AccountIdentifierError {
 
 /// The permanent, case-sensitive Silicon Accounts identifier (`sub`).
 ///
-/// It is compared exactly: never lowercased, never parsed as an RFC 4122 UUID.
+/// It is compared exactly. Canonical UUIDs and legacy case-sensitive identifiers coexist until backfill.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct AccountUuid(String);
@@ -46,8 +46,8 @@ impl AccountUuid {
     ///
     /// # Errors
     ///
-    /// Returns [`AccountIdentifierError::InvalidUuid`] unless the value is 3 to
-    /// 32 ASCII letters and digits.
+    /// Returns [`AccountIdentifierError::InvalidUuid`] unless the value is a canonical
+    /// lowercase UUID or a legacy 3 to 32 character ASCII alphanumeric identifier.
     pub fn new(value: impl Into<String>) -> Result<Self, AccountIdentifierError> {
         let value = value.into();
         if is_account_uuid(&value) {
@@ -94,8 +94,10 @@ impl<'de> Deserialize<'de> for AccountUuid {
 /// Returns whether `value` has the shape of a Silicon Accounts uuid.
 #[must_use]
 pub fn is_account_uuid(value: &str) -> bool {
-    (MIN_ACCOUNT_UUID_BYTES..=MAX_ACCOUNT_UUID_BYTES).contains(&value.len())
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    ((MIN_ACCOUNT_UUID_BYTES..=32).contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        || (value.len() == MAX_ACCOUNT_UUID_BYTES
+            && uuid::Uuid::parse_str(value).is_ok_and(|id| id.hyphenated().to_string() == value))
 }
 
 /// Returns whether `value` can name a storage tenant.
@@ -365,20 +367,21 @@ mod tests {
     }
 
     #[test]
-    fn uuids_are_case_sensitive_base62_and_never_normalized() {
+    fn canonical_uuids_and_case_sensitive_legacy_ids_are_accepted() {
         assert_eq!(uuid("zQo").as_str(), "zQo");
         assert_ne!(uuid("zQo"), uuid("zqo"));
         assert!(AccountUuid::new("ab").is_err());
         assert!(AccountUuid::new("c:ada").is_err());
         assert!(AccountUuid::new("zQo ").is_err());
-        assert!(AccountUuid::new("0192a3b4-0000-7000-8000-000000000000").is_err());
+        assert!(AccountUuid::new("0192a3b4-0000-4000-8000-000000000000").is_ok());
+        assert!(AccountUuid::new("0192A3B4-0000-4000-8000-000000000000").is_err());
         let error = AccountUuid::new("bad uuid")
             .err()
             .map(|error| error.to_string());
         assert_eq!(
             error.as_deref(),
             Some(
-                "`bad uuid` is not a Silicon Accounts uuid: a uuid is 3 to 32 ASCII letters and digits, such as `zQo`"
+                "`bad uuid` is not a Silicon Accounts uuid: use a canonical hyphenated UUID or a legacy 3 to 32 character account identifier"
             )
         );
     }

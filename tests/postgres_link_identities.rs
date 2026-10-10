@@ -224,7 +224,7 @@ async fn migrations_apply_to_an_empty_database_and_upgrade_origin_main() -> anyh
     let applied = empty
         .value("SELECT to_jsonb(count(*)) FROM _sqlx_migrations WHERE success")
         .await?;
-    assert_eq!(applied, json!(50));
+    assert_eq!(applied, json!(51));
     empty.drop().await?;
 
     let Some(upgraded) = World::create(true).await? else {

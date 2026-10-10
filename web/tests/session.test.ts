@@ -96,3 +96,11 @@ test("the account from a token response keeps what the shell shows", () => {
   assert.equal(accountFrom(null), null);
   assert.equal(accountFrom({ uuid: "K1E", kind: "carbon", id: "c:x", display_name: "  " })?.display_name, "c:x", "a blank name shows the id");
 });
+
+
+test("sealed sessions retain full canonical UUIDs", () => {
+  const uuid = "0192a3b4-0000-4000-8000-000000000000";
+  const current = session();
+  current.acct = { ...current.acct, uuid };
+  assert.deepEqual(sessionFromCookie(sealSession(current))?.acct, current.acct);
+});
