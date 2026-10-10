@@ -177,3 +177,148 @@ client library's hints address the verifying app). The error envelope shape is u
 ### S19. Uuids are text
 `AccountUuid` accepts 3–32 ASCII letters and digits (Silicon Accounts issues ≤ 12 today), is never lowercased or
 parsed as an RFC 4122 UUID, and every new column is `text COLLATE "C"`.
+
+## Service part 2 (drives and permissions), 2026-10-10
+
+### S20. Every account's drive is the storage tenant (supersedes S10)
+Each Carbon and Silicon owns exactly one drive, keyed by its Silicon Accounts uuid. The physical `org_id`
+column keeps its name and holds that uuid, so every composite key, foreign key, row-security policy, usage row,
+storage configuration and bin partition carries over. A drive is an `organizations` row whose
+`owner_account_uuid` equals its key (CHECK `organizations_drive_key_is_owner`); pre-migration organizations keep
+NULL and are never entered as drives (S10a). A drive comes into being on its owner's — or a custodian's — first
+request, with one root folder (`system_kind = 'drive_root'`, stored path `.`); the paths of what sits at the top
+start fresh (`notes/a.md`). Anyone else reaches only a drive that already exists and becomes a *participant* of it
+(an `organization_members` row) on first use, because the actor columns of every row reference a participant.
+Participation and `org_role` convey nothing any more; rights come only from S22.
+
+### S21. Drive keys compare exactly without re-collating `org_id`
+The decision file asks for the drive key as `text COLLATE "C"`. `org_id` keeps its declared `text` type with the
+database's deterministic collation instead of an `ALTER … COLLATE "C"` across ~30 tables: under deterministic
+collations equality and uniqueness are byte-exact (`'zQo' = 'zqo'` is false, checked on 5460), comparisons with
+the `COLLATE "C"` account columns resolve to `"C"` (checked), and nothing orders or pattern-matches drive keys.
+The re-collation would rebuild every composite key, foreign key and policy expression for no behavioural gain and
+risks collation-mismatch errors in the policies. Every new identity column is `COLLATE "C"`.
+
+### S22. Where rights come from
+Exactly four sources, evaluated by `domain::permission::evaluate_authorization`:
+1. **The drive.** Its owner, and the custodian of a Silicon that owns it, hold every operation on everything in
+   it, including what grantees created there (their space, their quota). This replaces the org owner/admin god
+   view; former admins get nothing implicit.
+2. **Creating the entry.** The creator keeps every operation on it in any drive, and so does the custodian of a
+   Silicon that created it (the custodian rule). After a custodian change the former custodian keeps only what it
+   created itself (proved end to end).
+3. **An explicit share** on the entry or an inheriting ancestor: read, write (add children), update (change what
+   exists). Delete and permission management are never shareable.
+4. **Creating a folder above it**, which conveys reading what others put inside (kept from before).
+Nothing is open to "everyone": legacy Public and Tag containers convey nothing. System folders (a drive's root,
+`apps/`, `apps/{app}/`) are structure — nobody renames, moves, deletes or shares them; only the drive's owner
+rights add at the top; only Briefcase creates folders directly in `apps/`. A custodian acts as itself: what it
+creates in a Silicon's drive is recorded as the custodian (proved), and an app acting through a proof never
+carries the account's custodial powers.
+
+### S23. How a request picks its drive
+Routes that address an entry act in the drive holding it (`briefcase.entry_drive`). Listing, folder creation at a
+path or the top, upload, the bin, usage, storage settings and path-based permission inspection take `drive`
+(the owner's `c:`/`si:` id or uuid, resolved at Silicon Accounts; default: the caller's own). `drive` together
+with `parent_id` is refused (`drive` / `drive_with_parent_id`): a folder names its drive. An unknown owner, or a
+visitor naming a drive that was never used, answers 404. An upload without a destination goes to the top of the
+drive (the old API required one; the top is now a real folder).
+
+### S24. Apps act only in the proof user's own drive
+A request authenticated by a proof never enters another drive, even for an entry shared with the user (404).
+Waveform and Extend store in the account's own `apps/{app}/`. Whether the first-party Interface may act on
+everything the user can reach is part 3's decision (S4).
+
+### S25. My files, Shared with me, and the drives of a custodian's Silicons
+`GET /api/v1/drives` lists the drives the caller opens with the owner's rights: its own (`own`) and, for a
+Carbon, each Silicon it looks after (`custodial`), with the owner, root folder and permanent URL; listing creates
+a custodial Silicon's drive if it was never used (the custodian may manage it). `GET /api/v1/shared` lists live,
+unexpired shares to the caller on entries it can still see, newest first, one item per entry with the owner so
+clients group by owner. Clients build **My files** from the own drive, **Shared with me** from `/shared`, and one
+entry per custodial Silicon.
+
+### S26. Silicons are not open to the world
+New table `silicon_share_allowances(silicon_uuid, allowed_uuid, allowed_by_uuid)`. A share (grant, invitation,
+folder invitee, delegated invitation) reaches a Silicon only from its custodian, the other Silicons its custodian
+looks after (the circle, D2), or an account the Silicon or its custodian allowed with
+`PUT /api/v1/silicons/{silicon}/allowed-accounts/{account}`; otherwise 403 `silicon_not_open` with what to do.
+Only the Silicon itself or its custodian reads or changes the list (403 `not_silicons_custodian`); changing it
+introspects like any sharing change. Removing an allowance keeps shares already made (they are revoked one by
+one). Anyone signed in can share with a Carbon. User-facing copy says "the Silicons you look after" /
+"its custodian and the custodian's other Silicons", never "circle".
+
+### S27. Sharing
+Immediate grants, no acceptance step. Only the entry's creator, the drive's owner and the custodian of either
+may share. The recipient's notification goes into the recipient's own inbox, in the recipient's drive, through
+`briefcase.deliver_notification` (which creates that drive's bookkeeping on first use and skips — logging — a
+uuid that names a legacy organization). The invitation email goes only to an active account that shared its
+`email` with Briefcase at sign-in. Notification subjects carry the entry's drive so links point at the right
+drive.
+
+### S28. Link access
+Allowed on any file or folder that is not a system folder, managed by the creator, the drive's owner or the
+custodian of either. The top of a drive, `apps/` and `apps/{app}/` never get a link (422 `protected_folder`) —
+the decision file allows links "below drive roots and the apps/ container"; `apps/{app}/` is itself a system
+folder, so links go on what is inside it.
+
+### S29. Quotas are per drive
+One `organization_usage` row per drive; defaults 100 GiB per UTC day and 1 PiB, overridable per drive in the
+database (`UPDATE briefcase.organization_usage SET daily_upload_limit_bytes = …, storage_limit_bytes = … WHERE
+org_id = '<uuid>'`). Uploads are charged to the drive they land in, whoever uploads them (tested: Bob's upload
+into Ada's shared folder spends Ada's allowance, not his). `GET /api/v1/usage` needs the drive's owner rights
+(404 otherwise). Recomputing `stored_bytes` for re-keyed legacy data belongs to part 3.
+
+### S30. Bring-your-own storage is per drive
+Configured by the drive's owner or the custodian of a Silicon that owns it (`drive` in the body; 403 otherwise).
+Each configuration persists its STS External ID (immutable with the rest of the descriptor). Legacy rows are
+backfilled with the exact organization-handle derivation, so customer trust policies keep working (upgrade path:
+`tos` → `161cc38e…`, equal to an independent SHA-256); new configurations derive it from the drive key. The API and
+the worker read the stored value (the worker's cleanup in a uuid drive no longer fails).
+
+### S31. Search and filter scope
+Search covers the caller's drive, its Silicons' drives and the 50 drives with the most recent live shares to it
+(a bound on fan-out); each drive is searched under its own authorization, results are merged by filename match,
+content hits and score (≤ 20), and each drive records its own access audit. Listing filters run within one drive;
+`from:`/`to:`/`for:@id` name accounts by the uuid their id resolves to now (unknown id: 422 `unknown_account`).
+There is no cross-drive "Recent" view; clients use `/shared` for what others shared.
+
+### S32. The bin is per drive
+The drive's owner and a custodian see everything in its bin; anyone else sees what they created there and what was
+shared with them. A restored entry goes back to its folder, or to the top of the drive (owner rights only) when
+the folder is gone or closed to the caller.
+
+### S33. Entries move only within their drive
+Bytes, versions and shares belong to a drive, so a move to a folder in another drive that the caller can see is
+422 `cross_drive_move` (download and upload instead); a destination it cannot see is 404, so a move never confirms
+that a hidden folder exists. The check reads the destination without recording an access.
+
+### S34. `account.deleted` erases the account's own drive (refines S9)
+In the webhook's transaction: every entry in the account's drive — including what grantees created there, which
+the owner always could delete — goes into one deletion batch with `purge_after = now` (the worker purges the
+objects, bring-your-own bucket included through the stored External ID), links end, shares in the drive end and
+the inbox is cleared; every live share *to* the account ends in every drive (audited); the account leaves every
+Silicon allow-list. What it created in other drives stays: it belongs to those drives. A Silicon deleted by its
+custodian loses its drive the same way. Both SQL functions refuse unless the cache records the deletion.
+
+### S35. Cross-drive questions go through narrow SECURITY DEFINER functions
+`entry_drive`, `shared_with_principal`, `principal_drives`, `deliver_notification`,
+`revoke_deleted_account_shares`, `erase_deleted_account_drive`; every request otherwise stays inside one drive
+under forced row security. Production migrates as a role without BYPASSRLS, so the functions' owner reads
+across drives through `drive_definer_lookup` SELECT policies created for the migrating role.
+`tests/postgres_drive_roles.rs` proves the layout with a non-superuser, non-BYPASSRLS migrator and calls every
+function as `briefcase_api`.
+
+### S36. Operation revisions
+Bumped where a request, response or refusal changed: `listEntries`, `createFolder`, `createInvitation`,
+`readOrganizationUsage`, `configureOrganizationBucket` → 2.0.0; `updateEntry`, `uploadFile`,
+`grantPermission`, `inspectEffectivePermissions`, `listNotifications`, `listBin` → 1.1.0; `setLinkAccess`,
+`resolvePermanentUrl` → 1.2.0. New operations start at 1.0.0. Rights changes that keep an operation's shape
+(who may delete, keep a self-destruct, restore) are covered by the contract major (4.0.0). The registry test now
+compares each operation's method, path and revision with `openapi.yaml`.
+
+### S37. Test harness
+The API tests' AWS configuration has a behavior version and a clock, as a loaded production configuration does,
+so the bring-your-own validation path runs (and fails without credentials) instead of panicking.
+`aws-smithy-async` is a dev-dependency only (already in the lock graph). MinIO no longer publishes binaries
+(HTTP 410 from dl.min.io), so uploads are tested through the content repository with a stored-object receipt, as
+the existing versioning tests do.

@@ -177,3 +177,115 @@ the Carbon at Silicon Accounts → `account.updated` applied; `interface` issued
   `test-stack.json`, never printing them), `e2e.py` (the 19-step check, restores the webhook URL at the end) and
   `apply-0047.py` (brings a database to origin/main's schema the way sqlx would, for upgrade tests).
   `.mig/boot-check.sh` runs the boot-validation cases.
+
+## 2026-10-10 — Service part 2 of 3: drives and permissions
+
+Scope: service stage step 6 and the authorisation parts of step 10 — drive as tenant, definer helpers, My files /
+Shared with me / custodial drives, rights (drive owner, creator, custodian), sharing by id, link rules, quotas,
+bring-your-own storage, notifications, search and filter scope, bins. Decisions S20–S37 in
+[decisions.md](decisions.md); cutover notes and the UNDERSTANDING proposal extended.
+
+### Hand-over
+
+An earlier run of this stage stopped at 05:43 after committing `dbcd2c2` (migration 0049, persisted External
+IDs) and leaving the domain/persistence/API rewrite uncommitted (49 files, green tests, two clippy errors). It
+was backed up to `<scratch>/briefcase-p2-wip-backup/`, reviewed file by file, fixed (clippy:
+`ordinary_routes` too long → `drive_routes()`; `DriveState` bools → `recorded_owner`), the D9 wording in
+`ActorKind`/`ActorTypeDto` docs corrected, and committed as `8032824`. Its scratch databases
+(`briefcase_p2_owner`, `briefcase_p2_sql`) and role (`briefcase_p2_migrator`) were dropped.
+
+### What changed
+
+Commits: `dbcd2c2` Add personal drives to the schema and persist bring-your-own External IDs (earlier run);
+`8032824` Make every account's drive the storage tenant and authorize by drive; `df27c9f` Test the cross-drive
+functions under production's database roles; `995e87a` Refuse moving an entry into another drive with an exact
+reason; `3689e16` Cover every drive route family for owner, share, custodian and outsider; `971a226` Document
+personal drives in the API contract and registry; `c652e03` Resolve each drive once per Shared with me page;
+`2b9dd98` List the drive operations in the documented-status contract test; and the commit adding this section.
+
+- **Migration 0049** (`migrations/0049_personal_drives.sql`): drive root shape + unique index, `entry_id`
+  index, path derivation for children of a drive root, `apps` reserved at the top (trigger), drive key = owner
+  (CHECK), persisted `external_id` (backfilled with the org-handle derivation, immutable), `shared-with` index,
+  `silicon_share_allowances`, `drive_definer_lookup` policies for the migrating role, and the definer functions
+  `entry_drive`, `shared_with_principal`, `principal_drives`, `deliver_notification`,
+  `revoke_deleted_account_shares`, `erase_deleted_account_drive`, with grants.
+- **Domain** (`domain/actor.rs`, `domain/permission.rs`): `DriveAccess {Owner, Custodian, Visitor}`,
+  `RequestAuthContext::{for_drive, for_account, in_drive, with_custodial_silicons}`, creator set = caller + its
+  Silicons; the four-source policy (S22); `OrganizationRole`, tags and Public/Tag boundaries removed from policy;
+  `SystemEntryKind::{DriveRoot, ApplicationContainer (apps/), ApplicationFolder (apps/{app}/)}` plus legacy kinds.
+- **Drive resolution** (`api/drives.rs`): `for_entry` (entry_drive), `named` (`drive` selector), `own`,
+  `enter` (relation from the cached custody facts; proofs confined to the user's own drive); every handler moves
+  its request into the right drive before calling a use case.
+- **Persistence** (`infrastructure/postgres/drives.rs` replaces `roots.rs`): drives created on the owner's or
+  custodian's first request with a root folder, visitors become participants, `apps/{app}/` on an app's first
+  use; queries use the creator set and drive owner rights instead of roles/tags; restore falls back to the drive
+  root; notifications delivered into the recipient's drive; worker email reads `accounts.email`.
+- **Routes**: `GET /api/v1/drives`, `GET /api/v1/shared`,
+  `GET /api/v1/silicons/{silicon}/allowed-accounts`, `PUT|DELETE …/allowed-accounts/{account}`; `drive` on
+  listings, folder creation, uploads, bin, usage, storage configuration and permission inspection; uploads
+  without a destination go to the top of the drive; 422 `cross_drive_move`, `reserved_name`, `tags_retired`,
+  `public_space_retired`, `protected_folder`; 403 `silicon_not_open`, `not_silicons_custodian`; 422
+  `not_a_silicon`, `allowance_self`.
+- **OpenAPI**: 54 operations, new `Drives` tag, `Drive`/`Silicon` parameters, `AccountSummary`, `Drive(List)`,
+  `Shared(Entry|Page)`, `AllowedAccounts`; revisions bumped per S36 and mirrored in `api/versioning.rs`;
+  `docs/api/operations.md` regenerated from the document; `docs/version-policy.md` notes the drive changes.
+  `openapi-spec-validator openapi.yaml`: OK (the session scratchpad's `venv-oas`).
+
+### Tests
+
+| command | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | clean (2 errors in the inherited WIP fixed first) |
+| `.mig/test.sh` = `BRIEFCASE_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/briefcase_mig cargo test --locked --all-targets --all-features -- --test-threads=1` (final) | **206 passed, 0 failed, 2 ignored** (lib 194, openapi_contract 3 + 1 ignored, postgres_drive_roles 1, postgres_metadata 3, postgres_versioning 4, s3_object_store 1; ignored: `telemetry_live_delivery`, the client cross-check) |
+| inherited WIP before any change (same command) | 197 passed, 2 ignored; `api::drives_tests` really writes (entries 1069 → 1095) |
+| `cargo test --test postgres_drive_roles` | 1 passed: a throwaway database migrated by a non-superuser, non-BYPASSRLS owner; every definer function called as `briefcase_api`; RLS still confines each session; the worker's self-destruct statement passes the drive-root trigger |
+| `cargo test --lib api::drive_access_tests` | 8 passed (uploads charged to the drive they land in, versions/content/download 404 for outsiders, self-destruct keeps, storage settings, search scope, permanent/public URLs, proofs confined, filters by id, cross-drive moves) |
+| `cargo test --lib api::drives_tests` | 4 passed (drives and custodial drives, shares by id + Shared with me + bins + inbox + inspection, Silicon allow-list, account deletion) |
+| `cargo test --test openapi_contract` | 3 passed, 1 ignored; the registry test now compares id, method, path and revision for all 54 operations |
+| all 49 migrations applied with psql one file per transaction as `briefcase_test_migrator` (NOSUPERUSER NOBYPASSRLS) | all applied |
+| upgrade path: `briefcase_upgrade` (origin/main 0047 + legacy fixture, then 0048 in part 1) + legacy `public_root`, a link-public folder and an active BYO config, then `briefcase-migrate` | 0049 applied; legacy rows and paths unchanged; `tos` stays ownerless (not a drive, `entry_drive` NULL); `external_id` = `161cc38e…` = SHA-256 of `silicon-briefcase:byo-storage:v1\0tos` computed independently |
+| fresh database: `briefcase-migrate` on a recreated `briefcase_e2e` | 0001–0049 applied |
+| end to end: `python3 <scratch>/briefcase-e2e/e2e-drives.py p2a` against the shared local Silicon Accounts stack, API on 127.0.0.1:4101 (`run-api.py "briefcase.entries.list=interface"`) | **36/36 passed**, no WARN/ERROR/5xx in the API log; webhook URL restored to `http://127.0.0.1:9593/briefcase/webhooks` |
+
+End to end, with real sign-ins (three Carbons, one Silicon via SLT): ada's drives list her own and Scout's;
+top-level paths start fresh; a share by `c:` id is stored by uuid and appears in bob's Shared with me; in ada's
+drive bob sees only the shared folder; bob's share to Scout is refused (`silicon_not_open`) until ada allows him,
+then reaches Scout; ada opens and adds to Scout's drive as herself; usage is the owner's and custodian's only;
+a cross-drive move is refused; an `interface` User verification proof for bob cannot reach ada's drive but works
+in bob's; ada hands Scout to bob at Silicon Accounts → `silicon.custodian_changed` → ada loses the custodial
+drive (keeping only what she created there), bob gains it; cat deletes her account → `account.deleted` → her
+drive is erased (2 entries due for purge), the share to her ends, her files leave bob's Shared with me, her token
+is refused, ada's files are untouched.
+
+### Left for part 3 (and later stages)
+
+- Part 3: identity re-keying migrations, `identity_links` and the `link-identities` operator command (moving
+  legacy org data into drives: `{org}-public/`, `{org}-{tag}/`, `apps/{app}/{org}-public/`, `unclaimed/…`,
+  snapshot shares written directly, tag grants expanded, quota overrides and `stored_bytes` recomputed);
+  `/{owner-id}/{path}` permanent URLs (`/api/v1/paths/…`) with `account_id_history` redirects and the legacy
+  `/org/{org}/…` alias table; `apps/{issuer}/` confinement details and the first-party `interface` exception
+  (today proofs reach only `apps/{issuer}/` in the user's own drive); the transfer route's tenant selector; the
+  per-operation revisions for the URL operations.
+- Client stage: `briefcase-client` 4.0.0 with the 54 operations and their revisions (un-ignore
+  `official_client_consumes_the_exact_published_operations`). CLI: `@<id>/path` targets map to `drive`.
+- Web stage: My files / Shared with me / one entry per custodial Silicon from `/drives` and `/shared`, the
+  "You might not be seeing all the contents of this folder" note on any folder in another drive, the Silicon
+  allow-list in a Silicon's settings, storage settings per drive.
+- Docs stage: README and `docs/` beyond the API inventory still describe organisations.
+
+### Gotchas
+
+- `openapi.yaml` is edited text-level by `<scratch>/briefcase-openapi-part2.py` (strict: every edit asserts its
+  original). Plain YAML scalars cannot contain `: ` (write `` `c:`/`si:` ``), and inside single-quoted scalars
+  apostrophes are doubled.
+- sqlx 0.9 needs `sqlx::AssertSqlSafe(...)` for DDL built at run time (test role/database names).
+- The worker never updates `entries.name/parent_id/path`; 0046's alias trigger (SELECT on
+  `identifier_path_aliases`, not granted to the worker) would refuse it. 0049's drive-root trigger fires on
+  `deleted_at` too, which the worker does update; its EXECUTE grant covers that.
+- The test role `briefcase_test_migrator` (LOGIN, local password) stays on 5460: `postgres_drive_roles` creates it
+  when missing and drops only its own throwaway database.
+- After the OpenAPI commit `971a226` one lib test (`every_openapi_operation_has_the_expected_response_status`)
+  failed until `2b9dd98` added the new operations to its table; run the whole suite, not just the contract tests,
+  after a contract change.
+- MinIO binaries are gone from dl.min.io (HTTP 410), so S3 paths are still not exercised locally.
