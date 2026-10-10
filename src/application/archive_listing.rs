@@ -15,8 +15,9 @@ use time::OffsetDateTime;
 
 /// The most entries one listing returns.
 pub const MAX_LISTED_ENTRIES: usize = 10_000;
-/// The longest central directory read from a zip archive.
-pub const MAX_ZIP_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
+/// The longest central directory read from a zip archive: room for far more
+/// than [`MAX_LISTED_ENTRIES`] entries even with long names.
+pub const MAX_ZIP_DIRECTORY_BYTES: u64 = 8 * 1024 * 1024;
 /// How much of the end of a zip archive is read to find its directory.
 pub const ZIP_TAIL_BYTES: u64 = 65_557 + 20 + 56;
 /// The most archive bytes a tar listing reads from storage.

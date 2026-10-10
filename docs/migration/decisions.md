@@ -425,11 +425,12 @@ way back. A dry run does everything and rolls back.
 
 ### S46. Archive listing
 `GET /api/v1/entries/{id}/archive` (`listArchiveContents`) for anyone who may read the file (same rule and audit as
-reading content). Formats by name, then media type: zip (central directory via ranged reads, zip64 aware, ≤ 64 MiB
+reading content). Formats by name, then media type: zip (central directory via ranged reads, zip64 aware, ≤ 8 MiB
 directory), tar / tar.gz / tar.zst (streamed, ≤ 1 GiB of archive read), 7z (index read from a private temporary
 copy, archives ≤ 512 MiB). At most 10,000 entries (`limit`), with `truncated` and `truncated_because`. Paths are
 decoded leniently and only displayed; encrypted entries are flagged; an encrypted 7z index answers 422
-`archive_encrypted`. The route has the upload deadline (it reads bytes before answering). New dependencies:
+`archive_encrypted`. The route has the upload deadline (it reads bytes before answering); tar and 7z listings run
+at most four at a time. New dependencies:
 `flate2` (rust backend) and `sevenz-rust2` (no default features); `zip` and the 7z encoder are test-only.
 
 ### S47. Custodians find Silicons the cutover recorded

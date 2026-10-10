@@ -37,6 +37,10 @@ use crate::{
     error::AppError,
 };
 
+/// Listings that read whole archives (tar streams, 7z copies) run a few at a
+/// time; the others wait for a slot.
+static LISTING_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// Query of an archive listing.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,12 +83,19 @@ pub(crate) async fn list(
             )
         })?;
     let listing = extract::scoped(&context, async {
-        match format {
-            ArchiveFormat::Zip => list_zip(&state, &context, entry_id, limit).await,
-            ArchiveFormat::SevenZip => list_seven_zip(&state, &context, entry_id, limit).await,
-            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarZst => {
-                list_tar(&state, &context, entry_id, format, limit).await
-            }
+        if format == ArchiveFormat::Zip {
+            return list_zip(&state, &context, entry_id, limit).await;
+        }
+        let _slot = LISTING_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal {
+                category: "archive_listing_slots",
+            })?;
+        if format == ArchiveFormat::SevenZip {
+            list_seven_zip(&state, &context, entry_id, limit).await
+        } else {
+            list_tar(&state, &context, entry_id, format, limit).await
         }
     })
     .await?;

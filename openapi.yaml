@@ -1308,7 +1308,7 @@ paths:
       - name: org_id
         in: path
         required: true
-        description: The organization key the address used.
+        description: The first segment of the old address, such as `tos` in `/org/tos/…`.
         schema:
           type: string
           pattern: ^[A-Za-z0-9_-]{3,50}$
@@ -1569,7 +1569,8 @@ paths:
       operationId: readPublicEntry
       summary: Read or download a publicly shared file or folder
       description: What anyone with the link may read, at `/public/{owner}/{path}`. The owner is a `c:`/`si:` id or
-        the account's uuid; an organization key from before personal drives also works, through the cutover's aliases.
+        the account's uuid; the first segment of an address from before personal drives (`tos` in
+        `/public/tos/…`) also works, through the cutover's aliases.
         An id the owner gave up answers `308` with the address under its current id.
       tags:
       - Permissions
@@ -1577,8 +1578,8 @@ paths:
       - name: owner
         in: path
         required: true
-        description: The drive's owner (`c:`/`si:` id or account uuid), or an organization key from before personal
-          drives.
+        description: The drive's owner (`c:`/`si:` id or account uuid), or the first segment of an address from
+          before personal drives.
         schema:
           type: string
           maxLength: 80
