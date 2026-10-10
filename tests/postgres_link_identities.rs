@@ -503,6 +503,17 @@ async fn link_identities_moves_the_organization_into_personal_drives() -> anyhow
         vec![&json!(["Saq1", "tos-public/handbook/guide.md"])]
     );
 
+    // Everything the run created carries a UUIDv7, as Briefcase requires.
+    let not_v7 = w
+        .value(
+            "SELECT to_jsonb(count(*)) FROM ( \
+                 SELECT grant_id AS id FROM briefcase.permission_grants \
+                 UNION ALL SELECT entry_id FROM briefcase.entries) AS ids \
+              WHERE substr(id::text, 15, 1) <> '7'",
+        )
+        .await?;
+    assert_eq!(not_v7, json!(0));
+
     // The API's role finds it all where the new service looks.
     let mut api = w.superuser().await?;
     api.execute("SET ROLE briefcase_api").await?;

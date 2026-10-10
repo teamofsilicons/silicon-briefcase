@@ -45,6 +45,7 @@ pub(crate) async fn list(
         })?;
     let mut owners = vec![(account.uuid.as_str().to_owned(), "own")];
     if account.kind == ActorKind::Carbon {
+        state.accounts.learn_unknown_custodians().await;
         for silicon in state.accounts.custodial_silicons(&account.uuid).await? {
             owners.push((silicon.uuid, "custodial"));
         }

@@ -225,7 +225,7 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    created uuid := gen_random_uuid();
+    created uuid := briefcase.new_uuid_v7();
     present record;
 BEGIN
     IF p_id = p_drive THEN

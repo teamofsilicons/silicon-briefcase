@@ -647,9 +647,18 @@ fn repository_error(error: &MetadataRepositoryError) -> AppError {
         MetadataRepositoryError::Unavailable => AppError::DependencyUnavailable {
             dependency: "database",
         },
-        MetadataRepositoryError::Internal(_) => AppError::Internal {
-            category: "metadata_repository",
-        },
+        MetadataRepositoryError::Internal(source) => {
+            // The cause stays in the service's own log; callers get the
+            // category only.
+            tracing::error!(
+                event = "metadata_repository_failed",
+                error = %format!("{source:#}"),
+                "metadata repository failure"
+            );
+            AppError::Internal {
+                category: "metadata_repository",
+            }
+        }
     }
 }
 

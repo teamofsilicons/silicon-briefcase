@@ -307,6 +307,47 @@ impl AccountStore {
         .await
     }
 
+    /// Lists Silicons Briefcase recorded without learning their custodian
+    /// (the cutover records accounts before they sign in), oldest first,
+    /// that were last confirmed before `stale_before`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn silicons_without_custodian(
+        &self,
+        stale_before: OffsetDateTime,
+        limit: i64,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT account_uuid FROM briefcase.accounts \
+              WHERE kind = 'silicon' AND custodian_uuid IS NULL AND status = 'active' \
+                AND refreshed_at < $1 \
+              ORDER BY refreshed_at, account_uuid \
+              LIMIT $2",
+        )
+        .bind(stale_before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Records that Silicon Accounts was just asked about an account it did
+    /// not answer for, so the question waits a cache lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error.
+    pub async fn touch(&self, uuid: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE briefcase.accounts SET refreshed_at = clock_timestamp() WHERE account_uuid = $1",
+        )
+        .bind(uuid)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Lists the cached Silicons whose custodian is `custodian_uuid`.
     ///
     /// # Errors

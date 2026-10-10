@@ -375,6 +375,46 @@ impl AccountDirectory {
             .map_err(database_error)
     }
 
+    /// Looks up a few Silicons Briefcase knows without their custodian, so
+    /// a custodian finds their drives before the Silicons come back. The
+    /// cutover records every linked Silicon this way; a Silicon's own first
+    /// request, a lookup or `silicon.custodian_changed` would teach it too.
+    /// Failures only delay it: each account is asked at most once per cache
+    /// lifetime.
+    pub async fn learn_unknown_custodians(&self) {
+        const BATCH: i64 = 10;
+        let ttl = time::Duration::try_from(self.ttl).unwrap_or(time::Duration::MAX);
+        let stale_before = OffsetDateTime::now_utc() - ttl;
+        let unknown = match self
+            .store
+            .silicons_without_custodian(stale_before, BATCH)
+            .await
+        {
+            Ok(unknown) => unknown,
+            Err(error) => {
+                tracing::warn!(event = "unknown_custodians_query_failed", error = %error, "could not list Silicons without a custodian");
+                return;
+            }
+        };
+        for uuid in unknown {
+            let Ok(account) = AccountUuid::new(uuid.clone()) else {
+                continue;
+            };
+            match self.refresh(&account).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if let Err(error) = self.store.touch(&uuid).await {
+                        tracing::warn!(event = "account_touch_failed", error = %error, "could not record a lookup");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(event = "accounts_custodian_lookup_failed", error = %error, "could not look up a Silicon's custodian");
+                    break;
+                }
+            }
+        }
+    }
+
     /// Returns whether `sharer` may share with `recipient`.
     ///
     /// Carbons can be reached by anyone signed in to Briefcase. Silicons are

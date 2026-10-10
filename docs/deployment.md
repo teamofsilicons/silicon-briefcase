@@ -102,7 +102,21 @@ signature.
 account through `/api/v1/obo/*` with a Silicon Accounts User verification
 proof: entries `scope=app` or `scope=app1|app2`, separated by commas or spaces.
 Unset means no app may (the API logs a warning at start). The production value
-is recorded in `docs/migration/decisions.md`.
+is recorded in `docs/migration/decisions.md`. An app acting this way reaches
+only its own folder, `apps/{app}/`, in the account's own drive, and what it
+creates records the app.
+
+`BRIEFCASE_PROOF_FIRST_PARTY_ISSUERS` (plain, optional) names the apps among
+those that act with everything the account can reach: its own files, what was
+shared with it and the drives of the Silicons it looks after, still only
+through the `/api/v1/obo/*` routes their scopes allow. Production:
+`interface`. Unset, every app is confined to its folder.
+
+**Moving organization data at the cutover.** After `briefcase-migrate` applied
+migration 0050, and with the API and worker stopped, run
+`briefcase-migrate link-identities --file mapping.csv --dry-run`, review the
+report, then run it without `--dry-run` (same environment as the migrator). The
+mapping and the procedure are in `docs/migration/cutover.md`.
 
 **3. Set Briefcase's sign-in setup and webhook at Silicon Accounts.** With the
 app's credentials (never from the Briefcase CLI): the sign-in setup allows the

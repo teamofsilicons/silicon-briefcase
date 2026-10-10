@@ -808,3 +808,46 @@ async fn a_deleted_accounts_drive_is_erased_and_its_shares_end() -> anyhow::Resu
     assert_eq!(status, StatusCode::OK);
     Ok(())
 }
+
+#[tokio::test]
+async fn custodians_find_silicons_the_cutover_recorded_before_they_signed_in() -> anyhow::Result<()>
+{
+    let Some(w) = World::new().await? else {
+        return Ok(());
+    };
+    // link-identities records each linked Silicon with its kind and id but
+    // without its custodian, and never as freshly confirmed.
+    let (uuid, id) = (w.f.uuid("Rec"), w.f.id("si:recorded"));
+    w.f.stub_account(
+        &uuid,
+        &id,
+        silicon_summary(&uuid, &id, (&w.ada.uuid, &w.ada.id)),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO briefcase.accounts (account_uuid, kind, public_id, refreshed_at) \
+         VALUES ($1, 'silicon', $2, 'epoch')",
+    )
+    .bind(&uuid)
+    .bind(&id)
+    .execute(&w.f.admin)
+    .await?;
+    let (status, drives) = w.call(&w.ada, Method::GET, "/api/v1/drives", None).await?;
+    assert_eq!(status, StatusCode::OK, "{drives}");
+    let custodial: Vec<&str> = drives["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item["relation"] == "custodial")
+                .filter_map(|item| item["owner"]["uuid"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(custodial.contains(&uuid.as_str()), "{drives}");
+    assert_eq!(
+        w.f.account_row(&uuid).await?["custodian_uuid"],
+        w.ada.uuid.as_str()
+    );
+    Ok(())
+}
