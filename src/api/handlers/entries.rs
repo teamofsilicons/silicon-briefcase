@@ -14,10 +14,11 @@ use uuid::Uuid;
 use crate::{
     application::{
         content::ContentIntent,
+        context::ExecutionContext,
         service::{
             CONTENTS_PAGE_SIZE, CreateFolderCommand, InitialPermission, ListBinQuery,
-            ListEntriesQuery as ServiceListEntriesQuery, PageRequest, RestoreBinEntryCommand,
-            SearchQuery, UpdateEntryCommand,
+            ListEntriesQuery as ServiceListEntriesQuery, MetadataRepository as _, PageRequest,
+            RestoreBinEntryCommand, SearchQuery, UpdateEntryCommand,
         },
     },
     domain::{
@@ -26,7 +27,7 @@ use crate::{
         entry::{EntryName, EntryPath},
         filter::FilterQuery,
         ids::EntryId,
-        permission::{AccessRight, GrantedAccess},
+        permission::{AccessRight, EntryVisibility, GrantedAccess},
     },
     error::AppError,
 };
@@ -285,6 +286,9 @@ pub(crate) async fn update_entry(
     let resource = entry_id.to_string();
     let context = extract::authenticate(&state, &headers, Action::UpdateEntry, &resource).await?;
     let context = drives::for_entry(&state, context, entry_id).await?;
+    if let Some(destination) = body.parent_id {
+        refuse_cross_drive_move(&state, &context, extract::entry_id(destination)?).await?;
+    }
     let metadata = extract::mutation(&headers, "update_entry", &resource, &body, true)?;
     let command = UpdateEntryCommand::new(
         entry_id,
@@ -462,6 +466,47 @@ pub(crate) async fn restore_bin_entry(
     .await
     .map_err(metadata_error)?;
     Ok(Json(state.mapper.entry(restored)?))
+}
+
+/// Entries move only within the drive that holds them: their bytes, versions
+/// and shares belong to it. A destination folder the caller can see in
+/// another drive gets an exact refusal; one it cannot see is reported by the
+/// move itself exactly like a folder that does not exist.
+async fn refuse_cross_drive_move(
+    state: &AppState,
+    context: &ExecutionContext,
+    destination: EntryId,
+) -> Result<(), AppError> {
+    let repository = state.content_adapter.metadata_repository();
+    let drive = repository
+        .entry_drive(destination.as_uuid())
+        .await
+        .map_err(|_| AppError::Internal {
+            category: "drive_lookup",
+        })?;
+    let Some(drive) = drive.filter(|drive| *drive != extract::tenant(context)) else {
+        return Ok(());
+    };
+    let Ok(elsewhere) = drives::enter(state, context.clone(), &drive).await else {
+        return Ok(());
+    };
+    let visible = extract::scoped(
+        &elsewhere,
+        repository.find_active_entry(&elsewhere, destination),
+    )
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|entry| {
+        entry.authorization(elsewhere.authorization()).visibility() != EntryVisibility::Hidden
+    });
+    if visible {
+        return Err(AppError::unprocessable(
+            "cross_drive_move",
+            "Files and folders move only within the drive that holds them. To put this in another drive, download it and upload it there.",
+        ));
+    }
+    Ok(())
 }
 
 /// Folders used to be created in a Public space or a tag's space. Personal
