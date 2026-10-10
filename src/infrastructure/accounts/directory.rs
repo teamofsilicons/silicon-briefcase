@@ -95,6 +95,21 @@ impl AccountDirectory {
         &self.store
     }
 
+    async fn refuse_retired_uuid(&self, uuid: &AccountUuid) -> Result<(), AppError> {
+        if self
+            .store
+            .retired_uuid(uuid.as_str())
+            .await
+            .map_err(database_error)?
+        {
+            return Err(AppError::unauthorized(
+                "account_uuid_migrated",
+                "This Accounts identity was migrated. Sign in again to use its canonical UUID.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Verifies a Silicon Accounts access token and records the account.
     ///
     /// With `introspect`, Silicon Accounts is also asked whether the token is
@@ -123,6 +138,7 @@ impl AccountDirectory {
                 "The access token has no `kind` claim, so Briefcase cannot tell a Carbon from a Silicon. Sign in again with Silicon Accounts.",
             )
         })?;
+        self.refuse_retired_uuid(&uuid).await?;
         let issued_at = claims
             .iat
             .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
@@ -223,6 +239,7 @@ impl AccountDirectory {
         }
         let user = proof.user.as_ref().ok_or_else(invalid_proof)?;
         let uuid = AccountUuid::new(user.uuid.clone()).map_err(|_| invalid_proof())?;
+        self.refuse_retired_uuid(&uuid).await?;
         let record = match user.kind {
             Some(kind) => self
                 .store
@@ -270,6 +287,7 @@ impl AccountDirectory {
     /// Returns 422 `unknown_account` when Silicon Accounts has no such
     /// account, or the lookup error.
     pub async fn record(&self, uuid: &AccountUuid) -> Result<AccountRecord, AppError> {
+        self.refuse_retired_uuid(uuid).await?;
         if let Some(record) = self
             .store
             .find(uuid.as_str())

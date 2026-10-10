@@ -74,11 +74,20 @@ pub(crate) async fn list(
                 })?,
             )
             .await?;
+        let external_id = state
+            .accounts
+            .store()
+            .storage_external_id(&entered)
+            .await
+            .map_err(|_| AppError::Internal {
+                category: "storage_configuration",
+            })?
+            .unwrap_or_else(|| crate::infrastructure::s3::organization_storage_external_id(&owner));
         items.push(json!({
             "owner": account_json(&record),
             "relation": relation,
             "root_id": root.entry.id.as_uuid(),
-            "storage_external_id": crate::infrastructure::s3::organization_storage_external_id(&owner),
+            "storage_external_id": external_id,
             "permanent_url": state
                 .mapper_for([owner.as_str()])
                 .await?

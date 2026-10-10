@@ -215,6 +215,35 @@ pub struct AccountStore {
 }
 
 impl AccountStore {
+    /// Whether an immutable mapping retired this credential subject.
+    ///
+    /// # Errors
+    /// Returns the database error.
+    pub async fn retired_uuid(&self, uuid: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM briefcase.account_uuid_mappings WHERE old_uuid=$1)",
+        )
+        .bind(uuid)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    /// The persisted AWS trust identity, retained when a drive is rekeyed.
+    ///
+    /// # Errors
+    /// Returns the database error.
+    pub async fn storage_external_id(
+        &self,
+        context: &crate::application::context::ExecutionContext,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let tenant = super::TenantContext::from_execution(context);
+        let mut tx = super::begin_tenant_transaction(&self.pool, &tenant).await?;
+        let value = sqlx::query_scalar("SELECT external_id FROM briefcase.organization_storage_configs WHERE org_id=briefcase.current_org_id() ORDER BY (status='active') DESC,created_at DESC LIMIT 1")
+            .fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(value)
+    }
+
     /// Wraps the API pool.
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
@@ -593,14 +622,27 @@ impl AccountStore {
             transaction.rollback().await?;
             return Ok(WebhookOutcome::Duplicate);
         }
+        let custodian = match &delivery.change {
+            AccountChange::Updated(snapshot) => snapshot.custodian_uuid.as_deref(),
+            AccountChange::CustodianChanged { custodian_uuid } => Some(custodian_uuid.as_str()),
+            _ => None,
+        };
+        let retired = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM briefcase.account_uuid_mappings WHERE old_uuid=$1 OR old_uuid=$2)",
+        )
+        .bind(delivery.account_uuid.as_deref())
+        .bind(custodian)
+        .fetch_one(&mut *transaction)
+        .await?;
         let outcome = match &delivery.account_uuid {
+            _ if retired => WebhookOutcome::Ignored,
             Some(uuid) => apply_change(&mut transaction, uuid, delivery).await?,
             None => WebhookOutcome::Ignored,
         };
         let recorded = sqlx::query_scalar::<_, String>(
             "INSERT INTO briefcase.accounts_webhook_receipts \
                  (event_id, event_type, account_uuid, occurred_at, outcome) \
-             VALUES ($1, $2, $3, $4, $5) \
+             VALUES ($1, $2, COALESCE((SELECT new_uuid FROM briefcase.account_uuid_mappings WHERE old_uuid=$3),$3), $4, $5) \
              ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
         )
         .bind(&delivery.event_id)

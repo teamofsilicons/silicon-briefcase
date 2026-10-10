@@ -224,7 +224,7 @@ async fn migrations_apply_to_an_empty_database_and_upgrade_origin_main() -> anyh
     let applied = empty
         .value("SELECT to_jsonb(count(*)) FROM _sqlx_migrations WHERE success")
         .await?;
-    assert_eq!(applied, json!(51));
+    assert_eq!(applied, json!(52));
     empty.drop().await?;
 
     let Some(upgraded) = World::create(true).await? else {
@@ -702,4 +702,285 @@ async fn link_identities_refuses_with_the_exact_reason_and_changes_nothing() -> 
     let _ = NOTES;
     w.drop().await?;
     Ok(())
+}
+
+const UUID_MAPPING: &str = "old_uuid,new_uuid,kind
+Saq1,12345678-1234-4234-8234-123456789abc,carbon
+Bob1,22345678-1234-4234-8234-123456789abc,carbon
+Sct1,32345678-1234-4234-8234-123456789abc,silicon
+Nob1,42345678-1234-4234-8234-123456789abc,carbon
+Del1,52345678-1234-4234-8234-123456789abc,carbon
+";
+
+impl World {
+    async fn rekey(&self, mapping: &str, dry_run: bool) -> anyhow::Result<Value> {
+        let mapping = postgres::rekey_accounts::parse_mapping(mapping)?;
+        postgres::rekey_accounts::apply(&self.migrator, &mapping, dry_run).await
+    }
+
+    /// Every table, not merely the fields that the migration expects to edit.
+    async fn complete_snapshot(&self) -> anyhow::Result<Value> {
+        let mut session = self.superuser().await?;
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT tablename FROM pg_tables WHERE schemaname='briefcase' ORDER BY tablename",
+        )
+        .fetch_all(&mut session)
+        .await?;
+        let mut result = serde_json::Map::new();
+        for name in names {
+            let value: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text),'[]'::jsonb) FROM briefcase.\"{name}\" row"
+            ))).fetch_one(&mut session).await?;
+            result.insert(name, value);
+        }
+        result.insert("catalog".into(), self.value("SELECT jsonb_build_object(
+            'rls',(SELECT jsonb_agg(jsonb_build_array(relname,relrowsecurity,relforcerowsecurity) ORDER BY relname) FROM pg_class WHERE relnamespace='briefcase'::regnamespace AND relkind='r'),
+            'triggers',(SELECT jsonb_agg(jsonb_build_array(tgrelid::regclass::text,tgname,tgenabled) ORDER BY tgrelid::regclass::text,tgname) FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='briefcase'::regnamespace)),
+            'constraints',(SELECT jsonb_agg(jsonb_build_array(conrelid::regclass::text,conname,condeferrable,condeferred) ORDER BY conrelid::regclass::text,conname) FROM pg_constraint WHERE connamespace='briefcase'::regnamespace))").await?);
+        Ok(Value::Object(result))
+    }
+
+    async fn seed_uuid_references(&self) -> anyhow::Result<()> {
+        self.link(MAPPING, false).await?;
+        let mut session = self.superuser().await?;
+        sqlx::raw_sql("UPDATE briefcase.accounts SET custodian_uuid='Saq1' WHERE account_uuid='Sct1';
+            INSERT INTO briefcase.accounts(account_uuid,kind,public_id,status,deleted_at) VALUES('Del1','carbon','c:deleted','deleted',clock_timestamp());
+            INSERT INTO briefcase.account_id_history(public_id,account_uuid,replaced_at) VALUES('c:before','Saq1',clock_timestamp());
+            INSERT INTO briefcase.silicon_share_allowances(silicon_uuid,allowed_uuid,allowed_by_uuid) VALUES('Sct1','Bob1','Saq1');
+            INSERT INTO briefcase.accounts_webhook_receipts(event_id,event_type,account_uuid,outcome) VALUES('uuid-history','account.updated','Saq1','applied');
+            UPDATE briefcase.audit_events SET metadata=jsonb_build_object('account_uuid','Saq1','actor',jsonb_build_object('kind','silicon','id','Sct1'),'text','Saq1','object_key','Saq1','entry_id',entry_id);
+            INSERT INTO briefcase.honeycomb_environments(environment_id,org_id,environment_revision,generation,key_version,state,operation_id,testing_key_ciphertext,testing_key_nonce)
+              VALUES('01900000-0000-7000-8000-000000000999','Saq1',1,1,1,'active','01900000-0000-7000-8000-000000000998',decode('deadbeef53617131','hex'),decode('123456','hex'));
+            UPDATE briefcase.outbox_events SET payload=payload || '{\"account_uuid\":\"Saq1\",\"signed_bytes\":\"unchanged\"}'::jsonb;")
+            .execute(&mut session).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn uuid_backfill_preserves_every_resource_and_is_atomic_and_replay_safe() -> anyhow::Result<()>
+{
+    let Some(w) = World::create(true).await? else {
+        return Ok(());
+    };
+    w.seed_uuid_references().await?;
+    let before = w.complete_snapshot().await?;
+    let dry = w.rekey(UUID_MAPPING, true).await?;
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["referenced_accounts"], 4);
+    assert_eq!(dry["unreferenced_accounts"], 1);
+    assert_eq!(
+        before,
+        w.complete_snapshot().await?,
+        "dry run changed a table or security setting"
+    );
+    let applied = w.rekey(UUID_MAPPING, false).await?;
+    assert_eq!(applied["status"], "applied");
+    let after = w.complete_snapshot().await?;
+    assert_eq!(before["catalog"], after["catalog"]);
+    assert_eq!(before["identity_link_runs"], after["identity_link_runs"]);
+    assert_eq!(
+        before["identity_link_ledger"],
+        after["identity_link_ledger"]
+    );
+    assert_eq!(
+        before["iam_identity_bindings"],
+        after["iam_identity_bindings"]
+    );
+    for table in [
+        "entry_versions",
+        "organization_storage_configs",
+        "multipart_uploads",
+        "honeycomb_environments",
+    ] {
+        let strip = |snapshot: &Value| -> anyhow::Result<Vec<Value>> {
+            let mut rows: Vec<_> = snapshot[table]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("snapshot array missing"))?
+                .iter()
+                .map(|row| {
+                    let mut object = row
+                        .as_object()
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("snapshot object missing"))?;
+                    for key in ["org_id", "created_by_id", "owner_id"] {
+                        object.remove(key);
+                    }
+                    Ok(Value::Object(object))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            rows.sort_by_key(Value::to_string);
+            Ok(rows)
+        };
+        assert_eq!(
+            strip(&before)?,
+            strip(&after)?,
+            "storage or private resource data changed in {table}"
+        );
+    }
+    for old in before["outbox_events"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("snapshot array missing"))?
+    {
+        let new = after["outbox_events"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("snapshot array missing"))?
+            .iter()
+            .find(|row| row["event_id"] == old["event_id"])
+            .ok_or_else(|| anyhow::anyhow!("historical event disappeared"))?;
+        assert_eq!(old["payload"], new["payload"]);
+        assert_eq!(new["account_uuid_retired"], true);
+    }
+    assert_eq!(
+        after["silicon_share_allowances"][0]["silicon_uuid"],
+        "32345678-1234-4234-8234-123456789abc"
+    );
+    assert_eq!(
+        after["silicon_share_allowances"][0]["allowed_uuid"],
+        "22345678-1234-4234-8234-123456789abc"
+    );
+    assert_eq!(
+        after["silicon_share_allowances"][0]["allowed_by_uuid"],
+        "12345678-1234-4234-8234-123456789abc"
+    );
+    assert!(
+        after["accounts"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("snapshot array missing"))?
+            .iter()
+            .any(
+                |row| row["account_uuid"] == "52345678-1234-4234-8234-123456789abc"
+                    && row["status"] == "deleted"
+            )
+    );
+    for row in after["audit_events"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("snapshot array missing"))?
+    {
+        assert_eq!(
+            row["metadata"]["account_uuid"],
+            "12345678-1234-4234-8234-123456789abc"
+        );
+        assert_eq!(
+            row["metadata"]["actor"]["id"],
+            "32345678-1234-4234-8234-123456789abc"
+        );
+        assert_eq!(row["metadata"]["text"], "Saq1");
+        assert_eq!(row["metadata"]["object_key"], "Saq1");
+    }
+    let replay = w.rekey(UUID_MAPPING, false).await?;
+    assert_eq!(replay["status"], "already_applied");
+    assert_eq!(replay["changed_references"], json!({}));
+    assert_eq!(
+        after,
+        w.complete_snapshot().await?,
+        "replay changed persisted rows"
+    );
+    assert!(
+        w.link(MAPPING, false)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected migration refusal"))?
+            .to_string()
+            .contains("sealed")
+    );
+    let mut session = w.superuser().await?;
+    for sql in [
+        "INSERT INTO briefcase.accounts(account_uuid,kind) VALUES('Saq1','carbon')",
+        "UPDATE briefcase.account_uuid_mappings SET kind='silicon' WHERE old_uuid='Saq1'",
+        "DELETE FROM briefcase.account_uuid_mappings WHERE old_uuid='Saq1'",
+        "UPDATE briefcase.outbox_events SET status='pending',delivered_at=NULL WHERE account_uuid_retired",
+        "UPDATE briefcase.outbox_events SET account_uuid_retired=false WHERE account_uuid_retired",
+    ] {
+        assert!(
+            sqlx::raw_sql(sql).execute(&mut session).await.is_err(),
+            "unsafe mutation accepted: {sql}"
+        );
+    }
+    assert_eq!(after, w.complete_snapshot().await?);
+    w.drop().await
+}
+
+#[tokio::test]
+async fn uuid_backfill_refuses_missing_mappings_conflicts_kinds_and_targets() -> anyhow::Result<()>
+{
+    let Some(w) = World::create(true).await? else {
+        return Ok(());
+    };
+    w.seed_uuid_references().await?;
+    let before = w.complete_snapshot().await?;
+    for mapping in [
+        UUID_MAPPING
+            .lines()
+            .filter(|line| !line.starts_with("Del1,"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        UUID_MAPPING.replace(
+            "Sct1,32345678-1234-4234-8234-123456789abc,silicon",
+            "Sct1,32345678-1234-4234-8234-123456789abc,carbon",
+        ),
+    ] {
+        assert!(w.rekey(&mapping, false).await.is_err());
+        assert_eq!(before, w.complete_snapshot().await?);
+    }
+    let mut session = w.superuser().await?;
+    sqlx::raw_sql("INSERT INTO briefcase.accounts(account_uuid,kind) VALUES('12345678-1234-4234-8234-123456789abc','carbon')").execute(&mut session).await?;
+    let collision = w.complete_snapshot().await?;
+    assert!(
+        w.rekey(UUID_MAPPING, false)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected migration refusal"))?
+            .to_string()
+            .contains("refusing identity merge")
+    );
+    assert_eq!(collision, w.complete_snapshot().await?);
+    sqlx::raw_sql(
+        "DELETE FROM briefcase.accounts WHERE account_uuid='12345678-1234-4234-8234-123456789abc'",
+    )
+    .execute(&mut session)
+    .await?;
+    w.rekey(UUID_MAPPING, false).await?;
+    let after = w.complete_snapshot().await?;
+    assert!(
+        w.rekey(
+            &UUID_MAPPING.replace(
+                "12345678-1234-4234-8234-123456789abc",
+                "92345678-1234-4234-8234-123456789abc"
+            ),
+            false
+        )
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("expected migration refusal"))?
+        .to_string()
+        .contains("immutable")
+    );
+    assert_eq!(after, w.complete_snapshot().await?);
+    w.drop().await
+}
+
+#[tokio::test]
+async fn uuid_backfill_refuses_undrained_deliveries_without_rewriting_signed_payloads()
+-> anyhow::Result<()> {
+    let Some(w) = World::create(true).await? else {
+        return Ok(());
+    };
+    w.seed_uuid_references().await?;
+    let mut session = w.superuser().await?;
+    sqlx::raw_sql("UPDATE briefcase.outbox_events SET status='pending',delivered_at=NULL")
+        .execute(&mut session)
+        .await?;
+    let before = w.complete_snapshot().await?;
+    assert!(
+        w.rekey(UUID_MAPPING, false)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected migration refusal"))?
+            .to_string()
+            .contains("work is still in flight")
+    );
+    assert_eq!(before, w.complete_snapshot().await?);
+    w.drop().await
 }

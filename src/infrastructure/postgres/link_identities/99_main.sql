@@ -14,6 +14,9 @@ DECLARE
 BEGIN
     PERFORM pg_temp.link_check_actor_columns();
     PERFORM pg_temp.link_maintenance_on();
+    IF EXISTS (SELECT 1 FROM briefcase.account_uuid_mappings) THEN
+        RAISE EXCEPTION 'Accounts UUIDs were already migrated; historical identity-link ledgers are sealed and cannot be replayed or reverted';
+    END IF;
 
     SELECT run.run_id, run.mapping_sha256, run.report
       INTO previous_run, previous_sha, previous_report

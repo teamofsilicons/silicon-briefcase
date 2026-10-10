@@ -9,6 +9,7 @@ pub mod link_identities;
 mod metadata;
 mod models;
 mod quota;
+pub mod rekey_accounts;
 mod reports;
 mod repository;
 pub use reports::ReportReceipt;

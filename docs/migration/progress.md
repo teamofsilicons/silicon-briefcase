@@ -492,3 +492,22 @@ Targeted delegated tests2passed; complete genuine cross-app run22passed/0failed,
 recorded in Waveform `.mig/e2e/bcfinal02/summary.json` and `briefcase-artifacts.json`.
 It includes fresh empty-folder discovery, Carbon/Silicon audio storage and reads,
 proof refresh, confined listing, approval/revocation and held-download checks.
+
+## 2026-10-10 — Accounts UUID data migration
+
+Added migration 0052 and `briefcase-migrate rekey-accounts` for the Accounts-owned
+immutable `old_uuid,new_uuid,kind` export. The consumer requires every legacy
+cached account, changes all audited identity references in one maintenance
+transaction, rejects merges/conflicts, restores all database security settings,
+and supports a fully rolled-back dry run and unchanged replay. Resource IDs,
+public IDs, S3 metadata/keys, ciphertext, storage External IDs and historical
+identity-link ledgers remain intact. Historical delivery payloads retain their
+bytes and cannot be requeued; undrained work blocks the migration. Old bearer and
+cached proof subjects are rejected, and late signed old-account events cannot
+resurrect them. The drive API retains the persisted storage External ID.
+
+Full service suite: **235 passed, 1 external integration ignored**, including three
+full-schema PostgreSQL migration tests and one API byte-retention/token/proof
+regression. Log: `.mig/uuid-full-tests.log`. Operator sequence and preservation
+contract: `docs/migration/account-uuids.md`. This is local verification; production
+has not been migrated or deployed. Coordinated shared-local cutover remains next.

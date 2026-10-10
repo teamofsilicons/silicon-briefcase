@@ -63,6 +63,17 @@ pub(super) async fn fixture_with_store(
         eprintln!("skipping: BRIEFCASE_TEST_DATABASE_URL is not set");
         return Ok(None);
     };
+    fixture_at(&url, proof_issuers, first_party, store)
+        .await
+        .map(Some)
+}
+
+async fn fixture_at(
+    url: &str,
+    proof_issuers: &str,
+    first_party: &str,
+    store: Option<std::sync::Arc<dyn crate::application::ports::ObjectStore>>,
+) -> anyhow::Result<Fixture> {
     let admin = sqlx::PgPool::connect_with(
         url.parse::<sqlx::postgres::PgConnectOptions>()?
             .options([("search_path", "public")]),
@@ -96,14 +107,14 @@ pub(super) async fn fixture_with_store(
     let (state, server_settings, webhook) =
         test_state_with_store(api, &settings, Some(issuer.jwks()), store)?;
     let router = router(state.clone(), &server_settings, &webhook);
-    Ok(Some(Fixture {
+    Ok(Fixture {
         server,
         issuer,
         router,
         state,
         admin,
         suffix: Uuid::new_v4().simple().to_string()[..12].to_owned(),
-    }))
+    })
 }
 
 impl Fixture {
@@ -1071,5 +1082,216 @@ async fn an_account_never_acts_in_a_legacy_organization_its_uuid_spells() -> any
     .fetch_one(&f.admin)
     .await?;
     assert_eq!(owner.as_deref(), Some(ada.as_str()));
+    Ok(())
+}
+
+/// Real PostgreSQL ownership migration, with signed Accounts tokens and an
+/// unchanged object-store key. The Accounts/S3 transports are local stand-ins.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn uuid_backfill_rejects_old_credentials_and_preserves_file_access() -> anyhow::Result<()> {
+    use crate::{application::ports::ObjectKey, infrastructure::postgres::rekey_accounts};
+    use sqlx::Executor as _;
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let admin = sqlx::PgPool::connect(&url).await?;
+    let database = format!("briefcase_uuid_api_{}", Uuid::new_v4().simple());
+    admin
+        .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+        .await?;
+    let mut database_url = url::Url::parse(&url)?;
+    database_url.set_path(&database);
+    let store = super::memory_store::MemoryStore::default();
+    let f = fixture_at(
+        database_url.as_str(),
+        "briefcase.entries.list=waveform",
+        "",
+        Some(std::sync::Arc::new(store.clone())),
+    )
+    .await?;
+    let (old, new) = ("Old1", "12345678-1234-4234-8234-123456789abc");
+    let token = f.issuer.token(old, "carbon", "c:stable");
+    f.stub_account(old, "c:stable", carbon_summary(old, "c:stable"))
+        .await;
+    let (status, folder) = f
+        .bearer(
+            Method::POST,
+            "/api/v1/entries",
+            &token,
+            Some(json!({"name":"keep"})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    let folder_id = Uuid::parse_str(
+        folder["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("folder ID missing"))?,
+    )?;
+    sqlx::query("INSERT INTO briefcase.organization_storage_configs(org_id,storage_config_id,status,bucket_name,region,role_arn,bucket_prefix,aws_account_id,encryption_mode,created_by_type,created_by_id,external_id) VALUES($1,$2,'active','retained-trust','us-east-1','arn:aws:iam::123456789012:role/briefcase-access','objects/','123456789012','sse_s3','carbon',$1,repeat('b',64))")
+        .bind(old).bind(Uuid::now_v7()).execute(&f.admin).await?;
+    let file_id = Uuid::now_v7();
+    let version_id = Uuid::now_v7();
+    let key = ObjectKey::new("objects/Old1/immutable-key")?;
+    let bytes = b"same file bytes after canonical UUID migration\n";
+    store.insert(&key, bytes.to_vec());
+    let mut tx = f.admin.begin().await?;
+    sqlx::query("INSERT INTO briefcase.entries(org_id,entry_id,parent_id,entry_type,name,root_type,owner_type,owner_id,content_type,size_bytes,current_version_id,created_by_type,created_by_id,updated_by_type,updated_by_id) VALUES($1,$2,$3,'file','proof.txt','private','carbon',$1,'text/plain',$4,$5,'carbon',$1,'carbon',$1)")
+        .bind(old).bind(file_id).bind(folder_id).bind(i64::try_from(bytes.len())?).bind(version_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO briefcase.entry_versions(org_id,entry_id,version_id,version_number,source,storage_backend,bucket_name,storage_region,storage_prefix,storage_encryption_mode,object_key,checksum_algorithm,checksum_type,checksum_value,size_bytes,content_type,created_by_type,created_by_id,content_sha256) VALUES($1,$2,$3,1,'upload','platform','unchanged-bucket','us-east-1','organizations/Old1','sse_s3',$4,'sha256','full_object','checksum',$5,'text/plain','carbon',$1,repeat('a',64))")
+        .bind(old).bind(file_id).bind(version_id).bind(key.as_str()).bind(i64::try_from(bytes.len())?).execute(&mut *tx).await?;
+    tx.commit().await?;
+    let download = |token: String| {
+        Request::builder()
+            .uri(format!("/api/v1/entries/{file_id}/content"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+    };
+    let response = f.router.clone().oneshot(download(token.clone())?).await?;
+    let response_status = response.status();
+    let response_bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+    assert_eq!(
+        response_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    assert_eq!(response_bytes.as_ref(), bytes);
+    Mock::given(method("POST"))
+        .and(path("/v1/proofs/verify"))
+        .and(body_string_contains("sap_before_migration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(valid_proof(
+            "waveform",
+            "briefcase",
+            (old, "c:stable", "carbon"),
+            &["briefcase.entries.list"],
+        )))
+        .mount(&f.server)
+        .await;
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some("Proof sap_before_migration"),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Stand in for a stopped/drained worker; this test sends no notifications.
+    sqlx::query("UPDATE briefcase.outbox_events SET status='dead_letter',last_error='test_worker_drained' WHERE status='pending'")
+        .execute(&f.admin).await?;
+    let mapping =
+        rekey_accounts::parse_mapping(&format!("old_uuid,new_uuid,kind\n{old},{new},carbon\n"))?;
+    rekey_accounts::apply(&f.admin, &mapping, false).await?;
+    for endpoint in [
+        "/api/v1/me",
+        "/api/v1/entries",
+        &format!("/api/v1/entries/{file_id}/content"),
+    ] {
+        let (status, body) = f.bearer(Method::GET, endpoint, &token, None).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(error_code(&body), "account_uuid_migrated");
+    }
+    let (status, body) = f
+        .send(
+            Method::POST,
+            "/api/v1/obo/entries/list",
+            Some("Proof sap_before_migration"),
+            Some(json!({})),
+            &[],
+        )
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(error_code(&body), "account_uuid_migrated");
+    // Even a valid, newly delivered old signed profile cannot resurrect it.
+    assert_eq!(
+        f.deliver(
+            "account.updated",
+            OffsetDateTime::now_utc(),
+            &json!({"uuid":old,"changed":["display_name"],"account":carbon_summary(old,"c:stable")})
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert!(f.account_row(old).await?.is_null());
+    let silicon = "22345678-1234-4234-8234-123456789abc";
+    sqlx::query("INSERT INTO briefcase.accounts(account_uuid,kind,public_id,custodian_uuid) VALUES($1,'silicon','si:stable',$2)")
+        .bind(silicon).bind(new).execute(&f.admin).await?;
+    for (event_type, data) in [
+        (
+            "account.updated",
+            json!({"uuid":silicon,"changed":["custodian"],"account":silicon_summary(silicon,"si:stable",(old,"c:stable"))}),
+        ),
+        (
+            "silicon.custodian_changed",
+            json!({"uuid":silicon,"to":{"uuid":old,"id":"c:stable"}}),
+        ),
+    ] {
+        assert_eq!(
+            f.deliver(event_type, OffsetDateTime::now_utc(), &data)
+                .await?,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(f.account_row(silicon).await?["custodian_uuid"], new);
+        assert!(f.account_row(old).await?.is_null());
+    }
+
+    f.stub_account(new, "c:stable", carbon_summary(new, "c:stable"))
+        .await;
+    let new_token = f.issuer.token(new, "carbon", "c:stable");
+    let (status, drives) = f
+        .bearer(Method::GET, "/api/v1/drives", &new_token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{drives}");
+    assert_eq!(drives["items"][0]["storage_external_id"], "b".repeat(64));
+    let response = f
+        .router
+        .clone()
+        .oneshot(download(new_token.clone())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 4096)
+            .await?
+            .as_ref(),
+        bytes
+    );
+    let (status, listing) = f
+        .bearer(Method::GET, "/api/v1/entries?path=keep", &new_token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        listing["items"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == file_id.to_string()))
+    );
+    let preserved: (String,String,String)=sqlx::query_as("SELECT bucket_name,storage_prefix,object_key FROM briefcase.entry_versions WHERE version_id=$1")
+        .bind(version_id).fetch_one(&f.admin).await?;
+    assert_eq!(
+        preserved,
+        (
+            "unchanged-bucket".into(),
+            "organizations/Old1".into(),
+            key.as_str().into()
+        )
+    );
+    let (status, _) = f
+        .bearer(
+            Method::GET,
+            &format!("/api/v1/entries/{file_id}/content"),
+            &f.issuer.token("Out1", "carbon", "c:outside"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    f.admin.close().await;
+    drop(f);
+    admin
+        .execute(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
+        .await?;
+    admin.close().await;
     Ok(())
 }

@@ -2,6 +2,8 @@
 
 Notes for the production switch, collected by each stage. Nothing here has been run against production.
 
+For the later Accounts canonical UUID change, follow [account-uuids.md](account-uuids.md) after identity linking and before reopening writes.
+
 ## From service part 1 (identity), 2026-10-10
 
 Before deploying the new service:
