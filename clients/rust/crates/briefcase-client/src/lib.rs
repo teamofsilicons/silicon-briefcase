@@ -67,6 +67,8 @@
 
 pub mod honeycomb;
 
+#[cfg(feature = "accounts")]
+pub mod accounts;
 mod api;
 mod client;
 mod config;

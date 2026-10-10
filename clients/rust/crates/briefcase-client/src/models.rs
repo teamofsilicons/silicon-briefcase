@@ -76,6 +76,43 @@ impl std::fmt::Display for ActorRef {
     }
 }
 
+/// Whether an account is a Carbon or a Silicon.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    /// A Carbon (`c:` ids).
+    Carbon,
+    /// A Silicon (`si:` ids).
+    Silicon,
+}
+
+impl AccountKind {
+    /// Returns the wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Carbon => "carbon",
+            Self::Silicon => "silicon",
+        }
+    }
+}
+
+impl std::fmt::Display for AccountKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Another account, by its permanent uuid and (when known) its current id.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct AccountRef {
+    /// The permanent, case-sensitive account identifier.
+    pub uuid: String,
+    /// The current public id, such as `c:ada`; it can change.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 /// Whether an entry stores bytes or contains other entries.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
