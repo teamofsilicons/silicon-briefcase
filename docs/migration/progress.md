@@ -549,3 +549,25 @@ passes. `dist/apps/briefcase-4.0.0-macos-aarch64.tar.gz`:3,412,862 bytes,
 SHA256 `de5b2d7cba5f870b1e0e7f74bacb2438a8a5f1ac4862eefc0fc6da6047e42a09`.
 Evidence: `.mig/uuid-cutover/client-release-{build,package}.log` and
 `client-release-proof.json`. No artifacts were published and production is untouched.
+
+## 2026-10-10 — Real Extend web link and final frontend verification
+
+Genuine Extend integration stored its native-protocol screenshot in Briefcase and
+read the same67 bytes as the Silicon and explicitly shared Carbon. The permanent
+web link exposed two frontend gaps: canonical UUID path segments were rejected,
+and anonymous private links returned404 without offering sign-in. Both are fixed.
+Every signed-out401/404 location takes the same Accounts sign-in route without
+revealing existence, preserves the original encoded/legacy return path, then
+applies actual authorization after sign-in.
+
+The exact Extend link now passes on the optimized Next build through real hosted
+sign-in as the existing Carbon, opens the screenshot dialog, decodes its image and
+downloads identical bytes through the BFF. Canonical UUID paths also pass, with no
+page errors. Screenshot `.mig/uuid-cutover/extend-link.png` was visually inspected;
+the native fixture is a1×1 PNG, not a physical-hardware screenshot. JSON proof and
+log are adjacent. SHA256:
+`2b1da20a14b97d8f01f0a809d9f7d53eeefc59df6312eaa5a0c8b5c1228d1d7f`.
+
+Web verification:47 unit tests; typecheck/lint; production build; full postcutover
+browser suite28passed; added private-link/encoded-path regression plus setup2passed.
+Logs are `.mig/uuid-cutover/web-final-*` and `web-private-link-e2e.log`.

@@ -460,3 +460,15 @@ proofs gain no custodial authority. Listing and mutation routes retain their
 own-drive restriction, and other issuers' folders remain hidden. Extend is not a
 first-party issuer. Revoking the share takes effect on the next read, including
 when the proof itself is cached.
+
+### S51. Canonical Accounts UUIDs supersede the historical short-ID decisions
+
+The canonical UUID contract and completed mapping migration in
+[account-uuids.md](account-uuids.md) supersede every earlier short-base62 and
+3–32-character identity definition in this decision history. New accounts use
+canonical lowercase36-character UUIDs; old identity references were rekeyed with
+the immutable Accounts export, while public IDs and resource/storage keys remain
+unchanged. Legacy string parsing exists only for compatibility and retired keys
+cannot authenticate. Permanent web addresses accept canonical UUIDs as well as
+public IDs; private links prompt signed-out readers to authenticate before their
+actual read permission is evaluated.

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { accountsSession, BASE, runAccounts, sameOrigin, signIn, watchErrors } from "./support";
+import { accountsSession, BASE, runAccounts, sameOrigin, signIn, signInOnHostedPages, watchErrors } from "./support";
 
 test("files: create, upload, range, preview, share, public link, version, bin and restore", async ({ browser }) => {
  const context = await accountsSession(browser,"carbon"); const page=await context.newPage(); const errors=watchErrors(page);
@@ -75,4 +75,18 @@ test("version restore, folder move, self-destruct keep and encoded public paths"
  const guest=await browser.newContext();const publicPage=await guest.newPage();await publicPage.goto(`${BASE}${new URL(address).pathname}`);await expect(publicPage.getByRole("heading",{name,exact:true})).toBeVisible();await expect(publicPage.getByText("Version one",{exact:true})).toBeVisible();await guest.close();
  await page.getByRole("tab",{name:"Details",exact:true}).click();await page.getByRole("button",{name:"Move to folder",exact:true}).click();await page.getByRole("button",{name:"Move here",exact:true}).click();await expect(page.getByRole("button",{name:"Move here",exact:true})).toHaveCount(0);
  const entry=await (await context.request.get(`${BASE}/api/v1/entries/${original.id}`)).json();expect(entry.self_destruct_at).toBeNull();expect(entry.name).toBe(name);await context.close();
+});
+
+
+test("private permanent links sign in and retain canonical UUID and encoded paths",async({browser})=>{
+ const owner=await accountsSession(browser,"carbon");const ownerPage=await owner.newPage();await signIn(ownerPage,runAccounts().carbon.email,"/files");
+ const name=`Private 100% ${Date.now()}.txt`;const text="Shared through a private permanent address.";
+ const upload=await owner.request.post(`${BASE}/api/v1/uploads`,{headers:sameOrigin({"Idempotency-Key":crypto.randomUUID()}),multipart:{file:{name,mimeType:"text/plain",buffer:Buffer.from(text)}}});expect(upload.status()).toBe(201);const entry=await upload.json();
+ expect(entry.org_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+ const share=await owner.request.post(`${BASE}/api/v1/entries/${entry.id}/invitations`,{headers:sameOrigin({"Idempotency-Key":crypto.randomUUID()}),data:{principal:{type:"carbon",id:runAccounts().friend.id},access:["read"],inherit:true}});expect(share.status()).toBe(201);
+ const friend=await accountsSession(browser,"friend");const page=await friend.newPage();const path=entry.path.split("/").map(encodeURIComponent).join("/");
+ await page.goto(`${BASE}/org/${entry.org_id}/${path}`);await signInOnHostedPages(page,runAccounts().friend.email);
+ await expect(page).toHaveURL(new RegExp(`entry=${entry.id}`));await expect(page.getByRole("dialog").getByText(text,{exact:true})).toBeVisible();
+ await page.goto(`${BASE}/${entry.org_id}/${path}`);await expect(page).toHaveURL(new RegExp(`entry=${entry.id}`));await expect(page.getByRole("dialog").getByText(text,{exact:true})).toBeVisible();
+ await friend.close();await owner.close();
 });

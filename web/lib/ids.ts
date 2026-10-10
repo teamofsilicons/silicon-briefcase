@@ -33,3 +33,8 @@ export function parseAccountId(input: string): IdCheck {
 }
 
 export const isAccountId = (input: string) => parseAccountId(input).ok;
+
+/** An owner in a permanent address: a public ID, legacy account key or canonical UUID. */
+export function isLocationOwner(value: string): boolean {
+  return /^(c:|si:)/.test(value) || /^[A-Za-z0-9]{3,32}$/.test(value) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
