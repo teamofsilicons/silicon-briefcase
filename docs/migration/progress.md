@@ -585,3 +585,17 @@ Moto instances were then stopped. Private recovery instructions and proof are in
 The objects include the real Extend screenshot and Waveform audio, not stand-ins.
 All Briefcase development services are stopped; local database/files remain
 available for recovery. This proves local S3 compatibility, not real AWS integration.
+
+### Parallel production staging, 2026-10-10
+
+The latest user scope preserves existing IAM Silicons and their data. The current
+runbook is `parallel-production.md`; the prior full-data adoption plan is historical.
+The new API/client default is `api.briefcase.teamofsilicons.com`. The new production
+store is migrated through 0052 with independent API/worker roles, and the new
+webhook secret is staged privately without a URL. Existing RDS stores were backed
+up and restored locally; both new roles lack USAGE/read/write on the legacy schema.
+The separate Next.js unit uses 4319; old gateway 4318 and its session files stay.
+Ingress changes remain gated until coordinated Accounts/Apps/Browser completion.
+Focused verification: client library 31/31, Rust formatting, docs synchronization,
+and shell syntax pass. The previous source candidate passed CI and all six native
+CLI targets; new-origin assets are rebuilt from the updated release commit.

@@ -1,14 +1,16 @@
 # Deploying Silicon Briefcase
 
+For the current Accounts release, follow [the parallel production plan](migration/parallel-production.md). Existing IAM runtimes and user data remain live; the historical replacement steps below do not authorize identity adoption or service shutdown.
+
 Run shell commands from the backend repository root unless stated otherwise.
 This is the operator guide; start with the [documentation index](README.md)
 for API, package, and CLI usage.
 
 ## Accounts migration candidate
 
-The 4.0 frontend is a Next.js standalone BFF built by `Dockerfile.browser`, listening on port3000 inside the image. Its runtime environment is separate from the Rust API: APP_ID, APP_SECRET, ACCOUNTS_URL, optional ACCOUNTS_API_URL, APP_API_URL (including `/api`), PUBLIC_URL and SESSION_SECRET. See [web setup](../web/README.md). The retired Rust browser gateway and static Vinext artifact are no longer deployed by this candidate.
+The 4.0 frontend is a Next.js standalone BFF built by `Dockerfile.browser`, listening on port3000 inside the image. Its runtime environment is separate from the Rust API: APP_ID, APP_SECRET, ACCOUNTS_URL, optional ACCOUNTS_API_URL, APP_API_URL (including `/api`), PUBLIC_URL and SESSION_SECRET. See [web setup](../web/README.md). The old Rust gateway and its static assets remain on port 4318 for legacy links; the independent Next.js unit uses 4319.
 
-The nginx candidate forwards `/api/v1/uploads` with request buffering disabled and 15-minute timeouts. Register the exact web `/auth/callback` at Accounts. Configure Accounts signed events on the API, verify personal-drive identity mappings and drain old delegated uploads before switching. Follow the [cutover runbook](migration/cutover.md). No local migration check alone authorizes production changes.
+The nginx candidate forwards `/api/v1/uploads` with request buffering disabled and 15-minute timeouts. Register the exact web `/auth/callback` at Accounts. Configure Accounts signed events on the API, use a fresh Accounts database and the separate `accounts/` object prefix. Follow the [parallel release plan](migration/parallel-production.md). No local migration check alone authorizes production changes.
 
 ## Previously deployed base tier
 

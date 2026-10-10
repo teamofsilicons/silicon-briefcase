@@ -6,6 +6,29 @@ load balancer or autoscaling refresh in this deployment path. The older
 CloudFormation/ASG scripts are retained for infrastructure history and must not
 be used to update the base-tier host.
 
+## Accounts release
+
+The 4.0.0 release uses a fresh Accounts database and S3 `accounts/` prefix.
+The existing IAM API, worker, database, `organizations/` objects, and web gateway
+remain live. No IAM users or Silicons are adopted into Accounts. See the current
+[parallel release plan](../../docs/migration/parallel-production.md).
+
+Build `Dockerfile.browser` from `web/`, then stage the digest-pinned image with
+`install-accounts-web.sh`. It creates `silicon-briefcase-accounts-web` on **4319**,
+a separate env file and session secret. It does not change ingress or the legacy
+web on **4318**. After coordinated approval, install `accounts-browser.nginx.conf`:
+legacy organization links, browser endpoints, assets, and IAM callbacks still use
+the preserved gateway. Accounts callbacks and canonical UUID links use Next.js.
+The cookies have different names; callbacks containing both credentials fail closed.
+
+Install `accounts-api.nginx.conf` for the separate `api.briefcase` origin, with
+`/etc/nginx/briefcase-accounts-gate.conf` initially containing `return 503;`.
+Remove that directive only after the Accounts phase completes. Never overwrite the
+existing `backend.briefcase` vhost. Verify hosted sign-in, both private link types,
+and upload/read before marking the release complete.
+
+The remaining instructions describe the retained legacy deployment and shared host.
+
 ## Ingress and uploads
 
 Install `backend.nginx.conf` as `/etc/nginx/conf.d/base-tier.conf` and

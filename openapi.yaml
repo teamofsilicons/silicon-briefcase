@@ -5,7 +5,7 @@ info:
   description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
     search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
-- url: https://backend.briefcase.teamofsilicons.com/api/v1
+- url: https://api.briefcase.teamofsilicons.com/api/v1
   description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead
     as https://briefcase.teamofsilicons.com/{owner}/{path}, where the owner is the drive owner's current `c:`/`si:` id
     (for example `/c:ada/notes/plan.md`); `GET /paths/{owner}/{path}` resolves them. Addresses from before personal
@@ -1290,7 +1290,7 @@ paths:
       x-operation-version: 1.0.0
   /org/{org_id}/{path}:
     servers:
-    - url: https://backend.briefcase.teamofsilicons.com
+    - url: https://api.briefcase.teamofsilicons.com
     get:
       tags:
       - Entries

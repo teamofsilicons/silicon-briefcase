@@ -1,111 +1,22 @@
-# Silicon Briefcase — Rust client and CLI
+# Silicon Briefcase Rust client and CLI
 
-Two crates, published separately:
+The workspace contains `briefcase-client` and `briefcase-cli` 4.0.0 for Silicon Accounts and Silicon Apps.
 
-| Crate | What it is |
-| --- | --- |
-| [`briefcase-client`](./crates/briefcase-client) | The Rust package. Stateless, async, and the primary interface to the service. |
-| [`briefcase-cli`](./crates/briefcase-cli) | The `briefcase` command, built on that package and stateful where a person needs it to be. |
+- [Rust client guide](../../docs/client/README.md)
+- [CLI guide](../../docs/cli/README.md)
 
-The package is the interface; the CLI is a shell around it and has no
-capability the package lacks. Anything the CLI can do, a program can do with
-the same call.
+The default API is `https://api.briefcase.teamofsilicons.com/api/v1/`. The IAM service remains available at its existing `backend.briefcase.teamofsilicons.com` origin for existing clients; its data is separate. Installing this release does not import IAM files or enroll existing Silicons in Accounts.
 
-- **[docs/package.md](./docs/package.md)** — using the Rust package
-- **[docs/cli.md](./docs/cli.md)** — using the CLI
-
-## Quick look
-
-```rust
-use briefcase_client::{Client, Config, Destination, Upload};
-
-let client = Client::connect(
-    Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
-        .with_token(token),
-)
-.await?;
-
-let entry = client
-    .upload(&Upload::file(Destination::path("private/cos:tos/notes"), "./report.pdf")?)
-    .await?;
-println!("{}", entry.permanent_url);
+```sh
+silicon-apps install briefcase
+briefcase login
+briefcase put report.pdf notes
 ```
 
-```bash
-# Ask IAM for an SLT for the canonical Application and selected organization.
-iam login --app-id 'briefcase'
-briefcase login <slt>
-briefcase --org tos put ./report.pdf private/cos:tos/notes
-briefcase --org tos share private/cos:tos/notes/report.pdf carbon:cos:tos --access read
+For an account already registered with Silicon Accounts:
+
+```sh
+silicon-accounts login --app briefcase -q | briefcase login --slt-stdin
 ```
 
-The CLI selects the hosted Briefcase service automatically; `--url` is only
-needed to override the destination for a separate or local deployment. An
-explicit `--url` takes precedence over `BRIEFCASE_URL`, then the saved profile
-URL, then `https://backend.briefcase.teamofsilicons.com/api/v1/`.
-
-The CLI stores the resulting rotating access/refresh session and renews it
-before expiry. It never asks for an IAM password, OTP, or Application secret.
-IAM 5 login returns exactly one selected organization. Keep each account and
-organization in a separate saved profile; `--org` must agree with the saved
-session. Log in separately to add another organization. Ordinary login does
-not approve a feature or create reusable OBO grants.
-Both crates also support disposable IAM-coupled test planes; see the guides for
-the bootstrap sequence and `briefcase --test <environment-uuid> <command>`.
-
-The Rust package does not update dependencies or mutate the consuming project.
-Honeycomb owns CLI installation and updates. The optional shared daemon
-supports local command coordination; it does not install an independent updater.
-
-## The contract check
-
-Both crates carry the complete ID, revision, HTTP method, and path of every
-operation they call. Before its first real call the client reads
-`GET /api/version`, verifies header/body negotiation agreement, and checks
-those operations plus the service identity and negotiated major. Unknown
-operation IDs are additive; duplicate IDs or a changed used operation fail at
-startup, naming what moved, instead of halfway through a later call.
-`--no-verify` on the CLI, or `Client::new_unchecked` in the package, skips it
-deliberately.
-
-## Working on these crates
-
-From the repository root, first run `cd clients/rust`. This is a separate
-Cargo workspace from the backend.
-
-```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo deny check
-```
-
-The package's wire behavior is covered against a mock server in
-`crates/briefcase-client/tests/wire.rs`: what goes on the wire, what the
-headers carry, and how a refusal reads.
-
-## Publishing
-
-Client, CLI and gateway 3.0.1 target API v1 and contract 3.0.0. Publish the
-client before the CLI after deploying the backend contract. They share one contract and include app namespaces, immutable versions, streamed folder
-downloads, invitations, public links, 365-day logs and IAM-secret testing.
-Link-access responses include the shareable file or folder `url`; the browser displays it with a copy action.
-See the [official documentation](https://docs.briefcase.teamofsilicons.com/).
-
-## Licence
-
-Both crates are Apache-2.0. See [LICENSE](./LICENSE).
-
-## The service
-
-The API this speaks to lives in
-[`silicon-briefcase`](https://github.com/teamofsilicons/silicon-briefcase);
-`UNDERSTANDING.md` there is the product contract, `openapi.yaml` the wire
-contract, and its `docs/` directory the canonical API/client/CLI integration
-guides. The local pages above retain compatibility links to those guides.
-
-In a paired test environment, the SLT can be an IAM-issued test login code or an existing Carbon ID (e.g. `c:alice`)
-or Silicon ID (e.g. `si:worker`). Configure the test app secret and pass that
-ID to `login_with_slt`, or use `briefcase --test <environment-id> login <actor-id>`.
-IAM issues the test session and determines its current access. Production
-continues to require a one-time IAM login code.
+From this directory, validate with `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --workspace`. Publish the client before the CLI only after the matching Accounts service is verified. Both crates are Apache-2.0.

@@ -21,7 +21,7 @@ pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(15);
 /// Default deadline for establishing a connection.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The hosted Briefcase API.
-pub const DEFAULT_API_URL: &str = "https://backend.briefcase.teamofsilicons.com/api/v1/";
+pub const DEFAULT_API_URL: &str = "https://api.briefcase.teamofsilicons.com/api/v1/";
 
 /// The credential a client presents.
 #[derive(Clone)]
@@ -78,7 +78,7 @@ impl Config {
     /// Starts a configuration for one deployment.
     ///
     /// The base URL is the versioned API base, such as
-    /// `https://backend.briefcase.teamofsilicons.com/api/v1/`
+    /// `https://api.briefcase.teamofsilicons.com/api/v1/`
     /// ([`DEFAULT_API_URL`]). A missing trailing slash is added rather than
     /// silently swallowing the last path segment.
     ///

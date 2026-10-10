@@ -51,7 +51,7 @@ pub struct Cli {
 pub struct GlobalArgs {
     /// Briefcase API URL, for a local or private deployment.
     ///
-    /// Default: the saved profile's, else <https://backend.briefcase.teamofsilicons.com/api/v1/>.
+    /// Default: the saved profile's, else <https://api.briefcase.teamofsilicons.com/api/v1/>.
     /// A saved sign-in is never sent to another URL than the one it was made for.
     #[arg(long, global = true, env = "BRIEFCASE_URL", value_name = "URL")]
     pub url: Option<String>,

@@ -1,66 +1,53 @@
-# briefcase-client
+# Briefcase Rust client
 
-The official Rust client for [Silicon Briefcase][service], the
-organization-scoped file service used by Carbons, Silicons, and IAM-authorized
-applications.
-
-Everything the service exposes to a client, and nothing it does internally.
-Application behavior remains stateless: it holds no login session or API
-cache — a `Config` goes in and a `Client` comes out. API calls never query a
-package registry, run Cargo, or change the consuming project's lockfile.
-Update the dependency explicitly and rebuild. `with_auto_update` and
-`with_update_manifest` remain compatibility no-ops; `update_status()` always
-reports `Disabled`. Honeycomb manages CLI installation and updates.
+`briefcase-client` 4.0.0 is the official client for the Briefcase 4.0 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = "3.0.1"
+briefcase-client = { version = "4.0.0", features = ["accounts"] }
 ```
 
-```rust
+```rust,no_run
 use briefcase_client::{Client, Config, Destination, ListEntries, Upload};
-
+# async fn example() -> briefcase_client::Result<()> {
 let client = Client::connect(
-    Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/", "tos")?
-        .with_token(token),
-)
-.await?;
-
-for entry in client.list_entries(&ListEntries::default()).await?.items {
-    println!("{}", entry.path);
-}
-
-let stored = client
-    .upload(&Upload::file(Destination::path("private/cos:tos/notes"), "./report.pdf")?)
-    .await?;
+    Config::new("https://api.briefcase.teamofsilicons.com/api/v1/")?
+        .with_token(std::env::var("BRIEFCASE_TOKEN").unwrap_or_default()),
+).await?;
+let entries = client.list_entries(&ListEntries::default()).await?;
+for entry in entries.items { println!("{}", entry.permanent_url); }
+let file = client.upload(&Upload::file(Destination::path("notes"), "report.pdf")?).await?;
+println!("{}", file.id);
+# Ok(())
+# }
 ```
 
-`connect` verifies the service identity, selected/supported API major, and the
-exact ID/version/method/path of every operation this client calls before the
-first real call. Unknown operation IDs are additive; duplicate IDs are
-refused. An incompatible pairing therefore fails at startup rather than
-mid-request.
+`Client::connect` checks the service name, API major and all 57 operation identifiers, methods, paths and revisions. `new_unchecked` is available when the caller already validated the pairing. API request execution does not install or update dependencies.
 
-`Config::new` accepts exactly the compiled `/api/v1/` base and requires HTTPS,
-with clear-text HTTP limited to `localhost` and loopback IPs for local tests.
-The version response header and body must select the same API major.
+## Sign-in
 
-IAM login uses `Client::login_with_slt`. `Config::for_sign_in(base_url)` can
-exchange a code before the caller knows its organization. Every returned IAM 5
-session has exactly one `org_id`; `organizations` contains only that ID. Build
-a file client for the same organization, and store additional accounts in
-separate clients and credential contexts. The IAM
-Application secret stays on the Briefcase backend. Testing environments use a
-typed IAM app-secret `EnvironmentKey` in `Config::with_environment`,
-independently of the bearer credential. Production-only management methods
-create, inspect, re-pair, rotate, clean, retire, and restore those planes. Every
-environment mutation has a caller-key `_with_key` variant for safely replaying
-an unchanged request after an uncertain result; upload, entry update, and
-version restore accept caller-owned keys too. Persist that `IdempotencyKey`
-before the first attempt.
+Briefcase access tokens are issued by Silicon Accounts with audience `briefcase`. Enable the `accounts` feature to sign in as Briefcase's public client. `accounts::SignIn::start_device_sign_in` returns a verification code and URL for a Carbon. `finish_device_sign_in` polls while honoring the interval, pending state, slow-down, expiry and denial. Silicons use `exchange_short_lived_token` with a fresh token from `silicon-accounts login --app briefcase -q`.
 
-## Delegated operations
+The result carries the account, access token and rotating refresh token. Store tokens privately. Refresh single-flight and persist the entire replacement pair before using it. A reused refresh token ends the sign-in; do not blindly retry an uncertain refresh. Public clients use `client_id` without an app secret. Revoke refresh tokens at `/v1/oauth/revoke` when signing out.
 
-The SDK exposes delegated folder, listing, read, trash, invitation, link-access and resumable upload operations. `OboProof` now wraps a reusable IAM OBO access token. Prepare a typed manifest, pass the calling `ApplicationId` and a valid token, and preserve logical mutation IDs for retries. Tokens may be cloned while valid; the caller owns OBO refresh and secret storage. The SDK never sends its configured actor bearer with delegated credentials.
+## Drives and files
 
-The legacy raw `create_file_on_behalf_of` operation is retired without transmitting bytes. Use reserve, capability transfer and commit. See the [3.0 migration guide](https://docs.briefcase.teamofsilicons.com/obo/) and [client guide](https://docs.briefcase.teamofsilicons.com/client/) for current examples. Documentation is published ahead of runtime rollout; verify `/api/version` before switching production clients.
+`drives()` lists the caller's drive and the drives of Silicons it looks after. `shared()` lists entries explicitly shared with it. Account uuids are permanent, case-sensitive text; display the account's current `c:` / `si:` id.
+
+`Destination::path` names a path in the caller's drive. `Destination::in_drive("c:ada", "plans")` names another drive the caller can access. `entry_at` resolves a permanent owner address. Requests never claim another identity: a custodian always acts as itself.
+
+The client supports entry listing and search, folder creation, streamed uploads and downloads, byte ranges, rename/move, permissions, invitations, expiring shares, public links, self-destruct cancellation, bin restore, versions, activity, archive listings, notifications, usage and verified S3 configuration. Paginated methods expose the service cursor. Hidden entries return the same not-found response as missing entries.
+
+## Acting from another app
+
+Apps sign accounts in to themselves. To act at Briefcase, issue a Silicon Accounts User verification proof for receiving app `briefcase` and the operation's documented scope. Pass a `Proof` to the typed `delegated` methods. Briefcase validates the proof and the configured issuer allow-list, acts as its account, and records the issuing app.
+
+Scopes include `briefcase.entries.list`, `briefcase.files.read`, `briefcase.files.write`, `briefcase.folders.create`, and the remaining operation catalogue in the API documentation. Each route requires its exact scope. Normal issuers stay inside `apps/<issuing-app>/` of the account's drive. Explicit first-party issuers can reach all entries the represented account can access. An app may trash only entries it created.
+
+Delegated uploads reserve, stream bytes using the upload capability, then commit. The service resolves the drive from the reservation. Keep a stable operation id across safe retries and use the status/cancel operations after uncertainty.
+
+## Errors and telemetry
+
+`Error::code`, `hint`, `status`, `request_id` and `retry_after` retain actionable service diagnostics. `is_not_found` covers missing and inaccessible entries. Contract mismatches name the incompatible operation before file mutations begin. Credentials are redacted from debug output.
+
+Telemetry can be disabled through the client configuration. It contains operational measurements, never file contents or tokens. See the crate's API documentation and `briefcase docs cli` for command examples.

@@ -16,7 +16,7 @@
 //!
 //! # async fn example() -> briefcase_client::Result<()> {
 //! let client = Client::connect(
-//!     Config::new("https://backend.briefcase.teamofsilicons.com/api/v1/")?
+//!     Config::new("https://api.briefcase.teamofsilicons.com/api/v1/")?
 //!         .with_token(std::env::var("BRIEFCASE_TOKEN").unwrap_or_default()),
 //! )
 //! .await?;

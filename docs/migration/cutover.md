@@ -1,6 +1,9 @@
-# Briefcase cutover to Silicon Accounts: runbook notes
+# Historical full-data cutover design (not the production release)
 
-Notes for the production switch, collected by each stage. Nothing here has been run against production.
+The user subsequently required existing IAM Silicons and their data to remain in place.
+**The current production authority is [parallel-production.md](parallel-production.md).**
+Do not execute the old identity adoption, service replacement, or decommissioning steps below.
+These notes are retained as the tested design for a possible separately authorized future adoption.
 
 For the later Accounts canonical UUID change, follow [account-uuids.md](account-uuids.md) after identity linking and before reopening writes.
 

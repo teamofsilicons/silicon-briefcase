@@ -279,7 +279,7 @@ fn server_settings() -> Result<ServerSettings, SettingsError> {
         bind_addr: parse_or("BRIEFCASE_BIND_ADDR", "127.0.0.1:8080")?,
         public_base_url: parse_or(
             "BRIEFCASE_PUBLIC_BASE_URL",
-            "https://backend.briefcase.teamofsilicons.com/api/v1/",
+            "https://api.briefcase.teamofsilicons.com/api/v1/",
         )?,
         public_site_base_url: parse_or(
             "BRIEFCASE_PUBLIC_SITE_BASE_URL",
