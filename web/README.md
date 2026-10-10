@@ -1,114 +1,55 @@
-# Briefcase browser app
+# Silicon Briefcase web
 
-The browser app uses Silicon IAM for sign-in and the official Briefcase Rust
-client for file operations through the `briefcase-web` gateway.
+Next.js 16 App Router, React 19, TypeScript, TanStack Query and the Arc UI components/styles from Silicon's Accounts/Apps web kit. Node 24+, pnpm 10.33.0. Product configuration is in `lib/app.config.ts`; credentials are server-only.
 
-See the [browser user guide](../docs/browser.md) for file management, links,
-sharing, and notifications.
+## Run locally
 
-## Sign-in
-
-1. Choose **Continue as Carbon** or **Continue as Silicon**. IAM selects the organization. A same-tab option remains available when the popup is blocked or while it is pending.
-2. Briefcase creates a ten-minute server flow, random state, and separate HttpOnly cookie for that attempt. The callback is `/auth/callback` on the configured origin.
-3. IAM authenticates you and returns an SLT. The gateway exchanges it once, verifies the selected kind, and saves a quarantined candidate. The callback never selects the browser account or clears a newer attempt's cookie.
-4. The initiating tab explicitly activates the candidate using its matching state or popup nonce. A cancelled, expired, mismatched, or superseded flow cannot activate. Cancellation is recorded durably even if it arrives before a delayed start. A new attempt atomically retires the tab’s bounded list of predecessors without waiting for their HTTP responses; same-tab completion must also match the latest persisted state.
-
-Each tab keeps only a public context UUID (or explicit `anonymous`) in sessionStorage, separately for production and each testing world. The gateway resolves that selector only within the cookie-authenticated browser group and exact world; it is not a credential. A late cookie response cannot change an already selected tab, including after reload. Invalid selectors fail closed, and a current 401 clears only that tab's selection. The gateway retains the same callback exchange and activation identity for bounded retries; tokens never enter popup messages or browser storage.
-
-When sign-in starts from a file link, the gateway retains its validated same-origin
-`/org/` return path in the pending flow. Absolute URLs, other origins, query strings,
-and fragments are not accepted as return destinations.
-
-IAM credentials are entered only on IAM. Access and refresh tokens stay on the
-gateway; the browser receives an HttpOnly session cookie, not those tokens.
-The callback is generated from the configured website origin, never a request
-header. IAM does not require callback registration. See the
-[official IAM login guide](https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/login.html).
-
-## Local development
-
-From this directory:
+Copy `.env.example` to `.env.local` and fill the app secret and random session secret. Register `http://127.0.0.1:4100/auth/callback` (or the exact PUBLIC_URL) for app `briefcase` in Accounts. Start the Briefcase API with a migrated PostgreSQL database and S3-compatible storage before running the web app.
 
 ```sh
-npm ci
-npm run dev -- --host 127.0.0.1 --port 4317
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
-In another terminal, from `clients/rust`:
+Open http://127.0.0.1:4100. Accounts owns email/phone/provider verification. The local E2E setup uses the Accounts stack's mock email sender; production needs a working delivery provider.
+
+| Setting | Purpose |
+| --- | --- |
+| `APP_ID` | `briefcase` |
+| `APP_SECRET` | `sa_app_…`, held only on the server |
+| `ACCOUNTS_URL` | Public Accounts origin and token issuer |
+| `ACCOUNTS_API_URL` | Optional private Accounts API base |
+| `APP_API_URL` | Briefcase service base **including `/api`**, e.g. `http://127.0.0.1:4101/api` |
+| `SESSION_SECRET` | At least 32 random bytes, e.g. `openssl rand -base64 48` |
+| `PUBLIC_URL` | Web origin; callback is `{PUBLIC_URL}/auth/callback` |
+| `EXTRA_IMG_ORIGINS` | Optional comma-separated profile image origins |
+| `EXTRA_ORIGINS` | Optional additional origins permitted to send state-changing requests |
+
+Settings are read and validated at runtime. Non-loopback public production origins require HTTPS. Never use a `NEXT_PUBLIC_` variable for credentials. Keep `.env.local` outside Git and Docker build contexts.
+
+## Sessions and files
+
+Hosted PKCE sign-in exchanges the code on the server. Tokens live in an authenticated, encrypted httpOnly cookie; secure deployments use a `__Host-` prefix. Refresh is single-flight per process, with a short memo for concurrent old-cookie requests. Deployment currently assumes one web process per session cohort; multi-instance deployments need shared refresh coordination before scaling. Sign-out revokes at Accounts, clears the cookie, and tells other tabs.
+
+`/api/*` checks same-origin mutations and forwards only allowlisted headers to APP_API_URL with the sealed session's bearer. Bodies and responses stream; uploads keep an idempotency key across retries. The proxy timeout is 15 minutes. Public `/public-api/*` reaches only the anonymous file route and forwards no credentials. Range and Content-Disposition survive both routes. Uploaded document responses have a restrictive sandbox CSP.
+
+File pages cover own/custodial drives, explicit shares, folder navigation, search, filters, list/grid views, uploads, folder creation, download, sharing, public links, activity, versions, rename/move, self-destruction, bin restore, notifications, usage and S3 setup. Preview readers are bounded: 256 KiB text, 10 MiB Office input and 12 MiB expanded XML. Office rendering is a text/table preview; originals preserve the complete formatting and media.
+
+The frontend uses no file-content indexing service; search and authorization belong to Briefcase. Browser previews do not execute uploaded scripts or external document relationships.
+
+## Verify
 
 ```sh
-BRIEFCASE_WEB_ORIGIN=http://localhost:4317 cargo run -p briefcase-web --locked
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+pnpm test:e2e
+pnpm screens
 ```
 
-Open `http://localhost:4317`. The development server proxies `/browser` and `/auth/callback` requests
-to the gateway at `127.0.0.1:4318`. Set `BRIEFCASE_API_URL` on the gateway to use
-a different Briefcase API, for example `http://127.0.0.1:18180/api/v1/`.
-Do not put application secrets or IAM tokens in frontend environment variables.
+Browser tests require real local Accounts (public9590/API9589/mock sender9592), Briefcase API4101 and storage. They start Next on4100 in `.next-e2e`, create fresh identities, and exercise uploaded bytes, sharing, public reads, session refresh/revocation, CSRF and accessibility. There is no stub file API. E2E state under `test-results/.auth` contains local secrets and is ignored. Screenshots go to `screens/` for visual review in four light/dark desktop/phone combinations.
 
-## Gateway configuration
+`next build` produces `.next/standalone` by default. `Dockerfile.browser` copies that server, public files and static assets, runs unprivileged, and accepts runtime settings. For direct self-hosting, copy public and `.next/static` beside the standalone server before starting it. The nginx candidate routes streaming uploads through `/api/v1/uploads` without request buffering.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `BRIEFCASE_WEB_ORIGIN` | `http://localhost:4317` | Exact browser origin used for callbacks and request validation |
-| `BRIEFCASE_WEB_LISTEN` | `127.0.0.1:4318` | Gateway listen address |
-| `BRIEFCASE_API_URL` | `https://backend.briefcase.teamofsilicons.com/api/v1/` | Briefcase API |
-| `BRIEFCASE_WEB_ASSETS` | `../../web/dist/client` | Built assets, relative to the gateway working directory |
-| `BRIEFCASE_WEB_UPLOAD_DIRECTORY` | OS temporary directory | Existing parent directory for a private, process-specific staging directory |
-| `BRIEFCASE_WEB_UPLOAD_BUDGET_BYTES` | `21990232555520` (20 TiB) | Aggregate staging reservation ceiling across the gateway's four upload slots |
-| `BRIEFCASE_WEB_UPLOAD_FREE_RESERVE_BYTES` | `1073741824` (1 GiB) | Filesystem free space to leave outside upload reservations |
-| `BRIEFCASE_WEB_UPLOAD_DEADLINE_SECONDS` | `86400` (24 hours) | Maximum browser-to-gateway staging duration; values must be positive |
-
-The staging budget is an admission ceiling, not allocated disk space or an
-organisation quota. Known-length uploads reserve their size before reading the
-body; unknown-length uploads reserve each chunk before writing. Both check
-filesystem availability and outstanding unwritten reservations. Reservations
-remain charged until forwarding finishes and the temporary file is removed.
-An incoming body idle for 60 seconds times out. The maximum file size remains
-5 TiB; provision staging capacity and configure deadlines for the intended load.
-
-Accounting is local to one gateway process. Give each replica a dedicated
-staging volume or a filesystem quota; do not rely on this counter to coordinate
-multiple processes or unrelated disk writers. Private staging files are removed
-on normal completion, cancellation, and shutdown. A process crash can leave its
-private staging directory behind; handle such orphan cleanup in deployment
-operations after confirming the owning process is no longer running.
-
-Run `npm run build` to produce `dist/client`, then build the gateway with
-`cargo build -p briefcase-web --release --locked` from `clients/rust`.
-For a standalone local preview of the built assets, run `npm start` from `web`
-and open `http://localhost:4318`. This builds and runs the Rust gateway; a Rust
-toolchain is required. It defaults the website origin to that same local address
-unless `BRIEFCASE_WEB_ORIGIN` is already configured.
-Serve the assets and `/browser` routes on the same browser origin. For HTTPS
-deployment, build the assets before starting the gateway and configure the
-canonical HTTPS origin. HTTP origins are accepted only for loopback development.
-
-Browser session families have a maximum 900-day gateway lifetime and remain subject to IAM validity. The configured private durable session store preserves sessions and pending receipts across gateway restarts. HTTPS cookies use `Secure`, `HttpOnly`,
-and the `__Host-` prefix. Pending sign-ins expire after ten minutes.
-Exclude callback query strings and authentication headers from proxy access logs.
-
-## Viewing test files
-
-Production environment managers can select **View as testing environment** and
-enter a short-lived token for the paired test IAM application. The gateway
-authorizes environment access and root-key retrieval, then exchanges the token
-through the SDK using that environment. Root keys and session tokens are never
-returned by the view endpoint.
-
-The production cookie identifies a parent session. Test identities are child
-sessions bound to that parent, selected per tab by a public UUID in sessionStorage.
-API, preview, download, and upload URLs carry `test_environment=<uuid>`; this is
-a selector, never a credential. Missing child sessions, invalid selectors, or an
-expired parent fail closed. The production tab retains its original identity.
-Test logout removes the child only; **Return to production** clears the tab
-selection. Cached reentry checks environment version, root-key generation, and
-live test authentication before reuse.
-
-Gateway regression checks:
-
-```sh
-cargo test --locked --manifest-path clients/rust/Cargo.toml -p briefcase-web
-```
-
-Run from the repository root. Tests cover parent binding, production/test
-isolation, expiry, malformed selectors, and independent test logout.
+This worktree is a migration candidate. Build success and local compatibility checks do not assert a production cutover or real AWS role integration. The migration log records the evidence and remaining release gates.

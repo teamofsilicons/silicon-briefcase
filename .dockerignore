@@ -14,3 +14,9 @@ web/dist/*
 !web/dist/client/
 !web/dist/client/**
 *.log
+
+.mig
+**/.env*
+**/.next*
+web/test-results
+web/screens

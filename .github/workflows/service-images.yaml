@@ -1,7 +1,7 @@
 name: Build service image candidates
 on:
   push:
-    branches: [release/public-identifiers-20260923]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -25,10 +25,6 @@ jobs:
         if: matrix.component != 'backend'
         with:
           node-version: 24
-      - name: Build browser assets
-        if: matrix.component == 'web'
-        run: npm ci && npm run build
-        working-directory: web
       - name: Build documentation assets
         if: matrix.component == 'docs'
         run: npm ci && npm run build && npm run check
