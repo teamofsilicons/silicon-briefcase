@@ -1,8 +1,20 @@
-//! Delegated operations authorized by a reusable IAM OBO access token.
+//! Delegated operations: another app acting for an account with a Silicon
+//! Accounts User verification proof.
 //!
-//! Each receiver verifies the selected endpoint and live authority online.
-//! Immutable manifests retain logical idempotency and content integrity; their
-//! digest is not a per-request IAM signature. No actor bearer is forwarded.
+//! An app that a Carbon or Silicon asked to work with its files (Waveform
+//! storing speech, Extend storing session recordings…) obtains a proof from
+//! Silicon Accounts (`POST /v1/proofs/user-verification`, receiving app
+//! `briefcase`, the scopes below) and sends it as `Authorization: Proof sap_…`.
+//! Briefcase verifies it with Silicon Accounts on every call, checks that the
+//! issuing app is allowed the route's scope, and acts as the account the proof
+//! speaks for; what it creates records the issuing app. Apps reach only
+//! `apps/{issuing app}/` in that account's own drive, except the first-party
+//! apps Briefcase's operator lists.
+//!
+//! Each route requires exactly one scope, its operation's [`DelegatedOperation::SCOPE`]
+//! (`briefcase.folders.create`, `briefcase.uploads.reserve`…). Immutable
+//! manifests keep logical idempotency (`operation_id`) and content integrity;
+//! no account bearer is ever sent with a proof.
 
 use std::{fmt, marker::PhantomData};
 
@@ -18,64 +30,90 @@ pub use uploads::{
     DelegatedUploadReservation, DelegatedUploadState, DelegatedUploadStatus, UploadCapability,
 };
 
-use crate::{
-    ApplicationId, ByteRange, Client, ContentStream, Entry, EntryPage, Error, Result,
-    client::json_body,
-};
+/// The routes another app may call with a proof, and the scope each requires.
+pub const SCOPES: [(&str, &str); 10] = [
+    ("briefcase.folders.create", CREATE_FOLDER_PATH),
+    ("briefcase.entries.list", LIST_ENTRIES_PATH),
+    ("briefcase.files.read", READ_FILE_PATH),
+    ("briefcase.entries.trash", TRASH_ENTRY_PATH),
+    ("briefcase.uploads.reserve", "/api/v1/obo/uploads/reserve"),
+    ("briefcase.uploads.commit", "/api/v1/obo/uploads/commit"),
+    ("briefcase.uploads.status", "/api/v1/obo/uploads/status"),
+    ("briefcase.uploads.cancel", "/api/v1/obo/uploads/cancel"),
+    ("briefcase.invitations.create", "/api/v1/obo/invitations"),
+    ("briefcase.link_access.update", "/api/v1/obo/link-access"),
+];
+
+use crate::{ByteRange, Client, ContentStream, Entry, EntryPage, Error, Result, client::json_body};
 
 /// HTTP method used for every delegated JSON manifest.
 pub const METHOD: &str = "POST";
-/// IAM endpoint identifier for folder creation.
-pub const CREATE_FOLDER_ENDPOINT_ID: &str = "briefcase.folders.create";
-/// Exact IAM request-binding path for folder creation.
+/// Proof scope for folder creation.
+pub const CREATE_FOLDER_SCOPE: &str = "briefcase.folders.create";
+/// Path of folder creation.
 pub const CREATE_FOLDER_PATH: &str = "/api/v1/obo/folders/create";
-/// IAM endpoint identifier for entry listing.
-pub const LIST_ENTRIES_ENDPOINT_ID: &str = "briefcase.entries.list";
-/// Exact IAM request-binding path for entry listing.
+/// Proof scope for entry listing.
+pub const LIST_ENTRIES_SCOPE: &str = "briefcase.entries.list";
+/// Path of entry listing.
 pub const LIST_ENTRIES_PATH: &str = "/api/v1/obo/entries/list";
-/// IAM endpoint identifier for a current file read.
-pub const READ_FILE_ENDPOINT_ID: &str = "briefcase.files.read";
-/// Exact IAM request-binding path for a current file read.
+/// Proof scope for reading a file.
+pub const READ_FILE_SCOPE: &str = "briefcase.files.read";
+/// Path of reading a file.
 pub const READ_FILE_PATH: &str = "/api/v1/obo/files/read";
-/// IAM endpoint identifier for recoverable deletion.
-pub const TRASH_ENTRY_ENDPOINT_ID: &str = "briefcase.entries.trash";
-/// Exact IAM request-binding path for recoverable deletion.
+/// Proof scope for moving an app-created entry to the bin.
+pub const TRASH_ENTRY_SCOPE: &str = "briefcase.entries.trash";
+/// Path of moving an app-created entry to the bin.
 pub const TRASH_ENTRY_PATH: &str = "/api/v1/obo/entries/trash";
 
-/// A reusable IAM OBO access token supplied by the calling application.
-/// The historical type name is retained for source compatibility. Receivers
-/// accept only the current token class; a clone may authorize another request
-/// within the approved graph while its live authority remains valid.
+/// A Silicon Accounts User verification proof (`sap_…`) whose receiving app is
+/// `briefcase`, sent as `Authorization: Proof sap_…`.
+///
+/// A proof may be reused for several calls while it is valid; refreshing it
+/// (with its `sapr_…` refresh token) is the issuing app's job and happens at
+/// Silicon Accounts, never here. `Debug` never prints it.
 #[derive(Clone)]
-pub struct OboProof(SecretString);
+pub struct Proof(SecretString);
 
-impl OboProof {
-    /// Wraps a proof without interpreting or changing its opaque token format.
+impl Proof {
+    /// Wraps a proof without interpreting it beyond its public prefix.
     ///
     /// # Errors
     ///
-    /// Rejects an empty value or one that cannot safely be an HTTP header.
+    /// Rejects anything that is not a `sap_…` proof — notably a proof refresh
+    /// token (`sapr_…`), which must never leave the issuing app — and values
+    /// that cannot be an HTTP header. The value is never repeated in the error.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        if value.trim().is_empty() || HeaderValue::from_str(&value).is_err() {
+        let value = value.trim();
+        if value.starts_with("sapr_") {
             return Err(Error::Configuration(
-                "an OBO proof must be a nonempty HTTP header value".into(),
+                "this is a proof refresh token (sapr_…), which stays with the app that holds it; pass the proof itself (sap_…)".into(),
             ));
         }
-        Ok(Self(SecretString::from(value)))
+        if !value.starts_with("sap_") || value.len() <= "sap_".len() {
+            return Err(Error::Configuration(
+                "a Briefcase delegated call takes a Silicon Accounts User verification proof (sap_…) issued for receiving app `briefcase`".into(),
+            ));
+        }
+        if HeaderValue::from_str(value).is_err() || value.contains(char::is_whitespace) {
+            return Err(Error::Configuration(
+                "the proof contains characters that cannot travel in a header".into(),
+            ));
+        }
+        Ok(Self(SecretString::from(value.to_owned())))
     }
 
     fn into_header(self) -> Result<HeaderValue> {
-        let mut header = HeaderValue::from_str(self.0.expose_secret())
-            .map_err(|_| Error::Configuration("invalid OBO proof header".into()))?;
+        let mut header = HeaderValue::from_str(&format!("Proof {}", self.0.expose_secret()))
+            .map_err(|_| Error::Configuration("invalid proof header".into()))?;
         header.set_sensitive(true);
         Ok(header)
     }
 }
 
-impl fmt::Debug for OboProof {
+impl fmt::Debug for Proof {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OboProof(<redacted>)")
+        formatter.write_str("Proof(<redacted>)")
     }
 }
 
@@ -87,18 +125,19 @@ mod sealed {
 
 /// One of the fixed delegated JSON operations supported by this client.
 ///
-/// Sealed to prevent a manifest for one endpoint being sent to another.
+/// Sealed to prevent a manifest for one route being sent to another.
 pub trait DelegatedOperation: sealed::Operation + Serialize {
-    /// IAM endpoint identifier whose metadata schema is the empty object.
-    const ENDPOINT_ID: &'static str;
-    /// Exact, versioned request path verified by the receiving endpoint.
+    /// The one proof scope the route requires (the issuing app requests it
+    /// from Silicon Accounts).
+    const SCOPE: &'static str;
+    /// Exact, versioned request path.
     const PATH: &'static str;
 }
 
 /// Immutable exact bytes to hash for integrity and logical idempotency, then transmit.
 ///
-/// Prepared manifests can be cloned or retained for logical retries, but
-/// tokens may be reused while valid. Changing the DTO cannot change these bytes.
+/// Prepared manifests can be cloned or retained for logical retries; changing
+/// the request value afterwards cannot change these bytes.
 #[derive(Clone)]
 pub struct DelegatedManifest<T: DelegatedOperation> {
     bytes: Vec<u8>,
@@ -136,22 +175,22 @@ impl<T: DelegatedOperation> DelegatedManifest<T> {
         &self.sha256
     }
 
-    /// The HTTP method to bind into the OBO token.
+    /// The HTTP method of the route.
     #[must_use]
     pub const fn method(&self) -> &'static str {
         METHOD
     }
 
-    /// The full versioned path to bind into the OBO token.
+    /// The full versioned path of the route.
     #[must_use]
     pub const fn path(&self) -> &'static str {
         T::PATH
     }
 
-    /// The IAM endpoint to select when minting the OBO token.
+    /// The proof scope the route requires.
     #[must_use]
-    pub const fn endpoint_id(&self) -> &'static str {
-        T::ENDPOINT_ID
+    pub const fn scope(&self) -> &'static str {
+        T::SCOPE
     }
 }
 
@@ -159,7 +198,7 @@ impl<T: DelegatedOperation> fmt::Debug for DelegatedManifest<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DelegatedManifest")
-            .field("endpoint_id", &T::ENDPOINT_ID)
+            .field("scope", &T::SCOPE)
             .field("path", &T::PATH)
             .field("body_length", &self.bytes.len())
             .field("body_sha256", &self.sha256)
@@ -173,9 +212,10 @@ impl<T: DelegatedOperation> fmt::Debug for DelegatedManifest<T> {
 pub struct DelegatedCreateFolder {
     /// Non-nil UUID retained with this unchanged manifest across logical retries.
     pub operation_id: Uuid,
-    /// Existing parent path; an empty string selects the private application folder.
+    /// Existing parent path; an empty string selects the app's own folder,
+    /// `apps/{issuing app}/` in the account's drive.
     pub parent_path: String,
-    /// A single child folder name, not a path or root declaration.
+    /// A single child folder name, not a path.
     pub name: String,
 }
 
@@ -185,8 +225,13 @@ pub struct DelegatedCreateFolder {
 pub struct DelegatedListEntries {
     /// Existing parent UUID, mutually exclusive with `path`.
     pub parent_id: Option<Uuid>,
-    /// Existing parent path; omitted with `parent_id` to browse organization roots.
+    /// Existing parent path; with neither, the app's own folder is listed.
     pub path: Option<String>,
+    /// First-party apps only: the drive to list or resolve `path` in, by its
+    /// owner's `c:`/`si:` id or uuid (the account's own by default). Other apps
+    /// are refused with `drive_not_delegated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
     /// Optional filter expression; without a parent, searches the visible tree.
     pub filter: Option<String>,
     /// Opaque cursor from the preceding page; each page is verified online.
@@ -199,7 +244,7 @@ pub struct DelegatedListEntries {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedReadFile {
-    /// Non-nil UUID of the exact file inside the represented organization.
+    /// Non-nil UUID of the exact file.
     pub entry_id: Uuid,
     /// Optional HTTP byte-range syntax, for example `bytes=0-1023`.
     pub range: Option<String>,
@@ -217,7 +262,8 @@ impl DelegatedReadFile {
     }
 }
 
-/// Moves an entry to the recoverable bin, not permanent deletion.
+/// Moves an entry the issuing app created to the recoverable bin (never
+/// anything else: `not_created_by_app`).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedTrashEntry {
@@ -228,9 +274,9 @@ pub struct DelegatedTrashEntry {
 }
 
 macro_rules! delegated_operation {
-    ($request:ty, $endpoint:ident, $path:ident) => {
+    ($request:ty, $scope:ident, $path:ident) => {
         impl DelegatedOperation for $request {
-            const ENDPOINT_ID: &'static str = $endpoint;
+            const SCOPE: &'static str = $scope;
             const PATH: &'static str = $path;
         }
         impl $request {
@@ -248,20 +294,12 @@ macro_rules! delegated_operation {
 
 delegated_operation!(
     DelegatedCreateFolder,
-    CREATE_FOLDER_ENDPOINT_ID,
+    CREATE_FOLDER_SCOPE,
     CREATE_FOLDER_PATH
 );
-delegated_operation!(
-    DelegatedListEntries,
-    LIST_ENTRIES_ENDPOINT_ID,
-    LIST_ENTRIES_PATH
-);
-delegated_operation!(DelegatedReadFile, READ_FILE_ENDPOINT_ID, READ_FILE_PATH);
-delegated_operation!(
-    DelegatedTrashEntry,
-    TRASH_ENTRY_ENDPOINT_ID,
-    TRASH_ENTRY_PATH
-);
+delegated_operation!(DelegatedListEntries, LIST_ENTRIES_SCOPE, LIST_ENTRIES_PATH);
+delegated_operation!(DelegatedReadFile, READ_FILE_SCOPE, READ_FILE_PATH);
+delegated_operation!(DelegatedTrashEntry, TRASH_ENTRY_SCOPE, TRASH_ENTRY_PATH);
 
 fn non_nil(id: Uuid, field: &str) -> Result<()> {
     if id.is_nil() {
@@ -288,6 +326,15 @@ impl sealed::Operation for DelegatedListEntries {
         }
         if let Some(parent) = self.parent_id {
             non_nil(parent, "parent_id")?;
+        }
+        if self
+            .drive
+            .as_deref()
+            .is_some_and(|drive| drive.trim().is_empty())
+        {
+            return Err(Error::Configuration(
+                "delegated listing drive must name an account when it is given".into(),
+            ));
         }
         if self.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
             return Err(Error::Configuration(
@@ -322,34 +369,32 @@ impl sealed::Operation for DelegatedTrashEntry {
 }
 
 impl Client {
-    /// Creates a folder using current endpoint authority for the prepared manifest.
+    /// Creates a folder for the account the proof speaks for.
     ///
     /// # Errors
     ///
     /// Returns proof, authorization, conflict, or transport errors without retry.
     pub async fn create_folder_on_behalf_of(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedCreateFolder>,
     ) -> Result<Entry> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
 
-    /// Lists one page using the endpoint or shared-chain access token.
+    /// Lists one page for the account the proof speaks for.
     ///
     /// # Errors
     ///
     /// Returns proof, visibility, pagination, or transport errors without retry.
     pub async fn list_entries_on_behalf_of(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedListEntries>,
     ) -> Result<EntryPage> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive_json(request.timeout(self.request_timeout()))
             .await
     }
@@ -362,29 +407,28 @@ impl Client {
     /// Reading or dropping the returned stream never triggers maintenance.
     pub async fn read_file_on_behalf_of(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedReadFile>,
     ) -> Result<ContentStream> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         let response = self
             .receive(request.timeout(self.transfer_timeout()))
             .await?;
         Ok(ContentStream::new(response))
     }
 
-    /// Trashes an entry using a stable operation UUID and a valid OBO token.
+    /// Moves an entry the issuing app created to the bin, with a stable
+    /// operation UUID.
     ///
     /// # Errors
     ///
     /// Returns proof, subtree-delete authorization, or transport errors without retry.
     pub async fn trash_entry_on_behalf_of(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedTrashEntry>,
     ) -> Result<()> {
-        let request = self.delegated_request(application, proof, manifest)?;
+        let request = self.delegated_request(proof, manifest)?;
         self.receive(request.timeout(self.request_timeout()))
             .await
             .map(drop)
@@ -392,33 +436,32 @@ impl Client {
 
     fn delegated_request<T: DelegatedOperation>(
         &self,
-        application: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<T>,
     ) -> Result<RequestBuilder> {
         let segments: Vec<_> = manifest.path().trim_start_matches('/').split('/').collect();
         let url = self.origin_url(&segments)?;
-        // An OBO request must not also carry the configured IAM bearer. Only
-        // the Briefcase test-plane selector is inherited from client config.
+        // A delegated request never also carries the configured account
+        // bearer: the proof is its only credential.
         Ok(self
             .anonymous_request(Method::POST, url)
-            .header("x-org-id", self.organization())
-            .header("x-app-id", application.as_str())
-            .header("x-iam-obo-access-token", proof.into_header()?)
+            .header(reqwest::header::AUTHORIZATION, proof.into_header()?)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(manifest.bytes.clone()))
     }
 }
 
-/// Critical invitation manifest; IAM must require user approval for this endpoint.
+/// Shares an entry the app can reach with an account (scope
+/// `briefcase.invitations.create`). The issuing app obtains the account's
+/// agreement in its own flow before asking for this proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedInvite {
-    /// Stable UUID reused with a valid OBO token on retry.
+    /// Stable UUID reused on retry.
     pub operation_id: Uuid,
-    /// Entry inside the calling application's namespace.
+    /// The entry to share.
     pub entry_id: Uuid,
-    /// Recipient and granted rights.
+    /// Recipient (a `c:`/`si:` id) and granted rights.
     pub invitation: crate::Invite,
 }
 impl sealed::Operation for DelegatedInvite {
@@ -428,16 +471,18 @@ impl sealed::Operation for DelegatedInvite {
     }
 }
 impl DelegatedOperation for DelegatedInvite {
-    const ENDPOINT_ID: &'static str = "briefcase.invitations.create";
+    const SCOPE: &'static str = "briefcase.invitations.create";
     const PATH: &'static str = "/api/v1/obo/invitations";
 }
-/// Critical anyone-with-link manifest; requires user approval in IAM.
+/// Turns anyone-with-the-link access on or off (scope
+/// `briefcase.link_access.update`). The issuing app obtains the account's
+/// agreement in its own flow before asking for this proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedLinkAccess {
     /// Stable logical operation ID.
     pub operation_id: Uuid,
-    /// Entry inside the calling application's namespace.
+    /// The entry.
     pub entry_id: Uuid,
     /// Desired explicit link setting.
     pub enabled: bool,
@@ -453,36 +498,34 @@ impl sealed::Operation for DelegatedLinkAccess {
     }
 }
 impl DelegatedOperation for DelegatedLinkAccess {
-    const ENDPOINT_ID: &'static str = "briefcase.link_access.update";
+    const SCOPE: &'static str = "briefcase.link_access.update";
     const PATH: &'static str = "/api/v1/obo/link-access";
 }
 impl Client {
-    /// Invites a member with a valid IAM OBO token for this critical endpoint.
+    /// Shares an entry for the account the proof speaks for.
     /// # Errors
     /// Returns proof, permission, recipient, or transport errors without retrying.
     pub async fn invite_on_behalf_of(
         &self,
-        app: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedInvite>,
     ) -> Result<crate::Invitation> {
         self.receive_json(
-            self.delegated_request(app, proof, manifest)?
+            self.delegated_request(proof, manifest)?
                 .timeout(self.request_timeout()),
         )
         .await
     }
-    /// Sets anonymous read access using a valid OBO token for this critical endpoint.
+    /// Sets anyone-with-the-link access for the account the proof speaks for.
     /// # Errors
     /// Returns proof, permission, protected-folder, or transport errors without retrying.
     pub async fn set_link_access_on_behalf_of(
         &self,
-        app: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         manifest: &DelegatedManifest<DelegatedLinkAccess>,
     ) -> Result<crate::LinkAccess> {
         self.receive_json(
-            self.delegated_request(app, proof, manifest)?
+            self.delegated_request(proof, manifest)?
                 .timeout(self.request_timeout()),
         )
         .await

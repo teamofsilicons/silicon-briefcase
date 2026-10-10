@@ -183,7 +183,6 @@ fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "in progress: the briefcase-client crate still describes contract 3.0.0; the client stage regenerates its OPERATIONS for 4.0.0 and removes this ignore"]
 fn official_client_consumes_the_exact_published_operations() -> anyhow::Result<()> {
     let document: Value = serde_yaml::from_str(include_str!("../openapi.yaml"))?;
     let mut actual = BTreeSet::new();

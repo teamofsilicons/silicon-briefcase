@@ -1,11 +1,18 @@
-//! CLI-owned preferences; the SDK remains responsible for network delivery.
-use crate::{
-    cli::{Cli, Command},
-    state::StateDirectory,
-};
-use briefcase_client::telemetry::{Event, Source, Stage};
+//! Operational telemetry for CLI commands: an opt-out preference here, delivery
+//! by the package (through Briefcase's own `/api/v1/telemetry`, so table keys
+//! stay on the server). Events carry a command name, a stage and a duration —
+//! never arguments, paths, ids or tokens.
+
 use std::time::Instant;
 
+use briefcase_client::telemetry::{Event, Source, Stage};
+
+use crate::{
+    cli::{Cli, Command, LoginCommand},
+    state::StateDirectory,
+};
+
+/// Whether telemetry is on: `BRIEFCASE_TELEMETRY` and `briefcase config set telemetry`.
 pub fn enabled() -> bool {
     briefcase_client::telemetry::enabled_from_env()
         && StateDirectory::locate()
@@ -13,48 +20,34 @@ pub fn enabled() -> bool {
             .is_ok_and(|config| config.telemetry)
 }
 
+/// One command's start, finished with its outcome.
 pub struct CommandObservation {
     started: Instant,
     event: Event,
     url: String,
     enabled: bool,
 }
+
 impl CommandObservation {
+    /// Starts observing a command. Discovery and local commands are never
+    /// reported: they must work offline and send nothing.
     pub fn new(cli: &Cli) -> Self {
-        let mut event = Event::new(Source::Cli, name(&cli.command), Stage::Started);
-        event.testing = cli.global.test.is_some() || cli.global.app_secret.is_some();
-        event.environment_id = cli.global.test;
-        let url = cli
-            .global
-            .url
-            .clone()
-            .or_else(|| {
-                StateDirectory::locate()
-                    .ok()?
-                    .configuration()
-                    .ok()
-                    .and_then(|config| {
-                        config
-                            .profiles
-                            .get(
-                                cli.global
-                                    .profile
-                                    .as_deref()
-                                    .unwrap_or(&config.current_profile),
-                            )
-                            .map(|profile| profile.url.clone())
-                    })
-            })
-            .unwrap_or_else(|| "https://backend.briefcase.teamofsilicons.com/api/v1/".into());
+        let event = Event::new(Source::Cli, name(&cli.command), Stage::Started);
+        let url = crate::session::select(&cli.global).map_or_else(
+            |_| briefcase_client::DEFAULT_API_URL.to_owned(),
+            |selection| selection.api_url,
+        );
         Self {
             started: Instant::now(),
             event,
             url,
-            enabled: enabled() && !matches!(cli.command, Command::Docs { .. } | Command::Version),
+            enabled: reported(&cli.command) && enabled(),
         }
     }
+
+    /// Sends the outcome, best effort.
     pub async fn finish(mut self, success: bool) {
-        if !self.enabled || !enabled() {
+        if !self.enabled {
             return;
         }
         self.event.stage = if success {
@@ -68,27 +61,34 @@ impl CommandObservation {
     }
 }
 
-pub async fn daemon_event(home: &StateDirectory, operation: &str, stage: Stage) {
-    let Ok(config) = home.configuration() else {
-        return;
-    };
-    if !config.telemetry || !briefcase_client::telemetry::enabled_from_env() {
-        return;
-    }
-    let url = config.profiles.get(&config.current_profile).map_or(
-        "https://backend.briefcase.teamofsilicons.com/api/v1/",
-        |profile| profile.url.as_str(),
-    );
-    let _ = briefcase_client::telemetry::submit(url, &Event::new(Source::Daemon, operation, stage))
-        .await;
+fn reported(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Accounts
+            | Command::Iam
+            | Command::Login(_)
+            | Command::Logout
+            | Command::Docs { .. }
+            | Command::Version
+            | Command::Config(_)
+            | Command::Daemon(_)
+            | Command::Env { .. }
+            | Command::System { .. }
+    )
 }
 
 fn name(command: &Command) -> &'static str {
     match command {
-        Command::Login(_) => "login",
-        Command::Iam => "iam",
+        Command::Login(args) => match args.command {
+            Some(LoginCommand::Status { .. }) => "login_status",
+            None => "login",
+        },
         Command::Logout => "logout",
+        Command::Accounts | Command::Iam => "accounts",
         Command::Status => "status",
+        Command::Drives => "drives",
+        Command::Shared(_) => "shared",
+        Command::Allow(_) => "allow",
         Command::Ls(_) => "ls",
         Command::Find(_) => "find",
         Command::Search(_) => "search",
@@ -97,6 +97,7 @@ fn name(command: &Command) -> &'static str {
         Command::Put(_) => "put",
         Command::Get(_) => "get",
         Command::Cat(_) => "cat",
+        Command::Archive(_) => "archive",
         Command::Mv(_) => "mv",
         Command::Rm(_) => "rm",
         Command::Keep(_) => "keep",
@@ -112,15 +113,15 @@ fn name(command: &Command) -> &'static str {
         Command::Shares { .. } => "shares",
         Command::Access(_) => "access",
         Command::Inbox(_) => "inbox",
-        Command::Usage => "usage",
+        Command::Usage { .. } => "usage",
         Command::Storage(_) => "storage",
         Command::App(_) => "app",
-        Command::Env(_) => "env",
         Command::Config(_) => "config",
-        Command::System(_) => "system",
         Command::Report { .. } => "report",
         Command::Daemon(_) => "daemon",
         Command::Docs { .. } => "docs",
         Command::Version => "version",
+        Command::Env { .. } => "env",
+        Command::System { .. } => "system",
     }
 }

@@ -1,25 +1,51 @@
-//! Invitations, anonymous links, and the complete 365-day audit log.
+//! Invitations (shares by account id), anyone-with-the-link access, and the
+//! complete 365-day audit log.
 
 use crate::{AccessRight, Client, ContentStream, IdempotencyKey, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A current member, a verified contact, or a dynamic IAM tag.
+/// Who an invitation is for: an account, by its `c:`/`si:` id in requests
+/// (its uuid in Briefcase's answers).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum Recipient {
-    /// Canonical Carbon ID.
+    /// A Carbon, such as `c:ada`.
     Carbon(String),
-    /// Canonical Silicon ID.
+    /// A Silicon, such as `si:scout`.
     Silicon(String),
-    /// Verified address belonging to a current member.
+    /// A share made by email address before personal accounts. Briefcase
+    /// refuses new ones (`email_recipients_retired`); kept so old answers parse.
     Email(String),
-    /// IAM tag ID or name.
+    /// A share made to a group before personal accounts. Briefcase refuses new
+    /// ones (`tag_recipients_retired`); kept so old answers parse.
     Tag(String),
 }
 
-/// Independently grant read, folder creation, and content updates.
+impl Recipient {
+    /// Names an account by its `c:` or `si:` id, taking the kind from the
+    /// prefix. Returns `None` for anything else.
+    #[must_use]
+    pub fn account(id: &str) -> Option<Self> {
+        let actor = crate::ActorRef::from_id(id)?;
+        Some(match actor.actor_type {
+            crate::ActorType::Silicon => Self::Silicon(actor.id),
+            _ => Self::Carbon(actor.id),
+        })
+    }
+
+    /// The account id (or legacy value) the invitation names.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Carbon(id) | Self::Silicon(id) | Self::Email(id) | Self::Tag(id) => id,
+        }
+    }
+}
+
+/// Shares read, adding content (write) and changing content (update),
+/// independently.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Invite {
     /// Invitation recipient.
@@ -108,9 +134,9 @@ pub struct LogEvent {
     pub id: Uuid,
     /// Carbon or Silicon.
     pub actor_type: String,
-    /// Acting member ID.
+    /// The acting account (its uuid).
     pub actor_id: String,
-    /// Calling app for delegated operations.
+    /// The app that acted through a proof, for delegated operations.
     pub app_id: Option<String>,
     /// Versioned action name.
     pub action: String,
@@ -129,14 +155,14 @@ pub struct LogPage {
     pub next_cursor: Option<String>,
 }
 
-/// Safe metadata available without an IAM login.
+/// Safe metadata available to anyone holding the link, without signing in.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicEntry {
     /// Stable entry identifier.
     pub id: Uuid,
     /// Display name.
     pub name: String,
-    /// Organization-relative path.
+    /// Path within the drive.
     pub path: String,
     /// File or folder.
     pub entry_type: String,
@@ -156,7 +182,7 @@ pub struct PublicPage {
 }
 
 impl Client {
-    /// Reads explicit member and tag invitations.
+    /// Reads the live shares on an entry.
     /// # Errors
     /// Returns access or transport errors.
     pub async fn invitations(&self, id: Uuid, cursor: Option<&str>) -> Result<InvitationPage> {
@@ -172,9 +198,12 @@ impl Client {
         self.receive_json(request).await
     }
 
-    /// Invites a member, email contact, or tag with independent rights.
+    /// Shares an entry with an account (by `c:`/`si:` id) with independent
+    /// rights. The share is immediate (no acceptance step); the recipient gets
+    /// a notification, and an email when it shared its email with Briefcase.
     /// # Errors
-    /// Returns validation, permission, idempotency, or transport errors.
+    /// Returns validation, permission (`silicon_not_open` for a Silicon that
+    /// has not allowed the caller), idempotency, or transport errors.
     pub async fn invite(
         &self,
         id: Uuid,
@@ -193,7 +222,7 @@ impl Client {
         .await
     }
 
-    /// Revokes either a member or tag invitation.
+    /// Revokes one share.
     /// # Errors
     /// Returns access, idempotency, or transport errors.
     pub async fn revoke_invitation(
@@ -322,26 +351,52 @@ impl Client {
         self.receive_json(request).await
     }
 
-    fn public_url(&self, org: &str, path: &str) -> Result<url::Url> {
-        let mut parts = vec!["public", org];
-        parts.extend(path.trim_start_matches('/').split('/'));
-        let mut url = self.api_url(&parts)?;
-        if let Some(environment) = self.config().public_environment {
-            url.query_pairs_mut()
-                .append_pair("test_environment", &environment.to_string());
-        }
-        Ok(url)
+    fn public_url(&self, owner: &str, path: &str) -> Result<url::Url> {
+        let mut parts = vec!["public", owner];
+        parts.extend(path.split('/').filter(|segment| !segment.is_empty()));
+        self.api_url(&parts)
     }
 
-    /// Resolves a shared file or folder without sending the configured bearer.
+    /// Sends an anyone-with-the-link read, following one `308` to the owner's
+    /// current id by uuid.
+    async fn public_request(
+        &self,
+        owner: &str,
+        path: &str,
+        build: impl Fn(&Self, url::Url) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let response = Self::send(build(self, self.public_url(owner, path)?)).await?;
+        let response = if response.status() == reqwest::StatusCode::PERMANENT_REDIRECT {
+            let moved: crate::Moved = Self::decode_json(response).await?;
+            Self::send(build(self, self.public_url(&moved.owner.uuid, path)?)).await?
+        } else {
+            response
+        };
+        if response.status().is_success() {
+            Ok(response)
+        } else if response.status().is_redirection() {
+            Err(crate::Error::Protocol(
+                "Briefcase moved this link twice in a row; open it again".into(),
+            ))
+        } else {
+            Err(Self::refusal(response).await)
+        }
+    }
+
+    /// Resolves a link-shared file or folder without sending the configured
+    /// bearer. `owner` is the drive owner's `c:`/`si:` id or uuid (or, for a
+    /// link made before personal drives, that link's first path segment).
     /// # Errors
     /// Returns not-found when link access is absent or revoked.
-    pub async fn public_entry(&self, org: &str, path: &str) -> Result<PublicEntry> {
-        self.receive_json(
-            self.anonymous_request(Method::GET, self.public_url(org, path)?)
-                .timeout(self.request_timeout()),
-        )
-        .await
+    pub async fn public_entry(&self, owner: &str, path: &str) -> Result<PublicEntry> {
+        let response = self
+            .public_request(owner, path, |client, url| {
+                client
+                    .anonymous_request(Method::GET, url)
+                    .timeout(client.request_timeout())
+            })
+            .await?;
+        Self::decode_json(response).await
     }
 
     /// Lists a publicly shared folder, without authentication.
@@ -349,25 +404,30 @@ impl Client {
     /// Returns visibility, cursor, or transport errors.
     pub async fn public_children(
         &self,
-        org: &str,
+        owner: &str,
         path: &str,
         cursor: Option<&str>,
     ) -> Result<PublicPage> {
-        let mut request = self
-            .anonymous_request(Method::GET, self.public_url(org, path)?)
-            .query(&[("view", "contents")])
-            .timeout(self.request_timeout());
-        if let Some(cursor) = cursor {
-            request = request.query(&[("cursor", cursor)]);
-        }
-        self.receive_json(request).await
+        let response = self
+            .public_request(owner, path, |client, url| {
+                let mut request = client
+                    .anonymous_request(Method::GET, url)
+                    .query(&[("view", "contents")])
+                    .timeout(client.request_timeout());
+                if let Some(cursor) = cursor {
+                    request = request.query(&[("cursor", cursor)]);
+                }
+                request
+            })
+            .await?;
+        Self::decode_json(response).await
     }
 
     /// Streams public file bytes or a folder's tar.zst archive.
     /// # Errors
     /// Returns visibility or transport errors, including errors during streaming.
-    pub async fn public_download(&self, org: &str, path: &str) -> Result<ContentStream> {
-        self.open_public_content(org, path, "attachment", None)
+    pub async fn public_download(&self, owner: &str, path: &str) -> Result<ContentStream> {
+        self.open_public_content(owner, path, "attachment", None)
             .await
     }
 
@@ -376,27 +436,32 @@ impl Client {
     /// Returns not-found, invalid-range, or transport errors.
     pub async fn public_content(
         &self,
-        org: &str,
+        owner: &str,
         path: &str,
         range: Option<crate::ByteRange>,
     ) -> Result<ContentStream> {
-        self.open_public_content(org, path, "inline", range).await
+        self.open_public_content(owner, path, "inline", range).await
     }
 
     async fn open_public_content(
         &self,
-        org: &str,
+        owner: &str,
         path: &str,
         view: &str,
         range: Option<crate::ByteRange>,
     ) -> Result<ContentStream> {
-        let mut request = self
-            .anonymous_request(Method::GET, self.public_url(org, path)?)
-            .query(&[("view", view)])
-            .timeout(self.transfer_timeout());
-        if let Some(range) = range {
-            request = request.header(reqwest::header::RANGE, range.header_value());
-        }
-        Ok(ContentStream::new(self.receive(request).await?))
+        let response = self
+            .public_request(owner, path, |client, url| {
+                let mut request = client
+                    .anonymous_request(Method::GET, url)
+                    .query(&[("view", view)])
+                    .timeout(client.transfer_timeout());
+                if let Some(range) = range {
+                    request = request.header(reqwest::header::RANGE, range.header_value());
+                }
+                request
+            })
+            .await?;
+        Ok(ContentStream::new(response))
     }
 }

@@ -2,10 +2,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use briefcase_client::{
-    AccessRight, ActorRef, ApplicationId, Client, Config, Destination, EntryUpdate, EnvironmentKey,
-    IamApplicationSecret, IamEnvironmentKey, IdempotencyKey, ListEntries, NewFolder, NewGrant,
-    TestingEnvironmentCreate, TestingEnvironmentIamPairing, TestingEnvironmentUpdate, UpdateStatus,
-    Upload,
+    AccessRight, ActorRef, Client, Config, Destination, EntryUpdate, IdempotencyKey, ListEntries,
+    NewFolder, NewGrant, PermissionQuery, Upload,
 };
 use serde_json::json;
 use wiremock::{
@@ -13,39 +11,7 @@ use wiremock::{
     matchers::{body_json, body_string_contains, header, method, path, query_param},
 };
 
-#[tokio::test]
-async fn anonymous_sandbox_links_send_only_the_public_routing_id() {
-    let server = MockServer::start().await;
-    let environment = uuid::Uuid::new_v4();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/public/tos/public/shared.txt"))
-        .and(query_param("test_environment", environment.to_string()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id":uuid::Uuid::new_v4(),"name":"shared.txt","path":"public/shared.txt",
-            "entry_type":"file","content_type":"text/plain","size":4
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let client = Client::new_unchecked(
-        Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
-            .unwrap()
-            .with_public_testing_environment(environment)
-            .with_auto_update(false),
-    )
-    .unwrap();
-    assert_eq!(
-        client
-            .public_entry("tos", "public/shared.txt")
-            .await
-            .unwrap()
-            .name,
-        "shared.txt"
-    );
-    let requests = server.received_requests().await.unwrap();
-    assert!(!requests[0].headers.contains_key("authorization"));
-    assert!(!requests[0].headers.contains_key("x-briefcase-app-secret"));
-}
+const ENTRY_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f828";
 
 fn version_document(list_entries_revision: &str) -> serde_json::Value {
     let operations: Vec<serde_json::Value> = briefcase_client::OPERATIONS
@@ -68,78 +34,40 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "0.2.0",
-        "build": "0.1.0",
+        "contract_version": "4.0.0",
+        "build": "4.0.0",
         "operations": operations,
     })
 }
 
 fn entry_document() -> serde_json::Value {
     json!({
-        "id": "01a067ce-7f19-7790-820a-0be6b3d4f828",
-        "org_id": "tos",
+        "id": ENTRY_ID,
+        "org_id": "zQo",
         "type": "file",
         "visibility": "full",
-        "name": "notes.md",
-        "path": "private/cos:tos/notes/notes.md",
+        "name": "plan.md",
+        "path": "notes/plan.md",
         "parent_id": "01a067ce-7f19-7790-820a-0be6b3d4f829",
         "root_type": "private",
         "tag": null,
         "content_type": "text/markdown",
         "size": 12,
         "render": "document",
-        "permanent_url": "https://briefcase.example/org/tos/private/cos:tos/notes/notes.md",
+        "permanent_url": "https://briefcase.example/c:ada/notes/plan.md",
         "content_url": null,
         "download_url": null,
-        "owner": {"type": "carbon", "id": "cos:tos"},
+        "owner": {"type": "carbon", "id": "zQo"},
         "origin_app_id": null,
         "effective_access": ["read", "write", "update", "delete", "manage_permissions"],
-        "created_at": "2026-09-03T10:00:00Z",
-        "updated_at": "2026-09-03T10:00:00Z",
+        "created_at": "2026-10-10T10:00:00Z",
+        "updated_at": "2026-10-10T10:00:00Z",
         "deleted_at": null
     })
 }
 
-fn environment_document(key: Option<&str>) -> serde_json::Value {
-    let mut value = json!({
-        "id": "01a067ce-7f19-7790-820a-0be6b3d4f800",
-        "org_id": "tos",
-        "name": "sdk-test",
-        "description": "wire coverage",
-        "status": "active",
-        "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f802",
-        "iam_app_id": "briefcase",
-        "created_by": {"type": "carbon", "id": "cos:tester"},
-        "key_generation": 1,
-        "key_rotated_at": null,
-        "last_activity_at": "2026-09-03T10:00:00Z",
-        "cleaned_at": null,
-        "deleted_at": null,
-        "purge_after": null,
-        "version": 1,
-        "created_at": "2026-09-03T10:00:00Z",
-        "updated_at": "2026-09-03T10:00:00Z"
-    });
-    if let Some(key) = key {
-        value["key"] = json!(key);
-    }
-    value
-}
-
-fn tokens_document() -> serde_json::Value {
-    json!({
-        "access_token": "access-from-briefcase",
-        "refresh_token": "refresh-from-briefcase",
-        "token_type": "Bearer",
-        "expires_in": 900,
-        "scope": "briefcase",
-        "actor": {
-            "principal_id": "01a067ce-7f19-7790-820a-0be6b3d4f803",
-            "type": "carbon",
-            "public_id": "cos:tester"
-        },
-        "org_id": "tos", "organizations": ["tos"]
-    })
+fn base(server: &MockServer) -> String {
+    format!("{}/api/v1/", server.uri())
 }
 
 async fn connected(server: &MockServer) -> Client {
@@ -148,19 +76,59 @@ async fn connected(server: &MockServer) -> Client {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("briefcase-api-version", "v1")
-                .set_body_json(version_document("1.0.0")),
+                .set_body_json(version_document(
+                    briefcase_client::OPERATIONS
+                        .iter()
+                        .find(|operation| operation.id == "listEntries")
+                        .unwrap()
+                        .version,
+                )),
         )
         .mount(server)
         .await;
 
     Client::connect(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+        Config::new(&base(server))
             .expect("the mock base URL is valid")
-            .with_token("test-token")
-            .with_auto_update(false),
+            .with_token("test-token"),
     )
     .await
     .expect("a matching deployment must connect")
+}
+
+#[test]
+fn the_client_carries_the_four_point_oh_operation_catalogue() {
+    assert_eq!(briefcase_client::OPERATIONS.len(), 57);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "4.0.0");
+    for retired in [
+        "readIamInfo",
+        "readLoginStatus",
+        "exchangeShortLivedToken",
+        "refreshApplicationSession",
+        "listTestingEnvironments",
+    ] {
+        assert!(
+            briefcase_client::OPERATIONS
+                .iter()
+                .all(|operation| operation.id != retired),
+            "{retired} is retired"
+        );
+    }
+    for added in [
+        "readAccountsInfo",
+        "readAccount",
+        "listDrives",
+        "listSharedWithMe",
+        "resolveDriveTop",
+        "listArchiveContents",
+    ] {
+        assert!(
+            briefcase_client::OPERATIONS
+                .iter()
+                .any(|operation| operation.id == added),
+            "{added} is part of contract 4.0.0"
+        );
+    }
 }
 
 #[tokio::test]
@@ -176,47 +144,11 @@ async fn connecting_refuses_a_deployment_serving_another_revision() {
         .mount(&server)
         .await;
 
-    let error = Client::connect(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .await
-    .expect_err("a changed revision must refuse the connection");
+    let error = Client::connect(Config::new(&base(&server)).unwrap())
+        .await
+        .expect_err("a changed revision must refuse the connection");
 
     assert!(error.to_string().contains("listEntries"));
-}
-
-#[tokio::test]
-async fn contract_negotiation_and_requests_keep_runtime_updates_disabled() {
-    let server = MockServer::start().await;
-    let connected = connected(&server).await;
-    let client = Client::connect(
-        connected
-            .config()
-            .clone()
-            .with_auto_update(true)
-            .with_update_manifest("/missing/Cargo.toml"),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(client.update_status(), UpdateStatus::Disabled);
-
-    Mock::given(method("GET"))
-        .and(path("/api/v1/entries"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [],
-            "next_cursor": null
-        })))
-        .mount(&server)
-        .await;
-    client
-        .list_entries(&ListEntries::default())
-        .await
-        .expect("an ordinary request must still be sent");
-
-    assert_eq!(client.update_status(), UpdateStatus::Disabled);
 }
 
 #[tokio::test]
@@ -227,34 +159,26 @@ async fn negotiation_header_and_body_must_agree() {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("briefcase-api-version", "v2")
-                .set_body_json(version_document("1.0.0")),
+                .set_body_json(version_document("2.0.0")),
         )
         .mount(&server)
         .await;
 
-    let error = Client::connect(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .await
-    .expect_err("a proxy must not be able to disagree about the selected API major");
+    let error = Client::connect(Config::new(&base(&server)).unwrap())
+        .await
+        .expect_err("a proxy must not be able to disagree about the selected API major");
     assert!(error.to_string().contains("header"));
     assert!(error.to_string().contains("body"));
 
     let missing = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/version"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(version_document("1.0.0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(version_document("2.0.0")))
         .mount(&missing)
         .await;
-    let error = Client::connect(
-        Config::new(&format!("{}/api/v1/", missing.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .await
-    .expect_err("the selected API header is mandatory");
+    let error = Client::connect(Config::new(&base(&missing)).unwrap())
+        .await
+        .expect_err("the selected API header is mandatory");
     assert!(error.to_string().contains("omitted"));
 }
 
@@ -271,13 +195,9 @@ async fn contract_handshake_never_follows_a_redirect_to_another_origin() {
         .mount(&server)
         .await;
 
-    Client::connect(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .await
-    .expect_err("a deployment redirect must not select another trust boundary");
+    Client::connect(Config::new(&base(&server)).unwrap())
+        .await
+        .expect_err("a deployment redirect must not select another trust boundary");
     assert!(
         other_origin
             .received_requests()
@@ -288,13 +208,12 @@ async fn contract_handshake_never_follows_a_redirect_to_another_origin() {
 }
 
 #[tokio::test]
-async fn every_request_carries_the_tenant_and_the_bearer() {
+async fn every_request_carries_the_bearer_and_no_organization_or_test_header() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/api/v1/entries"))
-        .and(header("x-org-id", "tos"))
         .and(header("authorization", "Bearer test-token"))
         .and(query_param("limit", "2"))
         .respond_with(
@@ -311,80 +230,148 @@ async fn every_request_carries_the_tenant_and_the_bearer() {
 
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.next_cursor.as_deref(), Some("next"));
-    assert_eq!(page.items[0].name, "notes.md");
+    assert_eq!(page.items[0].drive, "zQo");
+    let requests = server.received_requests().await.unwrap();
+    for request in &requests {
+        for retired in ["x-org-id", "x-briefcase-app-secret", "x-app-id"] {
+            assert!(!request.headers.contains_key(retired), "{retired}");
+        }
+    }
+    let listing = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/v1/entries")
+        .unwrap();
+    // The top of the caller's own drive names no drive and no path.
+    assert!(listing.url.query_pairs().all(|(key, _)| key == "limit"));
 }
 
 #[tokio::test]
-async fn creating_a_folder_sends_its_container_and_an_idempotency_key() {
+async fn listing_another_drive_names_its_owner_and_the_path_inside_it() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/entries"))
+        .and(query_param("drive", "si:scout"))
+        .and(query_param("path", "reports/2026"))
+        .and(query_param("filter", "is:pdf"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_cursor": null})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let query = ListEntries {
+        filter: Some("is:pdf".to_owned()),
+        ..ListEntries::in_folder(Destination::in_drive("si:scout", "/reports/2026/"))
+    };
+    client.list_entries(&query).await.unwrap();
+}
+
+#[tokio::test]
+async fn creating_a_folder_names_its_drive_and_parent_path_and_sends_an_idempotency_key() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
     Mock::given(method("POST"))
         .and(path("/api/v1/entries"))
         .and(header("content-type", "application/json"))
-        .and(body_string_contains("\"root_type\":\"tag\""))
-        .and(body_string_contains("\"tag\":\"engineering\""))
-        .and(body_string_contains("\"principal\""))
+        .and(body_json(json!({
+            "name": "drafts",
+            "parent_path": "notes",
+            "drive": "si:scout",
+            "invitees": [{"principal": {"type": "carbon", "id": "c:ada"}, "access": ["read", "write"], "inherit": true}]
+        })))
         .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/entries"))
+        .and(body_json(json!({"name": "top", "invitees": []})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .expect(1)
         .mount(&server)
         .await;
 
-    let folder = NewFolder::in_tag("specs", "engineering").inviting([NewGrant::new(
-        ActorRef::carbon("cos:tos"),
-        [AccessRight::Read, AccessRight::Write],
-    )
-    .inheriting()]);
+    let folder = NewFolder::in_folder("drafts", Destination::in_drive("si:scout", "notes"))
+        .inviting([NewGrant::new(
+            ActorRef::carbon("c:ada"),
+            [AccessRight::Read, AccessRight::Write],
+        )
+        .inheriting()]);
+    client.create_folder(&folder).await.unwrap();
     client
-        .create_folder(&folder)
+        .create_folder(&NewFolder::at_top("top"))
         .await
-        .expect("the folder must be created");
+        .unwrap();
 
     let requests = server.received_requests().await.unwrap_or_default();
-    let create = requests
-        .iter()
-        .find(|request| request.url.path() == "/api/v1/entries")
-        .expect("the creation must have been sent");
-    assert!(create.headers.contains_key("idempotency-key"));
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/entries")
+            .all(|request| request.headers.contains_key("idempotency-key"))
+    );
 }
 
 #[tokio::test]
-async fn an_upload_is_multipart_with_the_destination_and_the_file() {
+async fn an_upload_is_multipart_with_the_drive_destination_and_the_file() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
     Mock::given(method("POST"))
         .and(path("/api/v1/uploads"))
+        .and(body_string_contains("name=\"drive\""))
+        .and(body_string_contains("c:ada"))
         .and(body_string_contains("name=\"path\""))
-        .and(body_string_contains("private/cos:tos/notes"))
-        .and(body_string_contains("filename=\"notes.md\""))
+        .and(body_string_contains("shared/plans"))
+        .and(body_string_contains("filename=\"plan.md\""))
         .and(body_string_contains("first revision"))
         .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .expect(1)
         .mount(&server)
         .await;
 
     let upload = Upload::bytes(
-        Destination::path("private/cos:tos/notes"),
-        "notes.md",
+        Destination::in_drive("c:ada", "shared/plans"),
+        "plan.md",
         b"first revision".to_vec(),
     )
     .with_content_type("text/markdown");
-    let entry = client
-        .upload(&upload)
-        .await
-        .expect("the upload must be accepted");
+    let entry = client.upload(&upload).await.unwrap();
+    assert_eq!(entry.name, "plan.md");
 
-    assert_eq!(entry.name, "notes.md");
+    // The top of the caller's own drive sends neither a drive nor a path.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/uploads"))
+        .and(body_string_contains("filename=\"top.md\""))
+        .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client
+        .upload(&Upload::bytes(Destination::top(), "top.md", b"x".to_vec()))
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let top = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path() == "/api/v1/uploads")
+        .unwrap();
+    let body = String::from_utf8_lossy(&top.body);
+    assert!(!body.contains("name=\"path\""), "{body}");
+    assert!(!body.contains("name=\"drive\""), "{body}");
 }
 
 #[tokio::test]
 async fn entry_update_and_version_restore_accept_durable_retry_keys() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    let entry_id = "01a067ce-7f19-7790-820a-0be6b3d4f828";
     let version_id = "01a067ce-7f19-7790-820a-0be6b3d4f899";
 
     Mock::given(method("PATCH"))
-        .and(path(format!("/api/v1/entries/{entry_id}")))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}")))
         .and(header("idempotency-key", "move-attempt-0001"))
         .and(body_json(json!({"name": "renamed.md"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
@@ -392,7 +379,7 @@ async fn entry_update_and_version_restore_accept_durable_retry_keys() {
         .await;
     Mock::given(method("POST"))
         .and(path(format!(
-            "/api/v1/entries/{entry_id}/versions/{version_id}/restore"
+            "/api/v1/entries/{ENTRY_ID}/versions/{version_id}/restore"
         )))
         .and(header("idempotency-key", "restore-version-attempt-0001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
@@ -401,7 +388,7 @@ async fn entry_update_and_version_restore_accept_durable_retry_keys() {
 
     client
         .update_entry_with_key(
-            entry_id.parse().unwrap(),
+            ENTRY_ID.parse().unwrap(),
             &EntryUpdate::rename("renamed.md"),
             &IdempotencyKey::new("move-attempt-0001").unwrap(),
         )
@@ -409,7 +396,7 @@ async fn entry_update_and_version_restore_accept_durable_retry_keys() {
         .unwrap();
     client
         .restore_version_with_key(
-            entry_id.parse().unwrap(),
+            ENTRY_ID.parse().unwrap(),
             version_id.parse().unwrap(),
             &IdempotencyKey::new("restore-version-attempt-0001").unwrap(),
         )
@@ -418,7 +405,7 @@ async fn entry_update_and_version_restore_accept_durable_retry_keys() {
 }
 
 #[tokio::test]
-async fn a_refusal_keeps_its_code_request_id_and_retry_delay() {
+async fn a_refusal_keeps_its_code_hint_request_id_and_retry_delay() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
@@ -430,7 +417,8 @@ async fn a_refusal_keeps_its_code_request_id_and_retry_delay() {
                 .set_body_json(json!({
                     "error": {
                         "code": "daily_upload_limit_exhausted",
-                        "message": "The organization has uploaded its daily allowance.",
+                        "message": "This drive has uploaded its daily allowance.",
+                        "hint": "Try again after midnight UTC.",
                         "request_id": "01a067ce-0000-7000-8000-000000000001"
                     }
                 })),
@@ -439,19 +427,17 @@ async fn a_refusal_keeps_its_code_request_id_and_retry_delay() {
         .await;
 
     let error = client
-        .upload(&Upload::bytes(
-            Destination::path("public"),
-            "big.bin",
-            vec![0_u8; 8],
-        ))
+        .upload(&Upload::bytes(Destination::top(), "big.bin", vec![0_u8; 8]))
         .await
         .expect_err("a spent allowance must be refused");
 
     assert_eq!(error.code(), Some("daily_upload_limit_exhausted"));
+    assert_eq!(error.hint(), Some("Try again after midnight UTC."));
+    assert_eq!(error.status(), Some(429));
     assert!(error.is_retryable());
     assert_eq!(
         error.retry_after(),
-        Some(std::time::Duration::from_secs(3600))
+        Some(std::time::Duration::from_hours(1))
     );
     assert!(
         error
@@ -461,63 +447,159 @@ async fn a_refusal_keeps_its_code_request_id_and_retry_delay() {
 }
 
 #[tokio::test]
-async fn a_hidden_entry_reads_exactly_like_a_missing_one() {
+async fn effective_access_names_the_drive_its_paths_are_in() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/permissions/effective"))
+        .and(body_json(
+            json!({"entry_ids": [], "paths": ["notes"], "drive": "c:ada"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [], "unresolved_entry_ids": [], "unresolved_paths": ["notes"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let inspection = client
+        .effective_access(&PermissionQuery::paths(["notes".to_owned()]).in_drive("c:ada"))
+        .await
+        .unwrap();
+    assert_eq!(inspection.unresolved_paths, vec!["notes"]);
+}
+
+fn not_found() -> ResponseTemplate {
+    ResponseTemplate::new(404).set_body_json(json!({
+        "error": {
+            "code": "not_found",
+            "message": "The requested resource was not found.",
+            "request_id": "01a067ce-0000-7000-8000-000000000002"
+        }
+    }))
+}
+
+#[tokio::test]
+async fn an_address_resolves_by_owner_id_and_path_and_follows_one_move() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
     Mock::given(method("GET"))
-        .and(path("/org/tos/private/cos:tos/notes/notes.md"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "error": {
-                "code": "not_found",
-                "message": "The requested resource was not found.",
-                "request_id": "01a067ce-0000-7000-8000-000000000002"
-            }
-        })))
+        .and(path("/api/v1/paths/c:ada/notes/plan.md"))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
+        .expect(1)
         .mount(&server)
         .await;
+    assert_eq!(
+        client
+            .entry_at("c:ada", "/notes/plan.md")
+            .await
+            .unwrap()
+            .name,
+        "plan.md"
+    );
 
+    // An id the owner gave up moves to the owner's uuid, once.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/c:old-ada/notes/plan.md"))
+        .respond_with(ResponseTemplate::new(308).set_body_json(json!({
+            "moved_to": format!("{}/api/v1/paths/c:ada/notes/plan.md", server.uri()),
+            "permanent_url": "https://briefcase.example/c:ada/notes/plan.md",
+            "owner": {"uuid": "zQo", "id": "c:ada"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/zQo/notes/plan.md"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let moved = client.entry_at("c:old-ada", "notes/plan.md").await.unwrap();
+    assert_eq!(moved.drive, "zQo");
+
+    // The top of a drive is its own address.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/si:scout"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client.entry_at("si:scout", "").await.unwrap();
+}
+
+#[tokio::test]
+async fn an_address_that_keeps_moving_is_refused_rather_than_chased() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    let moved = ResponseTemplate::new(308).set_body_json(json!({
+        "moved_to": format!("{}/api/v1/paths/zQo/a.md", server.uri()),
+        "permanent_url": "https://briefcase.example/c:ada/a.md",
+        "owner": {"uuid": "zQo", "id": "c:ada"}
+    }));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/c:old/a.md"))
+        .respond_with(moved.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/zQo/a.md"))
+        .respond_with(moved)
+        .mount(&server)
+        .await;
+    let error = client.entry_at("c:old", "a.md").await.unwrap_err();
+    assert!(
+        matches!(error, briefcase_client::Error::Protocol(_)),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_hidden_entry_reads_exactly_like_a_missing_one() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/paths/c:ada/private/notes.md"))
+        .respond_with(not_found())
+        .mount(&server)
+        .await;
     let error = client
-        .entry_at("private/cos:tos/notes/notes.md")
+        .entry_at("c:ada", "private/notes.md")
         .await
         .expect_err("an entry the caller cannot read must be missing");
-
     assert!(error.is_not_found());
     assert!(!error.is_forbidden());
 }
 
 #[tokio::test]
-async fn retired_raw_obo_upload_never_sends_credentials_or_bytes() {
+async fn an_address_from_before_personal_drives_resolves_at_the_origin() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    let result = client
-        .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "app-notes",
-            "oba_secret",
-            b"private audio".to_vec(),
-        ))
+    Mock::given(method("GET"))
+        .and(path("/org/tos/public/handbook.md"))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entry_document()))
+        .expect(1)
+        .mount(&server)
         .await;
-    assert!(matches!(
-        result,
-        Err(briefcase_client::Error::Configuration(_))
-    ));
-    let requests = server.received_requests().await.unwrap_or_default();
-    assert!(
-        !requests
-            .iter()
-            .any(|request| request.url.path().starts_with("/api/v1/obo/"))
+    let entry = client
+        .entry_at_legacy_address("tos", "public/handbook.md")
+        .await
+        .unwrap();
+    assert_eq!(
+        entry.permanent_url.as_str(),
+        "https://briefcase.example/c:ada/notes/plan.md"
     );
 }
 
 #[tokio::test]
-async fn a_range_read_asks_for_exactly_those_bytes() {
+async fn reads_ask_for_exactly_the_bytes_and_addresses_ask_for_inline_content() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
 
     Mock::given(method("GET"))
-        .and(path(
-            "/api/v1/entries/01a067ce-7f19-7790-820a-0be6b3d4f828/content",
-        ))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/content")))
         .and(header("range", "bytes=2-8"))
         .respond_with(
             ResponseTemplate::new(206)
@@ -526,651 +608,437 @@ async fn a_range_read_asks_for_exactly_those_bytes() {
         )
         .mount(&server)
         .await;
-
-    let entry_id = "01a067ce-7f19-7790-820a-0be6b3d4f828".parse().unwrap();
     let stream = client
-        .read_content(entry_id, Some(briefcase_client::ByteRange::inclusive(2, 8)))
+        .read_content(
+            ENTRY_ID.parse().unwrap(),
+            Some(briefcase_client::ByteRange::inclusive(2, 8)),
+        )
         .await
-        .expect("the range must be served");
-
+        .unwrap();
     assert_eq!(stream.content_range(), Some("bytes 2-8/44"));
     assert_eq!(stream.bytes().await.unwrap(), b"otes.md");
-}
-
-#[tokio::test]
-async fn a_testing_key_selects_the_plane_without_replacing_identity() {
-    let server = MockServer::start().await;
-    let root_key = "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     Mock::given(method("GET"))
-        .and(path("/api/version"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("briefcase-api-version", "v1")
-                .set_body_json(version_document("1.0.0")),
-        )
+        .and(path("/api/v1/paths/c:ada/notes/plan.md"))
+        .and(query_param("disposition", "inline"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"# plan".to_vec()))
+        .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/entries"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .and(header("authorization", "Bearer test-token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [],
-            "next_cursor": null
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/obo/entries/list"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .and(header("x-app-id", "notes"))
-        .and(header("x-iam-obo-access-token", "oba_reusable"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"items":[],"next_cursor":null})),
-        )
-        .expect(2)
-        .mount(&server)
-        .await;
-
-    let client = Client::connect(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_token("test-token")
-            .with_environment(EnvironmentKey::new(root_key).unwrap())
-            .with_auto_update(false),
-    )
-    .await
-    .unwrap();
-    client.list_entries(&ListEntries::default()).await.unwrap();
-    for _ in 0..2 {
-        client
-            .list_entries_on_behalf_of(
-                &briefcase_client::ApplicationId::new("notes").unwrap(),
-                briefcase_client::OboProof::new("oba_reusable").unwrap(),
-                &briefcase_client::DelegatedListEntries::default()
-                    .prepare()
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-    }
-
-    let requests = server.received_requests().await.unwrap_or_default();
-    let obo = requests
-        .iter()
-        .find(|request| request.url.path() == "/api/v1/obo/entries/list")
+    let content = client
+        .read_content_at("c:ada", "notes/plan.md")
+        .await
         .unwrap();
-    assert!(!obo.headers.contains_key("authorization"));
-    assert!(!obo.headers.contains_key("x-iam-obo-access-proof"));
+    assert_eq!(content.bytes().await.unwrap(), b"# plan");
 }
 
 #[tokio::test]
-async fn test_only_self_operations_fail_locally_without_a_key() {
-    let server = MockServer::start().await;
-    let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .unwrap();
-
-    let error = client.current_testing_environment().await.unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "invalid client configuration: this action is only possible for a test environment"
-    );
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn production_environment_management_fails_locally_with_a_test_key() {
-    let server = MockServer::start().await;
-    let environment_id = "01a067ce-7f19-7790-820a-0be6b3d4f800".parse().unwrap();
-    let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_token("test-token")
-            .with_environment(
-                EnvironmentKey::new("ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB").unwrap(),
-            )
-            .with_auto_update(false),
-    )
-    .unwrap();
-    let input = TestingEnvironmentCreate::new("sdk-test");
-    let update = TestingEnvironmentUpdate {
-        name: Some("changed".to_owned()),
-        description: None,
-    };
-    let pairing = TestingEnvironmentIamPairing::new(
-        environment_id,
-        IamEnvironmentKey::new("c2345678901234567890123456789012").unwrap(),
-        ApplicationId::new("briefcase").unwrap(),
-        IamApplicationSecret::new(format!("ask_{}", "b".repeat(43))).unwrap(),
-    );
-    let key = IdempotencyKey::new("management-attempt-0001").unwrap();
-
-    let errors = [
-        client.testing_environments(None).await.unwrap_err(),
-        client
-            .create_testing_environment_with_key(&input, &key)
-            .await
-            .unwrap_err(),
-        client
-            .testing_environment(environment_id)
-            .await
-            .unwrap_err(),
-        client
-            .update_testing_environment_with_key(environment_id, 1, &update, &key)
-            .await
-            .unwrap_err(),
-        client
-            .delete_testing_environment_with_key(environment_id, &key)
-            .await
-            .unwrap_err(),
-        client
-            .restore_testing_environment_with_key(environment_id, &key)
-            .await
-            .unwrap_err(),
-        client
-            .testing_environment_key(environment_id)
-            .await
-            .unwrap_err(),
-        client
-            .replace_testing_environment_iam_pairing_with_key(environment_id, &pairing, &key)
-            .await
-            .unwrap_err(),
-        client
-            .clean_testing_environment_with_key(environment_id, &key)
-            .await
-            .unwrap_err(),
-    ];
-    for error in errors {
-        assert_eq!(
-            error.to_string(),
-            "invalid client configuration: testing-environment management is only possible from the production plane"
-        );
-    }
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn creating_an_environment_provisions_iam_from_the_production_application() {
+async fn an_archive_is_listed_without_extracting_it() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    let body = json!({"name":"sdk-test","description":"wire coverage"});
-    Mock::given(method("POST"))
-        .and(path("/api/v1/organizations/tos/testing-environments"))
-        .and(header("authorization", "Bearer test-token"))
-        .and(header("idempotency-key", "create-env-attempt-0001"))
-        .and(body_json(body))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(environment_document(Some(
-                "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-            ))),
-        )
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}/archive")))
+        .and(query_param("limit", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "format": "zip",
+            "entries": [
+                {"path": "docs/", "type": "folder", "size": 0},
+                {"path": "docs/a.txt", "type": "file", "size": 5, "compressed_size": 3,
+                 "modified_at": "2026-10-10T10:00:00Z", "encrypted": true},
+            ],
+            "truncated": true,
+            "truncated_because": "entry_limit"
+        })))
+        .expect(1)
         .mount(&server)
         .await;
-
-    let input = TestingEnvironmentCreate::new("sdk-test").described("wire coverage");
-    let idempotency_key = IdempotencyKey::new("create-env-attempt-0001").unwrap();
-    let created = client
-        .create_testing_environment_with_key(&input, &idempotency_key)
+    let listing = client
+        .archive_contents(ENTRY_ID.parse().unwrap(), Some(2))
         .await
         .unwrap();
-
-    assert_eq!(created.environment.name, "sdk-test");
-    assert_eq!(
-        created.key.expose_secret(),
-        "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-    );
+    assert_eq!(listing.format, "zip");
+    assert_eq!(listing.entries.len(), 2);
+    assert!(listing.entries[1].encrypted);
+    assert_eq!(listing.truncated_because.as_deref(), Some("entry_limit"));
 }
 
 #[tokio::test]
-async fn slt_exchange_and_refresh_are_anonymous_and_stay_in_the_selected_plane() {
-    let server = MockServer::start().await;
-    let root_key = "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/slt"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .and(header("idempotency-key", "login-attempt-0001"))
-        .and(body_json(json!({"slt": "si:worker", "org_id": "tos"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .and(header("idempotency-key", "refresh-attempt-0001"))
-        .and(body_json(
-            json!({"refresh_token": "refresh-from-briefcase"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(tokens_document()))
-        .mount(&server)
-        .await;
-
-    let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_token("must-not-leak")
-            .with_environment(EnvironmentKey::new(root_key).unwrap())
-            .with_auto_update(false),
-    )
-    .unwrap();
-    let too_short = IdempotencyKey::new("short-00").unwrap();
-    assert!(
-        client
-            .login_with_slt_with_key("si:worker", &too_short)
-            .await
-            .is_err()
-    );
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-    let too_long = IdempotencyKey::new("x".repeat(256)).unwrap_err();
-    assert!(too_long.to_string().contains("255"));
-
-    let login_key = IdempotencyKey::new("login-attempt-0001").unwrap();
-    let login = client
-        .login_with_slt_with_key("si:worker", &login_key)
-        .await
-        .unwrap();
-    let refresh_key = IdempotencyKey::new("refresh-attempt-0001").unwrap();
-    client
-        .refresh_session_with_key(&login.refresh_token, &refresh_key)
-        .await
-        .unwrap();
-    assert_eq!(client.update_status(), UpdateStatus::Disabled);
-
-    let requests = server.received_requests().await.unwrap_or_default();
-    for request in requests {
-        assert!(!request.headers.contains_key("authorization"));
-        assert!(request.headers.contains_key("idempotency-key"));
-    }
-}
-
-#[tokio::test]
-async fn slt_exchange_rejects_unscoped_and_cross_organization_sessions() {
-    for returned_organization in [None, Some("other")] {
-        let server = MockServer::start().await;
-        let mut response = tokens_document();
-        if let Some(organization) = returned_organization {
-            response["org_id"] = json!(organization);
-        } else {
-            response
-                .as_object_mut()
-                .expect("the token response is an object")
-                .remove("org_id");
-        }
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/slt"))
-            .and(header("idempotency-key", "login-org-check-0001"))
-            .and(body_json(json!({"slt": "slt-once", "org_id": "tos"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(response))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = Client::new_unchecked(
-            Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-                .unwrap()
-                .with_auto_update(false),
-        )
-        .unwrap();
-        let key = IdempotencyKey::new("login-org-check-0001").unwrap();
-        let result = client.login_with_slt_with_key("slt-once", &key).await;
-        if returned_organization.is_some() {
-            let error = result.unwrap_err();
-            assert!(matches!(&error, briefcase_client::Error::Protocol(_)));
-            assert!(error.to_string().contains("organization other"));
-            assert!(error.to_string().contains("configured for tos"));
-        } else {
-            assert!(matches!(
-                result.unwrap_err(),
-                briefcase_client::Error::Protocol(_)
-            ));
-        }
-        let requests = server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-        assert!(!requests[0].headers.contains_key("authorization"));
-    }
-}
-
-#[tokio::test]
-async fn noncanonical_obo_application_ids_fail_before_a_request() {
-    let server = MockServer::start().await;
-    let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .unwrap();
-    let error = client
-        .create_file_on_behalf_of(&briefcase_client::OnBehalfOfUpload::bytes(
-            "tos>notes",
-            "proof",
-            b"body".to_vec(),
-        ))
-        .await
-        .unwrap_err();
-
-    assert!(error.to_string().contains("bare lowercase handle"));
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one scenario intentionally walks every lifecycle route against one mock plane"
-)]
-async fn the_complete_environment_lifecycle_matches_the_server_contract() {
+async fn the_account_its_drives_and_what_others_shared_are_read_with_the_bearer() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
-    let id = "01a067ce-7f19-7790-820a-0be6b3d4f800";
-    let base = format!("/api/v1/organizations/tos/testing-environments/{id}");
-    let root_key = "ask_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-
+    let summary = json!({"uuid": "zQo", "id": "c:ada", "kind": "carbon", "display_name": "Ada", "pfp_url": null});
     Mock::given(method("GET"))
-        .and(path("/api/v1/organizations/tos/testing-environments"))
-        .and(query_param("status", "all"))
+        .and(path("/api/v1/me"))
+        .and(header("authorization", "Bearer test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [environment_document(None)]
+            "uuid": "Sc0", "id": "si:scout", "kind": "silicon", "display_name": "Scout",
+            "pfp_url": null, "custodian": {"uuid": "zQo", "id": "c:ada"}
         })))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path(base.clone()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(environment_document(None)))
+        .and(path("/api/v1/drives"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            {"owner": summary, "relation": "own",
+             "root_id": "01a067ce-7f19-7790-820a-0be6b3d4f801",
+             "permanent_url": "https://briefcase.example/c:ada"}
+        ]})))
+        .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("PATCH"))
-        .and(path(base.clone()))
-        .and(header("if-match", "\"1\""))
-        .and(header("idempotency-key", "update-env-attempt-0001"))
-        .and(header("content-type", "application/merge-patch+json"))
-        .and(body_json(json!({"name": "renamed", "description": null})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(environment_document(None)))
+    Mock::given(method("GET"))
+        .and(path("/api/v1/shared"))
+        .and(query_param("cursor", "next"))
+        .and(query_param("limit", "10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            {"owner": summary, "shared_at": "2026-10-10T10:00:00Z", "entry": entry_document()}
+        ], "next_cursor": null})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let me = client.me().await.unwrap();
+    assert_eq!(me.display_id(), "si:scout");
+    assert_eq!(me.custodian.unwrap().uuid, "zQo");
+    let drives = client.drives().await.unwrap();
+    assert_eq!(drives.items[0].owner.display_id(), "c:ada");
+    let shared = client.shared(Some("next"), Some(10)).await.unwrap();
+    assert_eq!(shared.items[0].entry.name, "plan.md");
+}
+
+#[tokio::test]
+async fn discovery_needs_no_credential() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "app_id": "briefcase",
+            "accounts_url": "https://accounts.teamofsilicons.com",
+            "delegated_scopes": ["briefcase.files.read"]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::new_unchecked(
+        Config::new(&base(&server))
+            .unwrap()
+            .with_token("must-not-be-sent"),
+    )
+    .unwrap();
+    let info = client.accounts_info().await.unwrap();
+    assert_eq!(info.app_id, "briefcase");
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests[0].headers.contains_key("authorization"));
+}
+
+#[tokio::test]
+async fn a_silicons_allow_list_is_read_and_changed_by_account() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/silicons/si:scout/allowed-accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "silicon": {"uuid": "Sc0", "id": "si:scout", "kind": "silicon"},
+            "items": [{"account": {"uuid": "b0b", "id": "c:bob", "kind": "carbon"},
+                       "allowed_at": "2026-10-10T10:00:00Z"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/silicons/si:scout/allowed-accounts/c:bob"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("DELETE"))
-        .and(path(base.clone()))
-        .and(header("idempotency-key", "delete-env-attempt-0001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(environment_document(None)))
+        .and(path("/api/v1/silicons/si:scout/allowed-accounts/c:bob"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let allowed = client.allowed_accounts("si:scout").await.unwrap();
+    assert_eq!(allowed.items[0].account.display_id(), "c:bob");
+    client.allow_account("si:scout", "c:bob").await.unwrap();
+    client.disallow_account("si:scout", "c:bob").await.unwrap();
+}
+
+#[tokio::test]
+async fn usage_storage_and_the_bin_name_the_drive_they_are_for() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/usage"))
+        .and(query_param("drive", "si:scout"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "storage": {"used_bytes": 1, "limit_bytes": 2, "remaining_bytes": 1},
+            "daily_uploads": {"used_bytes": 0, "limit_bytes": 2, "remaining_bytes": 2,
+                              "resets_at": "2026-10-11T00:00:00Z"}
+        })))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path(format!("{base}/key")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "environment_id": id,
-            "key_generation": 1,
-            "key_rotated_at": null,
-            "key": root_key
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("{base}/iam-pairings")))
-        .and(header("idempotency-key", "pair-iam-attempt-0001"))
-        .and(body_json(json!({
-            "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f899",
-            "iam_environment_key": "c2345678901234567890123456789012",
-            "iam_app_id": "briefcase",
-            "iam_app_secret": format!("ask_{}", "b".repeat(43)),
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(environment_document(None)))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("{base}/restorations")))
-        .and(header("idempotency-key", "restore-env-attempt-0001"))
+        .and(path("/api/v1/bin"))
+        .and(query_param("drive", "si:scout"))
+        .and(query_param("limit", "5"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(environment_document(Some(root_key))),
+            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_cursor": null})),
         )
+        .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path(format!("{base}/cleanings")))
-        .and(header("idempotency-key", "clean-env-attempt-0001"))
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/storage/configuration"))
+        .and(header("idempotency-key", "storage-attempt-1"))
+        .and(body_string_contains("\"drive\":\"si:scout\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "environment_id": id,
-            "erased_rows": 17,
-            "cleaned_at": "2026-09-03T11:00:00Z"
+            "status": "failed", "tested_at": "2026-10-10T10:00:00Z", "failure_reason": "assume_role"
         })))
+        .expect(1)
         .mount(&server)
         .await;
-
-    let parsed_id = id.parse().unwrap();
-    assert_eq!(
-        client
-            .testing_environments(Some("all"))
-            .await
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    let environment = client.testing_environment(parsed_id).await.unwrap();
-    assert_eq!(environment.created_by.id, "cos:tester");
-    client
-        .update_testing_environment_with_key(
-            parsed_id,
-            1,
-            &briefcase_client::TestingEnvironmentUpdate {
-                name: Some("renamed".to_owned()),
-                description: Some(None),
+    let usage = client.usage(Some("si:scout")).await.unwrap();
+    assert_eq!(usage.storage.remaining_bytes, 1);
+    client.bin(Some("si:scout"), None, Some(5)).await.unwrap();
+    let status = client
+        .configure_storage_with_key(
+            &briefcase_client::BucketConfiguration {
+                drive: Some("si:scout".to_owned()),
+                bucket_name: "scout-files".to_owned(),
+                region: "us-east-1".to_owned(),
+                role_arn: "arn:aws:iam::123456789012:role/briefcase".to_owned(),
+                prefix: "briefcase".to_owned(),
+                aws_account_id: "123456789012".to_owned(),
+                encryption_mode: briefcase_client::EncryptionMode::SseS3,
+                kms_key_arn: None,
             },
-            &IdempotencyKey::new("update-env-attempt-0001").unwrap(),
+            &IdempotencyKey::new("storage-attempt-1").unwrap(),
         )
         .await
         .unwrap();
-    client
-        .delete_testing_environment_with_key(
-            parsed_id,
-            &IdempotencyKey::new("delete-env-attempt-0001").unwrap(),
-        )
-        .await
-        .unwrap();
-    client.testing_environment_key(parsed_id).await.unwrap();
-    client
-        .replace_testing_environment_iam_pairing_with_key(
-            parsed_id,
-            &TestingEnvironmentIamPairing::new(
-                "01a067ce-7f19-7790-820a-0be6b3d4f899".parse().unwrap(),
-                IamEnvironmentKey::new("c2345678901234567890123456789012").unwrap(),
-                ApplicationId::new("briefcase").unwrap(),
-                IamApplicationSecret::new(format!("ask_{}", "b".repeat(43))).unwrap(),
-            ),
-            &IdempotencyKey::new("pair-iam-attempt-0001").unwrap(),
-        )
-        .await
-        .unwrap();
-    client
-        .clean_testing_environment_with_key(
-            parsed_id,
-            &IdempotencyKey::new("clean-env-attempt-0001").unwrap(),
-        )
-        .await
-        .unwrap();
-    let restored = client
-        .restore_testing_environment_with_key(
-            parsed_id,
-            &IdempotencyKey::new("restore-env-attempt-0001").unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(restored.key.expose_secret(), root_key);
+    assert_eq!(
+        status.status,
+        briefcase_client::BucketConfigurationState::Failed
+    );
+}
 
-    let sandbox = Client::new_unchecked(
-        Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
+#[tokio::test]
+async fn delegated_calls_carry_only_the_proof() {
+    use briefcase_client::{
+        DelegatedCreateFolder, DelegatedListEntries, DelegatedOperation, Proof,
+    };
+    let server = MockServer::start().await;
+    let client = Client::new_unchecked(
+        Config::new(&base(&server))
             .unwrap()
-            .with_environment(EnvironmentKey::new(root_key).unwrap())
-            .with_auto_update(false),
+            .with_token("account-bearer-never-sent"),
     )
     .unwrap();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/testing-environment"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": id,
-            "name": "sdk-test",
-            "description": "wire coverage",
-            "key_generation": 1,
-            "created_at": "2026-09-03T10:00:00Z"
-        })))
-        .mount(&server)
-        .await;
+    let folder = DelegatedCreateFolder {
+        operation_id: uuid::Uuid::new_v4(),
+        parent_path: String::new(),
+        name: "recordings".to_owned(),
+    };
+    let manifest = folder.prepare().unwrap();
+    assert_eq!(manifest.scope(), "briefcase.folders.create");
+    assert_eq!(DelegatedCreateFolder::SCOPE, "briefcase.folders.create");
     Mock::given(method("POST"))
-        .and(path("/api/v1/testing-environment/cleanings"))
-        .and(header("x-briefcase-app-secret", root_key))
-        .and(header("idempotency-key", "clean-current-attempt-0001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "environment_id": id,
-            "erased_rows": 0,
-            "cleaned_at": "2026-09-03T11:00:00Z"
-        })))
+        .and(path("/api/v1/obo/folders/create"))
+        .and(header("authorization", "Proof sap_waveform_proof"))
+        .and(body_json(serde_json::to_value(&folder).unwrap()))
+        .respond_with(ResponseTemplate::new(201).set_body_json(entry_document()))
+        .expect(1)
         .mount(&server)
         .await;
-    sandbox.current_testing_environment().await.unwrap();
-    sandbox
-        .clean_current_testing_environment_with_key(
-            &IdempotencyKey::new("clean-current-attempt-0001").unwrap(),
+    client
+        .create_folder_on_behalf_of(Proof::new("sap_waveform_proof").unwrap(), &manifest)
+        .await
+        .unwrap();
+
+    // A first-party app may name another drive to list.
+    let listing = DelegatedListEntries {
+        drive: Some("c:ada".to_owned()),
+        ..DelegatedListEntries::default()
+    };
+    Mock::given(method("POST"))
+        .and(path("/api/v1/obo/entries/list"))
+        .and(body_json(
+            json!({"parent_id": null, "path": null, "drive": "c:ada",
+                              "filter": null, "cursor": null, "limit": null}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_cursor": null})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    client
+        .list_entries_on_behalf_of(
+            Proof::new("sap_interface_proof").unwrap(),
+            &listing.prepare().unwrap(),
         )
         .await
         .unwrap();
-    assert!(matches!(
-        sandbox.list_entries(&ListEntries::default()).await,
-        Err(briefcase_client::Error::Configuration(_))
-    ));
-    for request in server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|request| {
-            request
-                .url
-                .path()
-                .starts_with("/api/v1/testing-environment")
-        })
-    {
-        assert!(!request.headers.contains_key("authorization"));
-        assert!(!request.headers.contains_key("x-org-id"));
-    }
-}
 
-#[tokio::test]
-async fn discovery_and_login_inspection_work_without_an_organization() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/iam"))
-        .and(header(
-            "x-briefcase-app-secret",
-            "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "app_id": "briefcase",
-            "test_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f800",
-            "iam_environment_id": "01a067ce-7f19-7790-820a-0be6b3d4f802"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer supplied-token"))
-        .and(header(
-            "x-briefcase-app-secret",
-            "ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "authenticated": false, "actor": null, "organizations": [], "expires_at": null
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let config = Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
-        .unwrap()
-        .with_auto_update(false)
-        .with_token("supplied-token")
-        .with_environment(
-            EnvironmentKey::new("ask_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap(),
-        );
-    let client = Client::new_unchecked(config).unwrap();
-    assert_eq!(
-        client.iam_info().await.unwrap().app_id.as_str(),
-        "briefcase"
-    );
-    assert!(!client.login_status().await.unwrap().authenticated);
     for request in server.received_requests().await.unwrap() {
-        if request.url.path().ends_with("/iam") {
-            assert!(request.headers.get("authorization").is_none());
+        let authorization = request.headers["authorization"].to_str().unwrap();
+        assert!(authorization.starts_with("Proof sap_"), "{authorization}");
+        for retired in ["x-org-id", "x-app-id", "x-iam-obo-access-token"] {
+            assert!(!request.headers.contains_key(retired), "{retired}");
         }
     }
+}
+
+#[test]
+fn only_a_user_verification_proof_is_accepted_and_never_echoed() {
+    use briefcase_client::Proof;
+    assert!(Proof::new("sap_abc").is_ok());
+    for value in [
+        "sapr_refresh_secret",
+        "eyJ.access_secret",
+        "oba_old_secret",
+        "sap_",
+        "",
+        "sap_a b_secret",
+    ] {
+        let error = Proof::new(value).unwrap_err().to_string();
+        // A bare prefix is fine to name; a secret never is.
+        assert!(
+            value.len() <= "sap_".len() || !error.contains(value),
+            "{value}: {error}"
+        );
+    }
     assert!(
-        client.usage().await.is_err(),
-        "workspace APIs still require an organization"
+        Proof::new("sapr_refresh_secret")
+            .unwrap_err()
+            .to_string()
+            .contains("proof refresh token")
+    );
+    assert_eq!(
+        format!("{:?}", Proof::new("sap_secret").unwrap()),
+        "Proof(<redacted>)"
     );
 }
 
 #[tokio::test]
-async fn v1_invitation_paging_and_public_ranges_keep_authority_separate() {
+async fn a_refused_delegated_call_is_never_retried() {
+    use briefcase_client::{DelegatedLinkAccess, DelegatedManifest, Proof};
+    let server = MockServer::start().await;
+    let client = Client::new_unchecked(Config::new(&base(&server)).unwrap()).unwrap();
+    let intent = DelegatedLinkAccess {
+        operation_id: uuid::Uuid::new_v4(),
+        entry_id: uuid::Uuid::new_v4(),
+        enabled: true,
+        expires_in_minutes: None,
+    };
+    let manifest = DelegatedManifest::new(&intent).unwrap();
+    assert_eq!(manifest.scope(), "briefcase.link_access.update");
+    Mock::given(method("POST"))
+        .and(path("/api/v1/obo/link-access"))
+        .and(header("authorization", "Proof sap_link_proof"))
+        .and(body_json(serde_json::to_value(&intent).unwrap()))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
+            "code": "proof_scope_missing",
+            "message": "The proof does not carry briefcase.link_access.update."
+        }})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = client
+        .set_link_access_on_behalf_of(Proof::new("sap_link_proof").unwrap(), &manifest)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some("proof_scope_missing"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_byte_transfer_carries_only_its_capability() {
+    use briefcase_client::{UploadCapability, UploadSource};
+    let server = MockServer::start().await;
+    let client = Client::new_unchecked(
+        Config::new(&base(&server))
+            .unwrap()
+            .with_token("account-bearer-never-sent"),
+    )
+    .unwrap();
+    let upload_id = uuid::Uuid::new_v4();
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/obo/uploads/{upload_id}/content")))
+        .and(header("x-briefcase-upload-capability", "cap_secret"))
+        .and(header("content-length", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "operation_id": uuid::Uuid::new_v4(), "upload_id": upload_id, "state": "staged",
+            "expires_at": "2026-10-10T11:00:00Z", "published_entry_id": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let status = client
+        .transfer_delegated_upload(
+            upload_id,
+            UploadCapability::new("cap_secret").unwrap(),
+            &UploadSource::Bytes(b"bytes".to_vec()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.state, briefcase_client::DelegatedUploadState::Staged);
+    let request = &server.received_requests().await.unwrap()[0];
+    assert!(!request.headers.contains_key("authorization"));
+    assert!(!request.headers.contains_key("x-org-id"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "one sharing flow verifies authenticated writes and anonymous reads")]
+async fn shares_go_to_accounts_and_link_reads_never_carry_the_bearer() {
     use briefcase_client::{ByteRange, Invite, Recipient};
     let server = MockServer::start().await;
     let id = uuid::Uuid::new_v4();
     let next = uuid::Uuid::new_v4().to_string();
     let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+        Config::new(&base(&server))
             .unwrap()
-            .with_token("private-bearer")
-            .with_auto_update(false),
+            .with_token("private-bearer"),
     )
     .unwrap();
     let invite = Invite {
-        principal: Recipient::Tag("engineering".into()),
+        principal: Recipient::account("si:scout").unwrap(),
         access: vec![AccessRight::Read, AccessRight::Update],
         inherit: true,
         expires_in_minutes: None,
     };
-    Mock::given(method("POST")).and(path(format!("/api/v1/entries/{id}/invitations")))
-        .and(header("authorization","Bearer private-bearer")).and(header("idempotency-key","v1-invitation"))
-        .and(body_json(json!({"principal":{"type":"tag","id":"engineering"},"access":["read","update"],"inherit":true})))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":id,"principal":{"type":"tag","id":"engineering"},"access":["read","update"],"inherit":true}))).expect(1).mount(&server).await;
-    assert_eq!(
-        client
-            .invite(id, &invite, &IdempotencyKey::new("v1-invitation").unwrap())
-            .await
-            .unwrap()
-            .id,
-        id
-    );
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/entries/{id}/invitations")))
+        .and(header("authorization", "Bearer private-bearer"))
+        .and(header("idempotency-key", "share-attempt-1"))
+        .and(body_json(
+            json!({"principal": {"type": "silicon", "id": "si:scout"},
+                              "access": ["read", "update"], "inherit": true}),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": id, "principal": {"type": "silicon", "id": "Sc0"},
+            "access": ["read", "update"], "inherit": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let invitation = client
+        .invite(
+            id,
+            &invite,
+            &IdempotencyKey::new("share-attempt-1").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invitation.invitation.principal.id(), "Sc0");
+
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/entries/{id}/invitations")))
         .and(query_param("cursor", &next))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"items":[],"next_cursor":null})),
+            ResponseTemplate::new(200).set_body_json(json!({"items": [], "next_cursor": null})),
         )
         .expect(1)
         .mount(&server)
@@ -1183,109 +1051,62 @@ async fn v1_invitation_paging_and_public_ranges_keep_authority_separate() {
             .items
             .is_empty()
     );
+
     Mock::given(method("GET"))
-        .and(path("/api/v1/public/tos/public/movie.mp4"))
+        .and(path("/api/v1/public/c:ada/talks/movie.mp4"))
         .and(query_param("view", "inline"))
         .and(header("range", "bytes=4-7"))
         .respond_with(
             ResponseTemplate::new(206)
                 .insert_header("Content-Range", "bytes 4-7/12")
-                .insert_header("Content-Type", "video/mp4")
                 .set_body_bytes(b"data".to_vec()),
         )
         .expect(1)
         .mount(&server)
         .await;
     let mut content = client
-        .public_content(
-            "tos",
-            "public/movie.mp4",
-            Some(ByteRange {
-                start: 4,
-                end: Some(7),
-            }),
-        )
+        .public_content("c:ada", "talks/movie.mp4", Some(ByteRange::inclusive(4, 7)))
         .await
         .unwrap();
     assert_eq!(content.content_range(), Some("bytes 4-7/12"));
     assert_eq!(content.chunk().await.unwrap(), Some(b"data".to_vec()));
-    let requests = server.received_requests().await.unwrap();
-    let public = requests
-        .iter()
-        .find(|request| request.url.path().starts_with("/api/v1/public/"))
-        .unwrap();
-    assert!(
-        !public.headers.contains_key("authorization"),
-        "anonymous reads must never leak a configured bearer"
-    );
-}
 
-#[tokio::test]
-async fn critical_link_manifest_is_exact_and_never_retries_consumed_proofs() {
-    use briefcase_client::{DelegatedLinkAccess, DelegatedManifest, OboProof};
-    let server = MockServer::start().await;
-    let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
-            .unwrap()
-            .with_token("never-send")
-            .with_auto_update(false),
-    )
-    .unwrap();
-    let intent = DelegatedLinkAccess {
-        operation_id: uuid::Uuid::new_v4(),
-        entry_id: uuid::Uuid::new_v4(),
-        enabled: true,
-        expires_in_minutes: None,
-    };
-    let manifest = DelegatedManifest::new(&intent).unwrap();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/obo/link-access"))
-        .and(header("x-app-id", "notes"))
-        .and(header("x-iam-obo-access-token", "critical-proof"))
-        .and(body_json(serde_json::to_value(&intent).unwrap()))
-        .respond_with(ResponseTemplate::new(503).set_body_json(
-            json!({"error":{"code":"iam_unavailable","message":"Try with a fresh proof"}}),
-        ))
+    // A link under an id the owner gave up moves to the owner's uuid.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/public/c:old-ada/talks"))
+        .respond_with(ResponseTemplate::new(308).set_body_json(json!({
+            "moved_to": format!("{}/api/v1/public/c:ada/talks", server.uri()),
+            "permanent_url": "https://briefcase.example/c:ada/talks",
+            "owner": {"uuid": "zQo", "id": "c:ada"}
+        })))
         .expect(1)
         .mount(&server)
         .await;
-    assert!(
-        client
-            .set_link_access_on_behalf_of(
-                &ApplicationId::new("notes").unwrap(),
-                OboProof::new("critical-proof").unwrap(),
-                &manifest
-            )
-            .await
-            .is_err()
-    );
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(!requests[0].headers.contains_key("authorization"));
-}
-
-#[tokio::test]
-async fn anonymous_links_need_no_selected_organization_or_session() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET")).and(path("/api/v1/public/tos/public/launch"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":uuid::Uuid::new_v4(),"name":"launch","path":"public/launch","entry_type":"folder","content_type":null,"size":null}))).expect(1).mount(&server).await;
-    let client = Client::new_unchecked(
-        Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
-            .unwrap()
-            .with_auto_update(false),
-    )
-    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/public/zQo/talks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id, "name": "talks", "path": "talks", "entry_type": "folder",
+            "content_type": null, "size": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     assert_eq!(
         client
-            .public_entry("tos", "public/launch")
+            .public_entry("c:old-ada", "talks")
             .await
             .unwrap()
             .name,
-        "launch"
+        "talks"
     );
+
+    let requests = server.received_requests().await.unwrap();
     assert!(
-        client.list_entries(&ListEntries::default()).await.is_err(),
-        "unscoped public access must not permit ordinary workspace reads"
+        requests
+            .iter()
+            .filter(|request| request.url.path().starts_with("/api/v1/public/"))
+            .all(|request| !request.headers.contains_key("authorization")),
+        "link reads must never leak a configured bearer"
     );
 }
 
@@ -1300,28 +1121,23 @@ async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
         .mount(&server)
         .await;
     let event = Event::new(Source::Sdk, "upload", Stage::Completed);
-    briefcase_client::telemetry::submit(&format!("{}/api/v1/", server.uri()), &event)
+    briefcase_client::telemetry::submit(&base(&server), &event)
         .await
         .unwrap();
     Mock::given(method("GET"))
-        .and(path("/api/v1/iam"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"app_id":"briefcase","testing":false,"test_environment_id":null}),
-        ))
+        .and(path("/api/v1/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "app_id": "briefcase", "accounts_url": "https://accounts.example", "delegated_scopes": []
+        })))
         .expect(2)
         .mount(&server)
         .await;
     for enabled in [true, false] {
-        Client::new_unchecked(
-            Config::for_sign_in(&format!("{}/api/v1/", server.uri()))
-                .unwrap()
-                .with_auto_update(false)
-                .with_telemetry(enabled),
-        )
-        .unwrap()
-        .iam_info()
-        .await
-        .unwrap();
+        Client::new_unchecked(Config::new(&base(&server)).unwrap().with_telemetry(enabled))
+            .unwrap()
+            .accounts_info()
+            .await
+            .unwrap();
     }
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
@@ -1332,8 +1148,7 @@ async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
     assert!(
         requests
             .iter()
-            .all(|r| !r.headers.contains_key("authorization")
-                && !r.headers.contains_key("x-briefcase-app-secret"))
+            .all(|r| !r.headers.contains_key("authorization"))
     );
     assert_eq!(requests[1].headers["x-briefcase-telemetry"], "on");
     assert_eq!(requests[2].headers["x-briefcase-telemetry"], "off");
@@ -1348,21 +1163,19 @@ async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
     let id = uuid::Uuid::new_v4();
     let grant = uuid::Uuid::new_v4();
     let client = Client::new_unchecked(
-        Config::new(&format!("{}/api/v1/", server.uri()), "tos")
+        Config::new(&base(&server))
             .unwrap()
-            .with_token("private-bearer")
-            .with_auto_update(false),
+            .with_token("private-bearer"),
     )
     .unwrap();
-    let invitation = json!({"id":grant,"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
-        "inherit":true,"expires_at":"2026-09-25T10:00:00Z"});
+    let invitation = json!({"id": grant, "principal": {"type": "carbon", "id": "a1ex"},
+        "access": ["read"], "inherit": true, "expires_at": "2026-10-25T10:00:00Z"});
 
-    // An expiring invitation carries its lifetime; the listing reports its end.
     Mock::given(method("POST"))
         .and(path(format!("/api/v1/entries/{id}/invitations")))
         .and(body_json(
-            json!({"principal":{"type":"carbon","id":"c:alex"},"access":["read"],
-            "inherit":true,"expires_in_minutes":90}),
+            json!({"principal": {"type": "carbon", "id": "c:alex"},
+            "access": ["read"], "inherit": true, "expires_in_minutes": 90}),
         ))
         .respond_with(ResponseTemplate::new(201).set_body_json(invitation.clone()))
         .expect(1)
@@ -1381,12 +1194,14 @@ async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
         )
         .await
         .unwrap();
-    assert_eq!(created.expires_at.as_deref(), Some("2026-09-25T10:00:00Z"));
+    assert_eq!(created.expires_at.as_deref(), Some("2026-10-25T10:00:00Z"));
 
-    // Changing a share sends exactly one field.
     for (change, body) in [
-        (ExpiryChange::ExpireIn(15), json!({"expires_in_minutes":15})),
-        (ExpiryChange::Permanent, json!({"permanent":true})),
+        (
+            ExpiryChange::ExpireIn(15),
+            json!({"expires_in_minutes": 15}),
+        ),
+        (ExpiryChange::Permanent, json!({"permanent": true})),
     ] {
         Mock::given(method("PATCH"))
             .and(path(format!("/api/v1/entries/{id}/invitations/{grant}")))
@@ -1409,11 +1224,13 @@ async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
 
     Mock::given(method("PUT"))
         .and(path(format!("/api/v1/entries/{id}/link-access")))
-        .and(body_json(json!({"enabled":true,"expires_in_minutes":60})))
+        .and(body_json(
+            json!({"enabled": true, "expires_in_minutes": 60}),
+        ))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"can_manage":true,
-            "enabled":true,"effective":true,"inherited_from":null,"url":null,
-            "expires_at":"2026-09-25T11:00:00Z"})),
+            ResponseTemplate::new(200).set_body_json(json!({"can_manage": true,
+            "enabled": true, "effective": true, "inherited_from": null, "url": null,
+            "expires_at": "2026-10-25T11:00:00Z"})),
         )
         .expect(1)
         .mount(&server)
@@ -1422,7 +1239,7 @@ async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
         .set_expiring_link_access(id, 60, &IdempotencyKey::new("expiring-link").unwrap())
         .await
         .unwrap();
-    assert_eq!(link.expires_at.as_deref(), Some("2026-09-25T11:00:00Z"));
+    assert_eq!(link.expires_at.as_deref(), Some("2026-10-25T11:00:00Z"));
 
     Mock::given(method("DELETE"))
         .and(path(format!("/api/v1/entries/{id}/self-destruct")))
@@ -1432,29 +1249,19 @@ async fn expiring_shares_and_self_destruct_use_the_contracted_shapes() {
         .await;
     client.make_permanent(id).await.unwrap();
 
-    // The upload form carries the self-destruct lifetime beside the file.
+    let mut document = entry_document();
+    document["self_destruct_at"] = json!("2026-10-25T12:00:00Z");
     Mock::given(method("POST"))
         .and(path("/api/v1/uploads"))
         .and(body_string_contains("name=\"self_destruct_minutes\""))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id":id,"org_id":"tos","type":"file","visibility":"full","name":"note.txt",
-            "path":"private/c:alex/note.txt","parent_id":null,"root_type":"private","tag":null,
-            "content_type":"text/plain","size":2,"render":"code",
-            "permanent_url":"https://briefcase.teamofsilicons.com/org/tos/private/c:alex/note.txt/",
-            "content_url":null,"download_url":null,"owner":null,"origin_app_id":null,
-            "effective_access":["read"],"created_at":null,"updated_at":null,"deleted_at":null,
-            "self_destruct_at":"2026-09-25T12:00:00Z"})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(document))
         .expect(1)
         .mount(&server)
         .await;
     let entry = client
         .upload(
-            &Upload::bytes(
-                Destination::Path("private/c:alex".into()),
-                "note.txt",
-                b"hi".to_vec(),
-            )
-            .self_destructing(30),
+            &Upload::bytes(Destination::path("notes"), "note.txt", b"hi".to_vec())
+                .self_destructing(30),
         )
         .await
         .unwrap();

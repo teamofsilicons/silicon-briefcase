@@ -48,10 +48,11 @@ pub struct Event {
     pub operation: String,
     /// Operation lifecycle stage.
     pub stage: Stage,
-    /// Whether the observation belongs to a sandbox.
+    /// Legacy field kept for wire compatibility; Briefcase has no testing
+    /// environments any more, so clients leave it `false`.
     #[serde(default)]
     pub testing: bool,
-    /// Public sandbox ID when known; never the application secret.
+    /// Legacy field kept for wire compatibility; always absent.
     pub environment_id: Option<Uuid>,
     /// Correlation with the API response request ID.
     pub request_id: Option<Uuid>,
@@ -98,7 +99,8 @@ impl Event {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
             && ![
-                "ask_", "slt_", "oat_", "ort_", "table-", "apikey-", "sscli-", "stk-",
+                "ask_", "slt_", "oat_", "ort_", "sar_", "sap_", "sapr_", "sa_app_", "whsec_",
+                "table-", "apikey-", "sscli-", "stk-", "stk_",
             ]
             .iter()
             .any(|prefix| self.operation.contains(prefix))
@@ -123,9 +125,7 @@ pub async fn submit(base: &str, event: &Event) -> crate::Result<()> {
             "invalid telemetry event".into(),
         ));
     }
-    let config = crate::Config::for_sign_in(base)?
-        .with_auto_update(false)
-        .with_telemetry(false);
+    let config = crate::Config::new(base)?.with_telemetry(false);
     let client = crate::Client::new_unchecked(config)?;
     client
         .receive_empty(
@@ -160,6 +160,8 @@ mod tests {
         assert!(event.valid());
         for value in [
             "ask_secret",
+            "sar_secret",
+            "sap_secret",
             "table-secret",
             "private/alice.txt",
             "a query",

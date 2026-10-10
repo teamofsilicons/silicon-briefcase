@@ -382,3 +382,30 @@ drive list. Both fixed in `5060817`, with a test each.
 - Throwaway databases on 5460 from these tests (`briefcase_link_*`) are dropped by the tests; `briefcase_p3cut`
   (the e2e database) is kept for inspection. Test identities on the stack: `briefcase-p3-*-c093407`,
   `briefcase-p3-*-d093745`.
+
+## 2026-10-10 — Resumed CLI and client stage
+
+Reviewed and completed the inherited client/CLI rewrite. The client and CLI are 4.0.0, use the
+57-operation Accounts-era contract, expose personal/custodial drives and explicit sharing, and replace
+broker sign-ins with public-client device/SLT flows and file-locked rotating refresh. Saved credentials
+stay bound to the API deployment. Offline discovery and status, hidden runtime aliases, retired-option
+errors, token redaction, telemetry controls and daemon-uninstall compatibility are covered.
+
+Rewrote the shipped CLI/client guides to match the implementation, removed the retired testing guide
+from the sync inventory, and restored the formerly ignored service/client operation contract test.
+The previous process security suite was tied to the retired broker and credential format: its eight
+file-operation tests were retained and migrated (pagination, cursor-cycle refusal, durable mutation
+replay, sharing/expiry, links, self-destruct and reports). The 21 Accounts process tests replace broker
+login/refresh/testing-plane assertions. Nothing was relaxed to accept incorrect file behavior.
+
+Verification against the current code:
+- Client workspace `cargo test --locked --workspace --all-targets --all-features`: **142 passed,
+  2 ignored** (external live credentials required). Log: `.mig/logs/client-final.log`.
+- Client workspace `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: passed.
+- Service `cargo test --offline --test openapi_contract`: **4 passed**, including exact identity, method,
+  path and revision equality for all 57 operations. Root lockfile updated for the path dependency 4.0.0.
+- Public-client and CLI tests exercise denial, expiry, slow-down, single-flight refresh and revoke.
+
+Next: real CLI/API/Accounts storage journeys, native Apps archives, frontend and active docs. Production
+cutover remains separate. The recovered local Accounts stack was recreated; old cached test sessions
+are invalid and all new checks must mint fresh identities.

@@ -1,190 +1,72 @@
-//! Shared-service process checks. No system service or external registry is used.
-#![cfg(unix)]
+//! The retired background service and the offline guides, process by process.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+mod common;
+
+use common::{Home, briefcase, stderr, stdout};
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt as _;
-use std::{
-    path::Path,
-    process::{Command, Output},
-    time::Duration,
-};
 
-fn cli(runtime: &Path, state: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_briefcase"))
-        .env("BRIEFCASE_TELEMETRY", "off")
-        .env("BRIEFCASE_DAEMON_HOME", runtime)
-        .env("BRIEFCASE_HOME", state)
-        .env("BRIEFCASE_AUTO_UPDATE", "on")
-        .env_remove("BRIEFCASE_TEST")
-        .env_remove("BRIEFCASE_APP_SECRET")
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-struct Cleanup {
-    runtime: std::path::PathBuf,
-    state: std::path::PathBuf,
-}
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let _ = cli(&self.runtime, &self.state, &["daemon", "stop"]);
-    }
-}
-
-#[test]
-fn two_silicon_homes_share_one_live_daemon_and_can_stop_it() {
-    // macOS Unix sockets have a short pathname limit; use a short temp root.
-    let dir = tempfile::Builder::new()
-        .prefix("bc-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let runtime = dir.path().join("r");
-    let first = dir.path().join("first");
-    let second = dir.path().join("second");
-    let _cleanup = Cleanup {
-        runtime: runtime.clone(),
-        state: first.clone(),
-    };
-    std::fs::create_dir_all(&first).unwrap();
-    std::fs::write(
-        first.join("config.json"),
-        r#"{"auto_update":true,"telemetry":false}"#,
+#[tokio::test]
+async fn uninstalling_with_nothing_installed_succeeds_and_changes_nothing() {
+    let home = Home::new();
+    let output = briefcase(
+        &home,
+        &["daemon", "uninstall"],
+        &[("BRIEFCASE_DAEMON_HOME", "/nonexistent-briefcase-daemon")],
     )
-    .unwrap();
-    let start = cli(&runtime, &first, &["daemon", "start"]);
-    assert!(
-        start.status.success(),
-        "{}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    let before: Value =
-        serde_json::from_slice(&cli(&runtime, &first, &["daemon", "status"]).stdout).unwrap();
-    assert_eq!(before["running"], true);
-    assert_eq!(before["auto_update"], false);
-    assert_eq!(before["update_manager"], "honeycomb");
-    let second_start = cli(&runtime, &second, &["daemon", "start"]);
-    assert!(second_start.status.success());
-    let after: Value =
-        serde_json::from_slice(&cli(&runtime, &second, &["daemon", "status"]).stdout).unwrap();
-    assert_eq!(before["pid"], after["pid"]);
-    assert_eq!(after["homes"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        std::fs::metadata(runtime.join("control.sock"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    assert_eq!(
-        std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    assert!(!runtime.join("installation").exists());
-    assert!(!first.join("update.json").exists());
-    assert!(!second.join("update.json").exists());
-    assert!(cli(&runtime, &first, &["daemon", "stop"]).status.success());
-    for _ in 0..30 {
-        if !runtime.join("control.sock").exists() {
-            break;
+    .await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["installed"], false);
+    assert_eq!(answer["service_removed"], Value::Null);
+    assert_eq!(answer["stopped"], false);
+    assert!(!home.state().exists());
+}
+
+#[tokio::test]
+async fn the_guides_are_bundled_and_readable_without_a_sign_in() {
+    let home = Home::new();
+    let listing = briefcase(&home, &["docs"], &[]).await;
+    assert!(listing.status.success());
+    let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listing["guides"], serde_json::json!(["cli", "client"]));
+    for guide in ["cli", "client"] {
+        let output = briefcase(&home, &["docs", guide], &[]).await;
+        assert!(output.status.success(), "{guide}");
+        let text = stdout(&output);
+        assert!(text.len() > 1000, "{guide} is too short");
+        for retired in ["Honeycomb", "honeycomb", "IAM", "--org", "organization"] {
+            assert!(!text.contains(retired), "{guide} mentions {retired}");
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
-    let stopped: Value =
-        serde_json::from_slice(&cli(&runtime, &first, &["daemon", "status"]).stdout).unwrap();
-    assert_eq!(stopped["running"], false);
-    // A fresh instance reloads both registrations, without credentials in IPC.
-    assert!(cli(&runtime, &first, &["daemon", "start"]).status.success());
-    let restarted: Value =
-        serde_json::from_slice(&cli(&runtime, &first, &["daemon", "status"]).stdout).unwrap();
-    assert_eq!(restarted["homes"].as_array().unwrap().len(), 2);
+    let unknown = briefcase(&home, &["docs", "testing"], &[]).await;
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(stderr(&unknown).contains("available: cli, client"));
 }
 
-#[test]
-fn test_selection_footer_survives_argument_errors_without_echoing_a_secret() {
-    let dir = tempfile::tempdir().unwrap();
-    let result = cli(
-        dir.path(),
-        dir.path(),
-        &["--app-secret", "never-print-this-secret", "not-a-command"],
-    );
-    assert_eq!(result.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("TEST ENVIRONMENT"));
-    assert!(!stderr.contains("never-print-this-secret"));
-    assert!(result.stdout.is_empty());
-}
-
-#[test]
-fn manuals_are_bundled_and_readable_without_a_login_or_daemon() {
-    let dir = tempfile::tempdir().unwrap();
-    let result = cli(dir.path(), dir.path(), &["docs", "testing", "--json"]);
-    assert!(result.status.success());
-    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert!(value["markdown"].as_str().unwrap().contains("2 GiB"));
-    assert!(!dir.path().join("control.sock").exists());
-}
-
-#[test]
-#[cfg(target_os = "macos")]
-fn installing_a_login_service_writes_valid_private_configuration() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::Builder::new()
-        .prefix("bc-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let runtime = dir.path().join("r");
-    let state = dir.path().join("state");
-    let home = dir.path().join("home & space");
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let control = bin.join("launchctl");
-    std::fs::write(&control, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _cleanup = Cleanup {
-        runtime: runtime.clone(),
-        state: state.clone(),
-    };
-    let result = Command::new(env!("CARGO_BIN_EXE_briefcase"))
-        .env("BRIEFCASE_TELEMETRY", "off")
-        .env("HOME", &home)
-        .env("BRIEFCASE_HOME", &state)
-        .env("BRIEFCASE_DAEMON_HOME", &runtime)
-        .env("BRIEFCASE_AUTO_UPDATE", "on")
-        .env("BRIEFCASE_TOKEN", "not-for-service-definition")
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .args(["daemon", "install"])
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let plist = home.join("Library/LaunchAgents/com.teamofsilicons.briefcase.plist");
-    assert!(
-        Command::new("/usr/bin/plutil")
-            .args(["-lint"])
-            .arg(&plist)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let text = std::fs::read_to_string(plist).unwrap();
-    assert!(text.contains("home &amp; space"));
-    assert!(!text.contains("not-for-service-definition"));
-}
-
-#[test]
-fn putting_a_secret_in_the_uuid_flag_does_not_leak_it_in_parser_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    let secret = format!("ask_{}", "a".repeat(43));
-    let result = cli(dir.path(), dir.path(), &["--test", &secret, "ls"]);
-    assert_eq!(result.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(!stderr.contains(&secret));
-    assert!(stderr.contains("<redacted>"));
-    assert!(stderr.contains("TEST ENVIRONMENT"));
+#[tokio::test]
+async fn every_command_explains_itself_in_its_help() {
+    let home = Home::new();
+    for command in [
+        "login", "logout", "accounts", "status", "drives", "shared", "allow", "ls", "find",
+        "search", "stat", "mkdir", "put", "get", "cat", "archive", "mv", "rm", "keep", "bin",
+        "versions", "restore", "history", "logs", "link", "share", "unshare", "expiry", "shares",
+        "access", "inbox", "usage", "storage", "app", "config", "report", "daemon", "docs",
+        "version",
+    ] {
+        let output = briefcase(&home, &[command, "--help"], &[]).await;
+        assert!(output.status.success(), "{command}");
+        let text = stdout(&output);
+        assert!(text.contains("Usage: briefcase"), "{command}");
+        assert!(
+            text.contains("briefcase docs cli"),
+            "{command} has no pointer to the guide"
+        );
+        for retired in ["--org", "IAM", "Honeycomb", "organization", "tag:"] {
+            assert!(
+                !text.contains(retired),
+                "{command} --help mentions {retired}"
+            );
+        }
+    }
 }

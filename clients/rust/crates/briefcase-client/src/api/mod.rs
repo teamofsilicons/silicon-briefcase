@@ -6,10 +6,8 @@
 mod access;
 mod content;
 pub mod delegated;
+mod drives;
 mod entries;
-mod environments;
-mod login;
-mod organization;
 
 pub use content::ContentStream;
 

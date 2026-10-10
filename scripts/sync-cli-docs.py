@@ -3,7 +3,7 @@
 from pathlib import Path
 import sys
 root = Path(__file__).resolve().parent.parent
-pairs = {'cli': 'cli/README.md', 'client': 'client/README.md', 'testing': 'testing-environments.md'}
+pairs = {'cli': 'cli/README.md', 'client': 'client/README.md'}
 check = '--check' in sys.argv
 stale = []
 for name, source in pairs.items():

@@ -1,26 +1,29 @@
-//! Opt-in coverage against a running Briefcase test plane.
+//! Opt-in coverage against a running Briefcase deployment.
 //!
-//! Both tests are ignored by default because they require live credentials.
-//! The smoke test is deliberately read-only. The mutation test must only run
-//! against a disposable environment: it creates a UUID-named private tree,
-//! exercises the package's file workflow, and moves that tree to the
-//! recoverable bin when it finishes (including after an ordinary test error).
+//! Both tests are ignored by default because they need a live access token.
+//! The first is read-only. The second creates a uniquely named folder at the
+//! top of the signed-in account's own drive, exercises the package's file
+//! workflow inside it, and moves it to the recoverable bin when it finishes
+//! (including after an ordinary test error).
+//!
+//! `BRIEFCASE_LIVE_API_URL` is the API base (`http://127.0.0.1:4101/api/v1/`
+//! locally), `BRIEFCASE_LIVE_BEARER_TOKEN` a Silicon Accounts access token
+//! issued to Briefcase (`briefcase login` stores one;
+//! `briefcase login status --json` shows who it is for), and the optional
+//! `BRIEFCASE_LIVE_GRANTEE` a `c:`/`si:` id to share with and unshare again.
 
 use std::{env, error::Error, io};
 
 use briefcase_client::{
-    API_VERSION, AccessRight, ActorRef, ByteRange, Client, Config, EffectiveAccess, EntryType,
-    EntryUpdate, EnvironmentKey, IdempotencyKey, ListEntries, NewFolder, NewGrant, PermissionQuery,
-    RootType, Upload,
+    API_VERSION, AccessRight, Account, ActorRef, ByteRange, Client, Config, EffectiveAccess,
+    EntryType, EntryUpdate, IdempotencyKey, ListEntries, NewFolder, NewGrant, PermissionQuery,
+    Upload,
 };
 use uuid::Uuid;
 
 const API_URL: &str = "BRIEFCASE_LIVE_API_URL";
-const ORG_ID: &str = "BRIEFCASE_LIVE_ORG_ID";
 const BEARER_TOKEN: &str = "BRIEFCASE_LIVE_BEARER_TOKEN";
-const TEST_ROOT: &str = "BRIEFCASE_LIVE_TEST_ROOT";
-const GRANTEE_TYPE: &str = "BRIEFCASE_LIVE_GRANTEE_TYPE";
-const GRANTEE_ID: &str = "BRIEFCASE_LIVE_GRANTEE_ID";
+const GRANTEE: &str = "BRIEFCASE_LIVE_GRANTEE";
 
 type LiveResult<T> = Result<T, Box<dyn Error>>;
 
@@ -41,41 +44,19 @@ fn required_environment_variable(name: &str) -> LiveResult<String> {
     Ok(value)
 }
 
-fn optional_environment_variable(name: &str) -> LiveResult<Option<String>> {
-    match env::var(name) {
-        Ok(value) if value.trim().is_empty() => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name} must not be empty when it is set"),
-        )
-        .into()),
-        Ok(value) => Ok(Some(value)),
+fn optional_grantee() -> LiveResult<Option<ActorRef>> {
+    match env::var(GRANTEE) {
         Err(env::VarError::NotPresent) => Ok(None),
+        Ok(id) => ActorRef::from_id(&id).map(Some).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{GRANTEE} must be a c: or si: id"),
+            )
+            .into()
+        }),
         Err(error) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{name} could not be read: {error}"),
-        )
-        .into()),
-    }
-}
-
-fn optional_grantee() -> LiveResult<Option<ActorRef>> {
-    match (
-        optional_environment_variable(GRANTEE_TYPE)?,
-        optional_environment_variable(GRANTEE_ID)?,
-    ) {
-        (None, None) => Ok(None),
-        (Some(actor_type), Some(id)) => match actor_type.as_str() {
-            "carbon" => Ok(Some(ActorRef::carbon(id))),
-            "silicon" => Ok(Some(ActorRef::silicon(id))),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{GRANTEE_TYPE} must be `carbon` or `silicon`"),
-            )
-            .into()),
-        },
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{GRANTEE_TYPE} and {GRANTEE_ID} must be set together"),
+            format!("{GRANTEE} could not be read: {error}"),
         )
         .into()),
     }
@@ -89,97 +70,68 @@ fn ensure(condition: bool, message: impl Into<String>) -> LiveResult<()> {
     }
 }
 
-async fn live_client() -> LiveResult<(Client, String)> {
+async fn live_client() -> LiveResult<(Client, Account)> {
     let api_url = required_environment_variable(API_URL)?;
-    let organization = required_environment_variable(ORG_ID)?;
     let bearer = required_environment_variable(BEARER_TOKEN)?;
-    let root = EnvironmentKey::new(required_environment_variable(TEST_ROOT)?)?;
-    let client = Client::connect(
-        Config::new(&api_url, &organization)?
-            .with_token(bearer)
-            .with_environment(root)
-            .with_auto_update(false),
-    )
-    .await?;
-    Ok((client, organization))
+    let client = Client::connect(Config::new(&api_url)?.with_token(bearer)).await?;
+    let account = client.me().await?;
+    Ok((client, account))
 }
 
 #[tokio::test]
-#[ignore = "requires a running Briefcase service and explicit live test credentials"]
-async fn live_testing_plane_contract_and_reads() -> LiveResult<()> {
+#[ignore = "requires a running Briefcase service and a live access token"]
+async fn live_contract_account_and_reads() -> LiveResult<()> {
     let api_url = required_environment_variable(API_URL)?;
-    let organization = required_environment_variable(ORG_ID)?;
-    let bearer = required_environment_variable(BEARER_TOKEN)?;
-    let root = EnvironmentKey::new(required_environment_variable(TEST_ROOT)?)?;
 
-    // Keep the contract check genuinely anonymous. The root selects the plane
-    // but is not actor authentication and must not be confused with the IAM
-    // bearer used by ordinary organization operations below.
-    let anonymous = Client::connect(
-        Config::new(&api_url, &organization)?
-            .with_environment(root.clone())
-            .with_auto_update(false),
-    )
-    .await?;
+    // The contract check and the sign-in discovery are anonymous.
+    let anonymous = Client::connect(Config::new(&api_url)?).await?;
     let version = anonymous.version().await?;
     assert_eq!(version.service, "silicon-briefcase");
     assert_eq!(version.selected_api_version, API_VERSION);
-    assert!(
-        version
-            .supported_api_versions
+    let accounts = anonymous.accounts_info().await?;
+    ensure(
+        accounts.app_id == "briefcase",
+        "the deployment is not Briefcase's app",
+    )?;
+
+    let (client, account) = live_client().await?;
+    ensure(
+        !account.uuid.is_empty(),
+        "the signed-in account has no uuid",
+    )?;
+    let _page = client.list_entries(&ListEntries::default()).await?;
+    let drives = client.drives().await?;
+    ensure(
+        drives
+            .items
             .iter()
-            .any(|supported| supported == API_VERSION)
-    );
-
-    // Self-description is authorized by the test root alone and discloses no
-    // IAM pairing secret. It proves that the supplied key selects a live plane.
-    let environment = anonymous.current_testing_environment().await?;
-    assert!(!environment.id.is_nil());
-    assert!(!environment.name.trim().is_empty());
-    assert!(environment.key_generation > 0);
-
-    // A successful listing proves the package sends the independent IAM actor
-    // credential and test-plane selector together on ordinary API operations.
-    let authenticated = Client::connect(
-        Config::new(&api_url, &organization)?
-            .with_token(bearer)
-            .with_environment(root)
-            .with_auto_update(false),
-    )
-    .await?;
-    let _page = authenticated.list_entries(&ListEntries::default()).await?;
-
+            .any(|drive| drive.owner.uuid == account.uuid),
+        "the drive list does not include the account's own drive",
+    )?;
+    let _shared = client.shared(None, Some(10)).await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "mutates an explicitly disposable Briefcase testing environment"]
+#[ignore = "creates and bins a uniquely named folder in the signed-in account's drive"]
 #[allow(clippy::too_many_lines)]
 async fn live_disposable_file_workflow() -> LiveResult<()> {
-    let (client, organization) = live_client().await?;
+    let (client, account) = live_client().await?;
     let grantee = optional_grantee()?;
     let run_id = Uuid::new_v4();
     let folder_name = format!("briefcase-client-live-{run_id}");
     let folder_key = IdempotencyKey::new(format!("live-folder-{run_id}"))?;
-    let folder_request = NewFolder::at_base(&folder_name, RootType::Private)
-        .with_idempotency_key(folder_key.clone());
+    let folder_request = NewFolder::at_top(&folder_name).with_idempotency_key(folder_key.clone());
     let folder = client.create_folder(&folder_request).await?;
 
     // Keep cleanup outside the workflow result so ordinary API/assertion
     // errors still leave the unique test tree in the recoverable bin.
     let workflow = async {
         ensure(
-            folder.org_id == organization,
-            "folder returned the wrong organization",
+            folder.drive == account.uuid,
+            "folder is not in the account's own drive",
         )?;
-        ensure(
-            folder.is_folder(),
-            "the created private entry is not a folder",
-        )?;
-        ensure(
-            folder.root_type == RootType::Private,
-            "folder is not private",
-        )?;
+        ensure(folder.is_folder(), "the created entry is not a folder")?;
 
         let folder_replay = client.create_folder(&folder_request).await?;
         ensure(
@@ -228,7 +180,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
         )?;
 
         let by_id = client.entry(file.id).await?;
-        let by_path = client.entry_at(&file.path).await?;
+        let by_path = client.entry_at(&account.uuid, &file.path).await?;
         ensure(
             by_id.id == file.id && by_path.id == file.id,
             "entry lookup disagrees",
@@ -246,7 +198,11 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
             full == first_bytes,
             "full content read returned different bytes",
         )?;
-        let at_path = client.read_content_at(&file.path).await?.bytes().await?;
+        let at_path = client
+            .read_content_at(&account.uuid, &file.path)
+            .await?
+            .bytes()
+            .await?;
         ensure(
             at_path == first_bytes,
             "path content read returned different bytes",
@@ -299,7 +255,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
 
         ensure(
             client.permissions(file.id).await?.is_empty(),
-            "a new private file unexpectedly has an explicit grant",
+            "a new file unexpectedly has an explicit share",
         )?;
         if let Some(principal) = grantee {
             let grant = client
@@ -309,8 +265,8 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
                 )
                 .await?;
             ensure(
-                grant.principal == principal,
-                "grant names the wrong principal",
+                grant.principal.actor_type == principal.actor_type,
+                "the share names the wrong kind of account",
             )?;
             ensure(
                 client
@@ -374,7 +330,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
             "file rename returned the old name",
         )?;
         ensure(
-            client.entry_at(&renamed.path).await?.id == file.id,
+            client.entry_at(&account.uuid, &renamed.path).await?.id == file.id,
             "the renamed permanent path does not resolve",
         )?;
 
@@ -386,7 +342,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
         )?;
         ensure(
             client
-                .bin(None, Some(100))
+                .bin(None, None, Some(100))
                 .await?
                 .items
                 .iter()
@@ -403,7 +359,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
             "bin restore did not recover the current bytes",
         )?;
 
-        let usage = client.usage().await?;
+        let usage = client.usage(None).await?;
         ensure(
             usage.storage.used_bytes >= first_bytes.len() as u64,
             "usage did not account for the live file",
@@ -423,7 +379,7 @@ async fn live_disposable_file_workflow() -> LiveResult<()> {
         (Ok(()), Ok(())) => {
             ensure(
                 client
-                    .bin(None, Some(100))
+                    .bin(None, None, Some(100))
                     .await?
                     .items
                     .iter()

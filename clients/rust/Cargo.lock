@@ -141,13 +141,16 @@ dependencies = [
 
 [[package]]
 name = "briefcase-cli"
-version = "3.0.1"
+version = "4.0.0"
 dependencies = [
+ "base64",
  "briefcase-client",
  "clap",
  "fs2",
  "libc",
+ "percent-encoding",
  "rpassword",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2",
@@ -155,13 +158,14 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "url",
  "uuid",
  "wiremock",
 ]
 
 [[package]]
 name = "briefcase-client"
-version = "3.0.1"
+version = "4.0.0"
 dependencies = [
  "futures-core",
  "libc",

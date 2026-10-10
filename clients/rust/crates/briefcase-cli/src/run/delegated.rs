@@ -1,4 +1,5 @@
-//! Local manifest preparation and one-shot delegated SDK calls.
+//! Local manifest preparation and one-shot delegated calls carrying a Silicon
+//! Accounts User verification proof.
 
 use std::{
     fs::File,
@@ -7,13 +8,12 @@ use std::{
 };
 
 use briefcase_client::{
-    ApplicationId, Client, ContentStream, UploadSource,
+    Client, ContentStream, UploadSource,
     delegated::{
         DelegatedCancelUpload, DelegatedCommitUpload, DelegatedCreateFolder, DelegatedInvite,
         DelegatedLinkAccess, DelegatedListEntries, DelegatedManifest,
         DelegatedOperation as ManifestOperation, DelegatedReadFile, DelegatedReserveUpload,
-        DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadStatus, OboProof,
-        UploadCapability,
+        DelegatedTrashEntry, DelegatedUploadQuery, DelegatedUploadStatus, Proof, UploadCapability,
     },
 };
 use serde::de::DeserializeOwned;
@@ -23,10 +23,12 @@ use uuid::Uuid;
 
 use crate::{
     cli::{AppRequestArgs, DelegatedOperation, GlobalArgs},
-    render::Output,
+    input::{prompt_secret, read_secret_stdin},
+    render::{Labels, Output},
+    session,
 };
 
-use super::{CliError, Result, anonymous_session, config, prompt_secret, read_secret_stdin};
+use super::{CliError, Result};
 
 const MAXIMUM_BODY_BYTES: u64 = 1024 * 1024;
 
@@ -109,25 +111,20 @@ impl Prepared {
     async fn execute(
         &self,
         client: &Client,
-        app: &ApplicationId,
-        proof: OboProof,
+        proof: Proof,
         destination: Option<AtomicDestination>,
         capability_destination: Option<CapabilityDestination>,
         output: Output,
     ) -> Result<()> {
         match self {
             Self::Invite(manifest) => {
-                output.invitation(&client.invite_on_behalf_of(app, proof, manifest).await?);
+                output.invitation(&client.invite_on_behalf_of(proof, manifest).await?);
             }
-            Self::Link(manifest) => output.link(
-                &client
-                    .set_link_access_on_behalf_of(app, proof, manifest)
-                    .await?,
-            ),
+            Self::Link(manifest) => {
+                output.link(&client.set_link_access_on_behalf_of(proof, manifest).await?);
+            }
             Self::Folder(manifest) => {
-                let entry = client
-                    .create_folder_on_behalf_of(app, proof, manifest)
-                    .await?;
+                let entry = client.create_folder_on_behalf_of(proof, manifest).await?;
                 if output.is_json() {
                     output.json(&entry);
                 } else {
@@ -135,15 +132,13 @@ impl Prepared {
                 }
             }
             Self::List(manifest) => {
-                let page = client
-                    .list_entries_on_behalf_of(app, proof, manifest)
-                    .await?;
-                output.entry_page(&page, true);
+                let page = client.list_entries_on_behalf_of(proof, manifest).await?;
+                output.entry_page(&page, true, &Labels::default());
             }
             Self::Read(manifest) => {
                 let destination = destination
                     .ok_or_else(|| CliError::usage("file-read requires --output <FILE>"))?;
-                let stream = client.read_file_on_behalf_of(app, proof, manifest).await?;
+                let stream = client.read_file_on_behalf_of(proof, manifest).await?;
                 let path = destination.path.clone();
                 let written = destination.write(stream).await?;
                 if output.is_json() {
@@ -153,9 +148,7 @@ impl Prepared {
                 }
             }
             Self::Trash(manifest) => {
-                client
-                    .trash_entry_on_behalf_of(app, proof, manifest)
-                    .await?;
+                client.trash_entry_on_behalf_of(proof, manifest).await?;
                 if output.is_json() {
                     output.json(&serde_json::json!({ "trashed": true }));
                 } else {
@@ -166,9 +159,7 @@ impl Prepared {
                 let destination = capability_destination.ok_or_else(|| {
                     CliError::usage("upload-reserve requires --capability-file <NEW_FILE>")
                 })?;
-                let reservation = client
-                    .reserve_delegated_upload(app, proof, manifest)
-                    .await?;
+                let reservation = client.reserve_delegated_upload(proof, manifest).await?;
                 if let Some(capability) = reservation.capability {
                     destination.save(&capability)?;
                 } else {
@@ -179,15 +170,15 @@ impl Prepared {
                 upload_status(&reservation.status, output);
             }
             Self::Commit(manifest) => {
-                let status = client.commit_delegated_upload(app, proof, manifest).await?;
+                let status = client.commit_delegated_upload(proof, manifest).await?;
                 upload_status(&status, output);
             }
             Self::Status(manifest) => {
-                let status = client.delegated_upload_status(app, proof, manifest).await?;
+                let status = client.delegated_upload_status(proof, manifest).await?;
                 upload_status(&status, output);
             }
             Self::Cancel(manifest) => {
-                let status = client.cancel_delegated_upload(app, proof, manifest).await?;
+                let status = client.cancel_delegated_upload(proof, manifest).await?;
                 upload_status(&status, output);
             }
         }
@@ -195,10 +186,10 @@ impl Prepared {
     }
 }
 
-/// Describes locally or executes one SDK operation without a member session.
+/// Describes locally, or executes one delegated operation with a proof and no saved sign-in.
 pub(super) async fn run(global: &GlobalArgs, args: &AppRequestArgs, output: Output) -> Result<()> {
     let prepared = Prepared::read(args.operation, &args.body)?;
-    // This branch precedes all profile, credential, client, and updater access.
+    // This branch precedes all profile, credential and network access.
     if args.describe {
         return prepared.describe(output);
     }
@@ -228,36 +219,23 @@ pub(super) async fn run(global: &GlobalArgs, args: &AppRequestArgs, output: Outp
         }
         (_, None) => None,
     };
-    let app = args
-        .app_id
-        .as_ref()
-        .ok_or_else(|| CliError::usage("--app-id is required when sending a request"))?;
-    let session = anonymous_session(global)?;
-    let client = if global.no_verify {
-        Client::new_unchecked(config(&session)?)?
-    } else {
-        Client::connect(config(&session)?).await?
-    };
     let proof = if args.proof_stdin {
         read_secret_stdin()?
     } else if let Some(proof) = &args.proof {
         proof.clone()
     } else {
-        prompt_secret("Fresh IAM OBO access proof: ")?
+        prompt_secret("User verification proof (sap_…): ")?
     };
+    // Validated before any network call; the value is never echoed.
+    let proof = Proof::new(proof)?;
+    // A proof is the whole credential: no saved sign-in is loaded or sent.
+    let client = session::client(global, &api_url(global), None).await?;
     let result = prepared
-        .execute(
-            &client,
-            app,
-            OboProof::new(proof)?,
-            destination,
-            capability_destination,
-            output,
-        )
+        .execute(&client, proof, destination, capability_destination, output)
         .await;
     if result.is_err() {
         eprintln!(
-            "briefcase: no automatic retry was made. A retry needs a fresh proof; keep the body and any operation_id unchanged."
+            "briefcase: no automatic retry was made. Keep the body and any operation_id unchanged when you retry."
         );
     }
     result
@@ -274,9 +252,9 @@ fn describe<T: ManifestOperation>(manifest: &DelegatedManifest<T>, output: Outpu
     output.json(&serde_json::json!({
         "method": manifest.method(),
         "path": manifest.path(),
-        "endpoint_id": manifest.endpoint_id(),
+        "scope": manifest.scope(),
+        "receiving_app": "briefcase",
         "body_sha256": manifest.body_sha256(),
-        "metadata": {},
         "body": body,
     }));
     Ok(())
@@ -320,12 +298,7 @@ pub(super) async fn transfer(
         prompt_secret("Private upload capability: ")?
     };
     let capability = UploadCapability::new(capability)?;
-    let session = anonymous_session(global)?;
-    let client = if global.no_verify {
-        Client::new_unchecked(config(&session)?)?
-    } else {
-        Client::connect(config(&session)?).await?
-    };
+    let client = session::client(global, &api_url(global), None).await?;
     let result = client
         .transfer_delegated_upload(upload_id, capability, &UploadSource::File(file.to_owned()))
         .await;
@@ -336,11 +309,19 @@ pub(super) async fn transfer(
         }
         Err(error) => {
             eprintln!(
-                "briefcase: transfer was not retried. Use upload-status with a fresh proof and the original operation_id to reconcile before retrying."
+                "briefcase: the transfer was not retried. Reconcile with `app request upload-status` and the original operation_id before retrying."
             );
             Err(error.into())
         }
     }
+}
+
+/// The API URL: `--url`, else the saved profile's, else the hosted service.
+fn api_url(global: &GlobalArgs) -> String {
+    session::select(global).map_or_else(
+        |_| session::normalize_api_url(global.url.as_deref().unwrap_or(session::DEFAULT_API_URL)),
+        |selection| selection.api_url,
+    )
 }
 
 fn upload_status(status: &DelegatedUploadStatus, output: Output) {

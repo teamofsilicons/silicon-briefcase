@@ -12,7 +12,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Briefcase answered, and said no.
     #[error("{0}")]
-    Api(#[from] ApiError),
+    Api(Box<ApiError>),
 
     /// The server and this build do not agree on the contract.
     ///
@@ -50,6 +50,12 @@ pub enum Error {
     Protocol(String),
 }
 
+impl From<ApiError> for Error {
+    fn from(error: ApiError) -> Self {
+        Self::Api(Box::new(error))
+    }
+}
+
 impl Error {
     /// Returns the error code Briefcase named, when it named one.
     ///
@@ -59,6 +65,24 @@ impl Error {
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api(error) => Some(error.code.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns what Briefcase suggested doing next, when it said.
+    #[must_use]
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            Self::Api(error) => error.hint.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the HTTP status of a refusal.
+    #[must_use]
+    pub const fn status(&self) -> Option<u16> {
+        match self {
+            Self::Api(error) => Some(error.status),
             _ => None,
         }
     }
@@ -111,8 +135,10 @@ pub struct ApiError {
     pub status: u16,
     /// Stable error code, such as `daily_upload_limit_exhausted`.
     pub code: String,
-    /// Human-readable message.
+    /// Human-readable message: what went wrong and why.
     pub message: String,
+    /// What to do next, when Briefcase said.
+    pub hint: Option<String>,
     /// Correlation identifier to quote when asking an operator about it.
     pub request_id: Option<String>,
     /// How long to wait before retrying, when the answer carried it.
@@ -186,6 +212,8 @@ pub(crate) struct WireError {
     pub(crate) code: String,
     pub(crate) message: String,
     #[serde(default)]
+    pub(crate) hint: Option<String>,
+    #[serde(default)]
     pub(crate) request_id: Option<String>,
 }
 
@@ -217,10 +245,11 @@ mod tests {
     use super::{ApiError, Error};
 
     fn api(status: u16, code: &str) -> Error {
-        Error::Api(ApiError {
+        Error::from(ApiError {
             status,
             code: code.to_owned(),
             message: "refused".to_owned(),
+            hint: None,
             request_id: Some("01a0".to_owned()),
             retry_after: None,
             unsatisfied_range_length: None,
