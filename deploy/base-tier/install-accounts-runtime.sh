@@ -21,7 +21,7 @@ finally: p.unlink()
 required=['BRIEFCASE_DATABASE_URL','BRIEFCASE_WORKER_DATABASE_URL','BRIEFCASE_APP_SECRET','BRIEFCASE_ACCOUNTS_WEBHOOK_SECRET']
 if any(not values.get(k) for k in required):raise SystemExit('Required Accounts runtime secret key is absent')
 if values.get('BRIEFCASE_S3_KEY_PREFIX')!='accounts':raise SystemExit('Accounts object prefix is required')
-if values.get('BRIEFCASE_BIND_ADDR')!='127.0.0.1:8180':raise SystemExit('Private Accounts API binding is required')
+if values.get('BRIEFCASE_BIND_ADDR')!='0.0.0.0:8180':raise SystemExit('Container Accounts API binding is required')
 for k in required[:2]:
  from urllib.parse import urlparse
  if urlparse(values[k]).path!='/briefcase_accounts':raise SystemExit('Refusing a legacy database')
@@ -37,6 +37,8 @@ install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/accounts-staging
 for component in api worker; do
   memory=256m; [ "$component" = worker ] && memory=128m
   unit=silicon-briefcase-accounts-$component
+  network_args="--network bridge"
+  [ "$component" = api ] && network_args="$network_args --publish 127.0.0.1:8180:8180"
   if [ -f "/etc/systemd/system/$unit.service" ]; then cp -p "/etc/systemd/system/$unit.service" "$backup/"; fi
   cat > "/etc/systemd/system/$unit.service" <<UNIT
 [Unit]
@@ -48,7 +50,7 @@ Wants=network-online.target
 Restart=always
 RestartSec=5
 ExecStartPre=-/usr/bin/docker rm -f $unit
-ExecStart=/usr/bin/docker run --name $unit --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/silicon-briefcase/accounts/$component.env --mount type=bind,src=/opt/silicon-briefcase/aws-rds-global-bundle.pem,dst=/opt/silicon-briefcase/aws-rds-global-bundle.pem,readonly --mount type=bind,src=/var/lib/silicon-briefcase/accounts-staging,dst=/var/lib/silicon-briefcase/staging --mount type=bind,src=/var/lib/silicon-briefcase/accounts-telemetry-$component,dst=/var/lib/silicon-briefcase/telemetry --log-opt max-size=10m --log-opt max-file=3 $image briefcase-$component
+ExecStart=/usr/bin/docker run --name $unit $network_args --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/silicon-briefcase/accounts/$component.env --mount type=bind,src=/opt/silicon-briefcase/aws-rds-global-bundle.pem,dst=/opt/silicon-briefcase/aws-rds-global-bundle.pem,readonly --mount type=bind,src=/var/lib/silicon-briefcase/accounts-staging,dst=/var/lib/silicon-briefcase/staging --mount type=bind,src=/var/lib/silicon-briefcase/accounts-telemetry-$component,dst=/var/lib/silicon-briefcase/telemetry --log-opt max-size=10m --log-opt max-file=3 $image briefcase-$component
 ExecStop=/usr/bin/docker stop -t 30 $unit
 TimeoutStopSec=40
 [Install]
@@ -56,7 +58,8 @@ WantedBy=multi-user.target
 UNIT
 done
 systemctl daemon-reload
-systemctl enable --now silicon-briefcase-accounts-api silicon-briefcase-accounts-worker
+systemctl enable silicon-briefcase-accounts-api silicon-briefcase-accounts-worker
+systemctl restart silicon-briefcase-accounts-api silicon-briefcase-accounts-worker
 for attempt in {1..30}; do
   if curl --fail --silent --output /dev/null http://127.0.0.1:8180/readyz; then
     echo "Accounts API ready privately on 8180; legacy services and public ingress unchanged. Backup: $backup"

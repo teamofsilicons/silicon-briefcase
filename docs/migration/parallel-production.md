@@ -15,7 +15,9 @@ resource key, ciphertext, or old account is copied or rewritten.
 | Website | IAM gateway 4318, retained for old links | Next.js 4319 |
 
 The new API and worker have independent units, env files, staging and telemetry
-directories. The new database restricts CONNECT; runtime object grants are copied
+directories. Docker publishes container port 8180 only on host loopback; the
+container binds all of its private interfaces to satisfy the production config.
+The new database restricts CONNECT; runtime object grants are copied
 inside the new database only, without granting membership in a legacy role.
 The API role cannot bypass RLS. The worker keeps its required BYPASSRLS capability
 but has object grants only in the new store. The shared host role reads each exact
