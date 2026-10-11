@@ -9,9 +9,9 @@ permissions:
   actions: read
 env:
   RELEASE_APP_ID: briefcase
-  RELEASE_VERSION: 4.0.0
-  BUILD_RUN_ID: '38057590327'
-  BUILD_SOURCE_COMMIT: 79611710cd803581558705458d4b5b80f7d2cba4
+  RELEASE_VERSION: 4.1.0
+  BUILD_RUN_ID: '38175822168'
+  BUILD_SOURCE_COMMIT: 738afd9c0d5aec0085fc0bdab2d4115a9882e0e9
 jobs:
   native:
     name: Verify ${{ matrix.target }}
