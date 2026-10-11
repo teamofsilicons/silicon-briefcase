@@ -38,9 +38,6 @@ importers:
       '@tanstack/react-query':
         specifier: 5.104.1
         version: 5.104.1(react@19.2.8)
-      '@teamofsilicons/space-station-web':
-        specifier: 0.1.0
-        version: 0.1.0
       fflate:
         specifier: 0.8.2
         version: 0.8.2
@@ -1092,10 +1089,6 @@ packages:
     resolution: {integrity: sha512-Zz70EgjahNI7aCz8BZxM3vUGU44ycxEAzMuCUjLeA7SVhhOkg3ZgPjPJPvHjs6Rmky/dtmnu1WzjGHNHmhCoZQ==}
     peerDependencies:
       react: ^18 || ^19
-
-  '@teamofsilicons/space-station-web@0.1.0':
-    resolution: {integrity: sha512-bP494vT3l3TAhMYbKzGdixJ20BpG0tQrkosBEtjLg+IxYU7yty8xSXhBe5YO94otlphnywhhQDiz32ct2lsPxA==}
-    engines: {node: '>=18'}
 
   '@tybys/wasm-util@0.10.4':
     resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
@@ -3506,8 +3499,6 @@ snapshots:
     dependencies:
       '@tanstack/query-core': 5.104.1
       react: 19.2.8
-
-  '@teamofsilicons/space-station-web@0.1.0': {}
 
   '@tybys/wasm-util@0.10.4':
     dependencies:
