@@ -9,7 +9,6 @@ import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
 import { date, message, size, type Account, type Drive, type Usage } from "@/lib/briefcase/types";
-import { TelemetryPreference } from "./telemetry";
 import styles from "./briefcase.module.css";
 export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } }) {
   const cache = useQueryClient();
@@ -42,7 +41,6 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
         <p className={styles.muted}>Allow the Briefcase service role in your bucket role’s trust policy, with this drive’s External ID condition. <a href="https://docs.briefcase.teamofsilicons.com" target="_blank" rel="noreferrer">Storage setup instructions</a></p>{chosen?.storage_external_id && <Input label="STS External ID for this drive" readOnly value={chosen.storage_external_id} onFocus={event => event.target.select()} />}<Button loading={busy} type="submit">Verify and connect bucket</Button>
       </form>
     </Section>
-    <Section title="Diagnostics" description="Applies to this browser. File contents, names, credentials and typed text are excluded."><TelemetryPreference /></Section>
     <Section title="Report a problem" description="Describe what happened, what you expected, and how to reproduce it."><form className={styles.form} onSubmit={event => { event.preventDefault(); void act(() => api.post("/v1/reports", {message:report}, { idempotencyKey:true }), "Report submitted"); }}><Input label="Problem details" value={report} onChange={event => setReport(event.target.value)} required /><Button loading={busy} variant="secondary">Send report</Button></form></Section>
   </Page>;
 }

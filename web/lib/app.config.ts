@@ -17,7 +17,7 @@ export const appConfig: AppConfig = {
   ],
   links: { docs: "https://docs.briefcase.teamofsilicons.com", store: "https://apps.teamofsilicons.com/apps/briefcase", source: "https://github.com/teamofsilicons/silicon-briefcase" },
   signIn: { scopes: ["email"] },
-  api: { forwardHeaders: ["x-briefcase-telemetry"], exposeHeaders: ["x-api-version", "x-operation-version"] },
+  api: { forwardHeaders: [], exposeHeaders: ["x-api-version", "x-operation-version"], telemetryOptOut: "x-briefcase-telemetry" },
   landing: {
     headline: "Everything you make,\nin its place.",
     lede: "A quiet home for your files. Keep a project close, share exactly what you mean to, and pick up where you left off — together with your Silicons.",

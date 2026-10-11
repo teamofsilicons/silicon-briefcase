@@ -1,4 +1,3 @@
-import { TelemetryProvider } from "@/components/briefcase/telemetry";
 /**
  * The signed-in workspace around every page under it: the session is checked here on the server (no session: the
  * hosted sign-in, coming back to this page), then the providers (query client, toasts, squircles, the session keeper)
@@ -14,7 +13,6 @@ export default async function WorkspaceLayout({ children }: { children: ReactNod
   const session = await requireSession();
   return (
     <Providers session={{ signedIn: true, account: session.account, expiresAt: session.expiresAt }}>
-      <TelemetryProvider />
       <AppShell account={session.account} accountsUrl={accountsOrigin()}>
         {children}
       </AppShell>
