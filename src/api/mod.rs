@@ -47,7 +47,7 @@ pub mod versioning;
 use handlers::{
     accounts, archive_listing, content, delegated, delegated_upload, drives as drive_handlers,
     entries, invitations, locations, notifications, obo, permissions, reports, sharing, system,
-    telemetry, usage,
+    usage,
 };
 use state::{AppState, ContentUseCases, DelegatedUploadUseCases};
 
@@ -357,7 +357,7 @@ fn ordinary_routes() -> Router<AppState> {
         )
         .route("/api/v1/search", get(entries::search))
         .route("/api/v1/reports", post(reports::submit))
-        .route("/api/v1/telemetry", post(telemetry::submit))
+        .route("/api/v1/telemetry", post(system::telemetry_removed))
         .route(
             "/api/v1/notifications",
             get(notifications::list_notifications),

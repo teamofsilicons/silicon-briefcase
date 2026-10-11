@@ -166,10 +166,8 @@ pub async fn connect(global: &GlobalArgs) -> Result<Context> {
 /// Returns a configuration error for an unusable URL, a transport error, or an
 /// incompatible contract.
 pub async fn client(global: &GlobalArgs, api_url: &str, token: Option<&str>) -> Result<Client> {
-    let mut config = Config::new(api_url)?
-        .with_telemetry(crate::telemetry::enabled())
-        .with_telemetry_source(briefcase_client::telemetry::Source::Cli)
-        .with_user_agent(concat!("briefcase-cli/", env!("CARGO_PKG_VERSION")));
+    let mut config =
+        Config::new(api_url)?.with_user_agent(concat!("briefcase-cli/", env!("CARGO_PKG_VERSION")));
     if let Some(token) = token {
         config = config.with_token(token);
     }

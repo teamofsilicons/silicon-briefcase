@@ -81,12 +81,12 @@ pub struct Profile {
     pub accounts_url: Option<String>,
 }
 
-/// Every saved profile, which one is current, and the telemetry preference.
+/// Every saved profile and which one is current.
+///
+/// Keys from older releases (`telemetry`, `auto_update`) are ignored when read
+/// and dropped on the next write.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Configuration {
-    /// Default-on operational diagnostics; separate from explicit bug reports.
-    #[serde(default = "enabled")]
-    pub telemetry: bool,
     /// Profile used when `--profile` is not given.
     #[serde(default = "default_profile_name")]
     pub current_profile: String,
@@ -98,15 +98,10 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            telemetry: true,
             current_profile: default_profile_name(),
             profiles: BTreeMap::new(),
         }
     }
-}
-
-fn enabled() -> bool {
-    true
 }
 
 fn default_profile_name() -> String {
@@ -822,7 +817,6 @@ mod tests {
         .unwrap();
         let state = StateDirectory::at(directory.path());
         let configuration = state.configuration().unwrap();
-        assert!(!configuration.telemetry);
         assert_eq!(
             configuration.profiles["work"].url,
             "https://briefcase.example/api/v1/"
@@ -831,6 +825,7 @@ mod tests {
         let written = std::fs::read_to_string(directory.path().join("config.json")).unwrap();
         assert!(!written.contains("\"org\""), "{written}");
         assert!(!written.contains("auto_update"), "{written}");
+        assert!(!written.contains("telemetry"), "{written}");
     }
 
     #[test]

@@ -315,7 +315,7 @@ pub enum Command {
     /// Act for an account as another app, with a Silicon Accounts proof.
     #[command(subcommand)]
     App(AppCommand),
-    /// Stored CLI settings and the state directory.
+    /// Stored CLI profiles and the state directory.
     #[command(subcommand)]
     Config(ConfigCommand),
     /// Submit a bug report, optionally linking a proposed fix.
@@ -890,23 +890,26 @@ pub struct AppRequestArgs {
 /// Stored CLI settings.
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show the current settings, profile and state directory.
+    /// Show the current profile, saved profiles and state directory.
     Show,
     /// Set the parent directory for the private `.briefcase` state directory.
     Home {
         /// Existing directory to use as the configured home.
         location: PathBuf,
     },
-    /// Set a supported setting: `telemetry on|off`.
+    /// Retired: the only setting was `telemetry`, which was removed. Kept so
+    /// older scripts that turn it on or off still succeed.
+    #[command(hide = true)]
     Set {
-        /// `telemetry`.
+        /// Setting name.
         key: String,
-        /// `on` or `off`.
+        /// New value.
         value: String,
     },
-    /// Restore a supported setting to its default.
+    /// Retired companion of `set`.
+    #[command(hide = true)]
     Unset {
-        /// `telemetry`.
+        /// Setting name.
         key: String,
     },
 }

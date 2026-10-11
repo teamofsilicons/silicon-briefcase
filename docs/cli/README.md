@@ -87,6 +87,6 @@ briefcase history notes/report.pdf
 
 `briefcase usage` shows daily uploads and stored bytes. Defaults are 100 GiB per day and 1 PiB stored per drive. `briefcase storage --help` describes verified S3 bucket configuration; existing file versions stay in their original storage. The drive owner or a Silicon's custodian can configure storage.
 
-`briefcase config show` inspects profiles; `config home <directory>` relocates state. Telemetry is optional. `briefcase daemon uninstall` removes an older installation's background service; the command no longer needs a background updater.
+`briefcase config show` inspects profiles; `config home <directory>` relocates state. Briefcase records no telemetry. `briefcase daemon uninstall` removes an older installation's background service; the command no longer needs a background updater.
 
 `briefcase report <message>` submits reproduction details, with `--pr` for a proposed fix. Errors explain the refusal and include a stable code in JSON. Exit codes: 0 success, 1 failure, 2 invalid invocation, 3 entry missing or inaccessible, 4 sign-in or permission refusal. Offline guides are `briefcase docs cli` and `briefcase docs client`.

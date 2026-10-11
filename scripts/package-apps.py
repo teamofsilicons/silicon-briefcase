@@ -49,7 +49,7 @@ def main():
         env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"}}
         home = directory / "home"
         home.mkdir()
-        env.update(HOME=str(home), USERPROFILE=str(home), SILICON_HOME=str(home), BRIEFCASE_TELEMETRY="off", SILICON_APPS_NO_DAEMON="1")
+        env.update(HOME=str(home), USERPROFILE=str(home), SILICON_HOME=str(home), SILICON_APPS_NO_DAEMON="1")
         subprocess.run([str(destination), "--help"], env=env, stdout=subprocess.DEVNULL, check=True, timeout=15)
         for command, key, expected_value in [( ["accounts", "--json"], "app_id", "briefcase" ), (["login", "status", "--json"], "authenticated", False)]:
             output = subprocess.run([str(destination), *command], env=env, capture_output=True, text=True, check=True, timeout=15)

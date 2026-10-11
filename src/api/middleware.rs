@@ -70,23 +70,6 @@ pub(crate) async fn contract(
 
 /// Runs one request inside a validated request-ID scope and tracing span.
 pub async fn request_scope(mut request: Request, next: Next) -> Response {
-    use briefcase_client::telemetry::{Event, Source, Stage};
-    let telemetry_enabled = request
-        .headers()
-        .get("x-briefcase-telemetry")
-        .is_none_or(|value| value != "off")
-        && !request.uri().path().ends_with("/telemetry");
-    let source = match request
-        .headers()
-        .get("x-briefcase-source")
-        .and_then(|value| value.to_str().ok())
-    {
-        Some("cli") => Source::Cli,
-        Some("daemon") => Source::Daemon,
-        Some("web") => Source::Web,
-        Some("sdk") => Source::Sdk,
-        _ => Source::Backend,
-    };
     let request_id = validated_request_id(&request).unwrap_or_else(|| Uuid::now_v7().to_string());
     if let Ok(value) = request_id.parse() {
         request.headers_mut().insert(request_id_header(), value);
@@ -98,7 +81,6 @@ pub async fn request_scope(mut request: Request, next: Next) -> Response {
         .map_or("<unmatched>", MatchedPath::as_str)
         .to_owned();
     let started_at = Instant::now();
-    let operation = operation_name(method.as_str(), &route);
     let span = info_span!(
         "http.request",
         request_id = %request_id,
@@ -109,34 +91,13 @@ pub async fn request_scope(mut request: Request, next: Next) -> Response {
     );
 
     let future = async move { normalize_error_response(next.run(request).await) };
-    let mut response = crate::telemetry::scope(
-        crate::telemetry::RequestContext {
-            enabled: telemetry_enabled,
-            request_id: Uuid::parse_str(&request_id).ok(),
-        },
-        request_context::scope(request_id.clone(), future),
-    )
-    .instrument(span.clone())
-    .await;
+    let mut response = request_context::scope(request_id.clone(), future)
+        .instrument(span.clone())
+        .await;
     span.record("status", response.status().as_u16());
     let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     span.record("latency_ms", latency_ms);
     info!(parent: &span, "HTTP request completed");
-    if telemetry_enabled {
-        let mut event = Event::new(
-            source,
-            operation,
-            if response.status().is_success() {
-                Stage::Completed
-            } else {
-                Stage::Failed
-            },
-        );
-        event.request_id = Uuid::parse_str(&request_id).ok();
-        event.duration_ms = Some(latency_ms);
-        event.status = Some(response.status().as_u16());
-        crate::telemetry::record(event, false);
-    }
     if let Ok(value) = request_id.parse() {
         response.headers_mut().insert(request_id_header(), value);
     }
@@ -161,20 +122,6 @@ pub fn handle_panic(_panic: Box<dyn Any + Send + 'static>) -> Response {
         category: "request_handler_panic",
     }
     .into_response()
-}
-
-fn operation_name(method: &str, route: &str) -> &'static str {
-    let route = route.replace("{*", "{");
-    let route = route.strip_prefix("/api/v1").unwrap_or(&route);
-    let route = if route == "/api/version" {
-        "/version"
-    } else {
-        route
-    };
-    super::versioning::OPERATIONS
-        .iter()
-        .find(|operation| operation.method == method && operation.path == route)
-        .map_or("http_request", |operation| operation.id)
 }
 
 fn validated_request_id(request: &Request) -> Option<String> {
@@ -235,30 +182,6 @@ mod tests {
     use axum::body::Body;
 
     use super::validated_request_id;
-
-    #[test]
-    fn telemetry_uses_contract_names_for_catch_all_and_version_aliases() {
-        assert_eq!(
-            super::operation_name("GET", "/api/v1/public/{owner}/{*path}"),
-            "readPublicEntry"
-        );
-        assert_eq!(
-            super::operation_name("GET", "/api/v1/paths/{owner}/{*path}"),
-            "resolvePermanentUrl"
-        );
-        assert_eq!(
-            super::operation_name("GET", "/api/v1/paths/{owner}"),
-            "resolveDriveTop"
-        );
-        assert_eq!(
-            super::operation_name("GET", "/org/{org_id}/{*path}"),
-            "resolveLegacyPermanentUrl"
-        );
-        assert_eq!(
-            super::operation_name("GET", "/api/version"),
-            "readApiVersion"
-        );
-    }
 
     #[test]
     fn accepts_only_log_safe_request_identifiers() {

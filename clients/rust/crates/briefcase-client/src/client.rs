@@ -131,7 +131,7 @@ impl Client {
             .get(url)
             .header("briefcase-supported-api-versions", API_VERSION)
             .timeout(self.config.request_timeout);
-        let request = self.apply_headers(request);
+        let request = Self::apply_headers(request);
         let response = self.receive(request).await?;
         let selected_header = response
             .headers()
@@ -171,7 +171,7 @@ impl Client {
     pub async fn health(&self) -> Result<ServiceStatus> {
         let url = self.origin_url(&["healthz"])?;
         let request = self.http.get(url).timeout(self.config.request_timeout);
-        self.receive_json(self.apply_headers(request)).await
+        self.receive_json(Self::apply_headers(request)).await
     }
 
     /// Reports whether the deployment can serve requests.
@@ -183,7 +183,7 @@ impl Client {
     pub async fn ready(&self) -> Result<ServiceStatus> {
         let url = self.origin_url(&["readyz"])?;
         let request = self.http.get(url).timeout(self.config.request_timeout);
-        self.receive_json(self.apply_headers(request)).await
+        self.receive_json(Self::apply_headers(request)).await
     }
 
     // ---- request plumbing ------------------------------------------------
@@ -222,7 +222,7 @@ impl Client {
 
     /// Starts a request carrying the configured bearer, when there is one.
     pub(crate) fn request(&self, method: Method, url: Url) -> RequestBuilder {
-        let builder = self.apply_headers(self.http.request(method, url));
+        let builder = Self::apply_headers(self.http.request(method, url));
         match &self.config.credential {
             Credential::Bearer(token) => builder.bearer_auth(token.expose_secret()),
             Credential::None => builder,
@@ -232,25 +232,13 @@ impl Client {
     /// Starts a request that never carries the configured bearer: links,
     /// proofs and upload capabilities authenticate on their own.
     pub(crate) fn anonymous_request(&self, method: Method, url: Url) -> RequestBuilder {
-        self.apply_headers(self.http.request(method, url))
+        Self::apply_headers(self.http.request(method, url))
     }
 
-    /// Adds the telemetry preference and the calling component.
-    pub(crate) fn apply_headers(&self, request: RequestBuilder) -> RequestBuilder {
-        request
-            .header(
-                "x-briefcase-telemetry",
-                if self.config.telemetry { "on" } else { "off" },
-            )
-            .header(
-                "x-briefcase-source",
-                match self.config.telemetry_source {
-                    crate::telemetry::Source::Cli => "cli",
-                    crate::telemetry::Source::Daemon => "daemon",
-                    crate::telemetry::Source::Web => "web",
-                    _ => "sdk",
-                },
-            )
+    /// Opts every request out of telemetry. Briefcase records none; the header
+    /// keeps services from before 4.1 from recording this client either.
+    pub(crate) fn apply_headers(request: RequestBuilder) -> RequestBuilder {
+        request.header("x-briefcase-telemetry", "off")
     }
 
     pub(crate) const fn request_timeout(&self) -> Duration {

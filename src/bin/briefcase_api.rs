@@ -1,12 +1,10 @@
 //! Silicon Briefcase HTTP API process.
 
-use silicon_briefcase::{api, config::Settings, telemetry};
+use silicon_briefcase::{api, config::Settings, logging};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::from_env()?;
-    telemetry::init(&settings)?;
-    let result = api::serve(settings).await;
-    telemetry::flush();
-    result
+    logging::init(&settings)?;
+    api::serve(settings).await
 }

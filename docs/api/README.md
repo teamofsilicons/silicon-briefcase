@@ -1,6 +1,6 @@
 # Briefcase HTTP API
 
-Contract **4.0.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
+Contract **4.1.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
 
 ## Authentication
 

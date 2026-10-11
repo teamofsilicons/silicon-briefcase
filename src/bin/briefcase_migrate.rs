@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use silicon_briefcase::{
     config::MigrationSettings,
     infrastructure::postgres::{self, link_identities, rekey_accounts},
-    telemetry,
+    logging,
 };
 
 const USAGE: &str =
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let settings = MigrationSettings::from_env()?;
-    telemetry::init_process(settings.environment, &settings.log_filter)?;
+    logging::init_process(settings.environment, &settings.log_filter)?;
     let pool = postgres::connect(&settings.database, "briefcase-migrate").await?;
     let outcome = match command {
         Command::Migrate => postgres::migrate(&pool).await,

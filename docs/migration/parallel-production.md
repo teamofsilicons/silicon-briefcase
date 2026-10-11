@@ -14,7 +14,7 @@ resource key, ciphertext, or old account is copied or rewritten.
 | Secret | `silicon-briefcase/production` | `silicon-briefcase/accounts-production` |
 | Website | IAM gateway 4318, retained for old links | Next.js 4319 |
 
-The new API and worker have independent units, env files, staging and telemetry
+The new API and worker have independent units, env files and staging
 directories. Docker publishes container port 8180 only on host loopback; the
 container binds all of its private interfaces to satisfy the production config.
 The new database restricts CONNECT; runtime object grants are copied

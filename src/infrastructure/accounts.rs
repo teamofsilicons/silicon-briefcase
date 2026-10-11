@@ -155,7 +155,8 @@ impl AccountsGateway {
             .timeout(settings.request_timeout)
             .connect_timeout(settings.request_timeout.min(Duration::from_secs(5)))
             .user_agent(format!("silicon-briefcase/{}", env!("CARGO_PKG_VERSION")))
-            .telemetry(briefcase_client::telemetry::enabled_from_env())
+            // Briefcase records no telemetry and opts out of Silicon Accounts'.
+            .telemetry(false)
             .build()
             .map_err(|error| unavailable(&error))?;
         Ok(Self {

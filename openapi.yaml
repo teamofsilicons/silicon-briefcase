@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 4.0.0
+  version: 4.1.0
   description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
     search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
@@ -618,36 +618,22 @@ paths:
       x-operation-version: 1.0.0
   /telemetry:
     post:
-      tags: [Telemetry]
+      tags: [Storage]
       operationId: submitTelemetry
       x-operation-version: 1.0.0
-      summary: Submit a bounded operational event
+      deprecated: true
+      summary: Retired telemetry intake
       security: []
-      description: Best-effort anonymous relay to Space Station. No table key or credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [id, source, operation, stage]
-              properties:
-                id: {type: string, format: uuid, description: Non-nil event ID retained across retries.}
-                source: {type: string, enum: [sdk, cli, daemon, web]}
-                operation: {type: string, minLength: 1, maxLength: 96, pattern: '^[A-Za-z0-9_.-]+$', description: Fixed operational name; never credentials or user content. Known credential prefixes are rejected.}
-                stage: {type: string, enum: [started, progress, completed, failed, cancelled]}
-                testing: {type: boolean, default: false}
-                environment_id: {type: [string, 'null'], format: uuid, description: Non-nil public ID; only valid when testing is true.}
-                request_id: {type: [string, 'null'], format: uuid}
-                duration_ms: {type: [integer, 'null'], minimum: 0}
-                status: {type: [integer, 'null'], minimum: 100, maximum: 599}
-                attempt: {type: [integer, 'null'], minimum: 0, maximum: 4294967295}
-                count: {type: [integer, 'null'], minimum: 0}
-                progress: {type: [integer, 'null'], minimum: 0, maximum: 100}
+      description: Briefcase records no telemetry. Returns HTTP 410 without reading the request body. The operation
+        stays in the catalogue only because 4.0 clients verify it before their first call; it is removed with the
+        next contract major.
       responses:
-        '204': {description: Event accepted for best-effort delivery or collection disabled}
-        '429': {description: Process-wide telemetry intake limit reached}
+        '410':
+          description: Telemetry was removed from Briefcase (`telemetry_removed`); nothing is recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         default:
           $ref: '#/components/responses/Error'
   /reports:
@@ -656,7 +642,7 @@ paths:
       operationId: submitReport
       x-operation-version: 1.0.0
       summary: Submit a bug report with an optional proposed fix
-      description: Stores the account-authored report in the caller's drive. No telemetry, credentials, or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
+      description: Stores the account-authored report in the caller's drive. No credentials or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:

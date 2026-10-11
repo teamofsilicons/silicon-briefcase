@@ -70,8 +70,6 @@ pub struct Config {
     pub(crate) transfer_timeout: Duration,
     pub(crate) connect_timeout: Duration,
     pub(crate) user_agent: String,
-    pub(crate) telemetry: bool,
-    pub(crate) telemetry_source: crate::telemetry::Source,
 }
 
 impl Config {
@@ -135,8 +133,6 @@ impl Config {
             transfer_timeout: DEFAULT_TRANSFER_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             user_agent: concat!("briefcase-client/", env!("CARGO_PKG_VERSION")).to_owned(),
-            telemetry: true,
-            telemetry_source: crate::telemetry::Source::Sdk,
         })
     }
 
@@ -155,17 +151,26 @@ impl Config {
         self
     }
 
-    /// Enables or disables operational telemetry for requests from this client.
+    /// Does nothing: telemetry was removed from Briefcase.
+    ///
+    /// Every request opts out of telemetry (`x-briefcase-telemetry: off`).
+    #[deprecated(
+        since = "4.1.0",
+        note = "Telemetry was removed from Briefcase; this does nothing."
+    )]
     #[must_use]
-    pub const fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled;
+    pub const fn with_telemetry(self, _enabled: bool) -> Self {
         self
     }
 
-    /// Identifies the embedding application without sending arguments or user data.
+    /// Does nothing: telemetry was removed from Briefcase.
+    #[deprecated(
+        since = "4.1.0",
+        note = "Telemetry was removed from Briefcase; this does nothing."
+    )]
     #[must_use]
-    pub const fn with_telemetry_source(mut self, source: crate::telemetry::Source) -> Self {
-        self.telemetry_source = source;
+    #[allow(deprecated)]
+    pub const fn with_telemetry_source(self, _source: crate::telemetry::Source) -> Self {
         self
     }
 

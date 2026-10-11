@@ -173,13 +173,10 @@ pub(crate) fn scoped<T>(
     context: &ExecutionContext,
     future: impl Future<Output = T>,
 ) -> impl Future<Output = T> {
-    crate::telemetry::authenticated(
-        context,
-        request_context::scope_authenticated(
-            context.request_id().to_owned(),
-            context.authorization().clone(),
-            Box::pin(future),
-        ),
+    request_context::scope_authenticated(
+        context.request_id().to_owned(),
+        context.authorization().clone(),
+        Box::pin(future),
     )
 }
 

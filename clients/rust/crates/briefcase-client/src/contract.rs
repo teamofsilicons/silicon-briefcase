@@ -16,7 +16,7 @@ use crate::error::{IncompatibleContract, OperationMismatch};
 pub const API_VERSION: &str = "v1";
 
 /// Version of the published contract document this build was written against.
-pub const CONTRACT_VERSION: &str = "4.0.0";
+pub const CONTRACT_VERSION: &str = "4.1.0";
 
 /// One operation and the revision this build was written against.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,8 +47,10 @@ const fn operation(
 
 /// Every operation this client calls, with the revision it expects.
 ///
-/// Generated from the service's published catalogue (contract 4.0.0).
-pub const OPERATIONS: [OperationRevision; 57] = [
+/// Generated from the service's published catalogue (contract 4.1.0). The
+/// service also lists the retired `submitTelemetry`, which this client never
+/// calls: Briefcase records no telemetry.
+pub const OPERATIONS: [OperationRevision; 56] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -189,7 +191,6 @@ pub const OPERATIONS: [OperationRevision; 57] = [
         "/permissions/effective",
     ),
     operation("searchFiles", "1.0.0", "GET", "/search"),
-    operation("submitTelemetry", "1.0.0", "POST", "/telemetry"),
     operation("submitReport", "1.0.0", "POST", "/reports"),
     operation("listNotifications", "1.1.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
@@ -404,8 +405,8 @@ mod tests {
             service: "silicon-briefcase".to_owned(),
             selected_api_version: "v1".to_owned(),
             supported_api_versions: vec!["v1".to_owned()],
-            contract_version: "4.0.0".to_owned(),
-            build: "4.0.0".to_owned(),
+            contract_version: "4.1.0".to_owned(),
+            build: "4.1.0".to_owned(),
             operations,
         }
     }

@@ -78,7 +78,7 @@ jobs:
         run: |
           docker run --rm --network none \
             --volume "$PWD/target/${{ matrix.triple }}/release/briefcase:/usr/local/bin/briefcase:ro" \
-            --env SILICON_HOME=/tmp/briefcase-smoke --env BRIEFCASE_TELEMETRY=off \
+            --env SILICON_HOME=/tmp/briefcase-smoke \
             debian:buster-slim@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc sh -eu -c '
               test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               briefcase --version

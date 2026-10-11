@@ -36,7 +36,7 @@ pub enum MetadataRepositoryError {
     /// Repository cannot serve the operation before its deadline.
     #[error("metadata repository unavailable")]
     Unavailable,
-    /// Unexpected adapter failure retained as a source for internal telemetry.
+    /// Unexpected adapter failure retained as a source for internal logs.
     #[error("internal metadata repository failure")]
     Internal(#[source] anyhow::Error),
 }

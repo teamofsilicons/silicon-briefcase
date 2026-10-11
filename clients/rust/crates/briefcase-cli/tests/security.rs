@@ -145,7 +145,6 @@ async fn briefcase(home: &Path, arguments: &[String]) -> std::process::Output {
     let arguments = arguments.to_owned();
     tokio::task::spawn_blocking(move || {
         Command::new(executable)
-            .env("BRIEFCASE_TELEMETRY", "off")
             .args(arguments)
             .env("BRIEFCASE_HOME", home)
             .env("BRIEFCASE_AUTO_UPDATE", "off")

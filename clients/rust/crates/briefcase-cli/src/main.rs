@@ -23,7 +23,6 @@ mod run;
 mod session;
 mod signin;
 mod state;
-mod telemetry;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -46,13 +45,8 @@ async fn main() -> std::process::ExitCode {
         );
     }
     let json = cli.global.json;
-    let observation = telemetry::CommandObservation::new(&cli);
-    let mut succeeded = false;
-    let exit = match run::run(cli).await {
-        Ok(()) => {
-            succeeded = true;
-            std::process::ExitCode::SUCCESS
-        }
+    match run::run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
         Err(run::CliError::Exit(code)) => std::process::ExitCode::from(code),
         Err(error) => {
             if json {
@@ -65,9 +59,7 @@ async fn main() -> std::process::ExitCode {
             }
             std::process::ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
         }
-    };
-    observation.finish(succeeded).await;
-    exit
+    }
 }
 
 /// Removes anything secret-looking from a parse error before printing it:
