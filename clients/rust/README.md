@@ -1,6 +1,6 @@
 # Silicon Briefcase Rust client and CLI
 
-The workspace contains `briefcase-client` and `briefcase-cli` 4.0.0 for Silicon Accounts and Silicon Apps.
+The workspace contains `briefcase-client` and `briefcase-cli` 4.1.0 for Silicon Accounts and Silicon Apps.
 
 - [Rust client guide](../../docs/client/README.md)
 - [CLI guide](../../docs/cli/README.md)

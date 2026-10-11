@@ -1,10 +1,10 @@
 # Briefcase Rust client
 
-`briefcase-client` 4.0.0 is the official client for the Briefcase 4.0 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
+`briefcase-client` 4.1.0 is the official client for the Briefcase 4.1 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = { version = "4.0.0", features = ["accounts"] }
+briefcase-client = { version = "4.1.0", features = ["accounts"] }
 ```
 
 ```rust,no_run
@@ -22,7 +22,7 @@ println!("{}", file.id);
 # }
 ```
 
-`Client::connect` checks the service name, API major and all 57 operation identifiers, methods, paths and revisions. `new_unchecked` is available when the caller already validated the pairing. API request execution does not install or update dependencies.
+`Client::connect` checks the service name, API major and all 56 operation identifiers, methods, paths and revisions it calls. `new_unchecked` is available when the caller already validated the pairing. API request execution does not install or update dependencies.
 
 ## Sign-in
 
@@ -46,8 +46,8 @@ Scopes include `briefcase.entries.list`, `briefcase.files.read`, `briefcase.file
 
 Delegated uploads reserve, stream bytes using the upload capability, then commit. The service resolves the drive from the reservation. Keep a stable operation id across safe retries and use the status/cancel operations after uncertainty.
 
-## Errors and telemetry
+## Errors
 
 `Error::code`, `hint`, `status`, `request_id` and `retry_after` retain actionable service diagnostics. `is_not_found` covers missing and inaccessible entries. Contract mismatches name the incompatible operation before file mutations begin. Credentials are redacted from debug output.
 
-Telemetry can be disabled through the client configuration. It contains operational measurements, never file contents or tokens. See the crate's API documentation and `briefcase docs cli` for command examples.
+Briefcase records no telemetry; `Config::with_telemetry` and the `telemetry` module remain only as deprecated no-ops.

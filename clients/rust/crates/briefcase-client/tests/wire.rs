@@ -34,8 +34,8 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "4.0.0",
-        "build": "4.0.0",
+        "contract_version": "4.1.0",
+        "build": "4.1.0",
         "operations": operations,
     })
 }
@@ -97,10 +97,11 @@ async fn connected(server: &MockServer) -> Client {
 }
 
 #[test]
-fn the_client_carries_the_four_point_oh_operation_catalogue() {
-    assert_eq!(briefcase_client::OPERATIONS.len(), 57);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "4.0.0");
+fn the_client_carries_the_four_point_one_operation_catalogue() {
+    assert_eq!(briefcase_client::OPERATIONS.len(), 56);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "4.1.0");
     for retired in [
+        "submitTelemetry",
         "readIamInfo",
         "readLoginStatus",
         "exchangeShortLivedToken",
@@ -126,7 +127,7 @@ fn the_client_carries_the_four_point_oh_operation_catalogue() {
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 4.0.0"
+            "{added} is part of contract 4.1.0"
         );
     }
 }
@@ -1114,48 +1115,51 @@ async fn shares_go_to_accounts_and_link_reads_never_carry_the_bearer() {
 }
 
 #[tokio::test]
-async fn telemetry_is_anonymous_and_opt_out_reaches_every_request_kind() {
-    use briefcase_client::telemetry::{Event, Source, Stage};
+#[allow(deprecated)]
+async fn every_request_opts_out_of_telemetry_and_nothing_is_ever_sent() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/telemetry"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let event = Event::new(Source::Sdk, "upload", Stage::Completed);
-    briefcase_client::telemetry::submit(&base(&server), &event)
-        .await
-        .unwrap();
     Mock::given(method("GET"))
         .and(path("/api/v1/accounts"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "app_id": "briefcase", "accounts_url": "https://accounts.example", "delegated_scopes": []
         })))
-        .expect(2)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/entries/{ENTRY_ID}")))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"code": "not_found", "message": "The requested resource was not found."}
+        })))
+        .mount(&server)
+        .await;
+    // The retired switches and submit are accepted and do nothing.
+    let event = briefcase_client::telemetry::Event::new(
+        briefcase_client::telemetry::Source::Sdk,
+        "upload",
+        briefcase_client::telemetry::Stage::Completed,
+    );
+    briefcase_client::telemetry::submit(&base(&server), &event)
+        .await
+        .unwrap();
+    assert!(!briefcase_client::telemetry::enabled_from_env());
     for enabled in [true, false] {
-        Client::new_unchecked(Config::new(&base(&server)).unwrap().with_telemetry(enabled))
+        let config = Config::new(&base(&server))
             .unwrap()
-            .accounts_info()
-            .await
-            .unwrap();
+            .with_telemetry(enabled)
+            .with_telemetry_source(briefcase_client::telemetry::Source::Cli);
+        let anonymous = Client::new_unchecked(config.clone()).unwrap();
+        anonymous.accounts_info().await.unwrap();
+        let signed_in = Client::new_unchecked(config.with_token("access")).unwrap();
+        let entry = uuid::Uuid::parse_str(ENTRY_ID).unwrap();
+        assert!(signed_in.entry(entry).await.is_err());
     }
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(
-        requests[0].body_json::<serde_json::Value>().unwrap()["id"],
-        event.id.to_string()
-    );
-    assert_eq!(requests[0].headers["x-briefcase-telemetry"], "off");
-    assert!(
-        requests
-            .iter()
-            .all(|r| !r.headers.contains_key("authorization"))
-    );
-    assert_eq!(requests[1].headers["x-briefcase-telemetry"], "on");
-    assert_eq!(requests[2].headers["x-briefcase-telemetry"], "off");
-    assert_eq!(requests[2].headers["x-briefcase-source"], "sdk");
+    assert_eq!(requests.len(), 4);
+    for request in &requests {
+        assert_ne!(request.url.path(), "/api/v1/telemetry");
+        assert_eq!(request.headers["x-briefcase-telemetry"], "off");
+        assert!(!request.headers.contains_key("x-briefcase-source"));
+    }
 }
 
 #[tokio::test]

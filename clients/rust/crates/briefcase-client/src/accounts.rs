@@ -115,6 +115,8 @@ impl SignIn {
             .base_url(base.as_str().trim_end_matches('/'))
             .allow_insecure_http(loopback)
             .user_agent(concat!("briefcase-client/", env!("CARGO_PKG_VERSION")))
+            // Briefcase records no telemetry and opts out of Silicon Accounts'.
+            .telemetry(false)
             .build()
             .map_err(|error| SignInError::invalid(error.to_string(), "Check ACCOUNTS_URL."))?;
         let http = reqwest::Client::builder()
@@ -397,6 +399,7 @@ impl SignIn {
                 "application/x-www-form-urlencoded",
             )
             .header(reqwest::header::ACCEPT, "application/json")
+            .header(silicon_accounts_client::TELEMETRY_HEADER, "off")
             .body(body)
             .send()
             .await

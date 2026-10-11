@@ -128,5 +128,10 @@ pub use requests::{
     UploadSource,
 };
 
-/// Operational telemetry and explicit opt-out controls.
+/// Kept so code written against 4.0 still compiles. Briefcase records no
+/// telemetry: nothing here sends anything.
+#[deprecated(
+    since = "4.1.0",
+    note = "Telemetry was removed from Briefcase; nothing in this module sends anything."
+)]
 pub mod telemetry;

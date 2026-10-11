@@ -169,7 +169,7 @@ fn the_served_operation_registry_matches_the_published_contract() -> anyhow::Res
 #[test]
 fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
     let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
-    assert_eq!(document["info"]["version"].as_str(), Some("4.0.0"));
+    assert_eq!(document["info"]["version"].as_str(), Some("4.1.0"));
     assert_eq!(
         document["info"]["version"].as_str(),
         Some(silicon_briefcase::api::versioning::CONTRACT_VERSION)
@@ -181,6 +181,10 @@ fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
     assert!(document["paths"]["/auth/slt"].is_null());
     Ok(())
 }
+
+/// Operations the service still serves for older clients but the official
+/// client no longer calls. Each answers 410 and records nothing.
+const RETIRED_FOR_CLIENTS: [&str; 1] = ["submitTelemetry"];
 
 #[test]
 fn official_client_consumes_the_exact_published_operations() -> anyhow::Result<()> {
@@ -194,7 +198,10 @@ fn official_client_consumes_the_exact_published_operations() -> anyhow::Result<(
             .as_mapping()
             .ok_or_else(|| anyhow::anyhow!("missing path item"))?
         {
-            if let Some(id) = operation["operationId"].as_str() {
+            if let Some(id) = operation["operationId"]
+                .as_str()
+                .filter(|id| !RETIRED_FOR_CLIENTS.contains(id))
+            {
                 actual.insert((
                     id.to_owned(),
                     method.as_str().unwrap_or_default().to_uppercase(),

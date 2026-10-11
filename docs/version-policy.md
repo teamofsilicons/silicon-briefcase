@@ -8,6 +8,8 @@ Briefcase 4.0.0 authenticates with Silicon Accounts: every route takes a Silicon
 
 Contract 4.0.0 also makes every account's drive the unit of storage and sharing. `/drives`, `/shared` and the Silicon allow-list (`/silicons/{silicon}/allowed-accounts`) are added; listings, uploads, the bin, usage and storage settings take `drive` (an owner's `c:`/`si:` id or uuid). Operations whose request, response or refusals changed carry new revisions: `listEntries`, `createFolder`, `createInvitation`, `readOrganizationUsage` and `configureOrganizationBucket` 2.0.0; `updateEntry`, `uploadFile`, `grantPermission`, `inspectEffectivePermissions`, `listNotifications` and `listBin` 1.1.0; `setLinkAccess` and `resolvePermanentUrl` 1.2.0.
 
+Contract 4.1.0 removes telemetry: Briefcase records none. `submitTelemetry` (`POST /telemetry`, revision 1.0.0) stays in the catalogue only because 4.0 clients verify it at startup; it now answers 410 `telemetry_removed` without reading the body and is removed with the next contract major. The 4.1.0 client no longer lists it and sends `x-briefcase-telemetry: off` on every request. Every other operation revision is unchanged, so 4.0 and 4.1 clients and services interoperate in both directions.
+
 ## Negotiation
 
 Before sending credentials, the official client requests `GET /api/version` with `Briefcase-Supported-API-Versions: v1`. It verifies the service identity, selected major and every known operation's exact ID, revision, method and path. A missing or changed required operation fails startup. Extra operation IDs are allowed; duplicate IDs are invalid.
@@ -18,6 +20,7 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 | API contract | Backend | Rust client / CLI | Identity SDK |
 | --- | --- | --- | --- |
+| 4.1.0 / v1 | 4.1.0 | 4.1.0 | silicon-accounts-client 0.4.0 |
 | 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-accounts-client 0.4.0 |
 | 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-iam-client 5.0.0 |
 | 2.1.0 / v1 | 2.1.0 | 2.1.0 | silicon-iam-client 4.0.0 |
@@ -36,7 +39,7 @@ WHERE version = 'v1' AND status = 'active';
 
 A deprecated version remains usable. Each request records its exact arrival and receives a deprecation header and a link to this policy. The worker sunsets a deprecated version only after **seven uninterrupted days with zero requests**, measured from the later of deprecation and last request. Request updates and retirement serialize on the same database row, so an in-flight update cannot be lost to a retirement race. Active versions are never automatically sunset. A retired version returns 410, including during initial negotiation.
 
-The seven-day rule determines retirement dynamically; there is no speculative fixed Sunset date. Worker downtime delays retirement rather than shortening the window. Operators should inspect `last_request_at`, `deprecated_at`, `sunset_at` and release telemetry before removing an old implementation. Restoring an implementation requires an explicit lifecycle update and supported code.
+The seven-day rule determines retirement dynamically; there is no speculative fixed Sunset date. Worker downtime delays retirement rather than shortening the window. Operators should inspect `last_request_at`, `deprecated_at`, `sunset_at` and the service logs before removing an old implementation. Restoring an implementation requires an explicit lifecycle update and supported code.
 
 ## Consumer contract checks
 

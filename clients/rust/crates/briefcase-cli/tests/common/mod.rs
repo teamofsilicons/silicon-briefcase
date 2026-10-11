@@ -61,7 +61,8 @@ impl Home {
         std::fs::write(
             state.join("config.json"),
             serde_json::to_vec_pretty(&json!({
-                "telemetry": false,
+                // A key older releases wrote; it must keep loading.
+                "telemetry": true,
                 "current_profile": "default",
                 "profiles": {"default": {"url": api, "accounts_url": accounts}}
             }))
@@ -96,7 +97,7 @@ impl Home {
 }
 
 /// Runs the CLI with a cleared environment: only `PATH`, the test's homes,
-/// telemetry off, and `extra`.
+/// and `extra`.
 pub async fn briefcase(home: &Home, arguments: &[&str], extra: &[(&str, &str)]) -> Output {
     run(home, arguments, extra, None).await
 }
@@ -123,7 +124,6 @@ async fn run(
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", home.home())
         .env("BRIEFCASE_HOME", home.state())
-        .env("BRIEFCASE_TELEMETRY", "off")
         .env("HOSTNAME", "testhost")
         .args(arguments);
     // Winsock loads its providers relative to SystemRoot on Windows.
@@ -191,8 +191,8 @@ pub fn version_document() -> Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "4.0.0",
-        "build": "4.0.0",
+        "contract_version": "4.1.0",
+        "build": "4.1.0",
         "operations": operations,
     })
 }

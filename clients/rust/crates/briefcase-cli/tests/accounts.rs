@@ -814,7 +814,7 @@ async fn discovery_works_signed_out_offline_in_an_empty_home_and_writes_nothing(
             "api_url": "https://api.briefcase.teamofsilicons.com/api/v1/",
             "web_url": "https://briefcase.teamofsilicons.com",
             "version": env!("CARGO_PKG_VERSION"),
-            "contract_version": "4.0.0",
+            "contract_version": "4.1.0",
             "api_version": "v1",
             "sign_in": {
                 "device_flow": true,
@@ -968,4 +968,60 @@ async fn argument_errors_never_repeat_a_token() {
             assert!(!text.contains(secret), "{arguments:?}: {text}");
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_send_no_telemetry_and_opt_out_of_older_services() {
+    let accounts = MockServer::start().await;
+    let service = briefcase_service(&accounts.uri()).await;
+    listing(&service, "access-one").await;
+    let home = Home::new();
+    home.sign_in(&api(&service), &accounts.uri(), 3600);
+    let output = briefcase(&home, &["--json", "ls"], &[]).await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let requests = service.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    for request in &requests {
+        assert_ne!(request.url.path(), "/api/v1/telemetry");
+        assert_eq!(request.headers["x-briefcase-telemetry"], "off");
+        assert!(!request.headers.contains_key("x-briefcase-source"));
+    }
+}
+
+#[tokio::test]
+async fn turning_telemetry_on_or_off_still_succeeds_and_changes_nothing() {
+    let home = Home::new();
+    home.sign_in("http://127.0.0.1:9/api/v1/", "http://127.0.0.1:9", 3600);
+    let before = std::fs::read(home.state().join("config.json")).unwrap();
+    for arguments in [
+        ["config", "set", "telemetry", "on"].as_slice(),
+        &["config", "set", "telemetry", "off"],
+        &["config", "unset", "telemetry"],
+    ] {
+        let output = briefcase(&home, arguments, &[]).await;
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            stdout(&output).trim(),
+            "Telemetry was removed from Briefcase; there is nothing to turn on or off."
+        );
+    }
+    assert_eq!(
+        std::fs::read(home.state().join("config.json")).unwrap(),
+        before
+    );
+    let output = briefcase(&home, &["--json", "config", "show"], &[]).await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let shown: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(shown["profile"], "default");
+    assert!(shown.get("telemetry").is_none());
+    // The retired subcommands are hidden from help.
+    let output = briefcase(&home, &["config", "--help"], &[]).await;
+    let help = stdout(&output);
+    assert!(
+        !help.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("set ") || line.starts_with("unset ")
+        }),
+        "{help}"
+    );
 }

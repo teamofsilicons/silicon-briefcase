@@ -25,7 +25,11 @@ if values.get('BRIEFCASE_BIND_ADDR')!='0.0.0.0:8180':raise SystemExit('Container
 for k in required[:2]:
  from urllib.parse import urlparse
  if urlparse(values[k]).path!='/briefcase_accounts':raise SystemExit('Refusing a legacy database')
-worker={k:v for k,v in values.items() if k.startswith(('BRIEFCASE_S3_','BRIEFCASE_WORKER_','BRIEFCASE_DATABASE_','BRIEFCASE_TELEMETRY')) or k in ['AWS_REGION','BRIEFCASE_ENVIRONMENT','BRIEFCASE_TEMPORARY_DIRECTORY','BRIEFCASE_LOG_FILTER','BRIEFCASE_POSTMARK_SERVER_TOKEN','BRIEFCASE_PUBLIC_SITE_BASE_URL']}
+# Retired variables: Briefcase records no telemetry. Never copied, even if the secret still has them.
+retired=[k for k in values if k.startswith('BRIEFCASE_TELEMETRY')]
+for k in retired:del values[k]
+if retired:print('Ignoring retired secret keys (remove them from the secret): '+', '.join(sorted(retired)))
+worker={k:v for k,v in values.items() if k.startswith(('BRIEFCASE_S3_','BRIEFCASE_WORKER_','BRIEFCASE_DATABASE_')) or k in ['AWS_REGION','BRIEFCASE_ENVIRONMENT','BRIEFCASE_TEMPORARY_DIRECTORY','BRIEFCASE_LOG_FILTER','BRIEFCASE_POSTMARK_SERVER_TOKEN','BRIEFCASE_PUBLIC_SITE_BASE_URL']}
 worker.pop('BRIEFCASE_DATABASE_URL',None);worker['BRIEFCASE_DATABASE_MAX_CONNECTIONS']='2'
 api={k:v for k,v in values.items() if not k.startswith('BRIEFCASE_WORKER_')}
 for name,settings in [('api',api),('worker',worker)]:
@@ -33,7 +37,7 @@ for name,settings in [('api',api),('worker',worker)]:
  p=base/(name+'.env');p.write_text(''.join(k+'='+str(v)+'\n' for k,v in sorted(settings.items())));p.chmod(0o600)
 print('Independent Accounts env files prepared; secret values omitted.')
 PY
-install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/accounts-staging /var/lib/silicon-briefcase/accounts-telemetry-api /var/lib/silicon-briefcase/accounts-telemetry-worker
+install -d -m 0700 -o 10001 -g 10001 /var/lib/silicon-briefcase/accounts-staging
 for component in api worker; do
   memory=256m; [ "$component" = worker ] && memory=128m
   unit=silicon-briefcase-accounts-$component
@@ -50,7 +54,7 @@ Wants=network-online.target
 Restart=always
 RestartSec=5
 ExecStartPre=-/usr/bin/docker rm -f $unit
-ExecStart=/usr/bin/docker run --name $unit $network_args --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/silicon-briefcase/accounts/$component.env --mount type=bind,src=/opt/silicon-briefcase/aws-rds-global-bundle.pem,dst=/opt/silicon-briefcase/aws-rds-global-bundle.pem,readonly --mount type=bind,src=/var/lib/silicon-briefcase/accounts-staging,dst=/var/lib/silicon-briefcase/staging --mount type=bind,src=/var/lib/silicon-briefcase/accounts-telemetry-$component,dst=/var/lib/silicon-briefcase/telemetry --log-opt max-size=10m --log-opt max-file=3 $image briefcase-$component
+ExecStart=/usr/bin/docker run --name $unit $network_args --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --memory $memory --env-file /etc/silicon-briefcase/accounts/$component.env --mount type=bind,src=/opt/silicon-briefcase/aws-rds-global-bundle.pem,dst=/opt/silicon-briefcase/aws-rds-global-bundle.pem,readonly --mount type=bind,src=/var/lib/silicon-briefcase/accounts-staging,dst=/var/lib/silicon-briefcase/staging --log-opt max-size=10m --log-opt max-file=3 $image briefcase-$component
 ExecStop=/usr/bin/docker stop -t 30 $unit
 TimeoutStopSec=40
 [Install]

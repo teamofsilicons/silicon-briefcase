@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_telemetry_classification_never_exposes_provider_details() {
+    fn cleanup_error_classification_never_exposes_provider_details() {
         let error = ObjectStoreError::Internal(anyhow::anyhow!("secret provider detail"));
         assert_eq!(provider_error_code(&error), "cleanup_storage_internal");
     }

@@ -1,20 +1,11 @@
-//! Structured process telemetry without secret- or content-bearing payloads.
+//! Structured process logs without secret- or content-bearing payloads.
+//!
+//! Logs are written to standard output for the host's own log collection.
+//! Briefcase records no telemetry: nothing here is sent anywhere.
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::config::{RuntimeEnvironment, Settings};
-
-mod collector;
-pub(crate) use collector::RequestContext;
-pub use collector::{configured, flush, record};
-
-/// Carries the caller's opt-out across every asynchronous request step.
-pub(crate) async fn scope<T>(
-    context: RequestContext,
-    future: impl std::future::Future<Output = T>,
-) -> T {
-    collector::REQUEST.scope(context, future).await
-}
 
 /// Installs the process-global tracing subscriber from full settings.
 ///
@@ -26,7 +17,7 @@ pub fn init(settings: &Settings) -> anyhow::Result<()> {
     init_process(settings.environment, &settings.log_filter)
 }
 
-/// Installs telemetry for a process with minimal settings, such as migrations.
+/// Installs logging for a process with minimal settings, such as migrations.
 ///
 /// Development and test output is compact and human-readable. Production
 /// output is newline-delimited JSON suitable for centralized collection.
@@ -36,11 +27,11 @@ pub fn init(settings: &Settings) -> anyhow::Result<()> {
 /// Returns an error when the filter is invalid or another subscriber has
 /// already been installed.
 pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow::Result<()> {
-    collector::init();
+    // Dependencies enable more than one rustls crypto provider, so pick one
+    // process-wide before any TLS client is built.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let filter = EnvFilter::try_new(log_filter)?;
-    let registry = tracing_subscriber::registry()
-        .with(filter)
-        .with(collector::CollectorLayer);
+    let registry = tracing_subscriber::registry().with(filter);
 
     match environment {
         RuntimeEnvironment::Development | RuntimeEnvironment::Test => registry
@@ -66,18 +57,4 @@ pub fn init_process(environment: RuntimeEnvironment, log_filter: &str) -> anyhow
     }
 
     Ok(())
-}
-
-/// Correlates authenticated work without changing the original opt-out.
-pub(crate) async fn authenticated<T>(
-    context: &crate::application::context::ExecutionContext,
-    future: impl std::future::Future<Output = T>,
-) -> T {
-    let request = RequestContext {
-        enabled: collector::REQUEST
-            .try_with(|context| context.enabled)
-            .unwrap_or(true),
-        request_id: uuid::Uuid::parse_str(context.request_id()).ok(),
-    };
-    scope(request, future).await
 }

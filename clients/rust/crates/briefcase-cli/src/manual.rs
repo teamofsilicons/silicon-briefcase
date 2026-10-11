@@ -91,7 +91,7 @@ fn workflow(command: &str) -> &'static str {
             "For apps acting for an account with a Silicon Accounts User verification proof (receiving app `briefcase`, one scope per operation). Apps reach only apps/<app>/ in that account's drive unless Briefcase lists them as first-party. Read `briefcase docs client` before integrating."
         }
         "config" => {
-            "Use `briefcase config show` to inspect saved settings and profiles. `briefcase config home <directory>` moves the state directory; telemetry is the only setting (Silicon Apps keeps briefcase up to date)."
+            "Use `briefcase config show` to inspect saved profiles. `briefcase config home <directory>` moves the state directory. There are no other settings: Silicon Apps keeps briefcase up to date and Briefcase records no telemetry."
         }
         "daemon" | "version" => {
             "Silicon Apps installs and updates briefcase (`silicon-apps install briefcase`). An older release's background service is removed with `briefcase daemon uninstall`."

@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, HeaderValue},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use serde::Serialize;
@@ -69,4 +69,21 @@ pub(crate) async fn version(headers: HeaderMap) -> Result<impl IntoResponse, App
         headers.insert(http::header::VARY, value);
     }
     Ok(response)
+}
+
+/// Answers the retired `submitTelemetry` operation without reading its body.
+///
+/// Briefcase records no telemetry. The operation stays in the catalogue only
+/// because 4.0 clients verify it before their first call and treat delivery as
+/// best effort; remove it with the next contract major.
+#[allow(
+    clippy::unused_async,
+    reason = "Axum handlers must remain async while returning an immediate retirement response"
+)]
+pub(crate) async fn telemetry_removed() -> AppError {
+    AppError::Explained {
+        status: StatusCode::GONE,
+        code: "telemetry_removed".into(),
+        message: "Telemetry was removed from Briefcase; nothing is recorded.".into(),
+    }
 }

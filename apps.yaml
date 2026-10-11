@@ -1,6 +1,6 @@
 schema_version: 1
 app_id: briefcase
-version: 4.0.0
+version: 4.1.0
 command: briefcase
 targets:
   linux-x86_64:

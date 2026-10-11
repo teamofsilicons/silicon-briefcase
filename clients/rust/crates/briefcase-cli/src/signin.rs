@@ -128,7 +128,7 @@ fn readable_configuration(state: &StateDirectory) -> Result<Configuration> {
 /// mismatch before a single-use code or token is spent. A deployment that
 /// cannot be reached only warns: signing in does not need it.
 async fn check_deployment(selection: &Selection) -> Result<()> {
-    let client = Client::new_unchecked(Config::new(&selection.api_url)?.with_telemetry(false))?;
+    let client = Client::new_unchecked(Config::new(&selection.api_url)?)?;
     match client.accounts_info().await {
         Ok(info) => {
             if info.app_id != APP_ID {
@@ -838,7 +838,7 @@ pub async fn status(global: &GlobalArgs, output: Output) -> Result<()> {
     let selection = session::select(global)?;
     let credentials = selection.state.credentials()?;
     let saved = credentials.session(&selection.profile);
-    let client = Client::new_unchecked(Config::new(&selection.api_url)?.with_telemetry(false))?;
+    let client = Client::new_unchecked(Config::new(&selection.api_url)?)?;
     let served = client.version().await;
     let agreement = served
         .as_ref()

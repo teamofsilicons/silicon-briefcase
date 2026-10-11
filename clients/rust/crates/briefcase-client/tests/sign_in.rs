@@ -135,6 +135,10 @@ async fn a_device_sign_in_waits_through_pending_and_slow_down_then_returns_the_a
     let body: Value = serde_json::from_slice(&authorize.body).unwrap();
     assert_eq!(body["scope"], "email");
     assert_eq!(body["client_label"], "briefcase CLI on test");
+    // Briefcase records no telemetry and opts out of Silicon Accounts'.
+    for request in server.received_requests().await.unwrap() {
+        assert_eq!(request.headers["x-accounts-telemetry"], "off");
+    }
 }
 
 #[tokio::test]
@@ -246,6 +250,7 @@ async fn a_short_lived_token_is_exchanged_with_the_client_id_alone() {
     let body = String::from_utf8_lossy(&request.body);
     assert!(!body.contains("client_secret"), "{body}");
     assert!(!request.headers.contains_key("authorization"));
+    assert_eq!(request.headers["x-accounts-telemetry"], "off");
 }
 
 #[tokio::test]

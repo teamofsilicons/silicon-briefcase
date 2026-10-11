@@ -74,7 +74,7 @@ const CONTRACT: [(&str, &str, &str); 57] = [
     ("/search", "get", "200"),
     ("/usage", "get", "200"),
     ("/reports", "post", "200"),
-    ("/telemetry", "post", "204"),
+    ("/telemetry", "post", "410"),
     ("/notifications", "get", "200"),
     ("/notifications/read", "post", "200"),
     ("/entries/{entry_id}/activity", "get", "200"),
@@ -387,73 +387,21 @@ async fn accounts_discovery_is_public_and_me_needs_an_access_token() -> anyhow::
 }
 
 #[tokio::test]
-async fn telemetry_relay_is_anonymous_and_rejects_arbitrary_payloads() -> anyhow::Result<()> {
-    use briefcase_client::telemetry::{Event, Source, Stage};
+async fn retired_telemetry_intake_answers_gone_and_records_nothing() -> anyhow::Result<()> {
     let router = test_router()?;
-    let mut event = serde_json::to_value(Event::new(Source::Cli, "upload", Stage::Completed))?;
-    for (mutation, expected) in [(None, 204), (Some("token"), 422), (Some("source"), 422)] {
-        if let Some(field) = mutation {
-            event[field] = serde_json::json!(if field == "source" {
-                "backend"
-            } else {
-                "slt_private"
-            });
-        }
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/telemetry")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&event)?))?,
-            )
-            .await?;
-        assert_eq!(response.status().as_u16(), expected);
-        event
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("object"))?
-            .remove("token");
-    }
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "explicit live Space Station check; requires the private collector configuration"]
-async fn telemetry_live_delivery() -> anyhow::Result<()> {
-    use briefcase_client::telemetry::{Event, Source, Stage};
-    crate::telemetry::init_process(
-        crate::config::RuntimeEnvironment::Test,
-        "silicon_briefcase=info",
-    )?;
-    anyhow::ensure!(
-        crate::telemetry::configured(),
-        "collector is not configured"
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let base = format!("http://{}/api/v1/", listener.local_addr()?);
-    let router = test_router()?;
-    let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    for source in [Source::Sdk, Source::Cli, Source::Daemon, Source::Web] {
-        let mut event = Event::new(source, "telemetry_integration_check", Stage::Completed);
-        event.testing = true;
-        event.count = Some(1);
-        briefcase_client::telemetry::submit(&base, &event).await?;
-        println!("live telemetry event {} source {source:?}", event.id);
-    }
-    let mut acked = false;
-    for _ in 0..40 {
-        if crate::telemetry::flush() {
-            acked = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    server.abort();
-    anyhow::ensure!(
-        acked,
-        "Space Station did not acknowledge within the live-check window"
-    );
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/telemetry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"not-even-an-event"}"#))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::GONE);
+    let bytes = axum::body::to_bytes(response.into_body(), 8192).await?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(body["error"]["code"], "telemetry_removed");
     Ok(())
 }
 

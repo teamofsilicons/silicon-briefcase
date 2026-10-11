@@ -1,4 +1,7 @@
-//! Bounded operational events. No credentials, paths, user text or file data.
+//! Retired: Briefcase records no telemetry.
+//!
+//! The types stay so code written against 4.0 still compiles; [`submit`] sends
+//! nothing and [`enabled_from_env`] is always false.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -115,69 +118,22 @@ impl Event {
     }
 }
 
-/// Sends an explicit diagnostic through Briefcase; table keys stay on its server.
-/// Failures are intentionally independent of the operation being diagnosed.
+/// Does nothing: telemetry was removed from Briefcase.
+///
 /// # Errors
-/// Returns validation or delivery errors. Callers should treat these as best effort.
-pub async fn submit(base: &str, event: &Event) -> crate::Result<()> {
-    if !event.valid() {
-        return Err(crate::Error::Configuration(
-            "invalid telemetry event".into(),
-        ));
-    }
-    let config = crate::Config::new(base)?.with_telemetry(false);
-    let client = crate::Client::new_unchecked(config)?;
-    client
-        .receive_empty(
-            client
-                .anonymous_request(reqwest::Method::POST, client.api_url(&["telemetry"])?)
-                .json(event)
-                .timeout(std::time::Duration::from_secs(2)),
-        )
-        .await
+///
+/// Never; the event is discarded without being sent.
+#[allow(
+    clippy::unused_async,
+    reason = "kept async for 4.0 callers that await it"
+)]
+pub async fn submit(_base: &str, _event: &Event) -> crate::Result<()> {
+    Ok(())
 }
 
-/// Reads the conventional opt-out, defaulting to enabled when unset.
+/// Always false: Briefcase records no telemetry, so there is nothing to enable.
+/// `BRIEFCASE_TELEMETRY` is ignored.
 #[must_use]
-pub fn enabled_from_env() -> bool {
-    std::env::var("BRIEFCASE_TELEMETRY")
-        .ok()
-        .is_none_or(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "off" | "false" | "no"
-            )
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-    #[test]
-    fn events_refuse_credentials_arbitrary_payloads_and_cross_plane_ids() {
-        let mut event = Event::new(Source::Cli, "upload", Stage::Completed);
-        assert!(event.valid());
-        for value in [
-            "ask_secret",
-            "sar_secret",
-            "sap_secret",
-            "table-secret",
-            "private/alice.txt",
-            "a query",
-            "",
-            "sscli-session",
-        ] {
-            event.operation = value.into();
-            assert!(!event.valid());
-        }
-        event.operation = "upload".into();
-        event.environment_id = Some(Uuid::new_v4());
-        assert!(!event.valid());
-        event.testing = true;
-        assert!(event.valid());
-        let mut value = serde_json::to_value(event).unwrap();
-        value["token"] = "secret".into();
-        assert!(serde_json::from_value::<Event>(value).is_err());
-    }
+pub const fn enabled_from_env() -> bool {
+    false
 }

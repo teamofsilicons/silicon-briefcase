@@ -1365,29 +1365,22 @@ async fn application(global: &GlobalArgs, command: &AppCommand, output: Output) 
     }
 }
 
+/// What `briefcase config set|unset telemetry` prints; it changes nothing.
+const TELEMETRY_REMOVED: &str =
+    "Telemetry was removed from Briefcase; there is nothing to turn on or off.";
+
 fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Result<()> {
-    if let ConfigCommand::Home { location } = command {
-        StateDirectory::configure_home(location)?;
-        output.note(&format!(
-            "Briefcase state will be stored under {}",
-            location.join(".briefcase").display()
-        ));
-        return Ok(());
-    }
-    let state = StateDirectory::locate()?;
-    // Writers lock before reading so concurrent setting changes merge.
-    let _state_lock = match command {
-        ConfigCommand::Set { .. } | ConfigCommand::Unset { .. } => Some(state.lock_credentials()?),
-        ConfigCommand::Show | ConfigCommand::Home { .. } => None,
-    };
-    let mut configuration = state.configuration()?;
-    let unknown = |key: &str| {
-        CliError::usage(format!(
-            "unknown setting `{key}`; the only setting is `telemetry` (Silicon Apps keeps briefcase up to date, so there is no update setting)"
-        ))
-    };
     match command {
+        ConfigCommand::Home { location } => {
+            StateDirectory::configure_home(location)?;
+            output.note(&format!(
+                "Briefcase state will be stored under {}",
+                location.join(".briefcase").display()
+            ));
+        }
         ConfigCommand::Show => {
+            let state = StateDirectory::locate()?;
+            let configuration = state.configuration()?;
             let profile = global
                 .profile
                 .as_deref()
@@ -1395,48 +1388,34 @@ fn configure(global: &GlobalArgs, command: &ConfigCommand, output: Output) -> Re
             if output.is_json() {
                 output.json(&serde_json::json!({
                     "profile": profile,
-                    "telemetry": configuration.telemetry,
                     "state": state.path().display().to_string(),
                     "profiles": configuration.profiles,
                 }));
             } else {
                 println!("profile     {profile}");
-                println!(
-                    "telemetry   {}",
-                    if configuration.telemetry { "on" } else { "off" }
-                );
                 println!("state       {}", state.path().display());
                 for (name, saved) in &configuration.profiles {
                     println!("  {name:<10} {}", saved.url);
                 }
             }
         }
-        ConfigCommand::Set { key, value } if key == "telemetry" => {
-            configuration.telemetry = parse_switch(value)?;
-            state.save_configuration(&configuration)?;
-            output.note(if configuration.telemetry {
-                "telemetry enabled"
+        // Older scripts turn telemetry on or off; both succeed and change nothing.
+        ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key }
+            if key.trim().eq_ignore_ascii_case("telemetry") =>
+        {
+            if output.is_json() {
+                output.json(&serde_json::json!({ "message": TELEMETRY_REMOVED }));
             } else {
-                "telemetry disabled"
-            });
+                output.note(TELEMETRY_REMOVED);
+            }
         }
-        ConfigCommand::Unset { key } if key == "telemetry" => {
-            configuration.telemetry = true;
-            state.save_configuration(&configuration)?;
-            output.note("telemetry restored to the default: on");
+        ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => {
+            return Err(CliError::usage(format!(
+                "unknown setting `{key}`; Briefcase has no settings to change (Silicon Apps keeps briefcase up to date)"
+            )));
         }
-        ConfigCommand::Set { key, .. } | ConfigCommand::Unset { key } => return Err(unknown(key)),
-        ConfigCommand::Home { .. } => {}
     }
     Ok(())
-}
-
-fn parse_switch(value: &str) -> Result<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "1" => Ok(true),
-        "off" | "false" | "no" | "0" => Ok(false),
-        _ => Err(CliError::usage("setting must be on or off")),
-    }
 }
 
 async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
@@ -1444,9 +1423,7 @@ async fn version(global: &GlobalArgs, output: Output) -> Result<()> {
         |_| session::normalize_api_url(global.url.as_deref().unwrap_or(session::DEFAULT_API_URL)),
         |selection| selection.api_url,
     );
-    let served = match briefcase_client::Config::new(&api_url)
-        .and_then(|config| Client::new_unchecked(config.with_telemetry(false)))
-    {
+    let served = match briefcase_client::Config::new(&api_url).and_then(Client::new_unchecked) {
         Ok(client) => client.version().await.ok(),
         Err(_) => None,
     };

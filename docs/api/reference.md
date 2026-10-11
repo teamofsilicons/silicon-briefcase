@@ -1,6 +1,6 @@
 # HTTP operation reference
 
-Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 4.0.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative.
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 4.1.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative.
 
 ## Report the API version and per-operation contract revisions
 
@@ -310,23 +310,22 @@ Names up to 100 targets by identifier, path, or both. Identifiers may name entri
 | 200 | Permission-filtered results |
 | default | Error |
 
-## Submit a bounded operational event
+## Retired telemetry intake
 
 `POST /telemetry` · `submitTelemetry`
 
-Best-effort anonymous relay to Space Station. No table key or credential is required. Events are marked client_reported and never confer authority. At most 100 events per second per process; duplicate IDs are suppressed for 60 seconds. A 204 acknowledges intake, not remote persistence. A disabled or unconfigured collector discards events.
+Briefcase records no telemetry. Returns HTTP 410 without reading the request body. The operation stays in the catalogue only because 4.0 clients verify it before their first call; it is removed with the next contract major.
 
 | Response | Meaning |
 | --- | --- |
-| 204 | Event accepted for best-effort delivery or collection disabled |
-| 429 | Process-wide telemetry intake limit reached |
+| 410 | Telemetry was removed from Briefcase (`telemetry_removed`); nothing is recorded |
 | default | Error |
 
 ## Submit a bug report with an optional proposed fix
 
 `POST /reports` · `submitReport`
 
-Stores the account-authored report in the caller's drive. No telemetry, credentials, or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
+Stores the account-authored report in the caller's drive. No credentials or files are collected automatically. Reuse the same idempotency key and body after an uncertain response.
 
 | Parameter | Location | Required |
 | --- | --- | --- |

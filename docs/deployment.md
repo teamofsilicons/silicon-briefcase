@@ -69,11 +69,12 @@ Prepare a private JSON file using a secure editor/secret manager. Its schema is:
   "BRIEFCASE_ACCOUNTS_WEBHOOK_SECRET": "<whsec-secret-returned-when-the-webhook-was-set>",
   "BRIEFCASE_PROOF_ISSUERS": "<scope=app list; see below>",
   "BRIEFCASE_POSTMARK_SERVER_TOKEN": "<postmark-server-token>",
-  "BRIEFCASE_TELEMETRY_TABLE_KEY": "<siliconbriefcase-table-key>",
   "BRIEFCASE_API_DATABASE_PASSWORD": "<strong-random-runtime-password>",
   "BRIEFCASE_WORKER_DATABASE_PASSWORD": "<different-strong-random-runtime-password>"
 }
 ```
+
+Briefcase records no telemetry, so the secret holds no telemetry keys.
 
 These are placeholders, not values to deploy. Generate credentials using a
 cryptographically secure generator and place the real values only in that
@@ -285,51 +286,3 @@ hostname. See [the site build instructions](../docs-site/README.md).
 
 This change prepares release artifacts and documentation. Publishing packages,
 changing DNS and deploying services/docs are separate operator actions.
-
-## Telemetry
-
-Backend and worker use the official Space Station Rust client, pinned in
-`Cargo.toml`. Browser analytics and explicit UI events use
-`@teamofsilicons/space-station-web`. Everything lands in the private
-[`tos/siliconbriefcase` table](https://spacestation.teamofsilicons.com/o/tos/tables/siliconbriefcase).
-Bug report content stays in Briefcase PostgreSQL.
-
-Provision `BRIEFCASE_TELEMETRY_TABLE_KEY` in the backend and worker secret
-environments. Keep it out of client builds and source control. Local processes
-also read `$HOME/.config/briefcase/telemetry.env`; use directory mode 0700 and file
-mode 0600. `BRIEFCASE_TELEMETRY_URL` defaults to
-`https://backend.spacestation.teamofsilicons.com`. `BRIEFCASE_TELEMETRY_HOME` selects a
-persistent private spool directory (default `$HOME/.briefcase-telemetry`).
-Each replica should have its own durable volume for this directory. The container
-image uses `/var/lib/silicon-briefcase/telemetry`; the AWS template mounts separate
-private API and worker spool directories and reads the telemetry key, URL and
-optional on/off override from the existing application secret in Secrets Manager. Missing or
-invalid configuration disables delivery; `telemetry::configured()` exposes only
-whether a collector was initialized. Set `BRIEFCASE_TELEMETRY=off` to disable a
-backend, worker, or gateway process. Restart after changing server settings.
-
-HTTP middleware records operation, outcome, duration, and a UUID correlation ID.
-Request-scoped tracing inherits opt-out and authenticated sandbox context.
-Workers record named job stages and numeric progress. Browser analytics are
-sanitized before leaving the browser; the gateway relays batches to
-`POST /api/v1/telemetry`, and only the backend holds the table key. Both browser
-analytics and custom request events use the same table. Browser preference is
-available on sign-in and in Organisation settings → Telemetry, applies to that
-browser, and is on by default. CLI and SDK settings are documented in their guides.
-
-Each stored record includes event ID, source, operation, stage, sandbox context,
-optional correlation/timing/status/count/progress, schema version, service,
-backend build, receipt time, and `client_reported`. Space Station adds its own
-host metadata for the collecting backend/worker, not the remote browser or CLI.
-Remote source and sandbox labels are claims, never authorization facts. Raw
-request paths, headers, error messages, typed text, filenames and file contents
-are excluded. Test telemetry shares this operational table with `testing: true`;
-it contains no sandbox application data and is independent of sandbox cleanup.
-
-Collection is best effort: the official Rust client's bounded queue and durable
-spool retry remote delivery, while client relays have short deadlines. Browser
-batches retry within bounded queues; duplicate event IDs are suppressed for 60
-seconds by each backend process. A 204 means intake, not Space Station persistence.
-When the sink is unavailable, Briefcase operations continue normally. An already
-accepted event can still drain after a client opts out; new opted-out requests
-are suppressed. In-flight network traffic cannot be recalled.
