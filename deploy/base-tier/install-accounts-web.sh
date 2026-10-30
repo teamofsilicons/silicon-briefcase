@@ -10,6 +10,8 @@ if [[ ! "$image" =~ ^234951665042\.dkr\.ecr\.us-east-1\.amazonaws\.com/silicon-b
 fi
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 234951665042.dkr.ecr.us-east-1.amazonaws.com >/dev/null
 docker pull "$image"
+# Persist encrypted refresh operations across container replacements.
+install -d -m 0700 -o 1000 -g 1000 /var/lib/briefcase-browser-sessions
 umask 077
 backup=/var/lib/silicon-briefcase/releases/accounts-web-$(date -u +%Y%m%dT%H%M%SZ)
 install -d -m 0700 "$backup" /etc/silicon-briefcase /etc/systemd/system/silicon-briefcase-accounts-web.service.d
@@ -59,7 +61,7 @@ Wants=network-online.target
 Restart=always
 RestartSec=5
 ExecStartPre=-/usr/bin/docker rm -f silicon-briefcase-accounts-web
-ExecStart=/usr/bin/docker run --name silicon-briefcase-accounts-web --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --tmpfs /app/.next/cache:size=64m,mode=1777 --memory 384m --env-file /etc/silicon-briefcase/accounts-web.env --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 $image
+ExecStart=/usr/bin/docker run --name silicon-briefcase-accounts-web --network host --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:size=32m,mode=1777 --tmpfs /app/.next/cache:size=64m,mode=1777 --memory 384m --env-file /etc/silicon-briefcase/accounts-web.env --mount type=bind,src=/var/lib/briefcase-browser-sessions,dst=/var/lib/browser-sessions --env REFRESH_STATE_PATH=/var/lib/browser-sessions/state.sqlite --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 $image
 ExecStop=/usr/bin/docker stop -t 20 silicon-briefcase-accounts-web
 TimeoutStopSec=30
 [Install]
