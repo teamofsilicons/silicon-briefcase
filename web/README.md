@@ -29,7 +29,7 @@ Settings are read and validated at runtime. Non-loopback public production origi
 
 ## Sessions and files
 
-Hosted PKCE sign-in exchanges the code on the server. Tokens live in an authenticated, encrypted httpOnly cookie; secure deployments use a `__Host-` prefix. Refresh is single-flight per process, with a short memo for concurrent old-cookie requests. Deployment currently assumes one web process per session cohort; multi-instance deployments need shared refresh coordination before scaling. Sign-out revokes at Accounts, clears the cookie, and tells other tabs.
+Hosted PKCE sign-in exchanges the code on the server. Tokens live in an authenticated, encrypted httpOnly cookie; secure deployments use a `__Host-` prefix. Refresh uses shared durable state; see Durable browser sessions below.
 
 `/api/*` checks same-origin mutations and forwards only allowlisted headers to APP_API_URL with the sealed session's bearer. Bodies and responses stream; uploads keep an idempotency key across retries. The proxy timeout is 15 minutes. Public `/public-api/*` reaches only the anonymous file route and forwards no credentials. Range and Content-Disposition survive both routes. Uploaded document responses have a restrictive sandbox CSP.
 
@@ -53,3 +53,23 @@ Browser tests require real local Accounts (public9590/API9589/mock sender9592), 
 `next build` produces `.next/standalone` by default. `Dockerfile.browser` copies that server, public files and static assets, runs unprivileged, and accepts runtime settings. For direct self-hosting, copy public and `.next/static` beside the standalone server before starting it. The nginx candidate routes streaming uploads through `/api/v1/uploads` without request buffering.
 
 This worktree is a migration candidate. Build success and local compatibility checks do not assert a production cutover or real AWS role integration. The migration log records the evidence and remaining release gates.
+
+## Durable browser sessions
+
+`lib/server/refresh-store.ts` and `refresh-state.ts` hold the current session and a random refresh operation key before
+calling Accounts. A compare-and-set update prevents late responses from overwriting newer tokens or a saved sign-out.
+Existing sealed cookies are adopted atomically. Cookies remain HttpOnly and encrypted; server state is encrypted with
+`SESSION_SECRET`, with a separate purpose for each record. Keep that secret stable across deployments.
+
+Production requires either `REFRESH_STATE_TABLE` plus `REFRESH_STATE_REGION` (DynamoDB, consistent reads and conditional
+writes), or `REFRESH_STATE_PATH` on a durable, private local volume shared by all web processes on one host. Vercel
+requires DynamoDB; `REFRESH_STATE_ROLE_ARN` selects an app-specific Vercel OIDC role with GetItem/PutItem permissions.
+EC2 can use its instance role. Never share a development store with production. Development defaults to
+`.dev/refresh-state.sqlite`; its parent directory and database are private. Configure DynamoDB TTL on `expires`.
+
+Storage failures, transport failures, 5xx and recovery conflicts preserve the session and return a retryable error.
+Recovered absolute access-token expiry is respected, including zero remaining lifetime: the successor is saved before
+rotating again. Only a definitive `invalid_grant` ends the sign-in. Sign-out is saved before the cookie is cleared.
+Tests in `tests/refresh-recovery.test.ts` cover competing refreshes, process restart, lost replies, expired recovery,
+stale cookies, storage failure and sign-out racing a refresh. All replicas must use this protocol before traffic is
+switched; do not roll back to the old token-refresh code once these sessions are in use.
