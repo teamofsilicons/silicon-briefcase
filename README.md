@@ -1,6 +1,6 @@
 # Silicon Briefcase
 
-File storage for personal and work accounts, Silicons, and apps acting with Silicon Accounts approval. Each account owns a drive. Accounts, organization and team shares, and custodian authority govern access. This branch extends the current 4.1.0 Accounts implementation with [Organizations management and sharing](docs/organizations.md). Production deployment requires the companion Organizations service update.
+File storage for personal and work accounts, Silicons, and apps acting with Silicon Accounts approval. Each account owns a drive. Accounts, organization and team shares, and custodian authority govern access. This branch extends the current 4.1.0 Accounts implementation with [Organizations management and sharing](docs/organizations.md), using Organizations' shared app-session API. That API is deployed; this Briefcase branch is not yet deployed.
 
 - Rust API and worker: Accounts JWT/JWKS verification, sensitive-action introspection, signed account events, per-drive row security, S3 streaming, immutable versions, share expiry, a 45-day bin, and delegated uploads.
 - Native CLI and Rust client: public device/short-lived-token sign-in, locked token refresh, precise paths and sharing, streaming operations, and Silicon Apps packaging.

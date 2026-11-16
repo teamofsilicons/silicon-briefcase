@@ -88,8 +88,13 @@ the permission view. Database row security still confines ordinary queries to
 one drive. Group IDs are never treated as Accounts UUIDs during UUID backfill.
 
 Set `BRIEFCASE_ORGANIZATIONS_URL` to the Organizations origin (HTTPS, or loopback
-HTTP for development). Deploy the Organizations companion first. See the
-[release procedure](../deploy/RELEASE-organizations.md).
+HTTP for development). The shared Organizations app-session API is deployed and
+supports the existing `/v1/integrations/briefcase/*` routes. Briefcase uses its
+own Accounts bearer session; it does not need a second Organizations login or
+a Briefcase-specific Organizations deployment. See the
+[integration guide](https://organizations.teamofsilicons.com/docs/app-integrations)
+and [release procedure](../deploy/RELEASE-organizations.md). This Briefcase
+branch itself has not yet been deployed.
 
 IAM login, workspace and tag authority are retired. Historical migrations and
 data-conversion tools remain to preserve existing files and immutable migration

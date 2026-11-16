@@ -1,6 +1,6 @@
 # Silicon Briefcase
 
-Personal and work accounts each have a drive. Briefcase stores files, preserves versions, and shares with accounts, organizations and teams. This branch extends the 4.1.0 Accounts source; see [Organizations](organizations.md) for the companion service and deployment requirements.
+Personal and work accounts each have a drive. Briefcase stores files, preserves versions, and shares with accounts, organizations and teams. This branch extends the 4.1.0 Accounts source; see [Organizations](organizations.md) for the shared app-session API and deployment requirements.
 
 ```sh
 silicon-apps install briefcase

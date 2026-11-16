@@ -7,7 +7,7 @@ use url::Url;
 
 pub use crate::domain::organizations::{OrganizationContext, ShareTarget};
 
-/// Bounded transport to Organizations' explicitly supported Briefcase surface.
+/// Bounded transport to Organizations' shared app-session API for Briefcase.
 #[derive(Clone)]
 pub struct OrganizationsGateway {
     base: Url,

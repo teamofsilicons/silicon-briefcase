@@ -6,17 +6,20 @@ session-recovery fixes. The live version endpoint reported 4.1.0 when inspected.
 The deployed git SHA was not exposed. The original checkout was a dirty 2.1.0
 checkout and was not modified.
 
-Companion source: Silicon Organizations branch `codex/briefcase-integration`,
-based on `2437f12` (current main with authority hardening). Its
-`/v1/integrations/briefcase` surface must be available before the new Briefcase
-API. Both branches are local implementation work; this document is not a
-production deployment record.
+Organizations now provides the shared `/v1/integrations/{app}` API in deployed
+source `f004cb441653708aaeff743d063e56f7dae2d36a`, branch
+`codex/app-session-integrations`. The existing `/v1/integrations/briefcase/*`
+paths, response shapes and action bodies are compatible with this Briefcase
+implementation. The earlier Briefcase-only companion commit `9ccd212` is
+superseded and should not be deployed separately. No second Organizations
+session is needed. This Briefcase branch remains local implementation work;
+this document is not a Briefcase production deployment record.
 
 ## Deployment order
 
-1. Build, test and deploy Organizations with the Briefcase integration. Check
-   the new endpoint rejects anonymous and wrong-audience credentials and returns
-   only the exact signed-in account’s organization memberships.
+1. Confirm the target Organizations service supports the shared app-session
+   integration. This prerequisite is met in production as of 2026-11-16. Keep
+   its app-specific token checks and exact-account membership boundary intact.
 2. Back up the Accounts-era Briefcase database. Apply migration 0053 using the
    schema owner. Standard `briefcase_api` and `briefcase_worker` grants are in
    the migration; installations with custom runtime role names must apply the
@@ -36,7 +39,8 @@ production deployment record.
    Use authorized test accounts and files, not production membership changes.
 
 Keep a copy of the prior images and Nginx configuration for rollback. Do not
-roll back only the Organizations companion while the new API depends on it.
+roll back Organizations to a release without the shared integration while the
+new API depends on it.
 Migration 0053 does not delete historical rows. Rolling the API back removes
 the new controls; retire or suspend new group grants deliberately before doing
 so because the database permission view also changed.
@@ -86,3 +90,19 @@ The existing real hosted-login E2E command was attempted but could not start:
 this checkout has no `APP_SECRET` or `TEST_STACK_JSON` for a local Accounts
 stack. Production sign-in, mail/notification delivery and deployment have not
 been exercised by this change.
+
+### Shared Organizations API deployed, 2026-11-16
+
+The [live integration guide](https://organizations.teamofsilicons.com/docs/app-integrations)
+and deployed source were checked against Briefcase's gateway. An independent
+read confirmed the Briefcase route exists and rejects anonymous requests with
+401. No runtime change is required in Briefcase: it already forwards its
+Accounts bearer token to the compatible routes and handles errors by HTTP status.
+
+Organizations' [release evidence](https://github.com/teamofsilicons/silicon-organizations/blob/a462193/deploy/verification-app-sessions-2026-11-16.json)
+records 16 successful read-only production checks with real Write and Accounts
+sessions, audience isolation, healthy services and a verified backup restore.
+Those sessions had no organization memberships. Work-account management was
+tested locally with PostgreSQL and an Accounts stand-in; production roles and
+memberships were not changed. Briefcase's authenticated production workflow
+and its own deployment remain unverified.
