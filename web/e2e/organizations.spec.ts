@@ -51,6 +51,11 @@ test("share a folder with a particular team and the whole organization", async (
   const requests = await (await request.get(fixture + "/__requests")).json();
   expect(requests.map((r: { body: { principal: { type: string } } }) => r.body.principal.type)).toEqual(["team", "organization"]);
   await page.screenshot({ path: "test-results/team-sharing.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await page.setViewportSize({ width: 320, height: 700 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(requests[0].body.inherit).toBe(true);
   expect(requests[0].body.principal.id).toBe("example/10000000-0000-4000-8000-000000000003");
 });
