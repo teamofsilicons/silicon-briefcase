@@ -37,7 +37,7 @@ pub(crate) const TEST_APP_SECRET: &str = "sa_app_briefcase_test_secret_012345678
 /// A well-formed webhook signing secret for tests.
 pub(crate) const TEST_WEBHOOK_SECRET: &str = "whsec_briefcase_test_signing_secret_0123456789";
 
-const CONTRACT: [(&str, &str, &str); 60] = [
+const CONTRACT: [(&str, &str, &str); 59] = [
     ("/organizations", "get", "200"),
     ("/organizations/{org}", "get", "200"),
     ("/organizations/{org}/actions", "post", "200"),
@@ -77,7 +77,6 @@ const CONTRACT: [(&str, &str, &str); 60] = [
     ("/search", "get", "200"),
     ("/usage", "get", "200"),
     ("/reports", "post", "200"),
-    ("/telemetry", "post", "410"),
     ("/notifications", "get", "200"),
     ("/notifications/read", "post", "200"),
     ("/entries/{entry_id}/activity", "get", "200"),

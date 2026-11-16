@@ -14,8 +14,8 @@ The website on port **4319** is the only public Briefcase UI. IAM callbacks are
 rejected and old `/browser/*` and `/assets/*` routes return 410. Historical file
 addresses go to the Accounts resolver; no request is forwarded to the IAM web.
 
-Deploy the companion Organizations integration first, then migration 0053 and the
-Briefcase API/worker, web, and matching CLI/client. Follow the concrete checks in
+The shared Organizations app-session API is deployed. Apply migration 0053 and
+deploy the Briefcase API/worker, web, and matching CLI/client. Follow the concrete checks in
 [Organizations release](../RELEASE-organizations.md). Keep existing storage and
 migration history; removing IAM authentication does not authorize deleting files.
 

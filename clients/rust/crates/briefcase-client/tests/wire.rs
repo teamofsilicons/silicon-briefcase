@@ -66,8 +66,8 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "4.1.0",
-        "build": "4.1.0",
+        "contract_version": "5.0.0",
+        "build": "5.0.0",
         "operations": operations,
     })
 }
@@ -131,7 +131,7 @@ async fn connected(server: &MockServer) -> Client {
 #[test]
 fn the_client_carries_the_four_point_one_operation_catalogue() {
     assert_eq!(briefcase_client::OPERATIONS.len(), 59);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "4.1.0");
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.0.0");
     for retired in [
         "submitTelemetry",
         "readIamInfo",
@@ -159,7 +159,7 @@ fn the_client_carries_the_four_point_one_operation_catalogue() {
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 4.1.0"
+            "{added} is part of contract 5.0.0"
         );
     }
 }

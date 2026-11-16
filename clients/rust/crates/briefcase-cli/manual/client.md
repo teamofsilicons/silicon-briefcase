@@ -1,10 +1,10 @@
 # Briefcase Rust client
 
-`briefcase-client` 4.1.0 is the official client for the Briefcase 4.1 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
+`briefcase-client` 5.0.0 is the official client for the Briefcase 5.0 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = { version = "4.1.0", features = ["accounts"] }
+briefcase-client = { version = "5.0.0", features = ["accounts"] }
 ```
 
 ```rust,no_run

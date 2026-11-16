@@ -16,7 +16,7 @@ use crate::error::{IncompatibleContract, OperationMismatch};
 pub const API_VERSION: &str = "v1";
 
 /// Version of the published contract document this build was written against.
-pub const CONTRACT_VERSION: &str = "4.1.0";
+pub const CONTRACT_VERSION: &str = "5.0.0";
 
 /// One operation and the revision this build was written against.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,7 +47,7 @@ const fn operation(
 
 /// Every operation this client calls, with the revision it expects.
 ///
-/// Generated from the service's published catalogue (contract 4.1.0). The
+/// Generated from the service's published catalogue (contract 5.0.0). The
 /// service also lists the retired `submitTelemetry`, which this client never
 /// calls: Briefcase records no telemetry.
 pub const OPERATIONS: [OperationRevision; 59] = [
@@ -413,8 +413,8 @@ mod tests {
             service: "silicon-briefcase".to_owned(),
             selected_api_version: "v1".to_owned(),
             supported_api_versions: vec!["v1".to_owned()],
-            contract_version: "4.1.0".to_owned(),
-            build: "4.1.0".to_owned(),
+            contract_version: "5.0.0".to_owned(),
+            build: "5.0.0".to_owned(),
             operations,
         }
     }

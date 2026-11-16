@@ -1,6 +1,6 @@
 # Operation inventory
 
-Contract **4.1.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
+Contract **5.0.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
 the wire reference; the service serves the same list at `GET /api/version`, and a client checks every operation's
 id, method, path and revision there before its first call.
 
@@ -44,7 +44,6 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `revokePermission` | `DELETE /entries/{entry_id}/permissions/{grant_id}` | 1.0.0 | bearer |
 | `inspectEffectivePermissions` | `POST /permissions/effective` | 1.1.0 | bearer |
 | `searchFiles` | `GET /search` | 1.0.0 | bearer |
-| `submitTelemetry` | `POST /telemetry` | 1.0.0 | none (retired: 410; Briefcase records no telemetry) |
 | `submitReport` | `POST /reports` | 1.0.0 | bearer |
 | `listNotifications` | `GET /notifications` | 1.1.0 | bearer |
 | `readNotifications` | `POST /notifications/read` | 1.0.0 | bearer |

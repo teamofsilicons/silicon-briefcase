@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 4.1.0
+  version: 5.0.0
   description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
     search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
@@ -697,26 +697,6 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
-  /telemetry:
-    post:
-      tags: [Storage]
-      operationId: submitTelemetry
-      x-operation-version: 1.0.0
-      deprecated: true
-      summary: Retired telemetry intake
-      security: []
-      description: Briefcase records no telemetry. Returns HTTP 410 without reading the request body. The operation
-        stays in the catalogue only because 4.0 clients verify it before their first call; it is removed with the
-        next contract major.
-      responses:
-        '410':
-          description: Telemetry was removed from Briefcase (`telemetry_removed`); nothing is recorded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
   /reports:
     post:
       tags: [Reports]

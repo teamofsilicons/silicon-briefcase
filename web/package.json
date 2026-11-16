@@ -1,6 +1,6 @@
 {
   "name": "@silicon-briefcase/web",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "description": "Silicon Briefcase: personal drives, precise sharing and file previews.",
   "scripts": {
