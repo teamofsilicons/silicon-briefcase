@@ -1,0 +1,191 @@
+{
+  "release": "5.0.0",
+  "date_utc": "2026-11-16",
+  "status": "live",
+  "site": "https://briefcase.teamofsilicons.com/",
+  "api": "https://api.briefcase.teamofsilicons.com/api/",
+  "contract_version": "5.0.0",
+  "operation_count": 59,
+  "source": {
+    "api_worker_cli_sdk": "254b814e391cdc93449929733d8d4bbef970c6f8",
+    "web": "fde0411b119a3f9cbca434c64368e66974a1c269",
+    "organizations_shared_integration": "f004cb441653708aaeff743d063e56f7dae2d36a"
+  },
+  "components": [
+    {
+      "component": "api",
+      "revision": "254b814e391cdc93449929733d8d4bbef970c6f8",
+      "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:fd62e4b26570a6607e68f8faeda1c2ea61f250251ae0b5cdefaa28bc9e54cfab",
+      "restarts": 0,
+      "oom_killed": false,
+      "started_at": "2026-11-16T18:04:16.777327255Z"
+    },
+    {
+      "component": "worker",
+      "revision": "254b814e391cdc93449929733d8d4bbef970c6f8",
+      "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:fd62e4b26570a6607e68f8faeda1c2ea61f250251ae0b5cdefaa28bc9e54cfab",
+      "restarts": 0,
+      "oom_killed": false,
+      "started_at": "2026-11-16T18:04:16.780384038Z"
+    },
+    {
+      "component": "web",
+      "revision": "fde0411b119a3f9cbca434c64368e66974a1c269",
+      "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:b1a941e11c3f083b24692a0d231dbfc1eb46d34c9789ee23fbdb6ea65c2ddf47",
+      "restarts": 0,
+      "oom_killed": false,
+      "started_at": "2026-11-16T18:12:32.281351569Z"
+    }
+  ],
+  "database": {
+    "migration": 53,
+    "success": true,
+    "backed_up_entries": 124,
+    "restore_verified_entries": 124,
+    "post_migration_entries": 125,
+    "backup_sha256": "21c84958b6795604b7d7c3d89d21cc9d8421b5d3eefda7e2bf877e7f50b710c6",
+    "configuration_backup_sha256": "fa3cc2e20556b70d5eaa7d07915ca1257fb219950809ac26ad6a2fae3d682fa7",
+    "rds_snapshot": "briefcase-organizations-v5-pre-20261116",
+    "custom_role_grants_verified": true,
+    "unscoped_group_query_rows": 0,
+    "historical_storage_preserved": true
+  },
+  "sessions": {
+    "existing_browser_key_preserved": true,
+    "durable_volume_preserved": true,
+    "shared_agent_cli_session_still_verified": true,
+    "independent_browser_test_session_revoked": true
+  },
+  "retired_iam": {
+    "services_disabled_and_inactive": true,
+    "legacy_backend_status": 410,
+    "browser_and_assets_status": 410,
+    "slt_callback_status": 400
+  },
+  "production_api_verification": {
+    "identity": "si:saket-agents",
+    "contract_verified": true,
+    "organization_count": 0,
+    "upload_read_integrity": true,
+    "sha256": "3269d31c3d45628990f69ddd9e84ccb18670c97d3b89437a1f3ab3ed2645b7b6",
+    "cleanup": "own temporary verification file deleted"
+  },
+  "production_browser_verification": {
+    "identity": "si:saket-agents",
+    "authenticated_bff": true,
+    "organizations_bff": true,
+    "organization_count": 0,
+    "desktop_and_mobile": true,
+    "sharing_recipient_modes": [
+      "People",
+      "Team",
+      "Organization"
+    ],
+    "account_chooser_redirect": true,
+    "independent_session_sign_out": true,
+    "page_errors": [],
+    "hosted_oauth_callback_tested": false,
+    "work_membership_mutations_tested_in_production": false
+  },
+  "silicon_apps": {
+    "published": true,
+    "production_release_id": "4a87b338-2045-491e-946d-ccc0abb1a355",
+    "version": "5.0.0",
+    "packages": [
+      {
+        "id": "8afb45df-c9e0-40c0-a7e2-c34230ab87fd",
+        "target": "linux-aarch64",
+        "sha256": "8d054b68178d2314d5f0163d3cc829d564e91f71fdbb8180836aecd27e27b308",
+        "size": 3467384,
+        "inspected": true
+      },
+      {
+        "id": "0bc25e08-c726-4337-a0ba-d7a7cbd1ba1e",
+        "target": "linux-x86_64",
+        "sha256": "771305e7a8047ea7740da495dcb175145eb61a9880cfaaaba2a107c88a43924c",
+        "size": 3736351,
+        "inspected": true
+      },
+      {
+        "id": "8e8e5a10-066f-41a7-8709-be9ea6ce427e",
+        "target": "macos-aarch64",
+        "sha256": "9c4d6333b862150dd96756ea99b35757440ba40948c0f53b056eb9eabebf4830",
+        "size": 3414723,
+        "inspected": true
+      },
+      {
+        "id": "00bb0873-5def-4f7e-8293-154987f5fb28",
+        "target": "macos-x86_64",
+        "sha256": "7e69a5a364023b1c544436a6c570c2a4353820dc317018047a87fcf945502651",
+        "size": 3683426,
+        "inspected": true
+      },
+      {
+        "id": "57a0a41c-893e-42e1-aba5-1821e380889b",
+        "target": "windows-aarch64",
+        "sha256": "45bb5cb3db2d339d7c508344f9f8550d06da76358f5d0dc65aa7577e98da8d7e",
+        "size": 3369895,
+        "inspected": true
+      },
+      {
+        "id": "6ac2b255-3230-46ee-a15e-74bbb8b1fa67",
+        "target": "windows-x86_64",
+        "sha256": "9a5595566c776dd67842a19b027a084c17bc263689d9835b9840701a419acc62",
+        "size": 3461597,
+        "inspected": true
+      }
+    ],
+    "installed_from_production_store_on_macos_arm64": true,
+    "installed_cli_verified_live_contract": true
+  },
+  "sdk": {
+    "crate": "briefcase-client",
+    "version": "5.0.0",
+    "published": true,
+    "yanked": false,
+    "url": "https://crates.io/crates/briefcase-client/5.0.0"
+  },
+  "github_release": "https://github.com/teamofsilicons/silicon-briefcase/releases/tag/v5.0.0",
+  "ci": {
+    "source_checks": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/43922438786",
+    "final_code_checks": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/43925928612",
+    "service_images": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/43920529408",
+    "final_web_image": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/43925917667",
+    "six_native_targets": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/43920536457",
+    "all_successful": true
+  },
+  "local_verification": {
+    "backend_reported_passed": 236,
+    "backend_optional_s3_case_skipped_without_configuration": true,
+    "cli_client_passed": 148,
+    "cli_client_external_service_tests_ignored": 2,
+    "web_unit_passed": 57,
+    "web_browser_scenarios_passed": 4,
+    "mobile_widths_checked": [
+      320,
+      390
+    ],
+    "nginx_routing_cases_passed": 20,
+    "strict_clippy_passed": true,
+    "web_typecheck_lint_build_passed": true,
+    "docs_pages": 28,
+    "docs_local_links_and_assets": 980
+  },
+  "documentation": {
+    "url": "https://docs.briefcase.teamofsilicons.com/organizations/",
+    "archive_sha256": "7f395de10a4e3ff464ce297006a31f45c78c74eda7a3717ba37a8c5fda45870a",
+    "live_status_verified": true
+  },
+  "ssm_commands": {
+    "activation": "a032fe86-812b-4b1a-8fb7-dc4d389de428",
+    "backup_restore": "462f41de-a097-437b-ac23-c75314f548a2",
+    "web_layout_fix": "bceae229-6d33-4326-95a2-9188551eef68",
+    "documentation": "530d8fc0-c5b7-46d6-9432-d44df3e1ef25",
+    "final_health": "d9f14168-37c4-4789-a501-2912d419ed76",
+    "credential_cleanup": "3d0d8223-9215-47d2-866c-84458f70c6ff"
+  },
+  "limitations": [
+    "The authorized production agent has no organization memberships. Owner/admin/team-admin actions, group revocation and app exclusions were tested locally with isolated PostgreSQL and browser fixtures.",
+    "The authenticated production browser check used a separate real Accounts app session sealed by the production BFF; interactive hosted OAuth callback completion and notification delivery were not tested."
+  ]
+}

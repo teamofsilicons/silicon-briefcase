@@ -93,8 +93,8 @@ supports the existing `/v1/integrations/briefcase/*` routes. Briefcase uses its
 own Accounts bearer session; it does not need a second Organizations login or
 a Briefcase-specific Organizations deployment. See the
 [integration guide](https://organizations.teamofsilicons.com/docs/app-integrations)
-and [release procedure](../deploy/RELEASE-organizations.md). This Briefcase
-branch itself has not yet been deployed.
+and [production release record](../deploy/RELEASE-organizations.md). Briefcase
+5.0 is deployed, with matching CLI packages and Rust client 5.0.0.
 
 IAM login, workspace and tag authority are retired. Historical migrations and
 data-conversion tools remain to preserve existing files and immutable migration

@@ -1,4 +1,9 @@
-# Organizations integration release
+# Briefcase 5.0 production release
+
+The API, worker, website and documentation were activated on 2026-11-16.
+Silicon Apps publishes CLI 5.0.0 for all six targets, and crates.io publishes
+`briefcase-client` 5.0.0. The production contract reports 5.0.0 with 59 operations.
+Release evidence is recorded in `verification-organizations-2026-11-16.json`.
 
 Prepared from the newest fetched Briefcase source, `5469a23` on
 `origin/fix/durable-browser-refresh`, including the 4.1.0 Accounts rewrite and
@@ -12,8 +17,8 @@ source `f004cb441653708aaeff743d063e56f7dae2d36a`, branch
 paths, response shapes and action bodies are compatible with this Briefcase
 implementation. The earlier Briefcase-only companion commit `9ccd212` is
 superseded and should not be deployed separately. No second Organizations
-session is needed. This Briefcase branch remains local implementation work;
-this document is not a Briefcase production deployment record.
+session is needed. Briefcase uses the user's existing app session to obtain
+current organization roles, teams and app policies.
 
 ## Deployment order
 
@@ -88,8 +93,9 @@ limits, action idempotency/audit, membership removal and current app exclusion.
 
 The existing real hosted-login E2E command was attempted but could not start:
 this checkout has no `APP_SECRET` or `TEST_STACK_JSON` for a local Accounts
-stack. Production sign-in, mail/notification delivery and deployment have not
-been exercised by this change.
+stack. Interactive hosted-login completion and mail/notification delivery
+were not exercised by this release. Live API and authenticated browser checks
+are recorded separately below.
 
 ### Shared Organizations API deployed, 2026-11-16
 
@@ -105,4 +111,38 @@ sessions, audience isolation, healthy services and a verified backup restore.
 Those sessions had no organization memberships. Work-account management was
 tested locally with PostgreSQL and an Accounts stand-in; production roles and
 memberships were not changed. Briefcase's authenticated production workflow
-and its own deployment remain unverified.
+was subsequently verified with the authorized `si:saket-agents` identity.
+
+### Production deployment, 2026-11-16
+
+- API/worker/native package source: `254b814e391cdc93449929733d8d4bbef970c6f8`.
+- Final website source: `fde0411b119a3f9cbca434c64368e66974a1c269`, including
+  the long-filename mobile layout fix found during live verification.
+- The Accounts database backup restored into an isolated PostgreSQL container
+  with all 124 entries present at backup time. An RDS snapshot is also available.
+  Migration 0053 completed successfully; the live table had 125 entries after
+  the migration. No historical database or stored file was removed.
+- Custom Accounts runtime roles received the new group table and narrow
+  discovery-function grants. A request without tenant context saw zero grants.
+- Existing browser session encryption keys and the durable session volume
+  were preserved. The API, worker and web started healthy without restarts.
+- IAM runtime services remain disabled. Retired browser/assets routes and the
+  legacy backend return 410; IAM callback parameters return 400.
+- A real agent session passed contract verification, retrieved its live
+  organization context, uploaded to hosted storage and downloaded identical
+  bytes. The temporary verification file was then deleted.
+- A separate real Accounts app session exercised the production browser BFF,
+  organization page, People/Team/Organization sharing controls, account-chooser
+  redirect and sign-out. Desktop and phone layouts passed without JavaScript
+  errors or horizontal overflow. The sealed test cookie survived the final
+  website replacement. Interactive hosted OAuth callback completion was not
+  tested by this cookie-based check.
+- All six native CLI packages passed CI checks. Linux packages also passed
+  Silicon Apps server validation before production promotion.
+- The published macOS ARM64 CLI installed through Silicon Apps and verified
+  contract 5.0.0 against production using the existing agent session.
+
+The production agent has no work-account membership. Owner/admin/team-admin
+management, group sharing, exclusions, inheritance and membership revocation
+were verified with isolated database and browser fixtures; live organization
+membership was not changed for testing.

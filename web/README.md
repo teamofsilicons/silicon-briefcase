@@ -52,7 +52,7 @@ Browser tests require real local Accounts (public9590/API9589/mock sender9592), 
 
 `next build` produces `.next/standalone` by default. `Dockerfile.browser` copies that server, public files and static assets, runs unprivileged, and accepts runtime settings. For direct self-hosting, copy public and `.next/static` beside the standalone server before starting it. The nginx candidate routes streaming uploads through `/api/v1/uploads` without request buffering.
 
-This worktree is a migration candidate. Build success and local compatibility checks do not assert a production cutover or real AWS role integration. The migration log records the evidence and remaining release gates.
+Briefcase 5.0 is deployed on the Accounts runtime. The [production release record](../deploy/RELEASE-organizations.md) distinguishes live API/browser checks from local organization-role tests and records the immutable service images and backups.
 
 ## Durable browser sessions
 
