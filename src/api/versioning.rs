@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 57] = [
+pub const OPERATIONS: [OperationVersion; 60] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -78,6 +78,14 @@ pub const OPERATIONS: [OperationVersion; 57] = [
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("readAccountsInfo", "1.0.0", "GET", "/accounts"),
     operation("readAccount", "1.0.0", "GET", "/me"),
+    operation("listOrganizations", "1.0.0", "GET", "/organizations"),
+    operation("readOrganization", "1.0.0", "GET", "/organizations/{org}"),
+    operation(
+        "manageOrganization",
+        "1.0.0",
+        "POST",
+        "/organizations/{org}/actions",
+    ),
     operation("listDrives", "1.0.0", "GET", "/drives"),
     operation("listSharedWithMe", "1.0.0", "GET", "/shared"),
     operation(
@@ -220,13 +228,13 @@ pub const OPERATIONS: [OperationVersion; 57] = [
     ),
     operation(
         "listInvitations",
-        "1.0.0",
+        "2.0.0",
         "GET",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "createInvitation",
-        "2.0.0",
+        "2.1.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),

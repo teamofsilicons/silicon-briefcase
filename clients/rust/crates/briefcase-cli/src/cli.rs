@@ -133,6 +133,9 @@ pub enum Command {
         Example:\n  briefcase accounts --json"
     )]
     Accounts,
+    /// List organizations, inspect people and teams, or apply a management action.
+    #[command(subcommand)]
+    Organizations(OrganizationCommand),
     /// Retired name of `accounts`, kept for older Silicon runtimes.
     #[command(hide = true)]
     Iam,
@@ -668,14 +671,79 @@ pub struct RestoreArgs {
     pub version_id: Uuid,
 }
 
+/// Organization management in the current account, with current role checks.
+#[derive(Subcommand, Debug)]
+pub enum OrganizationCommand {
+    /// List organizations and available file-sharing recipients.
+    List,
+    /// Show visible members, teams, invitations and capabilities.
+    Show {
+        /// Permanent organization handle.
+        organization: String,
+    },
+    /// Apply an Organizations action from a JSON file. Reuse the key when retrying.
+    Action {
+        /// Permanent organization handle.
+        organization: String,
+        /// JSON action, for example `{"action":"team_create","name":"Design"}`.
+        #[arg(long)]
+        file: PathBuf,
+        /// Stable key for this action; reuse it if the result is uncertain.
+        #[arg(long)]
+        idempotency_key: String,
+    },
+}
+
+/// A person, team or whole organization receiving a file share.
+#[derive(Clone, Debug)]
+pub struct ShareRecipient(pub briefcase_client::Recipient);
+impl FromStr for ShareRecipient {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let handle = |value: &str| {
+            (3..=30).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        };
+        if let Some(id) = value.strip_prefix("organization:") {
+            return if handle(id) {
+                Ok(Self(briefcase_client::Recipient::Organization(id.into())))
+            } else {
+                Err("Use organization:<organization-id>.".into())
+            };
+        }
+        if let Some(id) = value.strip_prefix("team:") {
+            if let Some((org, team)) = id.split_once('/')
+                && handle(org)
+                && Uuid::parse_str(team).is_ok()
+            {
+                return Ok(Self(briefcase_client::Recipient::Team(id.into())));
+            }
+            return Err(
+                "Use team:<organization-id>/<team-uuid> from `briefcase organizations list`."
+                    .into(),
+            );
+        }
+        let Principal(actor) = value.parse()?;
+        Ok(Self(
+            if actor.actor_type == briefcase_client::ActorType::Silicon {
+                briefcase_client::Recipient::Silicon(actor.id)
+            } else {
+                briefcase_client::Recipient::Carbon(actor.id)
+            },
+        ))
+    }
+}
+
 /// Arguments for `share`.
 #[derive(Args, Debug)]
 pub struct ShareArgs {
     /// Entry to share.
     pub target: Target,
 
-    /// Who to share with: an account id such as `c:ada` or `si:scout`.
-    pub principal: Principal,
+    /// An account ID, `organization:<id>`, or `team:<org>/<team-uuid>`.
+    pub principal: ShareRecipient,
 
     /// Rights to convey, comma separated: read, write, update. Read is always included.
     #[arg(long, value_name = "RIGHTS", default_value = "read")]
@@ -1328,6 +1396,35 @@ impl FromStr for Lifetime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn share_recipients_distinguish_accounts_from_current_group_ids() {
+        let team = "team:example/10000000-0000-4000-8000-000000000003"
+            .parse::<super::ShareRecipient>()
+            .unwrap();
+        assert!(matches!(team.0, briefcase_client::Recipient::Team(_)));
+        let organization = "organization:example"
+            .parse::<super::ShareRecipient>()
+            .unwrap();
+        assert!(matches!(
+            organization.0,
+            briefcase_client::Recipient::Organization(_)
+        ));
+        let work = "c:ada.example".parse::<super::ShareRecipient>().unwrap();
+        assert!(matches!(work.0, briefcase_client::Recipient::Carbon(_)));
+        for invalid in [
+            "team:example/Design",
+            "team:other/../id",
+            "organization:",
+            "organization:../example",
+            "tag:design",
+        ] {
+            assert!(
+                invalid.parse::<super::ShareRecipient>().is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
     use super::{Cli, DriveArg, Invitation, Lifetime, Principal, Rights, Target};
     use clap::{CommandFactory as _, Parser as _};
     use uuid::Uuid;

@@ -8,6 +8,12 @@ test("ids are normalised to lowercase and tell Carbons from Silicons", () => {
   assert.deepEqual(parseAccountId("si:scout-2"), { ok: true, value: { id: "si:scout-2", kind: "silicon", handle: "scout-2" } });
 });
 
+test("work IDs keep both validated components and stay separate from personal IDs", () => {
+  assert.deepEqual(parseAccountId(" C:Ada.Example "), { ok: true, value: { id: "c:ada.example", kind: "carbon", handle: "ada.example" } });
+  assert.equal(parseAccountId("si:scout.example").ok, true);
+  for (const id of ["c:ada..example", "c:.example", "c:ada.", "c:ada/ex", "c:ada.ex", `c:ada.${"x".repeat(31)}`]) assert.equal(parseAccountId(id).ok, false, id);
+});
+
 test("a wrong id says exactly what is wrong", () => {
   const message = (input: string) => {
     const result = parseAccountId(input);

@@ -87,6 +87,32 @@ pub(super) async fn perform(
     let entry_id = extract::entry_id(id)?;
     let context = drives::for_entry(state, context, entry_id).await?;
     let access = GrantedAccess::new(body.access);
+    if matches!(body.principal.kind.as_str(), "organization" | "team") {
+        let target = context
+            .organizations()
+            .share_targets
+            .iter()
+            .find(|target| target.kind == body.principal.kind && target.id == body.principal.id)
+            .ok_or_else(|| {
+                AppError::refused(
+                    "group_not_available",
+                    "Choose an organization or team available to your current work account.",
+                )
+            })?;
+        return state
+            .content_adapter
+            .metadata_repository()
+            .invite_group(
+                &context,
+                entry_id,
+                target,
+                access,
+                body.inherit,
+                body.expires_in_minutes,
+                metadata,
+            )
+            .await;
+    }
     let kind = match body.principal.kind.as_str() {
         "carbon" => ActorKind::Carbon,
         "silicon" => ActorKind::Silicon,
@@ -155,6 +181,12 @@ pub(crate) async fn list(
     if let Some(items) = page.get_mut("items").and_then(Value::as_array_mut) {
         let keys: Vec<String> = items
             .iter()
+            .filter(|item| {
+                matches!(
+                    item["principal"]["type"].as_str(),
+                    Some("carbon" | "silicon")
+                )
+            })
             .filter_map(|item| item["principal"]["id"].as_str().map(str::to_owned))
             .collect();
         let labels = state.accounts.labels(&keys).await?;
@@ -182,7 +214,7 @@ pub(crate) async fn revoke(
     state
         .content_adapter
         .metadata_repository()
-        .revoke_tag_or_member(&context, extract::entry_id(id)?, grant, &metadata)
+        .revoke_invitation(&context, extract::entry_id(id)?, grant, &metadata)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

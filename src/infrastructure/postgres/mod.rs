@@ -4,6 +4,7 @@ pub mod accounts;
 mod content;
 mod drives;
 pub use drives::SharedEntry;
+mod group_sharing;
 mod invitations;
 pub mod link_identities;
 mod metadata;
@@ -49,6 +50,7 @@ pub struct TenantContext {
     actor_id: String,
     origin_app_id: Option<String>,
     request_id: String,
+    groups: Vec<String>,
 }
 
 impl TenantContext {
@@ -68,6 +70,7 @@ impl TenantContext {
                 .originating_application()
                 .map(|application_id| application_id.as_str().to_owned()),
             request_id: execution.request_id().to_owned(),
+            groups: execution.organizations().groups.clone(),
         }
     }
 
@@ -81,6 +84,7 @@ impl TenantContext {
             actor_id: "briefcase".to_owned(),
             origin_app_id: None,
             request_id: request_id.into(),
+            groups: Vec::new(),
         }
     }
 
@@ -262,6 +266,13 @@ pub async fn begin_tenant_transaction<'pool>(
         context.request_id(),
     )
     .await?;
+    sqlx::query("SELECT set_config('briefcase.groups', $1, true)")
+        .bind(
+            serde_json::to_string(&context.groups)
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
+        )
+        .execute(&mut *transaction)
+        .await?;
     Ok(transaction)
 }
 

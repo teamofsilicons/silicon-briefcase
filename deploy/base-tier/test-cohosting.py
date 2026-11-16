@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the actual Nginx cohosting maps in an isolated loopback process."""
+"""Exercise the actual Nginx Accounts-only routes in an isolated loopback process."""
 import argparse
 import pathlib
 import re
@@ -27,12 +27,12 @@ server = server.replace('server {', f'server {{\n listen 127.0.0.1:{port};', 1)
 config = (maps + server).replace('4318', str(legacy)).replace('4319', str(accounts))
 config += f'\nserver {{ listen 127.0.0.1:{legacy}; return 200 "legacy"; }}\nserver {{ listen 127.0.0.1:{accounts}; return 200 "accounts"; }}\n'
 cases = [
-    ('/', 200, 'accounts'), ('/org/tos/private.txt', 200, 'legacy'),
+    ('/', 200, 'accounts'), ('/org/tos/private.txt', 200, 'accounts'),
     ('/org/4eb1de48-df66-4801-ba07-d69f59c81692/apps/extend/image.png', 200, 'accounts'),
-    ('/browser/session', 200, 'legacy'), ('/assets/main.js', 200, 'legacy'),
-    ('/api/v1/uploads', 200, 'accounts'), ('/browser/upload', 200, 'legacy'),
+    ('/browser/session', 410, None), ('/assets/main.js', 410, None),
+    ('/api/v1/uploads', 200, 'accounts'), ('/browser/upload', 410, None),
     ('/auth/callback?code=abc&state=xyz', 200, 'accounts'),
-    ('/auth/callback?state=xyz&slt=slt_abc', 200, 'legacy'),
+    ('/auth/callback?state=xyz&slt=slt_abc', 400, None),
     ('/auth/callback?error=access_denied&error_description=Cancelled&state=xyz', 200, 'accounts'),
     ('/auth/callback?code=abc&slt=slt_abc&state=xyz', 400, None),
     ('/auth/callback?code=abc&slt=&state=xyz', 400, None),
@@ -46,6 +46,7 @@ cases = [
 ]
 with tempfile.TemporaryDirectory(prefix='briefcase-nginx-proof-') as directory:
     root = pathlib.Path(directory)
+    (root / "logs").mkdir()
     path = root/'nginx.conf'
     path.write_text(f'pid {root}/nginx.pid;\nerror_log {root}/error.log;\nevents {{}}\nhttp {{ access_log off; {config} }}\n')
     subprocess.run([args.nginx, '-p', str(root), '-c', str(path), '-t'], check=True)
@@ -62,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='briefcase-nginx-proof-') as directory:
                 actual = response.read().decode()
                 assert response.status == status, (route, response.status, status)
                 if body is not None: assert actual == body, (route, actual, body)
-        print(f'{len(cases)} Nginx cohosting and callback isolation checks passed')
+        print(f'{len(cases)} Nginx Accounts-only routing and callback isolation checks passed')
     finally:
         process.terminate()
         process.wait(timeout=5)

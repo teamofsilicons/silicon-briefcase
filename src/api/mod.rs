@@ -104,6 +104,13 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     }
     let state = AppState {
         accounts: Arc::new(accounts),
+        organizations: Some(Arc::new(
+            crate::infrastructure::organizations::OrganizationsGateway::new(
+                &std::env::var("BRIEFCASE_ORGANIZATIONS_URL")
+                    .unwrap_or_else(|_| "https://organizations.teamofsilicons.com".into()),
+            )
+            .map_err(|_| anyhow::anyhow!("Invalid BRIEFCASE_ORGANIZATIONS_URL"))?,
+        )),
         metadata: MetadataService::new(metadata_repository),
         content,
         content_adapter: concrete_content,
@@ -299,6 +306,19 @@ fn drive_routes() -> Router<AppState> {
         )
 }
 
+fn organization_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/organizations", get(handlers::organizations::list))
+        .route(
+            "/api/v1/organizations/{org}",
+            get(handlers::organizations::show),
+        )
+        .route(
+            "/api/v1/organizations/{org}/actions",
+            post(handlers::organizations::action),
+        )
+}
+
 fn ordinary_routes() -> Router<AppState> {
     Router::new()
         .merge(sharing_routes())
@@ -333,6 +353,7 @@ fn ordinary_routes() -> Router<AppState> {
         .route("/api/v1/version", get(system::version))
         .route("/api/v1/accounts", get(accounts::discovery))
         .route("/api/v1/me", get(accounts::me))
+        .merge(organization_routes())
         .route(
             "/api/v1/entries",
             get(entries::list_entries).post(entries::create_folder),
@@ -435,5 +456,7 @@ mod drives_tests;
 mod locations_tests;
 #[cfg(test)]
 mod memory_store;
+#[cfg(test)]
+mod organizations_tests;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -71,7 +71,18 @@ pub(crate) async fn authenticate_with_token(
         accounts.introspected = action.requires_introspection(),
         "Silicon Accounts access token verified"
     );
-    Ok((execution_context(actor)?, token))
+    let organizations = match &state.organizations {
+        Some(gateway) => {
+            gateway
+                .context(token.expose_secret(), actor.uuid.as_str())
+                .await?
+        }
+        None => crate::domain::organizations::OrganizationContext::default(),
+    };
+    Ok((
+        execution_context(actor)?.with_organizations(organizations),
+        token,
+    ))
 }
 
 /// Authenticates an app acting for an account with a User verification proof

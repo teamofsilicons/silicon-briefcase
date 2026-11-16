@@ -79,7 +79,10 @@ fn workflow(command: &str) -> &'static str {
             "Use `briefcase versions <target>` to find a retained version and `briefcase restore --help` to roll back. History and logs explain who changed an entry and when."
         }
         "link" | "share" | "unshare" | "shares" | "expiry" => {
-            "Inspect current access with `briefcase shares <target>` or `briefcase link <target>`. Share with an account by its id (c:ada, si:scout) and only the rights needed; delete is never shared. For temporary read access, add `--expires-after <DURATION>` (1 minute to 30 days) to `share` or `link`; change a live expiring share with `briefcase expiry`, end it early with `briefcase unshare`, and find entries carrying one with `briefcase find is:expiring`."
+            "Inspect current access with `briefcase shares <target>` or `briefcase link <target>`. Share with an account by its id (c:ada, c:ada.example, si:scout), organization:<id>, or team:<org>/<team-uuid> and only the rights needed; delete is never shared. For temporary read access, add `--expires-after <DURATION>` (1 minute to 30 days) to `share` or `link`; change a live expiring share with `briefcase expiry`, end it early with `briefcase unshare`, and find entries carrying one with `briefcase find is:expiring`."
+        }
+        "organizations" => {
+            "Use `briefcase organizations list` to find your current work organization and share targets, then `briefcase organizations show <org>` to inspect members and teams. Apply management actions from JSON with `briefcase organizations action --help`; reuse the same idempotency key when retrying."
         }
         "inbox" => {
             "Read the notifications about shares made to you with `briefcase inbox`; `--read` marks them read. It is pulled: nothing runs in the background."

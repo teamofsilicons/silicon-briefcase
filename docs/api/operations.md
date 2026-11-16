@@ -22,6 +22,9 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | --- | --- | --- | --- |
 | `readApiVersion` | `GET /version` | 1.0.0 | none |
 | `readAccountsInfo` | `GET /accounts` | 1.0.0 | none |
+| `listOrganizations` | `GET /organizations` | 1.0.0 | bearer |
+| `readOrganization` | `GET /organizations/{org}` | 1.0.0 | bearer |
+| `manageOrganization` | `POST /organizations/{org}/actions` | 1.0.0 | bearer |
 | `readAccount` | `GET /me` | 1.0.0 | bearer |
 | `listDrives` | `GET /drives` | 1.0.0 | bearer |
 | `listSharedWithMe` | `GET /shared` | 1.0.0 | bearer |
@@ -66,8 +69,8 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `resolveDriveTop` | `GET /paths/{owner}` | 1.0.0 | bearer |
 | `resolveLegacyPermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 | bearer, or none for link-shared entries (deprecated) |
 | `listArchiveContents` | `GET /entries/{entry_id}/archive` | 1.0.0 | bearer |
-| `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 | bearer |
-| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.0.0 | bearer |
+| `listInvitations` | `GET /entries/{entry_id}/invitations` | 2.0.0 | bearer |
+| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.1.0 | bearer |
 | `changeExpiringShare` | `PATCH /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `makeEntryPermanent` | `DELETE /entries/{entry_id}/self-destruct` | 1.0.0 | bearer |

@@ -92,6 +92,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             enabled,
             expires_after,
         } => link(global, &target, enabled, expires_after, output).await,
+        Command::Organizations(command) => organizations(global, command, output).await,
         Command::Share(args) => share(global, &args, output).await,
         Command::Unshare(args) => unshare(global, &args, output).await,
         Command::Expiry(args) => change_expiring_share(global, &args, output).await,
@@ -130,6 +131,38 @@ pub async fn run(cli: Cli) -> Result<()> {
             "Silicon Apps installs and updates briefcase (`silicon-apps install briefcase`); there is nothing to update by hand.",
         )),
     }
+}
+
+async fn organizations(
+    global: &GlobalArgs,
+    command: crate::cli::OrganizationCommand,
+    output: Output,
+) -> Result<()> {
+    let context = session::connect(global).await?;
+    let value = match command {
+        crate::cli::OrganizationCommand::List => context.client.organizations().await?,
+        crate::cli::OrganizationCommand::Show { organization } => {
+            context.client.organization(&organization).await?
+        }
+        crate::cli::OrganizationCommand::Action {
+            organization,
+            file,
+            idempotency_key,
+        } => {
+            let bytes = std::fs::read(&file).map_err(|source| CliError::Io {
+                path: file.display().to_string(),
+                source,
+            })?;
+            let body = serde_json::from_slice(&bytes)
+                .map_err(|error| CliError::usage(format!("Invalid action JSON: {error}")))?;
+            context
+                .client
+                .organization_action(&organization, &body, &IdempotencyKey::new(idempotency_key)?)
+                .await?
+        }
+    };
+    output.json(&value);
+    Ok(())
 }
 
 /// Commands that never contact Briefcase or Silicon Accounts.
@@ -1062,14 +1095,8 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
                 .join(",")
         )));
     }
-    let principal = match args.principal.0.actor_type {
-        briefcase_client::ActorType::Silicon => {
-            briefcase_client::Recipient::Silicon(args.principal.0.id.clone())
-        }
-        _ => briefcase_client::Recipient::Carbon(args.principal.0.id.clone()),
-    };
     let grant = briefcase_client::Invite {
-        principal,
+        principal: args.principal.0.clone(),
         access: args.access.0.clone(),
         inherit: args.inherit,
         expires_in_minutes: args.expires_after.map(|Lifetime(minutes)| minutes),
@@ -1085,7 +1112,7 @@ async fn share(global: &GlobalArgs, args: &ShareArgs, output: Output) -> Result<
         )
         .await?;
     finish_durable_mutation(&scope, &pending)?;
-    output.invitation_to(&invitation, &args.principal.0.id);
+    output.invitation_to(&invitation, args.principal.0.id());
     Ok(())
 }
 

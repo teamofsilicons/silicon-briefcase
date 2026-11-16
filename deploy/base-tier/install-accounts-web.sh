@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage the independent Accounts web. This does not change public ingress.
-# Keep the IAM web on 4318 for legacy links; switch Nginx only after coordinated GO.
+# Public ingress uses only this Accounts web; legacy IAM routing is retired.
 set -Eeuo pipefail
 image=${1:?Pass the digest-pinned Briefcase web image}
 secret_id=${2:-silicon-briefcase/accounts-production}

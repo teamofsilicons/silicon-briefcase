@@ -11,6 +11,7 @@ pub(crate) mod entries;
 pub(crate) mod locations;
 pub(crate) mod notifications;
 pub(crate) mod obo;
+pub(crate) mod organizations;
 pub(crate) mod permissions;
 pub(crate) mod system;
 pub(crate) mod usage;

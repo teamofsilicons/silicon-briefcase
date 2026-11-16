@@ -1,6 +1,9 @@
 //! Trusted execution context shared by application use cases.
 
-use crate::domain::actor::{ActorRef, RequestAuthContext};
+use crate::domain::{
+    actor::{ActorRef, RequestAuthContext},
+    organizations::OrganizationContext,
+};
 
 /// Verified authorization facts plus request correlation for one use case.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8,6 +11,7 @@ pub struct ExecutionContext {
     authorization: RequestAuthContext,
     request_id: String,
     share_recipients: Vec<ActorRef>,
+    organizations: OrganizationContext,
 }
 
 impl ExecutionContext {
@@ -18,6 +22,7 @@ impl ExecutionContext {
             authorization,
             request_id: request_id.into(),
             share_recipients: Vec::new(),
+            organizations: OrganizationContext::default(),
         }
     }
 
@@ -54,5 +59,18 @@ impl ExecutionContext {
     #[must_use]
     pub fn share_recipients(&self) -> &[ActorRef] {
         &self.share_recipients
+    }
+
+    /// Attaches the current Organizations response bound to this account.
+    #[must_use]
+    pub fn with_organizations(mut self, organizations: OrganizationContext) -> Self {
+        self.organizations = organizations;
+        self
+    }
+
+    /// Live organization and team authority for this request only.
+    #[must_use]
+    pub const fn organizations(&self) -> &OrganizationContext {
+        &self.organizations
     }
 }

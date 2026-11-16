@@ -13,6 +13,7 @@ import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
 import { date, message, size, type Drive, type Entry, type EntryPage, type SharedPage } from "@/lib/briefcase/types";
+import { useOrganizations } from "./organizations-query";
 import { EntryDetail } from "./entry-detail";
 import styles from "./briefcase.module.css";
 
@@ -20,6 +21,8 @@ type Mode = "files" | "shared" | "recent" | "bin";
 type Transfer = { id: string; file: File; status: "uploading" | "done" | "failed"; error?: string; abort: AbortController; parent: string; drive: string; minutes: string };
 export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = "", initialDrives, initialEntry }: { mode?: Mode; accountUuid: string; drive?: string; folder?: string; initialDrives?: { items: Drive[] }; initialEntry?: Entry }) {
   const router = useRouter();
+  const organizations = useOrganizations();
+  const work = organizations.data?.organizations[0];
   const cache = useQueryClient();
   const [layout, setLayout] = useState<"list" | "grid">("list");
   const [search, setSearch] = useState("");
@@ -55,7 +58,7 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
   });
   const entries = pages.data?.pages.flatMap(page => page.items) ?? [];
   const canCreate = mode === "files" && (!folder ? !!activeDrive : currentFolder.data?.effective_access.includes("write"));
-  const title = query ? "Search results" : mode === "shared" ? "Shared with me" : mode === "recent" ? "Recent" : mode === "bin" ? "Bin" : folder.split("/").filter(Boolean).pop() || (activeDrive?.relation === "custodial" ? `${activeDrive.owner.display_name || activeDrive.owner.id}’s files` : "My files");
+  const title = query ? "Search results" : mode === "shared" ? "Shared with me" : mode === "recent" ? "Recent" : mode === "bin" ? "Bin" : folder.split("/").filter(Boolean).pop() || (activeDrive?.relation === "custodial" ? `${activeDrive.owner.display_name || activeDrive.owner.id}’s files` : work ? "My work files" : "My personal files");
   function navigate(path: string, selectedDrive = drive) {
     const params = new URLSearchParams(); if (path) params.set("path", path); if (selectedDrive) params.set("drive", selectedDrive);
     router.push(`/files${params.size ? `?${params}` : ""}`);
@@ -87,7 +90,7 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
     void (async () => { for (const item of added) await transfer(item); })();
   }
   return <Page className={styles.filesPage}>
-    <PageHeader title={title} description={mode === "bin" ? "Deleted files stay here for 45 days. Self-destructing files are removed permanently." : mode === "shared" ? "Files and folders others chose to share with you." : mode === "recent" ? "The latest changes across your drive." : "A little more room for everything you’re working on."} actions={canCreate ? <div className={styles.actions}><Button variant="secondary" onClick={() => setNewFolder(true)}><FolderPlus size={17} />New folder</Button><Button onClick={() => fileInput.current?.click()}><Upload size={17} />Upload files</Button></div> : undefined} />
+    <PageHeader title={title} description={mode === "bin" ? "Deleted files stay here for 45 days. Self-destructing files are removed permanently." : mode === "shared" ? "Files shared directly with you, your teams, and your organization." : mode === "recent" ? "The latest changes across your drive." : work ? `Your files in ${work.name}. Share with people or teams when you’re ready.` : "Your personal space. Files stay private until you choose to share them."} actions={canCreate ? <div className={styles.actions}><Button variant="secondary" onClick={() => setNewFolder(true)}><FolderPlus size={17} />New folder</Button><Button onClick={() => fileInput.current?.click()}><Upload size={17} />Upload files</Button></div> : undefined} />
     <input ref={fileInput} type="file" multiple hidden onChange={event => { if (event.target.files) upload(event.target.files); event.target.value = ""; }} />
     {mode === "files" && <nav className={styles.crumbs} aria-label="Folder path"><button onClick={() => navigate("")}>{activeDrive?.owner.id || "My drive"}</button>{folder.split("/").filter(Boolean).map((part, index, parts) => <span className={styles.controls} key={index}><ChevronRight size={13} /><button onClick={() => navigate(parts.slice(0,index + 1).join("/"))}>{part}</button></span>)}</nav>}
     {folder && currentFolder.data && <Button variant="ghost" size="sm" onClick={() => setSelected(currentFolder.data)}>Folder details and sharing</Button>}

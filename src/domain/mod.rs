@@ -18,3 +18,5 @@ pub mod permission;
 pub mod quota;
 pub mod storage;
 pub mod version;
+
+pub mod organizations;

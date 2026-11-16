@@ -11,6 +11,7 @@
     "lint": "eslint --max-warnings=0 .",
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "playwright test --project=e2e",
+    "test:organizations": "playwright test --config playwright.organizations.config.ts",
     "screens": "playwright test --project=screens"
   },
   "dependencies": {

@@ -8,6 +8,7 @@ mod content;
 pub mod delegated;
 mod drives;
 mod entries;
+mod organizations;
 
 pub use content::ContentStream;
 

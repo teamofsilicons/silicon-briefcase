@@ -1,15 +1,16 @@
-import { Bell, Bot, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
+import { Bell, Bot, Building2, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
 import type { AppConfig } from "./app-config.types";
 export const appConfig: AppConfig = {
   appId: "briefcase", name: "Briefcase", brandPrefix: "Silicon",
   tagline: "A place for everything you make.",
-  description: "Your files, thoughtfully kept. Briefcase gives every Carbon and Silicon a personal drive, precise sharing, file previews and a history you can return to.",
+  description: "Your files, thoughtfully kept. Briefcase gives every Carbon and Silicon personal and work drives, team sharing, file previews and a history you can return to.",
   mark: { paths: ["M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2", "M4 6h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z", "M3 12h18", "M10 11v3h4v-3"] },
   cli: { command: "briefcase" }, home: "/files",
   nav: [
     { href: "/files", label: "My files", icon: FolderOpen, keywords: ["drive", "upload"] },
     { href: "/shared", label: "Shared with me", icon: Share2 },
     { href: "/recent", label: "Recent", icon: Clock3 },
+    { href: "/organizations", label: "Organizations", icon: Building2, keywords: ["teams", "members", "admins", "work"] },
     { href: "/silicons", label: "My Silicons", icon: Bot },
     { href: "/bin", label: "Bin", icon: Trash2 },
     { href: "/inbox", label: "Notifications", icon: Bell },

@@ -60,7 +60,7 @@ export default defineConfig({
   projects: [
     // Two Carbons sign in with an email code once per run; the specs continue as them (e2e/accounts.setup.ts).
     { name: "setup", testMatch: /accounts\.setup\.ts/, use: { browserName: "chromium" } },
-    { name: "e2e", testIgnore: [/screens\.spec\.ts/, /\.setup\.ts/], dependencies: ["setup"], use: { browserName: "chromium" } },
+    { name: "e2e", testIgnore: [/screens\.spec\.ts/, /organizations\.spec\.ts/, /\.setup\.ts/], dependencies: ["setup"], use: { browserName: "chromium" } },
     { name: "screens", testMatch: /screens\.spec\.ts/, dependencies: ["setup"], use: { browserName: "chromium" } },
   ],
   webServer: [

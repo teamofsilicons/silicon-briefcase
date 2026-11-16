@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 57] = [
+const EXPECTED_OPERATIONS: [&str; 60] = [
+    "listOrganizations",
+    "readOrganization",
+    "manageOrganization",
     "submitReport",
     "submitTelemetry",
     "cancelDelegatedUpload",
