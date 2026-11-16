@@ -15,6 +15,10 @@ pub enum Recipient {
     Carbon(String),
     /// A Silicon, such as `si:scout`.
     Silicon(String),
+    /// Everyone currently active in this organization.
+    Organization(String),
+    /// Current members of `organization/team-uuid`.
+    Team(String),
     /// A share made by email address before personal accounts. Briefcase
     /// refuses new ones (`email_recipients_retired`); kept so old answers parse.
     Email(String),
@@ -39,7 +43,12 @@ impl Recipient {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::Carbon(id) | Self::Silicon(id) | Self::Email(id) | Self::Tag(id) => id,
+            Self::Carbon(id)
+            | Self::Silicon(id)
+            | Self::Organization(id)
+            | Self::Team(id)
+            | Self::Email(id)
+            | Self::Tag(id) => id,
         }
     }
 }

@@ -4,9 +4,11 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 57] = [
+const EXPECTED_OPERATIONS: [&str; 59] = [
+    "listOrganizations",
+    "readOrganization",
+    "manageOrganization",
     "submitReport",
-    "submitTelemetry",
     "cancelDelegatedUpload",
     "commitDelegatedUpload",
     "configureOrganizationBucket",
@@ -167,9 +169,9 @@ fn the_served_operation_registry_matches_the_published_contract() -> anyhow::Res
 }
 
 #[test]
-fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
+fn the_contract_is_version_five_with_accounts_security() -> anyhow::Result<()> {
     let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
-    assert_eq!(document["info"]["version"].as_str(), Some("4.1.0"));
+    assert_eq!(document["info"]["version"].as_str(), Some("5.0.0"));
     assert_eq!(
         document["info"]["version"].as_str(),
         Some(silicon_briefcase::api::versioning::CONTRACT_VERSION)
@@ -184,7 +186,7 @@ fn the_contract_is_version_four_with_accounts_security() -> anyhow::Result<()> {
 
 /// Operations the service still serves for older clients but the official
 /// client no longer calls. Each answers 410 and records nothing.
-const RETIRED_FOR_CLIENTS: [&str; 1] = ["submitTelemetry"];
+const RETIRED_FOR_CLIENTS: [&str; 0] = [];
 
 #[test]
 fn official_client_consumes_the_exact_published_operations() -> anyhow::Result<()> {

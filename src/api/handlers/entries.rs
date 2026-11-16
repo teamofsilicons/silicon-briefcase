@@ -369,7 +369,11 @@ async fn search_scope(
         state
             .content_adapter
             .metadata_repository()
-            .shared_drives(context.authorization().actor(), MAX_SHARED_DRIVES_SEARCHED)
+            .group_shared_drives(
+                context.authorization().actor(),
+                &context.organizations().groups,
+                MAX_SHARED_DRIVES_SEARCHED,
+            )
             .await
             .map_err(|_| AppError::Internal {
                 category: "drive_lookup",

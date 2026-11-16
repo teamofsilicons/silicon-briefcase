@@ -124,7 +124,12 @@ pub(crate) async fn shared(
     let rows = state
         .content_adapter
         .metadata_repository()
-        .shared_with(&caller, before, i32::from(limit) + 1)
+        .shared_with_groups(
+            &caller,
+            &context.organizations().groups,
+            before,
+            i32::from(limit) + 1,
+        )
         .await
         .map_err(|_| AppError::Internal {
             category: "shared_lookup",

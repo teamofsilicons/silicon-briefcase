@@ -229,9 +229,9 @@ fn push_expiring_match(builder: &mut QueryBuilder<Postgres>, caller: FilterCalle
                OR EXISTS (SELECT 1 FROM briefcase.permission_grants AS own_expiring \
                            WHERE own_expiring.org_id = entry.org_id AND own_expiring.entry_id = entry.entry_id \
                              AND own_expiring.revoked_at IS NULL AND own_expiring.expires_at > clock_timestamp()) \
-               OR EXISTS (SELECT 1 FROM briefcase.tag_permission_grants AS own_tag_expiring \
-                           WHERE own_tag_expiring.org_id = entry.org_id AND own_tag_expiring.entry_id = entry.entry_id \
-                             AND own_tag_expiring.revoked_at IS NULL AND own_tag_expiring.expires_at > clock_timestamp())) \
+               OR EXISTS (SELECT 1 FROM briefcase.group_permission_grants AS own_group_expiring \
+                           WHERE own_group_expiring.org_id = entry.org_id AND own_group_expiring.entry_id = entry.entry_id \
+                             AND own_group_expiring.revoked_at IS NULL AND own_group_expiring.expires_at > clock_timestamp())) \
           OR EXISTS (SELECT 1 FROM briefcase.permission_grants AS granted_expiring \
                       WHERE granted_expiring.org_id = entry.org_id AND granted_expiring.entry_id = entry.entry_id \
                         AND granted_expiring.revoked_at IS NULL AND granted_expiring.expires_at > clock_timestamp() \
@@ -241,13 +241,13 @@ fn push_expiring_match(builder: &mut QueryBuilder<Postgres>, caller: FilterCalle
     builder.push(" AND granted_expiring.granted_by_id = ");
     builder.push_bind(caller.id.to_owned());
     builder.push(
-        ") OR EXISTS (SELECT 1 FROM briefcase.tag_permission_grants AS granted_tag_expiring \
-                      WHERE granted_tag_expiring.org_id = entry.org_id AND granted_tag_expiring.entry_id = entry.entry_id \
-                        AND granted_tag_expiring.revoked_at IS NULL AND granted_tag_expiring.expires_at > clock_timestamp() \
-                        AND granted_tag_expiring.granted_by_type = ",
+        ") OR EXISTS (SELECT 1 FROM briefcase.group_permission_grants AS granted_group_expiring \
+                      WHERE granted_group_expiring.org_id = entry.org_id AND granted_group_expiring.entry_id = entry.entry_id \
+                        AND granted_group_expiring.revoked_at IS NULL AND granted_group_expiring.expires_at > clock_timestamp() \
+                        AND granted_group_expiring.granted_by_type = ",
     );
     builder.push_bind(caller.kind);
-    builder.push(" AND granted_tag_expiring.granted_by_id = ");
+    builder.push(" AND granted_group_expiring.granted_by_id = ");
     builder.push_bind(caller.id.to_owned());
     builder.push("))");
 }

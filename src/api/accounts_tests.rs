@@ -118,6 +118,15 @@ async fn fixture_at(
 }
 
 impl Fixture {
+    pub(super) fn with_organizations(&mut self, base: &str) -> anyhow::Result<()> {
+        let (_, settings, _) = super::tests::test_state(self.state.database.clone())?;
+        self.state.organizations = Some(std::sync::Arc::new(
+            crate::infrastructure::organizations::OrganizationsGateway::new(base)?,
+        ));
+        self.router = router(self.state.clone(), &settings, &self.state.webhook_settings);
+        Ok(())
+    }
+
     /// A uuid unique to this test run, such as `Ada3f2a…`.
     pub(super) fn uuid(&self, prefix: &str) -> String {
         if prefix == "Ada" {

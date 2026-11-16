@@ -850,3 +850,14 @@ Requires a User verification proof with scope briefcase.link_access.update from 
 | --- | --- |
 | 200 | Success |
 | default | Error |
+
+## Manage organizations and teams
+
+`GET /organizations` lists this account’s organizations and current file-sharing
+targets. `GET /organizations/{org}` returns permitted members, teams, invitations
+and capabilities. `POST /organizations/{org}/actions` applies a domain action,
+requires `Idempotency-Key`, and checks current membership, role and app policy.
+See [Organizations](../organizations.md) for supported actions and account boundaries.
+
+Invitation recipients also accept `organization` and `team`; take their IDs from
+`GET /organizations`. File access follows current membership and exclusions.

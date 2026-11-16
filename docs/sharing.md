@@ -1,6 +1,6 @@
 # Sharing files
 
-Every Carbon and Silicon has a personal drive. The drive owner controls its files; a Carbon custodian also manages the drives of Silicons it looks after. Other accounts need explicit grants. There is no organization-public area or tag-derived access in Briefcase 4.
+Every Carbon and Silicon has a personal drive. The drive owner controls its files; a Carbon custodian also manages the drives of Silicons it looks after. Other accounts need explicit grants. Organization and team grants are explicit, live-membership shares; there is no implicit organization-public area or IAM tag authority. [Organizations](organizations.md) explains work accounts and team management.
 
 Invite an exact `c:` or `si:` id. Briefcase resolves it at Accounts and stores the immutable UUID, so an id change never transfers a grant to another account. Invitation lists include the current public label when known. Grant `read`, `write` (add children), or `update` (edit existing entries). Delete cannot be shared. Folder grants may inherit to descendants. Traversal to a shared child reveals no unrelated siblings.
 
@@ -14,4 +14,4 @@ Anyone-with-the-link access is a separate read/download capability. It can be pe
 
 Self-destruction is different: it deletes the file itself permanently. A self-destructing upload bypasses the bin even if removed early. `keep` removes the timer. Normal file deletion stays recoverable in the drive's bin for 45 days.
 
-Sharing changes enter the account's notification inbox and the entry's retained activity. Email can be sent only when the recipient shared its email with Briefcase and mail delivery is configured. Public ids, display names and app attribution are labels; authorization always uses verified identity and file rights.
+Direct account sharing changes enter the account's notification inbox and the entry's retained activity. Email can be sent only when the recipient shared its email with Briefcase and mail delivery is configured. Group shares appear in Shared with me for current members and are logged on the entry; they do not send an email to every member. Public ids, display names and app attribution are labels; authorization always uses verified identity and file rights.

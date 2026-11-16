@@ -1,6 +1,6 @@
 {
   "name": "@silicon-briefcase/web",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "description": "Silicon Briefcase: personal drives, precise sharing and file previews.",
   "scripts": {
@@ -11,6 +11,7 @@
     "lint": "eslint --max-warnings=0 .",
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "playwright test --project=e2e",
+    "test:organizations": "playwright test --config playwright.organizations.config.ts",
     "screens": "playwright test --project=screens"
   },
   "dependencies": {
@@ -29,7 +30,9 @@
     "motion": "14.0.0",
     "next": "16.3.8",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "@aws-sdk/client-dynamodb": "3.1160.0",
+    "@vercel/oidc-aws-credentials-provider": "3.3.17"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

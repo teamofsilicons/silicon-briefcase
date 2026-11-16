@@ -33,7 +33,7 @@ pub(crate) async fn sweep(pool: &PgPool, batch_size: i64) -> Result<LifetimeStat
     for (count, statement) in counts.iter_mut().zip([
         SELF_DESTRUCT,
         MEMBER_EXPIRING_EXPIRY,
-        TAG_EXPIRING_EXPIRY,
+        GROUP_EXPIRING_EXPIRY,
         LINK_EXPIRING_EXPIRY,
     ]) {
         *count = sqlx::query(statement)
@@ -46,12 +46,12 @@ pub(crate) async fn sweep(pool: &PgPool, batch_size: i64) -> Result<LifetimeStat
     let [
         self_destructed,
         member_shares,
-        tag_shares,
+        group_shares,
         expiring_links_expired,
     ] = counts;
     Ok(LifetimeStats {
         self_destructed,
-        expiring_shares_expired: member_shares + tag_shares,
+        expiring_shares_expired: member_shares + group_shares,
         expiring_links_expired,
     })
 }
@@ -102,23 +102,24 @@ const MEMBER_EXPIRING_EXPIRY: &str = "WITH due AS ( \
                 expires_at \
            FROM marked";
 
-/// Logs expired tag expiring shares the same way.
-const TAG_EXPIRING_EXPIRY: &str = "WITH due AS ( \
-             SELECT org_id, grant_id FROM briefcase.tag_permission_grants \
+/// Logs expired organization and team shares.
+const GROUP_EXPIRING_EXPIRY: &str = "WITH due AS ( \
+             SELECT org_id, grant_id FROM briefcase.group_permission_grants \
               WHERE expires_at <= clock_timestamp() AND expiry_logged_at IS NULL AND revoked_at IS NULL \
               ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED \
          ), marked AS ( \
-             UPDATE briefcase.tag_permission_grants AS grant_row SET expiry_logged_at = clock_timestamp() \
+             UPDATE briefcase.group_permission_grants AS grant_row SET expiry_logged_at = clock_timestamp() \
                FROM due WHERE grant_row.org_id = due.org_id AND grant_row.grant_id = due.grant_id \
-             RETURNING grant_row.org_id, grant_row.entry_id, grant_row.grant_id, grant_row.tag_id, \
-                       grant_row.granted_by_type, grant_row.granted_by_id, grant_row.expires_at \
+             RETURNING grant_row.org_id, grant_row.entry_id, grant_row.grant_id, grant_row.principal_type, \
+                       grant_row.principal_id, grant_row.granted_by_type, grant_row.granted_by_id, \
+                       grant_row.expires_at \
          ) \
          INSERT INTO briefcase.audit_events \
                 (org_id, audit_id, entry_id, actor_type, actor_id, action, request_id, metadata, occurred_at) \
          SELECT org_id, briefcase.new_uuid_v7(), entry_id, granted_by_type, granted_by_id, \
-                'permission.tag_expiring_share_expired.v1', 'worker:share-expiry', \
-                jsonb_build_object('grant_id', grant_id, 'tag_id', tag_id, 'expires_at', expires_at, \
-                                   'automatic', true), \
+                'permission.group_expiring_share_expired.v1', 'worker:share-expiry', \
+                jsonb_build_object('grant_id', grant_id, 'expires_at', expires_at, 'automatic', true, \
+                                   'principal', jsonb_build_object('type', principal_type, 'id', principal_id)), \
                 expires_at \
            FROM marked";
 

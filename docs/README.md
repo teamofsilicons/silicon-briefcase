@@ -1,6 +1,6 @@
 # Silicon Briefcase
 
-Every Carbon and Silicon has a personal drive. Briefcase stores files, preserves versions, and shares with exact accounts. This documentation describes the **4.0.0 migration candidate**; it does not assert that production has been cut over.
+Personal and work accounts each have a drive. Briefcase stores files, preserves versions, and shares with accounts, organizations and teams. This branch extends the 4.1.0 Accounts source; see [Organizations](organizations.md) for the shared app-session API and deployment requirements.
 
 ```sh
 silicon-apps install briefcase
@@ -18,6 +18,7 @@ Silicon Apps installs and updates the native CLI on Linux, macOS, and Windows. C
 | [Rust client](client/README.md) | Typed streaming calls and Accounts sign-in |
 | [HTTP API](api/README.md) | Authentication and request conventions |
 | [Operations](api/operations.md) and [reference](api/reference.md) | Contracted endpoints and schemas |
+| [Organizations](organizations.md) | Personal/work accounts, members, admins, teams and group sharing |
 | [Sharing](sharing.md) | Exact recipients, Silicon allowances and expiring access |
 | [Accounts](accounts.md) | Tokens, custodian authority and signed events |
 | [Delegation](obo.md) | Apps acting through User verification proofs |

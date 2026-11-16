@@ -1,6 +1,6 @@
 /**
  * Account ids as Carbons and Silicons type them: `c:handle` for a Carbon, `si:handle` for a Silicon. The handle is 3 to
- * 30 characters of a-z, 0-9, "-" and "_"; ids are case-insensitive and stored in lowercase (Silicon Accounts, "Ids and
+ * 30 characters per component (work IDs append `.organization`) of a-z, 0-9, "-" and "_"; ids are case-insensitive and stored in lowercase (Silicon Accounts, "Ids and
  * uuids"). An id names an account for people; apps key everything on the account's uuid and only show the id.
  */
 import type { AccountKind } from "./format";
@@ -23,13 +23,17 @@ export function parseAccountId(input: string): IdCheck {
   if (text.includes("@")) return { ok: false, message: `"${input.trim()}" looks like an email address. Share with an account by its id instead, such as c:ada or si:scout.` };
   const match = /^(c|si):(.*)$/.exec(text);
   if (!match) return { ok: false, message: `"${input.trim()}" has no c: or si: in front. Use c:${text.replace(/^[^:]*:/, "")} for a Carbon or si:${text.replace(/^[^:]*:/, "")} for a Silicon.` };
-  const [, prefix, handle] = match as unknown as [string, "c" | "si", string];
+  const [, prefix, fullHandle] = match as unknown as [string, "c" | "si", string];
+  const parts = fullHandle.split(".");
+  if (parts.length > 2) return { ok: false, message: "Work account IDs use one dot: c:handle.organization or si:handle.organization." };
+  for (const handle of parts) {
   if (handle.length < 3 || handle.length > 30) return { ok: false, message: `The handle "${handle}" is ${handle.length} character${handle.length === 1 ? "" : "s"}; it must be 3 to 30.` };
   if (!HANDLE.test(handle)) {
     const index = [...handle].findIndex(char => !/[a-z0-9_-]/.test(char));
     return { ok: false, message: `The handle "${handle}" contains "${handle[index]}" at position ${index + 1}; only a-z, 0-9, "-" and "_" are allowed.` };
   }
-  return { ok: true, value: { id: `${prefix}:${handle}`, kind: prefix === "c" ? "carbon" : "silicon", handle } };
+  }
+  return { ok: true, value: { id: `${prefix}:${fullHandle}`, kind: prefix === "c" ? "carbon" : "silicon", handle: fullHandle } };
 }
 
 export const isAccountId = (input: string) => parseAccountId(input).ok;

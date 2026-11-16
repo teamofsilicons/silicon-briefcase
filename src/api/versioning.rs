@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "4.1.0";
+pub const CONTRACT_VERSION: &str = "5.0.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,7 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 57] = [
+pub const OPERATIONS: [OperationVersion; 59] = [
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -78,6 +78,14 @@ pub const OPERATIONS: [OperationVersion; 57] = [
     operation("readApiVersion", "1.0.0", "GET", "/version"),
     operation("readAccountsInfo", "1.0.0", "GET", "/accounts"),
     operation("readAccount", "1.0.0", "GET", "/me"),
+    operation("listOrganizations", "1.0.0", "GET", "/organizations"),
+    operation("readOrganization", "1.0.0", "GET", "/organizations/{org}"),
+    operation(
+        "manageOrganization",
+        "1.0.0",
+        "POST",
+        "/organizations/{org}/actions",
+    ),
     operation("listDrives", "1.0.0", "GET", "/drives"),
     operation("listSharedWithMe", "1.0.0", "GET", "/shared"),
     operation(
@@ -187,7 +195,6 @@ pub const OPERATIONS: [OperationVersion; 57] = [
     operation("searchFiles", "1.0.0", "GET", "/search"),
     // Retired: answers 410 and records nothing. Kept because 4.0 clients
     // verify it before their first call; remove with the next contract major.
-    operation("submitTelemetry", "1.0.0", "POST", "/telemetry"),
     operation("submitReport", "1.0.0", "POST", "/reports"),
     operation("listNotifications", "1.1.0", "GET", "/notifications"),
     operation("readNotifications", "1.0.0", "POST", "/notifications/read"),
@@ -220,13 +227,13 @@ pub const OPERATIONS: [OperationVersion; 57] = [
     ),
     operation(
         "listInvitations",
-        "1.0.0",
+        "2.0.0",
         "GET",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "createInvitation",
-        "2.0.0",
+        "2.1.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),

@@ -35,7 +35,7 @@ async fn the_guides_are_bundled_and_readable_without_a_sign_in() {
         assert!(output.status.success(), "{guide}");
         let text = stdout(&output);
         assert!(text.len() > 1000, "{guide} is too short");
-        for retired in ["Honeycomb", "honeycomb", "IAM", "--org", "organization"] {
+        for retired in ["Honeycomb", "honeycomb", "IAM", "--org"] {
             assert!(!text.contains(retired), "{guide} mentions {retired}");
         }
     }
@@ -48,10 +48,45 @@ async fn the_guides_are_bundled_and_readable_without_a_sign_in() {
 async fn every_command_explains_itself_in_its_help() {
     let home = Home::new();
     for command in [
-        "login", "logout", "accounts", "status", "drives", "shared", "allow", "ls", "find",
-        "search", "stat", "mkdir", "put", "get", "cat", "archive", "mv", "rm", "keep", "bin",
-        "versions", "restore", "history", "logs", "link", "share", "unshare", "expiry", "shares",
-        "access", "inbox", "usage", "storage", "app", "config", "report", "daemon", "docs",
+        "login",
+        "logout",
+        "accounts",
+        "organizations",
+        "status",
+        "drives",
+        "shared",
+        "allow",
+        "ls",
+        "find",
+        "search",
+        "stat",
+        "mkdir",
+        "put",
+        "get",
+        "cat",
+        "archive",
+        "mv",
+        "rm",
+        "keep",
+        "bin",
+        "versions",
+        "restore",
+        "history",
+        "logs",
+        "link",
+        "share",
+        "unshare",
+        "expiry",
+        "shares",
+        "access",
+        "inbox",
+        "usage",
+        "storage",
+        "app",
+        "config",
+        "report",
+        "daemon",
+        "docs",
         "version",
     ] {
         let output = briefcase(&home, &[command, "--help"], &[]).await;
@@ -62,7 +97,7 @@ async fn every_command_explains_itself_in_its_help() {
             text.contains("briefcase docs cli"),
             "{command} has no pointer to the guide"
         );
-        for retired in ["--org", "IAM", "Honeycomb", "organization", "tag:"] {
+        for retired in ["--org", "IAM", "Honeycomb", "tag:"] {
             assert!(
                 !text.contains(retired),
                 "{command} --help mentions {retired}"

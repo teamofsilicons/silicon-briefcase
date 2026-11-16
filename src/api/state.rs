@@ -24,6 +24,8 @@ pub(crate) type DelegatedUploadUseCases =
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) accounts: Arc<AccountDirectory>,
+    pub(crate) organizations:
+        Option<Arc<crate::infrastructure::organizations::OrganizationsGateway>>,
     pub(crate) metadata: MetadataService,
     pub(crate) content: Arc<ContentUseCases>,
     pub(crate) content_adapter: Arc<crate::infrastructure::postgres::PostgresContentRepository>,

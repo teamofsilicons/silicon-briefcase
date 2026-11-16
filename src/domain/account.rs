@@ -122,18 +122,23 @@ impl PublicId {
     /// # Errors
     ///
     /// Returns [`AccountIdentifierError::InvalidPublicId`] unless the value is
-    /// `c:` or `si:` followed by 1 to 64 of `a-z`, `0-9`, `_` and `-`.
+    /// `c:` or `si:` followed by a personal handle or `handle.organization`,
+    /// each 1 to 64 of `a-z`, `0-9`, `_` and `-` (Accounts owns final validation).
     pub fn parse(value: &str) -> Result<Self, AccountIdentifierError> {
         let normalized = value.trim().to_ascii_lowercase();
         let handle = normalized
             .strip_prefix("c:")
             .or_else(|| normalized.strip_prefix("si:"));
         let valid = handle.is_some_and(|handle| {
-            (1..=MAX_HANDLE_BYTES).contains(&handle.len())
+            (1..=MAX_HANDLE_BYTES * 2 + 1).contains(&handle.len())
+                && handle.split('.').count() <= 2
+                && handle
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.len() <= MAX_HANDLE_BYTES)
                 && handle.bytes().all(|byte| {
                     byte.is_ascii_lowercase()
                         || byte.is_ascii_digit()
-                        || matches!(byte, b'_' | b'-')
+                        || matches!(byte, b'_' | b'-' | b'.')
                 })
         });
         if valid {
@@ -391,6 +396,14 @@ mod tests {
         let carbon = PublicId::parse(" C:Ada ")?;
         assert_eq!(carbon.as_str(), "c:ada");
         assert_eq!(carbon.kind(), ActorKind::Carbon);
+        assert_eq!(
+            PublicId::parse(" C:Ada.Example ")?.as_str(),
+            "c:ada.example"
+        );
+        assert_eq!(
+            PublicId::parse("si:scout.example")?.kind(),
+            ActorKind::Silicon
+        );
         assert_eq!(PublicId::parse("si:scout_2")?.kind(), ActorKind::Silicon);
         for invalid in [
             "ada",
@@ -400,6 +413,9 @@ mod tests {
             "c:ada king",
             "c:ada/x",
             "tag:research",
+            "c:ada..example",
+            "c:.example",
+            "c:ada.",
         ] {
             assert!(PublicId::parse(invalid).is_err(), "{invalid}");
         }

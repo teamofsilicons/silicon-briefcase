@@ -146,6 +146,8 @@ INSERT INTO link_actor_columns VALUES
     ('permission_grants', 'principal_type', 'principal_id'),
     ('permission_grants', 'granted_by_type', 'granted_by_id'),
     ('permission_grants', 'revoked_by_type', 'revoked_by_id'),
+    ('group_permission_grants', 'granted_by_type', 'granted_by_id'),
+    ('group_permission_grants', 'revoked_by_type', 'revoked_by_id'),
     ('tag_permission_grants', 'granted_by_type', 'granted_by_id'),
     ('tag_permission_grants', 'revoked_by_type', 'revoked_by_id'),
     ('access_requests', 'requested_by_type', 'requested_by_id'),
@@ -167,6 +169,7 @@ CREATE TEMP TABLE link_other_columns (
     PRIMARY KEY (table_name, id_column)
 ) ON COMMIT DROP;
 INSERT INTO link_other_columns VALUES
+    ('group_permission_grants', 'principal_id'),
     ('entries', 'entry_id'),
     ('webhook_receipts', 'aggregate_id'),
     ('webhook_receipts', 'event_id'),

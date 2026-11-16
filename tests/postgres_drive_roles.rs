@@ -228,6 +228,8 @@ async fn exercise(world: &RoleWorld) -> anyhow::Result<()> {
     let (root, folder) = (Uuid::now_v7(), Uuid::now_v7());
     let mut api = world.session_as("briefcase_api").await?;
     seed_drive(&mut api, ada, bob, root, folder).await?;
+    sqlx::query("INSERT INTO briefcase.group_permission_grants(org_id,entry_id,grant_id,principal_type,principal_id,display_name,access_mask,inherits_to_descendants,granted_by_type,granted_by_id) VALUES($1,$2,$3,'organization','example','Example',1,true,'carbon',$1)")
+        .bind(ada).bind(folder).bind(Uuid::new_v4()).execute(&mut api).await?;
 
     // A notification lands in the recipient's own inbox, creating that
     // drive's bookkeeping, and the caller's drive setting is restored.
@@ -292,6 +294,27 @@ async fn exercise(world: &RoleWorld) -> anyhow::Result<()> {
             .fetch_all(&mut api)
             .await?;
     assert_eq!(drives, vec![ada.to_owned()]);
+
+    // An unrelated account discovers only its verified groups through the
+    // non-superuser definer, while table reads remain inside its own drive.
+    assert_eq!(
+        count(
+            &mut api,
+            "SELECT count(*) FROM briefcase.group_permission_grants"
+        )
+        .await?,
+        0
+    );
+    let via_group: Vec<String> = sqlx::query_scalar("SELECT drive FROM briefcase.group_shared_drives('carbon','CatRole1',ARRAY['organization:example'],10)").fetch_all(&mut api).await?;
+    assert_eq!(via_group, vec![ada.to_owned()]);
+    let without_group: Vec<String> = sqlx::query_scalar(
+        "SELECT drive FROM briefcase.group_shared_drives('carbon','CatRole1',ARRAY[]::text[],10)",
+    )
+    .fetch_all(&mut api)
+    .await?;
+    assert!(without_group.is_empty());
+    let group_entries: Vec<Uuid> = sqlx::query_scalar("SELECT entry_id FROM briefcase.shared_with_groups('carbon','CatRole1',ARRAY['organization:example'],NULL,NULL,10)").fetch_all(&mut api).await?;
+    assert_eq!(group_entries, vec![folder]);
 
     // A pre-migration organization (no recorded owner) is never a drive:
     // nothing is delivered into it and none of its entries is reported.

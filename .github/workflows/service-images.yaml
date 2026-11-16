@@ -12,6 +12,8 @@ permissions:
   contents: read
 jobs:
   images:
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     strategy:
@@ -40,8 +42,20 @@ jobs:
           docker save "briefcase-$COMPONENT:candidate" | gzip > "candidate/briefcase-$COMPONENT-arm64.tar.gz"
           (cd candidate && sha256sum *.tar.gz > SHA256SUMS)
       - uses: actions/upload-artifact@v4
+        id: candidate-artifact
+        continue-on-error: true
         with:
           name: briefcase-${{ matrix.component }}-arm64-candidate
           path: candidate/*
           retention-days: 14
+      - name: Preserve candidate when Actions artifact storage is full
+        if: steps.candidate-artifact.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          gh release create "service-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${COMPONENT}" \
+            --draft --target "$GITHUB_SHA" --title "Briefcase $COMPONENT candidate $GITHUB_SHA" \
+            --notes "Immutable deployment candidate and checksum. This draft does not deploy or publish the app." candidate/*
 # Artifacts only; no registry push, publication, or deployment.

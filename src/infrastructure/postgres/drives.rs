@@ -435,6 +435,47 @@ impl super::PostgresRepository {
         .await
     }
 
+    /// Discovers direct and current organization/team shares.
+    /// # Errors
+    /// Returns database or discovery errors.
+    pub async fn shared_with_groups(
+        &self,
+        principal: &ActorRef,
+        groups: &[String],
+        before: Option<(time::OffsetDateTime, Uuid)>,
+        limit: i32,
+    ) -> std::result::Result<Vec<SharedEntry>, sqlx::Error> {
+        sqlx::query_as::<_, SharedEntry>(
+            "SELECT drive,entry_id,shared_at FROM briefcase.shared_with_groups($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(actor_kind(principal.kind()))
+        .bind(principal.id().as_str())
+        .bind(groups)
+        .bind(before.map(|(at, _)| at))
+        .bind(before.map(|(_, entry)| entry))
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+    }
+
+    /// Discovers search scopes from current group memberships.
+    /// # Errors
+    /// Returns database or discovery errors.
+    pub async fn group_shared_drives(
+        &self,
+        principal: &ActorRef,
+        groups: &[String],
+        limit: i32,
+    ) -> std::result::Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT drive FROM briefcase.group_shared_drives($1,$2,$3,$4)")
+            .bind(actor_kind(principal.kind()))
+            .bind(principal.id().as_str())
+            .bind(groups)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+    }
+
     /// Lists the other drives `principal` holds live shares in, most recently
     /// shared first.
     ///

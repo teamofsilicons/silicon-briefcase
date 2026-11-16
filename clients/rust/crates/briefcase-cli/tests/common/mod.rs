@@ -191,8 +191,8 @@ pub fn version_document() -> Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "4.1.0",
-        "build": "4.1.0",
+        "contract_version": "5.0.0",
+        "build": "5.0.0",
         "operations": operations,
     })
 }

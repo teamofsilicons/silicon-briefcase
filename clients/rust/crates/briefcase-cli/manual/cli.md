@@ -90,3 +90,16 @@ briefcase history notes/report.pdf
 `briefcase config show` inspects profiles; `config home <directory>` relocates state. Briefcase records no telemetry. `briefcase daemon uninstall` removes an older installation's background service; the command no longer needs a background updater.
 
 `briefcase report <message>` submits reproduction details, with `--pr` for a proposed fix. Errors explain the refusal and include a stable code in JSON. Exit codes: 0 success, 1 failure, 2 invalid invocation, 3 entry missing or inaccessible, 4 sign-in or permission refusal. Offline guides are `briefcase docs cli` and `briefcase docs client`.
+
+## Organizations and team sharing
+
+`briefcase organizations list --json` lists current memberships and sharing targets.
+`briefcase organizations show example --json` reads visible members, teams and roles.
+Use `briefcase organizations action example --file action.json --idempotency-key KEY`
+for management (for example `{"action":"team_create","name":"Design"}`). Reuse
+that key and body when retrying an uncertain action.
+
+Share a folder with `briefcase share plans organization:example --inherit`, or
+`briefcase share plans team:example/TEAM_UUID --inherit --access read,update`.
+Personal and work account profiles remain separate; a linked personal identity
+never acquires a work account’s roles. Team membership changes affect shared access.

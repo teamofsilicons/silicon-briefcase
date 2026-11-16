@@ -10,7 +10,7 @@ export type Entry = {
 };
 export type EntryPage = { items: Entry[]; next_cursor: string | null };
 export type SharedPage = { items: { entry: Entry; owner: Account }[]; next_cursor: string | null };
-export type Grant = { id: string; principal: { type: string; id: string; public_id?: string }; access: string[]; inherit: boolean; expires_at: string | null };
+export type Grant = { id: string; principal: { type: string; id: string; public_id?: string; name?: string }; access: string[]; inherit: boolean; expires_at: string | null };
 export type LinkAccess = { enabled: boolean; effective: boolean; can_manage: boolean; inherited_from: string | null; expires_at: string | null; url: string | null };
 export type Version = { id: string; size: number; content_type: string; created_at: string; created_by?: { id: string } };
 export type Activity = { id: string; action?: string; event?: string; kind?: string; actor?: { id: string }; occurred_at: string };

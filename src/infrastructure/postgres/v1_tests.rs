@@ -380,9 +380,9 @@ async fn app_folders_and_shares_across_drives_are_live() -> anyhow::Result<()> {
 
     // Revoking is idempotent under its key and notifies once.
     let revoke_key = mutation()?;
-    repo.revoke_tag_or_member(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
+    repo.revoke_invitation(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
         .await?;
-    repo.revoke_tag_or_member(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
+    repo.revoke_invitation(&owner, private.entry.id, grant.id().as_uuid(), &revoke_key)
         .await?;
     let inbox = repo.load_notification_inbox(&bob_home).await?;
     assert_eq!(

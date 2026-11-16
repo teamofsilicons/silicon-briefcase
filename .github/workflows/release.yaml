@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   binaries:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -95,25 +97,34 @@ jobs:
           VERSION=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then echo "Tag must match v$VERSION" >&2; exit 1; fi
           python ../../scripts/package-apps.py "$VERSION" ${{ matrix.target }} target/${{ matrix.triple }}/release/${{ matrix.binary }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: briefcase-silicon-apps-${{ matrix.target }}
-          path: dist/apps/*
-          if-no-files-found: error
+      - name: Retain the validated native package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          gh release create "native-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TARGET}" \
+            --draft --target "$GITHUB_SHA" --title "Briefcase native candidate $TARGET" \
+            --notes "Validated native candidate; publication is a separate release step." ../../dist/apps/*
 
   collect:
+    permissions:
+      contents: write
     needs: binaries
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: briefcase-silicon-apps-*
-          merge-multiple: true
-          path: dist/apps
-      - run: cd dist/apps && cat *.sha256 > SHA256SUMS
-      - uses: actions/upload-artifact@v4
-        with:
-          name: briefcase-silicon-apps-release
-          path: dist/apps/*
-          if-no-files-found: error
+      - name: Collect exact validated packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p dist/apps
+          for target in linux-x86_64 linux-aarch64 windows-x86_64 windows-aarch64 macos-x86_64 macos-aarch64; do
+            gh release download "native-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${target}" --dir dist/apps
+          done
+          (cd dist/apps && cat *.sha256 > SHA256SUMS)
+          gh release create "native-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --draft --target "$GITHUB_SHA" --title "Briefcase native release candidate" \
+            --notes "All six native packages passed platform checks. Publication is a separate release step." dist/apps/*
 # Artifacts only. Release upload and publication are separate operator actions.

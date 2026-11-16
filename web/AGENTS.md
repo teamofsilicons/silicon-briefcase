@@ -9,8 +9,9 @@ docs in `node_modules/next/dist/docs/` before relying on memory.
   into the browser: no secrets.
 - The browser never holds a token: pages call the service through `/api/*` (`api` in `lib/client/api.ts`), Server
   Components through `apiFetch()` / `tryApiFetch()` (`lib/server/rsc.ts`).
-- Words: Carbons and Silicons; never "AI agent", "human", "user account", "organization", "org", "team" for a group of
-  accounts, Honeycomb or IAM. Errors say what happened, why, and what to do.
+- Words: Carbons and Silicons; personal and work accounts. Organizations and teams refer to current Silicon
+  Organizations memberships. Never use legacy Honeycomb or IAM terminology in the interface. Errors say what
+  happened, why, and what to do.
 - Use Silicon UI foundation tokens and its native corner-shape styles for library controls; app-specific surfaces retain the existing squircle fallback.
 - Focus shows as fills and edges, never rings; every change respects reduced motion.
 - Before finishing: `pnpm typecheck && pnpm lint && pnpm test && pnpm build`, and `pnpm test:e2e` against the local

@@ -4,7 +4,6 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { Download, ExternalLink, Folder, RotateCcw } from "lucide-react";
 import { Button } from "@/components/silicon-ui/button/button";
 import { Input } from "@/components/silicon-ui/input/input";
-import { Select } from "@/components/silicon-ui/select/select";
 import { Dialog, DialogContent } from "@/components/silicon-ui/dialog/dialog";
 import { HoldToConfirm } from "@/components/silicon-ui/hold-to-confirm/hold-to-confirm";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
@@ -12,6 +11,7 @@ import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
 import { contentUrl, date, entryUrl, message, size, type Activity, type Entry, type EntryPage, type Grant, type LinkAccess, type Version } from "@/lib/briefcase/types";
 import { Preview } from "./preview";
+import { ShareAccess } from "./share-access";
 import styles from "./briefcase.module.css";
 
 export function EntryDetail({ entry: initial, onClose, onChanged }: { entry: Entry; onClose: () => void; onChanged: () => void }) {
@@ -19,8 +19,6 @@ export function EntryDetail({ entry: initial, onClose, onChanged }: { entry: Ent
   const [tab, setTab] = useState("preview");
   const [name, setName] = useState(initial.name);
   const [destination, setDestination] = useState<string | null>(null);
-  const [recipient, setRecipient] = useState("");
-  const [rights, setRights] = useState("read");
   const [minutes, setMinutes] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
@@ -52,14 +50,9 @@ export function EntryDetail({ entry: initial, onClose, onChanged }: { entry: Ent
       {tab === "preview" && <><Preview entry={entry} /><div className={styles.actions}><a href={contentUrl(entry.id, true)} className={styles.rowButton}><Download size={17} />Download {entry.type === "folder" ? "folder" : "file"}</a><a href={new URL(entry.permanent_url).pathname} className={styles.rowButton}><ExternalLink size={17} />Open permanent address</a></div></>}
       {tab === "sharing" && <div className={styles.form}>
         {link.error && <ErrorAlert error={link.error} />}{invitations.error && <ErrorAlert error={invitations.error} />}
-        {link.data?.can_manage && <><div><h3>Share with an account</h3><p className={styles.muted}>Name a Carbon or Silicon by its current id. Delete access stays with the owner.</p></div>
-        <form className={styles.form} onSubmit={event => { event.preventDefault(); if (!/^(c|si):[^\s]+$/.test(recipient.trim())) { setFailure("Enter a Carbon or Silicon id, such as c:ada or si:scout."); return; } void act(() => api.post(`${endpoint}/invitations`, { principal: { type: recipient.startsWith("si:") ? "silicon" : "carbon", id: recipient.trim() }, access: minutes ? ["read"] : rights.split(","), inherit: entry.type === "folder", ...(minutes ? { expires_in_minutes: Number(minutes) } : {}) }), "Access shared"); }}>
-          <Input label="Account id" value={recipient} onChange={event => setRecipient(event.target.value)} placeholder="c:ada or si:scout" required />
-          <div className={styles.detailGrid}><Select label="Access" value={rights} onValueChange={setRights} disabled={!!minutes} options={[{value:"read",label:"Read"},{value:"read,write",label:"Read and add"},{value:"read,update",label:"Read and edit"},{value:"read,write,update",label:"Read, add and edit"}]} /><Input label="Expires after (minutes)" type="number" min={1} max={43200} placeholder="No expiry" value={minutes} onChange={event => setMinutes(event.target.value)} /></div>
-          {minutes && <p className={styles.muted}>Expiring access is read-only and lasts from one minute to thirty days.</p>}<Button type="submit" loading={busy}>Share access</Button>
-        </form>
-        <ul className={styles.list}>{invitations.data?.pages.flatMap(page => page.items).map(grant => <li key={grant.id}><div><strong>{grant.principal.public_id || grant.principal.id}</strong><small>{grant.access.join(", ")} · {grant.expires_at ? `Until ${date(grant.expires_at)}` : "No expiry"}</small></div><Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(() => api.delete(`${endpoint}/invitations/${grant.id}`), "Access removed")}>Remove</Button>{grant.expires_at && <Button variant="ghost" size="sm" onClick={() => void act(() => api.patch(`${endpoint}/invitations/${grant.id}`, minutes ? { expires_in_minutes: Number(minutes) } : { permanent: true }), minutes ? "Expiry changed" : "Share made permanent")}>{minutes ? "Set new expiry" : "Keep sharing"}</Button>}</li>)}</ul>
-        {invitations.hasNextPage && <Button loading={invitations.isFetchingNextPage} onClick={() => void invitations.fetchNextPage()}>More accounts</Button>}</>}
+        {link.data?.can_manage && <><ShareAccess endpoint={endpoint} folder={entry.type === "folder"} busy={busy} minutes={minutes} setMinutes={setMinutes} act={act} />
+        <ul className={styles.list}>{invitations.data?.pages.flatMap(page => page.items).map(grant => <li key={grant.id}><div><strong>{grant.principal.name || grant.principal.public_id || grant.principal.id}</strong><small>{grant.principal.type === "team" ? "Team · " : grant.principal.type === "organization" ? "Organization · " : ""}{grant.access.join(", ")} · {grant.expires_at ? `Until ${date(grant.expires_at)}` : "No expiry"}</small></div><Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(() => api.delete(`${endpoint}/invitations/${grant.id}`), "Access removed")}>Remove</Button>{grant.expires_at && <Button variant="ghost" size="sm" onClick={() => void act(() => api.patch(`${endpoint}/invitations/${grant.id}`, minutes ? { expires_in_minutes: Number(minutes) } : { permanent: true }), minutes ? "Expiry changed" : "Share made permanent")}>{minutes ? "Set new expiry" : "Keep sharing"}</Button>}</li>)}</ul>
+        {invitations.hasNextPage && <Button loading={invitations.isFetchingNextPage} onClick={() => void invitations.fetchNextPage()}>More shares</Button>}</>}
         <div><h3>Anyone with the link</h3><p className={styles.muted}>{link.data?.effective ? "This entry can be opened without signing in." : "Only accounts with access can open this entry."}</p>{link.data?.url && <Input label="Shareable address" readOnly value={link.data.url} onFocus={event => event.target.select()} />}</div>
         {link.data?.can_manage && <div className={styles.actions}><Button variant="secondary" loading={busy} onClick={() => void act(() => api.put(`${endpoint}/link-access`, { enabled: !link.data?.enabled, ...(!link.data?.enabled && minutes ? { expires_in_minutes: Number(minutes) } : {}) }), link.data?.enabled ? "Link access turned off" : "Link access enabled")}>{link.data.enabled ? "Turn off link access" : "Enable link access"}</Button>{link.data.url && <Button variant="ghost" onClick={() => void navigator.clipboard.writeText(link.data!.url!).then(() => notify.success("Link copied"))}>Copy link</Button>}</div>}
       </div>}

@@ -633,6 +633,8 @@ fn recipient(principal: &Recipient) -> String {
         Recipient::Email(address) => {
             format!("{address} (a share by email from before personal accounts)")
         }
+        Recipient::Organization(id) => format!("{id} (organization)"),
+        Recipient::Team(id) => format!("{id} (team)"),
         Recipient::Tag(tag) => format!("{tag} (a group share from before personal accounts)"),
     }
 }

@@ -13,6 +13,38 @@ use wiremock::{
 
 const ENTRY_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f828";
 
+#[tokio::test]
+async fn organization_actions_keep_the_briefcase_bearer_and_retry_key() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    let body = json!({"action":"team_create","name":"Design"});
+    Mock::given(method("POST"))
+        .and(path("/api/v1/organizations/example/actions"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(header("idempotency-key", "organization-action-key"))
+        .and(body_json(body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"team":"team-id"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client
+            .organization_action(
+                "example",
+                &body,
+                &IdempotencyKey::new("organization-action-key").unwrap()
+            )
+            .await
+            .unwrap()["team"],
+        "team-id"
+    );
+    let grant: briefcase_client::Invitation = serde_json::from_value(json!({"id":ENTRY_ID,"principal":{"type":"team","id":"example/team-id","name":"Design"},"access":["read"],"inherit":true,"expires_at":null})).unwrap();
+    assert!(matches!(
+        grant.invitation.principal,
+        briefcase_client::Recipient::Team(_)
+    ));
+}
+
 fn version_document(list_entries_revision: &str) -> serde_json::Value {
     let operations: Vec<serde_json::Value> = briefcase_client::OPERATIONS
         .iter()
@@ -34,8 +66,8 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "4.1.0",
-        "build": "4.1.0",
+        "contract_version": "5.0.0",
+        "build": "5.0.0",
         "operations": operations,
     })
 }
@@ -98,8 +130,8 @@ async fn connected(server: &MockServer) -> Client {
 
 #[test]
 fn the_client_carries_the_four_point_one_operation_catalogue() {
-    assert_eq!(briefcase_client::OPERATIONS.len(), 56);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "4.1.0");
+    assert_eq!(briefcase_client::OPERATIONS.len(), 59);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.0.0");
     for retired in [
         "submitTelemetry",
         "readIamInfo",
@@ -127,7 +159,7 @@ fn the_client_carries_the_four_point_one_operation_catalogue() {
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 4.1.0"
+            "{added} is part of contract 5.0.0"
         );
     }
 }

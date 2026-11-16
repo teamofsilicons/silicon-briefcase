@@ -567,7 +567,7 @@ async fn expiring_shares_extend_shorten_become_permanent_or_end_early() -> anyho
         )
         .await?;
     f.repo
-        .revoke_tag_or_member(&owner, folder, early.id().as_uuid(), &mutation()?)
+        .revoke_invitation(&owner, folder, early.id().as_uuid(), &mutation()?)
         .await?;
     let actions = f.actions(&owner, folder).await?;
     for expected in [

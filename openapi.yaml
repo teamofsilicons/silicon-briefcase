@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 4.1.0
+  version: 5.0.0
   description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
     search, versioning, recovery, and access for other apps through User verification proofs.
 servers:
@@ -14,6 +14,7 @@ security:
 - bearerAuth: []
 tags:
 - name: Authentication
+- name: Organizations
 - name: Drives
 - name: Entries
 - name: Applications
@@ -25,6 +26,86 @@ tags:
 - name: Bin
 - name: Storage
 paths:
+  /organizations:
+    get:
+      tags: [Organizations]
+      operationId: listOrganizations
+      summary: List this account’s organizations and available sharing targets
+      x-operation-version: 1.0.0
+      description: Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+      responses:
+        "200":
+          description: Current authorized organization data or applied action result
+          headers:
+            Cache-Control:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        default:
+          $ref: "#/components/responses/Error"
+  /organizations/{org}:
+    get:
+      tags: [Organizations]
+      operationId: readOrganization
+      summary: Read visible members, teams, invitations and capabilities
+      x-operation-version: 1.0.0
+      description: Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+      parameters:
+      - name: org
+        in: path
+        required: true
+        schema: {type: string, pattern: "^[a-z0-9_-]{3,30}$"}
+      responses:
+        "200":
+          description: Current authorized organization data or applied action result
+          headers:
+            Cache-Control:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        default:
+          $ref: "#/components/responses/Error"
+  /organizations/{org}/actions:
+    post:
+      tags: [Organizations]
+      operationId: manageOrganization
+      summary: Manage organization members, admins, teams and policies
+      x-operation-version: 1.0.0
+      description: Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+      parameters:
+      - name: org
+        in: path
+        required: true
+        schema: {type: string, pattern: "^[a-z0-9_-]{3,30}$"}
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 8, maxLength: 200}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [update, team_create, team_update, team_delete, team_member_add, team_member_remove, team_admin_set, admin_set, member_update, invite, invite_cancel, invite_resend, member_remove, policy_update]
+              additionalProperties: true
+      responses:
+        "200":
+          description: Current authorized organization data or applied action result
+          headers:
+            Cache-Control:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        default:
+          $ref: "#/components/responses/Error"
   /version:
     get:
       tags:
@@ -616,26 +697,6 @@ paths:
         default:
           $ref: '#/components/responses/Error'
       x-operation-version: 1.0.0
-  /telemetry:
-    post:
-      tags: [Storage]
-      operationId: submitTelemetry
-      x-operation-version: 1.0.0
-      deprecated: true
-      summary: Retired telemetry intake
-      security: []
-      description: Briefcase records no telemetry. Returns HTTP 410 without reading the request body. The operation
-        stays in the catalogue only because 4.0 clients verify it before their first call; it is removed with the
-        next contract major.
-      responses:
-        '410':
-          description: Telemetry was removed from Briefcase (`telemetry_removed`); nothing is recorded
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        default:
-          $ref: '#/components/responses/Error'
   /reports:
     post:
       tags: [Reports]
@@ -1381,7 +1442,7 @@ paths:
                 $ref: '#/components/schemas/InvitationPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 2.0.0
     post:
       operationId: createInvitation
       summary: Share with a Carbon or Silicon named by id
@@ -1412,7 +1473,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/InvitationCreate'
-      x-operation-version: 2.0.0
+      x-operation-version: 2.1.0
   /entries/{entry_id}/invitations/{grant_id}:
     delete:
       operationId: revokeInvitation
@@ -3002,12 +3063,20 @@ components:
           enum:
           - carbon
           - silicon
-          - email
-          - tag
+          - organization
+          - team
+        name:
+          type: [string, "null"]
+          readOnly: true
+          description: Display name for a team or organization.
+        public_id:
+          type: [string, "null"]
+          readOnly: true
         id:
           type: string
           minLength: 1
           maxLength: 254
+          description: Account ID, organization handle, or organization-handle/team-uuid from GET /organizations.
     InvitationCreate:
       type: object
       additionalProperties: false

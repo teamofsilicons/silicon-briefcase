@@ -1,6 +1,6 @@
 # Operation inventory
 
-Contract **4.1.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
+Contract **5.0.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
 the wire reference; the service serves the same list at `GET /api/version`, and a client checks every operation's
 id, method, path and revision there before its first call.
 
@@ -22,6 +22,9 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | --- | --- | --- | --- |
 | `readApiVersion` | `GET /version` | 1.0.0 | none |
 | `readAccountsInfo` | `GET /accounts` | 1.0.0 | none |
+| `listOrganizations` | `GET /organizations` | 1.0.0 | bearer |
+| `readOrganization` | `GET /organizations/{org}` | 1.0.0 | bearer |
+| `manageOrganization` | `POST /organizations/{org}/actions` | 1.0.0 | bearer |
 | `readAccount` | `GET /me` | 1.0.0 | bearer |
 | `listDrives` | `GET /drives` | 1.0.0 | bearer |
 | `listSharedWithMe` | `GET /shared` | 1.0.0 | bearer |
@@ -41,7 +44,6 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `revokePermission` | `DELETE /entries/{entry_id}/permissions/{grant_id}` | 1.0.0 | bearer |
 | `inspectEffectivePermissions` | `POST /permissions/effective` | 1.1.0 | bearer |
 | `searchFiles` | `GET /search` | 1.0.0 | bearer |
-| `submitTelemetry` | `POST /telemetry` | 1.0.0 | none (retired: 410; Briefcase records no telemetry) |
 | `submitReport` | `POST /reports` | 1.0.0 | bearer |
 | `listNotifications` | `GET /notifications` | 1.1.0 | bearer |
 | `readNotifications` | `POST /notifications/read` | 1.0.0 | bearer |
@@ -66,8 +68,8 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `resolveDriveTop` | `GET /paths/{owner}` | 1.0.0 | bearer |
 | `resolveLegacyPermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 | bearer, or none for link-shared entries (deprecated) |
 | `listArchiveContents` | `GET /entries/{entry_id}/archive` | 1.0.0 | bearer |
-| `listInvitations` | `GET /entries/{entry_id}/invitations` | 1.0.0 | bearer |
-| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.0.0 | bearer |
+| `listInvitations` | `GET /entries/{entry_id}/invitations` | 2.0.0 | bearer |
+| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.1.0 | bearer |
 | `changeExpiringShare` | `PATCH /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `makeEntryPermanent` | `DELETE /entries/{entry_id}/self-destruct` | 1.0.0 | bearer |

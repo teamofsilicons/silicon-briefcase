@@ -21,6 +21,7 @@ import { openCommandPalette, toggleCommandPalette, useRegisterCommands } from "@
 import { navigationType, navItemFor } from "@/lib/navigation";
 import { notifyError } from "@/lib/notify";
 import { AccountMenu } from "./account-menu";
+import { WorkspaceSwitcher } from "@/components/briefcase/workspace-switcher";
 import { CommandMenu } from "./command-menu";
 import { NavList, OutsideLinks } from "./nav-list";
 import styles from "./shell.module.css";
@@ -92,6 +93,7 @@ export function AppShell({ account, accountsUrl, children }: AppShellProps) {
             </Link>
           </div>
           <nav className={styles.nav} aria-label={appConfig.name}>
+            <WorkspaceSwitcher />
             <NavList id="sidebar" />
             <OutsideLinks />
           </nav>
@@ -137,6 +139,7 @@ export function AppShell({ account, accountsUrl, children }: AppShellProps) {
       <Drawer open={menuOpen} onOpenChange={setMenuOpen}>
         <DrawerContent side="left" title={appConfig.name} description={appConfig.tagline} className={styles.sheet}>
           <nav className={styles.sheetNav} aria-label={`${appConfig.name} menu`}>
+            <WorkspaceSwitcher />
             <NavList id="sheet" onNavigate={() => setMenuOpen(false)} />
             <OutsideLinks />
           </nav>
