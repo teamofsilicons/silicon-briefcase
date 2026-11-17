@@ -36,7 +36,16 @@ test("incoming shares are open by default and the recipient can restrict and reo
       headers: sameOrigin(), data: { id: accounts.carbon.id, name: "Incoming share sender", trust: 1 },
     });
     expect(contact.ok()).toBeTruthy();
+    const disconnected = await context.request.put(`${BASE}/api/v1/contacts/connection`, {
+      headers: sameOrigin(), data: { enabled: false },
+    });
+    expect(disconnected.ok()).toBeTruthy();
+    const signedOut = await context.request.post(`${BASE}/auth/sign-out`, { headers: sameOrigin() });
+    expect(signedOut.ok()).toBeTruthy();
     expect((await shareNewFolder()).status()).toBe(201);
+
+    await signIn(page, accounts.friend.email, "/settings");
+    await expect(allow).not.toBeChecked();
     await allow.click();
     await expect(allow).toBeChecked();
     await page.reload();
