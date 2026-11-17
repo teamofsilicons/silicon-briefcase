@@ -1,5 +1,7 @@
-/* The app's mark: the bare glyph in ink beside the name in the pixel face, as on Silicon Writings and Silicon Apps. */
+/* The app's mark: the bare glyph in ink beside "Team of Silicons Briefcase" in the body face at 16px, medium, with the
+   product muted, as Silicon Accounts' top bar draws its wordmark. */
 .mark { display: inline-grid; width: var(--mark-size, 22px); height: var(--mark-size, 22px); flex: none; place-items: center; color: var(--foreground); }
 .mark svg { display: block; }
-.wordmark { display: inline-flex; min-width: 0; align-items: center; gap: 9px; color: var(--foreground); font-family: var(--font-pixel); font-size: 1.0625rem; letter-spacing: 0; }
+.wordmark { display: inline-flex; min-width: 0; align-items: center; gap: var(--space-group); color: var(--foreground); font-family: var(--font-body); font-size: var(--text-base); font-weight: 500; letter-spacing: var(--tracking-body); }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.product { color: var(--text-muted); font-weight: 500; }

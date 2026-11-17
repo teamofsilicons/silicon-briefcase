@@ -1,17 +1,23 @@
 "use client";
+
+/**
+ * Sharing a file or folder: with whom (people, a team, or the whole organization, as Silicon UI's segmented control),
+ * then the recipient, the access and an optional expiry, and the one primary action. Notices are Silicon UI alerts.
+ */
 import { useRef, useState } from "react";
-import { Building2, UserRound, UsersRound } from "lucide-react";
-import { Button } from "@/components/silicon-ui/button/button";
-import { Input } from "@/components/silicon-ui/input/input";
-import { Select } from "@/components/silicon-ui/select/select";
-import { api } from "@/lib/client/api";
 import { useQueryClient } from "@tanstack/react-query";
+import { Alert } from "@teamofsilicons/silicon-ui/alert";
+import { Button } from "@teamofsilicons/silicon-ui/button";
+import { Input } from "@teamofsilicons/silicon-ui/input";
+import { Select } from "@teamofsilicons/silicon-ui/select";
+import SegmentedControl from "@teamofsilicons/silicon-ui/segmented-control";
+import { api } from "@/lib/client/api";
 import type { Person } from "@/lib/briefcase/people";
+import { groupShareBody } from "@/lib/briefcase/organizations";
 import { RecipientPicker } from "./recipient-picker";
 import { ContactEditor } from "./contacts";
-import { groupShareBody } from "@/lib/briefcase/organizations";
 import { useOrganizations } from "./organizations-query";
-import styles from "./organizations.module.css";
+import styles from "./people.module.css";
 
 export function ShareAccess({ endpoint, folder, busy, minutes, setMinutes, act }: { endpoint: string; folder: boolean; busy: boolean; minutes: string; setMinutes: (minutes: string) => void; act: (work: () => Promise<unknown>, success: string) => Promise<void> }) {
   const organizations = useOrganizations();
@@ -42,13 +48,27 @@ export function ShareAccess({ endpoint, folder, busy, minutes, setMinutes, act }
     await cache.invalidateQueries({ queryKey: ["people"] });
     return value;
   }
-  return <form className={styles.form} onSubmit={event => { event.preventDefault(); void act(share, "Access shared"); }}>
-    <div><h3>Share access</h3><p className={styles.muted}>Choose people, a particular team, or everyone in your organization.</p></div>
-    <div className={styles.shareKinds} aria-label="Share with">{[{ id: "account", label: "People", icon: UserRound }, { id: "team", label: "Team", icon: UsersRound }, { id: "organization", label: "Organization", icon: Building2 }].map(item => <button key={item.id} type="button" aria-pressed={kind === item.id} onClick={() => { setKind(item.id); setTargetId(""); }}><item.icon size={16} />{item.label}</button>)}</div>
-    {kind === "account" ? <RecipientPicker value={recipient} onChange={setRecipient} disabled={busy} onSaveContact={setEditingContact} /> : organizations.error ? <div className={styles.notice}>Couldn’t load your organizations. <Button type="button" variant="ghost" onClick={() => void organizations.refetch()}>Try again</Button></div> : organizations.isPending ? <p role="status">Loading available teams…</p> : targets.length ? <><Select label={kind === "team" ? "Team" : "Organization"} placeholder={`Choose ${kind === "team" ? "a team" : "an organization"}`} value={targetId} onValueChange={setTargetId} options={targets.map(target => ({ value: target.id, label: kind === "team" ? `${target.name} · ${target.org_id}` : target.name }))} /><p className={styles.muted}>{kind === "team" ? "Current and future members of this team receive access. Leaving the team ends access from this share." : "Current and future members of this organization receive access."}</p></> : <div className={styles.notice}>{kind === "team" ? "No teams are available to this account." : "This account has no organization membership."} Open Organizations or switch to your work account to manage team sharing.</div>}
-    <div className={styles.fields}><Select label="Access" value={rights} onValueChange={setRights} disabled={!!minutes} options={[{ value: "read", label: "Can view and download" }, { value: "read,update", label: "Can view and edit" }, ...(folder ? [{ value: "read,write", label: "Can view and add files" }, { value: "read,write,update", label: "Can view, add, and edit" }] : [])]} /><Input label="Expires after (minutes)" type="number" min={1} max={43200} step={1} placeholder="No expiry" value={minutes} onChange={event => setMinutes(event.target.value)} /></div>
-    {minutes && <p className={styles.muted}>Expiring shares allow viewing and downloading only, for up to 30 days.</p>}
-    <Button type="submit" loading={busy} disabled={kind === "account" ? !recipient : (!target || !!organizations.error)}>Share {kind === "team" ? "with team" : kind === "organization" ? "with organization" : "access"}</Button>
-    {editingContact && <ContactEditor initial={editingContact} onClose={() => setEditingContact(null)} onSaved={setRecipient} />}
+  return <form className={styles.share} onSubmit={event => { event.preventDefault(); void act(share, "Access shared"); }} aria-labelledby="share-access-title">
+    <div className={styles.shareHead}>
+      <h3 id="share-access-title" className={styles.shareTitle}>Share access</h3>
+      <p className={styles.shareText}>Choose people, a particular team, or everyone in your organization.</p>
+    </div>
+    <SegmentedControl size="sm" label="Share with" value={kind} onValueChange={value => { setKind(value); setTargetId(""); }} options={[{ value: "account", label: "People" }, { value: "team", label: "Team" }, { value: "organization", label: "Organization" }]} />
+    {kind === "account" ? <RecipientPicker value={recipient} onChange={setRecipient} disabled={busy} onSaveContact={setEditingContact} />
+      : organizations.error ? <Alert tone="danger" title="Your organizations could not be loaded"><Button type="button" variant="secondary" size="sm" onClick={() => void organizations.refetch()}>Try Again</Button></Alert>
+      : organizations.isPending ? <p role="status" className={styles.shareText}>Loading available teams…</p>
+      : targets.length ? <>
+        <Select label={kind === "team" ? "Team" : "Organization"} placeholder={`Choose ${kind === "team" ? "a team" : "an organization"}`} value={targetId} onValueChange={setTargetId} options={targets.map(target => ({ value: target.id, label: kind === "team" ? `${target.name} · ${target.org_id}` : target.name }))} />
+        <p className={styles.shareText}>{kind === "team" ? "Current and future members of this team receive access. Leaving the team ends access from this share." : "Current and future members of this organization receive access."}</p>
+      </>
+      : <Alert tone="info" title={kind === "team" ? "No teams are available to this account" : "This account has no organization membership"}>Open Organizations or switch to your work account to manage team sharing.</Alert>}
+    <div className={styles.fields}>
+      <Select label="Access" value={rights} onValueChange={setRights} disabled={!!minutes} options={[{ value: "read", label: "Can view and download" }, { value: "read,update", label: "Can view and edit" }, ...(folder ? [{ value: "read,write", label: "Can view and add files" }, { value: "read,write,update", label: "Can view, add, and edit" }] : [])]} />
+      <Input label="Expires after (minutes)" type="number" min={1} max={43200} step={1} placeholder="No expiry" value={minutes} onChange={event => setMinutes(event.target.value)} description={minutes ? "Expiring shares allow viewing and downloading only, for up to 30 days." : undefined} />
+    </div>
+    <div className={styles.shareActions}>
+      <Button type="submit" loading={busy} disabled={kind === "account" ? !recipient : (!target || !!organizations.error)}>Share {kind === "team" ? "with Team" : kind === "organization" ? "with Organization" : "Access"}</Button>
+    </div>
+    {editingContact ? <ContactEditor initial={editingContact} onClose={() => setEditingContact(null)} onSaved={setRecipient} /> : null}
   </form>;
 }

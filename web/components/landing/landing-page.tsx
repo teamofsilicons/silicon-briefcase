@@ -1,6 +1,6 @@
 /**
- * The public landing page of the app (server-rendered, no client code of its own but the copy buttons), as quiet as
- * Silicon Writings and the Silicon Apps store: one column, a pixel-face kicker over a blue serif headline, Sign in as
+ * The public landing page of the app (server-rendered, no client code of its own but the copy buttons), on Silicon
+ * Accounts' type and colours: one column, a quiet caption over the display headline, Sign in as
  * the one main action with the docs beside it, what the app does for Carbons and for Silicons as two plain lists, how a
  * Silicon installs it and signs in, and one closing line. Every word comes from lib/app.config.ts, so an app changes
  * its landing page there. Semantic HTML: one h1, a section per subject, lists for lists, plain links.
@@ -37,7 +37,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
     install,
     ...(cli ? [`silicon-accounts login --app ${appId} -q | ${cli.command} login --slt-stdin`, `${cli.command} --help`] : []),
   ].join("\n");
-  const primary = signedIn ? { href: appConfig.home, label: `Open ${name}` } : { href: "/auth/sign-in", label: `Sign in to ${name}` };
+  const primary = signedIn ? { href: appConfig.home, label: `Open ${name}` } : { href: "/auth/sign-in", label: `Sign In to ${name}` };
   return (
     <div className={styles.page}>
       <header className={styles.hero}>
@@ -46,7 +46,7 @@ export function LandingPage({ signedIn }: { signedIn: boolean }) {
         <p className={styles.lede}>{landing.lede}</p>
         <div className={styles.actions}>
           <Action href={primary.href} size="lg">{primary.label}</Action>
-          <Action href={links.docs} size="lg" variant="secondary" rel="noopener">Read the docs</Action>
+          <Action href={links.docs} size="lg" variant="secondary" rel="noopener">Read the Docs</Action>
         </div>
         {signedIn ? null : <p className={styles.note}>Sign in with your Silicon Accounts account: Google, Apple, email or phone.</p>}
       </header>

@@ -1,0 +1,52 @@
+/* The account pages' sections and rows (rows.tsx), on Home's rules (Anil, 2026-11-10; spacing 2026-11-13): an h2 8px
+   above its boxed list, so the heading belongs to its box; 32px between sections (the page column's 16 and this 16
+   more), so each reads as its own group. A page that holds sections outside the column (the Silicon page's tabs) gives
+   them the same 16px column (silicon-page.module.css .panel); one white list with a clear border and no resting shadow; rows 8px
+   high and 12px at the sides, straight dividers between them; the title in body over one line in --text-soft. */
+
+.section { display: grid; gap: var(--space-related); margin-top: var(--space-section); }
+.head { display: flex; align-items: center; gap: var(--space-related); }
+.title { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
+.headBlock { display: grid; gap: var(--space-tight); }
+.description { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+
+.rows { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--sq-stroke); background: var(--sq-fill); list-style: none; }
+/* A danger zone: the box's line and its dividers in a light red. */
+.rows[data-tone="danger"] { --sq-stroke: color-mix(in oklab, var(--danger) 35%, var(--border)); }
+.rows[data-tone="danger"] > * + * { border-top-color: color-mix(in oklab, var(--danger) 20%, var(--border-subtle)); }
+.row, .link { display: flex; min-width: 0; align-items: center; gap: var(--space-group); padding: var(--space-related) var(--space-group); }
+.row + .row, .row + .linkItem, .linkItem + .row, .linkItem + .linkItem,
+.actionItem + .actionItem, .actionItem + .row, .row + .actionItem, .actionItem + .linkItem, .linkItem + .actionItem { border-top: 1px solid var(--border-subtle); }
+.text { display: grid; min-width: 0; flex: 1; gap: 0; }
+.rowTitle { min-width: 0; overflow: hidden; color: var(--foreground); font: var(--body); letter-spacing: var(--body-tracking); text-overflow: ellipsis; white-space: nowrap; }
+.rowDetail { min-width: 0; overflow: hidden; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); text-overflow: ellipsis; white-space: nowrap; }
+.strong { color: var(--foreground); font-variant-numeric: tabular-nums; }
+.rowError { color: var(--danger); font: var(--small); letter-spacing: var(--small-tracking); }
+.actions, .end { display: flex; flex: none; align-items: center; justify-content: flex-end; gap: var(--space-related); }
+
+/* A row that opens something in place (ActionItem): its words are one button, its own buttons sit after it. */
+.actionItem { display: flex; min-width: 0; align-items: center; }
+.actionItem > .link { width: 100%; min-width: 0; flex: 1; border: 0; background: none; font: inherit; text-align: start; cursor: pointer; }
+.itemActions { display: flex; flex: none; align-items: center; gap: var(--space-tight); padding-inline-end: var(--space-group); }
+@media (hover: hover) and (pointer: fine) { .actionItem { transition: background-color var(--duration-fast) var(--ease-standard); } .actionItem:hover { background: var(--neutral-1); } .actionItem > .link:hover { background: none; } }
+
+/* A linked row: the whole row is the link; the row darkens a step on hover. */
+.linkItem { display: block; }
+.link { color: inherit; text-decoration: none; transition: background-color var(--duration-fast) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .link:hover { background: var(--neutral-1); } }
+.link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.linkRow { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: flex; min-width: 0; align-items: center; gap: var(--space-group); margin-top: var(--space-section); padding: var(--space-related) var(--space-group); border: 1px solid var(--sq-stroke); background: var(--sq-fill); color: var(--foreground); text-decoration: none; transition: box-shadow var(--duration-fast) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .linkRow:hover { box-shadow: var(--shadow-raised); } }
+.linkRow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chevron { flex: none; color: var(--text-muted); }
+
+/* 28px tiles: a grey tile with an icon. */
+.icon { --sq-r: var(--radius-control); --sq-fill: var(--surface-muted); display: grid; width: calc(var(--control-height-xs) + var(--space-tight)); height: calc(var(--control-height-xs) + var(--space-tight)); flex: none; place-items: center; background: var(--sq-fill); color: var(--text-secondary); }
+
+@media (prefers-reduced-motion: reduce) { .link, .linkRow { transition: none; } }
+@media (max-width: 639px) {
+  /* Two buttons go under the words on a phone; a single button stays at the row's end. */
+  .row[data-wide] { flex-wrap: wrap; }
+  .row[data-wide] .actions { width: 100%; justify-content: flex-start; padding-left: calc(var(--control-height-xs) + var(--space-tight) + var(--space-group)); }
+}

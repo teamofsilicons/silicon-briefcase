@@ -55,8 +55,8 @@ export default async function SignInPage({ searchParams }: PageProps<"/sign-in">
               what to share on the way.
             </p>
             <div className={styles.actions}>
-              <Action href={start} size="lg" className={styles.cta}>Sign in to {appConfig.name}<ArrowRight size={16} strokeWidth={1.75} aria-hidden="true" /></Action>
-              <Action href="/" size="lg" variant="ghost" className={styles.cta}>Back to the home page</Action>
+              <Action href={start} size="lg" className={styles.cta}>Sign In to {appConfig.name}<ArrowRight size={16} strokeWidth={1.75} aria-hidden="true" /></Action>
+              <Action href="/" size="lg" variant="ghost" className={styles.cta}>Back to the Home Page</Action>
             </div>
           </section>
         </div>
@@ -85,7 +85,7 @@ export default async function SignInPage({ searchParams }: PageProps<"/sign-in">
             <>
               <p className={styles.signedIn}>You are signed in as <strong>{session.account.display_name}</strong> ({session.account.id}).</p>
               <Action href={back} size="lg" className={styles.cta}>Continue to {appConfig.name}<ArrowRight size={16} strokeWidth={1.75} aria-hidden="true" /></Action>
-              <Action href={`/auth/sign-in?prompt=select_account&return_to=${encodeURIComponent(back)}`} size="lg" variant="ghost" className={styles.cta}>Use another account</Action>
+              <Action href={`/auth/sign-in?prompt=select_account&return_to=${encodeURIComponent(back)}`} size="lg" variant="ghost" className={styles.cta}>Use Another Account</Action>
             </>
           ) : (
             <Action href={start} size="lg" className={styles.cta}>Continue with Silicon Accounts<ArrowRight size={16} strokeWidth={1.75} aria-hidden="true" /></Action>

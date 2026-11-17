@@ -1,12 +1,12 @@
-/* Not found, errors and cancelled sign-ins: one calm message in the middle (the developer site's status pages). */
+/* Not found, errors and cancelled sign-ins: one calm message in the middle, as Silicon Accounts' status pages. */
 .problem { display: grid; place-items: center; padding: var(--space-12) var(--gutter); }
-.problem[data-layout="page"] { min-height: calc(100vh - 65px); min-height: calc(100dvh - 65px); }
+.problem[data-layout="page"] { min-height: 100vh; min-height: 100dvh; }
 .problem[data-layout="inset"] { min-height: min(70vh, 640px); }
 .problem > * { width: min(100%, var(--page-narrow)); }
 .box { display: grid; justify-items: center; gap: var(--space-4); text-align: center; }
 .icon { --sq-r: 16px; --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; width: 56px; height: 56px; place-items: center; border: 1px solid var(--sq-stroke); background: var(--sq-fill); color: var(--text-secondary); }
 .icon svg { width: 24px; height: 24px; }
-.title { margin: 0; color: var(--accent-ink); font-family: var(--font-serif); font-weight: 400; letter-spacing: -.01em; font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem); line-height: 1.1; text-wrap: balance; }
+.title { margin: 0; color: var(--foreground); font: var(--display); letter-spacing: var(--display-tracking); text-wrap: balance; }
 .text { max-width: 46ch; margin: 0; color: var(--text-secondary); line-height: 1.6; text-wrap: pretty; }
 .text p { margin: 0; }
 .text p + p { margin-top: var(--space-2); }

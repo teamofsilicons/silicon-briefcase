@@ -1,0 +1,14 @@
+/* A file's preview (preview.tsx): one quiet box on the canvas grey, the file inside it at its own size. */
+.preview { --sq-r: var(--radius-container); --sq-fill: var(--canvas); --sq-stroke: var(--border); display: flex; min-height: 220px; align-items: center; justify-content: center; overflow: hidden; border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
+.preview img, .preview video { max-width: 100%; max-height: 420px; object-fit: contain; }
+.preview audio { width: 90%; }
+.preview iframe { width: 100%; height: 420px; border: 0; background: white; }
+.preview pre { width: 100%; max-height: 420px; align-self: stretch; margin: 0; padding: var(--space-block); overflow: auto; background: var(--surface); font-size: .82rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+.placeholder { display: grid; justify-items: center; gap: var(--space-related); padding: var(--space-block); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); text-align: center; }
+.placeholder p, .status { margin: 0; }
+.status { padding: var(--space-block); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
+.muted { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.table { width: 100%; align-self: stretch; border-collapse: collapse; background: var(--surface); font: var(--small); letter-spacing: var(--small-tracking); text-align: left; }
+.table th { padding: var(--space-related) var(--space-group); border-bottom: 1px solid var(--border); color: var(--text-secondary); font: var(--caption); letter-spacing: var(--caption-tracking); }
+.table td { padding: var(--space-related) var(--space-group); border-bottom: 1px solid var(--border-subtle); }
+.table tr:last-child td { border-bottom: 0; }

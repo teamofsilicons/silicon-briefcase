@@ -64,8 +64,8 @@ for (const theme of ["light", "dark"] as const) {
         await audit(page, `${item.href} (${where})`);
       }
       await page.goto("/files");
-      await page.getByRole("button", { name: "New folder", exact: true }).click();
-      await page.getByRole("dialog", { name: "New folder" }).waitFor();
+      await page.getByRole("button", { name: "New Folder", exact: true }).click();
+      await page.getByRole("dialog", { name: "New Folder" }).waitFor();
       await audit(page, `new folder dialog (${where})`);
       await context.close();
     });

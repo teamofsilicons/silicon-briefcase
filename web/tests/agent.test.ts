@@ -32,10 +32,10 @@ test("llms.txt says what the app is, how a Silicon installs it and signs in, and
   for (const word of ["AI agent", "human", "user account", "organization", " org ", "Honeycomb", "IAM"]) assert.ok(!text.includes(word), `never "${word}"`);
 });
 
-test("the logo is the mark in ink on a cream square, and the tab icon is the mark alone", () => {
+test("the logo is the mark in ink on a grey square, as Accounts' icon, and the tab icon is the mark alone", () => {
   const svg = markSvg();
   assert.ok(svg.startsWith("<svg "));
-  assert.ok(svg.includes('<rect width="200" height="200" fill="#EDE8E0"/>'));
+  assert.ok(svg.includes('<rect width="200" height="200" fill="#E3E3E3"/>'));
   assert.ok(svg.includes("#181818"));
   const icon = readFileSync("app/icon.svg", "utf8");
   assert.ok(icon.includes(LOGO_MARK.body));

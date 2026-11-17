@@ -9,7 +9,7 @@
  * The Arc toast stack (components/silicon-ui/toast-stack) lives in the providers; <ToastBridge> hands its API to this module.
  * Toasts raised before it mounts are queued and shown once it does. Adapted from the developer site's lib/notify.ts.
  */
-import type { ToastOptions, ToastStackApi } from "@/components/silicon-ui/toast-stack/toast-stack";
+import type { ToastOptions, ToastStackApi } from "@teamofsilicons/silicon-ui/toast-stack";
 import { ApiError } from "./errors";
 import { durationText, readableTimes } from "./format";
 

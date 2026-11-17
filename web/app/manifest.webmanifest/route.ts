@@ -10,8 +10,8 @@ export function GET(request: Request) {
     start_url: appConfig.home,
     scope: "/",
     display: "standalone",
-    background_color: "#FFFDF9",
-    theme_color: "#FFFDF9",
+    background_color: "#FCFCFC",
+    theme_color: "#FCFCFC",
     lang: "en",
     icons: [
       { src: "/icon", type: "image/png", sizes: "512x512" },

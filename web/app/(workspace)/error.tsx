@@ -7,7 +7,7 @@
  */
 import { useEffect } from "react";
 import { RotateCcw } from "lucide-react";
-import { Button } from "@/components/silicon-ui/button/button";
+import { Button } from "@teamofsilicons/silicon-ui/button";
 import { ButtonLink } from "@/components/foundation/button-link";
 import { Problem } from "@/components/foundation/feedback/problem";
 import { appConfig } from "@/lib/app.config";
@@ -24,7 +24,7 @@ export default function WorkspaceError({ error, reset }: { error: Error & { dige
       reference={error.digest}
       actions={
         <>
-          <Button variant="secondary" onClick={reset}>Try again</Button>
+          <Button variant="secondary" onClick={reset}>Try Again</Button>
           <ButtonLink href={appConfig.home} variant="ghost">Back to {appConfig.nav[0]?.label ?? appConfig.name}</ButtonLink>
         </>
       }

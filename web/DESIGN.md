@@ -1,5 +1,17 @@
 # The Silicon design system
 
+> **2026-11-18: the Silicon Accounts look.** Briefcase now shares its interface with accounts.teamofsilicons.com, so the
+> two read as one product. `styles/tokens.css`, `styles/base.css` and `styles/squircle.css` are copied from Accounts'
+> `web/styles` (keep them in step: change Accounts first, then here); components come from Silicon UI on npm, at the version
+> Accounts pins. The frame is Accounts' (`components/foundation/shell`): a 56px top bar on the canvas grey (the mark and
+> "Team of Silicons Briefcase", a 400px ⌘K search in the middle, the account menu), the section list beside a white page
+> box with an 8px corner and a #E5E7EB hairline from 900px (a bottom sheet below), number keys for the sections. Pages
+> use Accounts' parts (`components/foundation/page`): the sticky page bar (the way back above the title, the page's
+> buttons at its right) and sections as an h2 over one boxed list of rows (a 28px lead, the title in body over one
+> detail line, the row's buttons at its end). Text and titles are the system face; colours are Accounts' neutral #FCFCFC
+> page, near-black ink and the #3460F0 accent; buttons and titles use Title Case. Where this document describes the
+> Writings look or an older palette, this note wins.
+>
 > **2026-10-12: the Writings look, light only, no telemetry.** The site now looks like Silicon Writings, the Silicon
 > Apps store and Silicon Accounts: warm paper `#FFFDF9`, ink `#1E1E1C`, Hedvig Letters Serif for titles (page titles in
 > blue `#1F5CB1`), BDO Grotesk for text, Geist Pixel for the wordmark and small labels, the current item on beige

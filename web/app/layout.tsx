@@ -1,12 +1,12 @@
 /**
- * The root layout: <html> and <body>, the Silicon look (Silicon UI's foundation, BDO Grotesk, the tokens, squircles, the base),
+ * The root layout: <html> and <body>, the Silicon look as Silicon Accounts has it (Silicon UI's styles, the tokens, squircles,
+ * the base; text and titles in the system face),
  * the light-only boot script (inline, with the request's CSP nonce from proxy.ts), the app's colour and the
  * metadata every page shares. It ships no client code of its own: the public pages stay server-rendered HTML with a
  * few small islands, and the signed-in workspace mounts its providers in app/(workspace)/layout.tsx. Every page renders
  * per request (the nonce changes each time).
  */
-import "@/components/silicon-ui/foundation.css";
-import "@/styles/fonts.css";
+import "@teamofsilicons/silicon-ui/styles.css";
 import "@/styles/tokens.css";
 import "@/styles/squircle.css";
 import "@/styles/base.css";
@@ -37,7 +37,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#FFFDF9",
+  themeColor: "#FCFCFC",
   colorScheme: "light",
 };
 
@@ -48,11 +48,6 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     <html lang="en" style={accent} suppressHydrationWarning>
       <head>
         <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
-        {/* Every face the first paint uses, fetched with the page so text never paints in a fallback first (styles/fonts.css). */}
-        <link rel="preload" href="/fonts/bdo-grotesk/BDOGrotesk-Regular.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
-        <link rel="preload" href="/fonts/bdo-grotesk/BDOGrotesk-Medium.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
-        <link rel="preload" href="/fonts/hedvig-letters-serif/HedvigLettersSerif-Regular.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
-        <link rel="preload" href="/fonts/geist-pixel/GeistPixel-Square.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
       </head>
       <body>{children}</body>
     </html>

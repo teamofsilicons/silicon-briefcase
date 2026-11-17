@@ -1,0 +1,5 @@
+/* Notifications (inbox.tsx), as Accounts' Activity page. */
+.lead { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.end { display: inline-flex; align-items: center; gap: var(--space-related); }
+.time { color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.empty { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-block) var(--space-group); border: 1px dashed var(--sq-stroke); }

@@ -1,0 +1,56 @@
+/* The file pages (file-browser.tsx), on Silicon Accounts' rules: the page bar's buttons, a line of context in
+   --text-soft, search and filters in one row, the entries as one boxed list (rows from foundation/page/rows) or as
+   cards, and a quiet foot with the count and Load More. */
+
+.page { gap: var(--space-section); }
+.barActions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-related); }
+/* List or grid only where a grid fits: phones get the list. */
+.viewSwitch { display: contents; }
+@media (max-width: 639px) { .viewSwitch { display: none; } }
+
+.lead { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.hint { margin: 0; color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
+
+.toolbar, .filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-group); }
+.search { min-width: min(100%, 240px); flex: 2 1 280px; }
+.toolbar > :not(.search) { flex: 1 1 180px; min-width: 0; }
+.filters > * { min-width: 0; flex: 1 1 170px; }
+.filters > button { flex: none; }
+
+/* Upload options: a quiet disclosure under the toolbar. */
+.options { display: grid; gap: var(--space-related); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
+.options > summary { width: fit-content; cursor: pointer; }
+.options[open] > summary { margin-bottom: var(--space-related); }
+
+.results { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-related); color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+
+/* The 28px tile for an entry's kind (file-kind.tsx): its colour on a 10% tint of itself. */
+.tile { --sq-r: var(--radius-control); --sq-fill: color-mix(in oklab, var(--tone) 10%, var(--surface)); display: grid; width: calc(var(--control-height-xs) + var(--space-tight)); height: calc(var(--control-height-xs) + var(--space-tight)); flex: none; place-items: center; background: var(--sq-fill); color: var(--tone); }
+.tile[data-large] { width: var(--control-height-lg); height: var(--control-height-lg); }
+
+.updated { color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 719px) { .updated { display: none; } }
+.sharers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-tight); margin-top: var(--space-tight); white-space: normal; }
+
+/* Drop files anywhere on the list: the box takes the accent's tint while files are over it. */
+.dropArea { --sq-r: var(--radius-container); min-width: 0; transition: background-color var(--duration-fast) var(--ease-standard), outline-color var(--duration-fast) var(--ease-standard); outline: 2px dashed transparent; outline-offset: 4px; }
+.dropArea[data-dragging] { outline-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
+.loading { display: grid; }
+.empty { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-block) var(--space-group); border: 1px dashed var(--sq-stroke); }
+
+/* Grid view: cards on the boxes' rules (a white face, a clear border, no resting shadow), raised on hover. */
+.grid { display: grid; margin: 0; padding: 0; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: var(--space-group); list-style: none; }
+.card { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; width: 100%; min-width: 0; height: 100%; align-content: start; justify-items: start; gap: var(--space-related); padding: var(--space-group); border: 1px solid var(--sq-stroke); background: var(--sq-fill); color: var(--foreground); font: inherit; text-align: start; cursor: pointer; transition: box-shadow var(--duration-fast) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .card:hover { box-shadow: var(--shadow-raised); } }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cardName { width: 100%; overflow: hidden; margin-top: var(--space-tight); font: var(--body); letter-spacing: var(--body-tracking); text-overflow: ellipsis; white-space: nowrap; }
+.cardDetail { color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+
+.listFoot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-group); color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); }
+
+/* Dialogs: the fields, then Cancel (ghost) and the action, at the end (Accounts' dialog rules). */
+.form { display: grid; gap: var(--space-group); }
+.dialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-related); margin-top: var(--space-related); }
+@media (max-width: 520px) { .dialogActions { display: grid; grid-template-columns: minmax(0, 1fr); } .dialogActions > * { width: 100%; } }
+
+@media (prefers-reduced-motion: reduce) { .card, .dropArea { transition: none; } }

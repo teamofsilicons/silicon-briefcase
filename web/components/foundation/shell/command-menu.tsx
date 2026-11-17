@@ -1,19 +1,15 @@
 "use client";
 
 /**
- * The ⌘K command palette: Silicon UI's command-palette block in a modal layer. Commands come from the registry
- * (lib/commands.ts): the shell's navigation, theme and account commands plus whatever the current page adds.
+ * The ⌘K command palette in Silicon UI's headerless Dialog, as on Silicon Accounts. Commands come from the registry
+ * (lib/commands.ts): the shell's navigation and account commands plus whatever the current page adds.
  */
-import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { CommandPalette, type CommandItem } from "@/components/silicon-ui/command-palette/command-palette";
-import { returnFocusTo, useLayerOpener } from "@/lib/return-focus";
+import { CommandPalette, type CommandItem } from "@teamofsilicons/silicon-ui/command-palette";
+import { Dialog, DialogContent } from "@teamofsilicons/silicon-ui/dialog";
 import { closeCommandPalette, setCommandPaletteOpen, useCommandPaletteOpen, useCommands } from "@/lib/commands";
-import styles from "./shell.module.css";
 
 export function CommandMenu() {
   const open = useCommandPaletteOpen();
-  // Opened by ⌘K or the search button (no Radix Trigger): closing returns focus to what had it (lib/return-focus.ts).
-  const opener = useLayerOpener(open);
   const commands = useCommands();
   const items: CommandItem[] = commands.map(({ id, label, description, group, keywords, icon, shortcut }) => ({ id, label, description, group, keywords, icon, shortcut }));
   const run = (item: CommandItem) => {
@@ -23,18 +19,10 @@ export function CommandMenu() {
     if (command) requestAnimationFrame(() => command.run());
   };
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={setCommandPaletteOpen}>
-      <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className={styles.paletteOverlay} />
-        <div className={styles.palettePositioner}>
-          <DialogPrimitive.Content className={styles.palettePanel} aria-describedby={undefined} onCloseAutoFocus={returnFocusTo(opener)}>
-            <DialogPrimitive.Title className="sr-only">Search and jump</DialogPrimitive.Title>
-            {open ? (
-              <CommandPalette items={items} placeholder="Search pages and actions" label="Search pages and actions" autoFocus onClose={closeCommandPalette} onSelect={run} />
-            ) : null}
-          </DialogPrimitive.Content>
-        </div>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+    <Dialog open={open} onOpenChange={setCommandPaletteOpen}>
+      <DialogContent title="Search and jump" hideHeader placement="top">
+        {open ? <CommandPalette items={items} placeholder="Search pages and actions" label="Search pages and actions" autoFocus onClose={closeCommandPalette} onSelect={run} /> : null}
+      </DialogContent>
+    </Dialog>
   );
 }

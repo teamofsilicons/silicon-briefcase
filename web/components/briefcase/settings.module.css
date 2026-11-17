@@ -1,0 +1,21 @@
+/* Settings (settings.tsx), on Accounts' rules: sections an h2 over one boxed list or one boxed form. */
+.lead { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.drive { max-width: 360px; }
+.meter { display: block; width: clamp(80px, 18vw, 160px); }
+@media (max-width: 519px) { .meter { display: none; } }
+
+/* The allowance form, as the last row of its list. */
+.formRow:not(:first-child) { border-top: 1px solid var(--border-subtle); }
+.formRow { padding: var(--space-related) var(--space-group); list-style: none; }
+.inlineForm { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-related); }
+.inlineForm > :first-child { min-width: 0; flex: 1 1 220px; }
+
+/* A section holding a form: Accounts' section head over one box. */
+.section { display: grid; gap: var(--space-related); margin-top: var(--space-section); }
+.head { display: grid; gap: var(--space-tight); }
+.title { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
+.description { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.box { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; gap: var(--space-group); padding: var(--space-group); border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
+.fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-group); }
+.end { display: flex; justify-content: flex-end; }
+@media (max-width: 640px) { .fields { grid-template-columns: minmax(0, 1fr); } }

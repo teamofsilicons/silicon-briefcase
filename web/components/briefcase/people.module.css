@@ -1,15 +1,35 @@
-.field, .form { display: grid; gap: var(--space-3); min-width: 0; }
-.suggestions { margin: 0; padding: var(--space-1); list-style: none; max-height: 280px; overflow-y: auto; --sq-r: var(--radius-control); --sq-fill: var(--surface); --sq-stroke: var(--border); background: var(--sq-fill); border: 1px solid var(--sq-stroke); }
-.suggestion { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); cursor: pointer; border-radius: 12px; corner-shape: squircle; }
+/* People: the recipient picker, the share form, Contacts and its dialog, on Accounts' rules (type roles, quiet
+   surfaces, Cancel then the action at a dialog's end). */
+.field, .form { display: grid; min-width: 0; gap: var(--space-group); }
+.lead { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.note { color: var(--text-secondary); font: var(--hint); letter-spacing: var(--hint-tracking); }
+
+/* The picker's suggestions: a floating list under the field. */
+.suggestions { --sq-r: var(--radius-control); --sq-fill: var(--surface); --sq-stroke: var(--border); max-height: 280px; margin: 0; padding: var(--space-tight); overflow-y: auto; border: 1px solid var(--sq-stroke); background: var(--sq-fill); box-shadow: var(--shadow-floating); list-style: none; }
+.suggestion { display: flex; align-items: center; justify-content: space-between; gap: var(--space-group); padding: var(--space-related); border-radius: var(--radius-control); cursor: pointer; corner-shape: squircle; }
 .suggestion[aria-selected="true"], .suggestion:hover { background: var(--surface-muted); }
-.note { font-size: var(--text-xs); color: var(--text-secondary); }
-.selected { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3); --sq-r: var(--radius-control); --sq-fill: var(--surface-muted); background: var(--sq-fill); }
-.connection { display: grid; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
-.connection a { color: var(--accent-ink); text-decoration: underline; }
-.list { display: grid; margin: 0; padding: 0; list-style: none; }
-.row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) 0; border-bottom: 1px solid var(--border-subtle); }
-.actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-.filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin-block: var(--space-3); }
-.filters > * { flex: 1 1 170px; min-width: 0; }
-.sharer { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
-@media (max-width: 600px) { .suggestion { align-items: flex-start; } .suggestion > .note { max-width: 88px; text-align: right; } .row { flex-wrap: wrap; } }
+.selected { --sq-r: var(--radius-control); --sq-fill: var(--surface-muted); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-group); padding: var(--space-related) var(--space-group); background: var(--sq-fill); }
+.connection { display: grid; gap: var(--space-tight); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
+.connection p { margin: 0; }
+
+/* The share form inside a file's details. */
+.share { --sq-r: var(--radius-container); --sq-stroke: var(--border); display: grid; min-width: 0; gap: var(--space-group); padding: var(--space-group); border: 1px solid var(--sq-stroke); }
+.shareHead { display: grid; gap: var(--space-tight); }
+.shareTitle { margin: 0; color: var(--foreground); font: var(--h3); letter-spacing: var(--h3-tracking); }
+.shareText { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-group); }
+.shareActions { display: flex; justify-content: flex-end; }
+
+/* Contacts. */
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-group); }
+.filters > * { min-width: 0; flex: 1 1 200px; }
+.empty { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-block) var(--space-group); border: 1px dashed var(--sq-stroke); }
+.presets { display: flex; flex-wrap: wrap; gap: var(--space-tight); }
+.dialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-related); margin-top: var(--space-related); }
+
+@media (max-width: 600px) {
+  .fields { grid-template-columns: minmax(0, 1fr); }
+  .suggestion { align-items: flex-start; }
+  .suggestion > .note { max-width: 88px; text-align: right; }
+}
+@media (max-width: 520px) { .dialogActions { display: grid; grid-template-columns: minmax(0, 1fr); } .dialogActions > * { width: 100%; } }

@@ -1,4 +1,4 @@
-/* Global base. Component styles live in CSS modules next to each component (copied from the developer site). */
+/* Global base, copied from Silicon Accounts (web/styles/base.css). Component styles live in CSS modules next to each component. */
 *, *::before, *::after { box-sizing: border-box; }
 
 html {
@@ -24,7 +24,8 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-size: var(--text-base);
+  font: var(--body);
+  letter-spacing: var(--body-tracking);
 }
 
 h1, h2, h3, h4, h5, h6, p, figure, blockquote, dl, dd { margin: 0; }
@@ -36,7 +37,8 @@ img { height: auto; }
 input, button, textarea, select { font: inherit; letter-spacing: inherit; color: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 a { color: var(--accent-ink); text-decoration-thickness: from-font; text-underline-offset: .2em; }
-a:not([data-variant]):hover { color: var(--accent-strong); }
+/* :where, as for focus below: a component's own hover for its links (NavList's rows) wins over the blue. */
+:where(a:not([data-variant])):hover { color: var(--accent-strong); }
 /* Keyboard focus on a plain link: the hover ink, a full underline and a soft fill (focus never shows as a ring). :where
    keeps it at one pseudo-class of specificity, so a component's own focus rule for its links still wins. */
 :where(a:not([data-variant], [data-sq])):focus-visible {
@@ -69,29 +71,29 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
   white-space: nowrap;
   border: 0;
 }
-.mono { font-family: var(--font-mono); letter-spacing: 0; font-variant-ligatures: none; }
-.serif { font-family: var(--font-serif); font-weight: 400; letter-spacing: -.005em; }
+/* Mono letters are wider and taller than the text face at the same size, so inline mono steps down a little to sit in
+   the line (Anil, 2026-11-11: c:anil and the uuid jumped out of their sentence). */
+.mono { font-family: var(--font-mono); font-size: var(--mono-inline-scale); letter-spacing: 0; font-variant-ligatures: none; }
 .display { font-family: var(--font-display); font-weight: 500; letter-spacing: var(--tracking-display); }
-/* Small labels, dates and ids in the pixel face, as on Silicon Writings. */
-.pixel { font-family: var(--font-pixel); letter-spacing: 0; }
 .tabular { font-variant-numeric: tabular-nums; }
 .muted { color: var(--text-muted); }
 .secondary { color: var(--text-secondary); }
 
-/* Controls that only work with script (copy buttons) stay out of sight in a browser without it: the theme boot script
+/* Controls that only work with script stay out of sight in a browser without it: the boot script (lib/theme.ts)
    marks <html data-js> before the first paint. */
 :root:not([data-js]) [data-js-only] { display: none !important; }
 
-/* Skip link: invisible until keyboard focus reaches it. A squircle like every rounded surface: the element carries
-   data-sq="surface", so its corners come from --sq-r and its paint from --sq-fill. */
+/* Skip link (<SkipLink>, components/foundation/layout): invisible until keyboard focus reaches it. A squircle
+   ([data-sq]): its corners come from --sq-r and its fill from --sq-fill, never border-radius. A skip link without
+   data-sq (write <SkipLink>) has square corners. */
 .skip-link {
-  --sq-r: var(--radius-control);
-  --sq-fill: var(--foreground);
   position: fixed;
   top: 12px;
   left: 12px;
   z-index: 200;
   padding: var(--space-2) var(--space-4);
+  --sq-r: var(--radius-control);
+  --sq-fill: var(--foreground);
   background: var(--sq-fill);
   color: var(--background);
   font-size: var(--text-sm);
@@ -104,19 +106,12 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
 /* ------------------------------------------------------------------------------------------------------------------
  * View transitions.
  *
- * Page changes inside the workspace (components/foundation/shell): React's <ViewTransition> tags the leaving page and
- * the arriving one with a class per direction along the navigation (page-forward / page-back) or page-fade. The
- * sidebar and the top bar are their own layer that never moves, so only the page slides.
- * The theme change is Silicon UI's eclipse (lib/theme.ts): the next appearance crosses the page as a disc from the switch.
+ * Page changes between sections (components/foundation/shell): React's <ViewTransition> tags the leaving page and the
+ * arriving one with a class per direction along the sidebar (page-forward / page-back) or page-fade. The frame around
+ * the page box is the same on both sides, so only the page slides.
  * ------------------------------------------------------------------------------------------------------------------ */
 ::view-transition { pointer-events: none; }
 
-/* Each still layer needs a name of its own (two elements with one name abort the transition). */
-[data-vt="sidebar"] { view-transition-name: kit-sidebar; }
-[data-vt="topbar"] { view-transition-name: kit-topbar; }
-::view-transition-group(kit-sidebar), ::view-transition-group(kit-topbar) { z-index: 100; animation: none; }
-::view-transition-old(kit-sidebar), ::view-transition-old(kit-topbar) { display: none; }
-::view-transition-new(kit-sidebar), ::view-transition-new(kit-topbar) { animation: none; }
 
 ::view-transition-old(.page-forward) { animation: page-out var(--duration-fast) var(--ease-standard) both; --page-dir: 1; }
 ::view-transition-new(.page-forward) { animation: page-in var(--duration-considered) var(--ease-enter) both; --page-dir: 1; }
@@ -135,5 +130,14 @@ hr { height: 1px; margin: 0; border: 0; background: var(--border); }
   ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }
 
+/* A value named in a dialog's copy (an id, an email, a date) is bold: the label weight in --foreground, so it stands
+   out in a 14/400 line without going heavier than the title (dialog rules, redesign/decisions.md). */
+[role="dialog"] strong { color: var(--foreground); font-weight: var(--weight-medium); }
+
 /* What only a browser without script needs; hidden once the boot script marks <html data-js>. */
 :root[data-js] [data-nojs-only] { display: none !important; }
+
+/* A spinner's turn (lucide's LoaderCircle with className="spin"). */
+.spin { animation: briefcase-spin 900ms linear infinite; }
+@keyframes briefcase-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }

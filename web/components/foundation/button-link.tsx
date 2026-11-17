@@ -1,31 +1,18 @@
 /**
- * A link that looks like an Arc button: navigation goes through a link, never a button with a router push (Arc
- * components.md). Same variants and sizes as <Button>, the same squircle, and the hosted pages' button styles
- * (data-variant) apply.
+ * Silicon UI's ButtonLink with the app's router: navigation goes through a link, never a button with a router push.
+ * Same variants and sizes as <Button>; the hosted pages' button styles (data-variant) apply.
  *
- *   <ButtonLink href={paths.signIn} size="lg">Sign in</ButtonLink>
- *   <ButtonLink href="https://apps.teamofsilicons.com" variant="secondary" external>Make an app</ButtonLink>
+ *   <ButtonLink href={paths.signIn} size="lg">Sign In</ButtonLink>
+ *   <ButtonLink href="https://apps.teamofsilicons.com" variant="secondary" external>Make an App</ButtonLink>
  */
 import Link from "next/link";
-import type { AnchorHTMLAttributes, ReactNode } from "react";
-import buttonStyles from "@/components/silicon-ui/button/button.module.css";
-import type { ButtonSize, ButtonVariant } from "@/components/silicon-ui/button/button";
-import styles from "./button-link.module.css";
+import { ButtonLink as SiliconButtonLink, type ButtonLinkProps as SiliconButtonLinkProps } from "@teamofsilicons/silicon-ui/button-link";
 
-export interface ButtonLinkProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> {
-  href: string;
-  variant?: ButtonVariant;
-  size?: ButtonSize;
+export interface ButtonLinkProps extends Omit<SiliconButtonLinkProps, "as"> {
   /** A plain <a> for other sites (no client-side navigation, no prefetch). */
   external?: boolean;
-  children: ReactNode;
 }
 
-export function ButtonLink({ href, variant = "primary", size = "md", external, className, children, ...rest }: ButtonLinkProps) {
-  const classes = [buttonStyles.button, buttonStyles[variant], buttonStyles[size], styles.link, className].filter(Boolean).join(" ");
-  const content = <span className={styles.content}>{children}</span>;
-  if (external) {
-    return <a {...rest} href={href} data-sq="surface" data-variant={variant} className={classes}>{content}</a>;
-  }
-  return <Link {...rest} href={href} data-sq="surface" data-variant={variant} className={classes}>{content}</Link>;
+export function ButtonLink({ external, ...props }: ButtonLinkProps) {
+  return <SiliconButtonLink {...props} as={external ? undefined : Link} />;
 }

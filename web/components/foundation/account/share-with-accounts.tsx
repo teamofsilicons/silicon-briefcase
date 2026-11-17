@@ -15,7 +15,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { motionTokens } from "@/components/silicon-ui/lib/motion-tokens";
+import { motionTokens } from "@teamofsilicons/silicon-ui/motion-tokens";
 import { ApiError } from "@/lib/errors";
 import { parseAccountId } from "@/lib/ids";
 import { AccountChip, type ChipAccount } from "./account-chip";

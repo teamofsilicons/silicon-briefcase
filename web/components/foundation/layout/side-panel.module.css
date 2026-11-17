@@ -1,0 +1,23 @@
+/* The side column an action opens (side-panel.tsx). It is as wide as the Page's --panel-width, scrolls on its own when
+   it is taller than the window (the shell's page box, --scroll-view, from 900px), and slides and fades in a beat after the page starts to open. */
+.panel {
+  display: grid;
+  width: var(--panel-width, 420px);
+  max-height: calc(var(--scroll-view, 100dvh - var(--top-height)) - 2 * var(--space-section));
+  grid-template-rows: auto minmax(0, 1fr);
+  opacity: 0;
+  transition:
+    opacity var(--duration-considered) var(--ease-standard),
+    translate var(--duration-expressive) var(--ease-standard);
+  translate: var(--space-block) 0;
+}
+.panel[data-open] { opacity: 1; transition-delay: var(--duration-fast); translate: 0 0; }
+
+.head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-group); padding-bottom: var(--space-inset); border-bottom: 1px solid var(--border); }
+.headText { display: grid; min-width: 0; gap: var(--space-hair); }
+.title { margin: 0; color: var(--foreground); font: var(--h3); letter-spacing: var(--h3-tracking); overflow-wrap: anywhere; }
+.description { margin: 0; color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); overflow-wrap: anywhere; }
+/* Only the body scrolls; overscroll stays in it so the page behind does not move. */
+.body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-top: var(--space-inset); padding-bottom: var(--space-section); }
+
+@media (prefers-reduced-motion: reduce) { .panel { transition: none; } }

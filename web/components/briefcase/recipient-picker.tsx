@@ -2,8 +2,8 @@
 import Link from "next/link";
 import { useEffect, useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Input } from "@/components/silicon-ui/input/input";
-import { Button } from "@/components/silicon-ui/button/button";
+import { Input } from "@teamofsilicons/silicon-ui/input";
+import { Button } from "@teamofsilicons/silicon-ui/button";
 import { AccountChip } from "@/components/foundation/account/account-chip";
 import { api } from "@/lib/client/api";
 import { useSessionView } from "@/lib/client/session";
@@ -49,10 +49,10 @@ export function RecipientPicker({ value, onChange, disabled, onSaveContact }: { 
     {open && <ul id={id} role="listbox" aria-label="Suggested people" className={styles.suggestions} data-sq="surface">{suggestions.map((person, index) => <li key={person.uuid} id={`${id}-${index}`} role="option" aria-selected={active === index} className={styles.suggestion} onMouseDown={event => event.preventDefault()} onClick={() => choose(person)}><AccountChip account={person} /><span className={styles.note}>{suggestionNote(person)}</span></li>)}</ul>}
     {!value && resolve.isFetching && settled === draft.trim() && <p role="status" className={styles.note}>Checking this account…</p>}
     {!value && focused && draft && !suggestions.length && !resolve.isFetching && !error && <p className={styles.note}>No matching suggestions. Enter a full Carbon or Silicon ID to find someone new.</p>}
-    {value && <div className={styles.selected} data-sq="surface" aria-label="Selected recipient"><AccountChip account={value} note={value.contact ? `Trust ${value.contact.trust}` : undefined} />{onSaveContact && people.data?.contacts_status === "connected" && <Button type="button" size="sm" variant="ghost" onClick={() => onSaveContact(value)}>{value.contact ? "Edit contact" : "Add contact"}</Button>}</div>}
+    {value && <div className={styles.selected} data-sq="surface" aria-label="Selected recipient"><AccountChip account={value} note={value.contact ? `Trust ${value.contact.trust}` : undefined} />{onSaveContact && people.data?.contacts_status === "connected" && <Button type="button" size="sm" variant="ghost" onClick={() => onSaveContact(value)}>{value.contact ? "Edit Contact" : "Add Contact"}</Button>}</div>}
     {people.isPending && <p role="status" className={styles.note}>Loading suggestions…</p>}
-    {people.error && <div className={styles.connection}><p>Invite history couldn’t load. You can still enter an exact account ID.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry suggestions</Button></div>}
+    {people.error && <div className={styles.connection}><p>Invite history couldn’t load. You can still enter an exact account ID.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry Suggestions</Button></div>}
     {people.data?.contacts_status === "disconnected" && <p className={styles.connection}><Link href="/contacts">Connect Silicon Contacts</Link> to include your saved names, photos and trusted contacts.</p>}
-    {people.data?.contacts_status === "unavailable" && <div className={styles.connection}><p>Contacts are unavailable. Suggestions show invitation history.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry contacts</Button></div>}
+    {people.data?.contacts_status === "unavailable" && <div className={styles.connection}><p>Contacts are unavailable. Suggestions show invitation history.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry Contacts</Button></div>}
   </div>;
 }

@@ -5,9 +5,9 @@ test("files: create, upload, range, preview, share, public link, version, bin an
  const context = await accountsSession(browser,"carbon"); const page=await context.newPage(); const errors=watchErrors(page);
  await signIn(page,runAccounts().carbon.email,"/files");
  const folder=`Project ${Date.now()}`;
- await page.getByRole("button",{name:"New folder",exact:true}).click();
+ await page.getByRole("button",{name:"New Folder",exact:true}).click();
  await page.getByRole("textbox",{name:"Folder name"}).fill(folder);
- await page.getByRole("button",{name:"Create folder",exact:true}).click();
+ await page.getByRole("button",{name:"Create Folder",exact:true}).click();
  await expect(page.getByRole("dialog")).toHaveCount(0);
  await page.getByRole("button",{name:new RegExp(`^${folder}`)}).click();
  await expect(page.getByRole("heading",{name:folder,exact:true})).toBeVisible();
@@ -22,10 +22,10 @@ test("files: create, upload, range, preview, share, public link, version, bin an
  await dialog.getByRole("tab",{name:"Sharing",exact:true}).click();
  await dialog.getByRole("combobox",{name:"Account ID or name",exact:true}).fill(runAccounts().friend.id);
  await expect(dialog.getByLabel("Selected recipient")).toContainText(runAccounts().friend.id);
- await dialog.getByRole("button",{name:"Share access",exact:true}).click();
+ await dialog.getByRole("button",{name:"Share Access",exact:true}).click();
  await expect(dialog.getByRole("button",{name:"Remove",exact:true})).toHaveCount(1);
  await expect(dialog.getByText(runAccounts().friend.id,{exact:true}).last()).toBeVisible();
- await dialog.getByRole("button",{name:"Enable link access",exact:true}).click();
+ await dialog.getByRole("button",{name:"Enable Link Access",exact:true}).click();
  const address=await dialog.getByRole("textbox",{name:"Shareable address"}).inputValue();
  const anonymous=await browser.newContext();const publicPage=await anonymous.newPage();
  await publicPage.goto(`${BASE}${new URL(address).pathname}`);
@@ -42,7 +42,7 @@ test("files: create, upload, range, preview, share, public link, version, bin an
  await expect(dialog.getByRole("heading",{name:"notes-renamed.txt",exact:true})).toBeVisible();
  await dialog.getByRole("button",{name:"Close dialog"}).click();
  const deleted=await context.request.delete(`${BASE}/api/v1/entries/${entry.id}`,{headers:sameOrigin({"Idempotency-Key":crypto.randomUUID()})});expect(deleted.ok()).toBe(true);
- await page.goto("/bin");await page.getByRole("button",{name:/^notes-renamed.txt/}).click();await page.getByRole("button",{name:"Restore from bin",exact:true}).click();
+ await page.goto("/bin");await page.getByRole("button",{name:/^notes-renamed.txt/}).click();await page.getByRole("button",{name:"Restore from Bin",exact:true}).click();
  await expect(page.getByRole("dialog")).toHaveCount(0);const restored=await context.request.get(`${BASE}/api/v1/entries/${entry.id}`);expect(restored.status()).toBe(200);expect((await restored.json()).deleted_at).toBeNull();
  expect(errors).toEqual([]);await context.close();
 });
@@ -73,7 +73,7 @@ test("version restore, folder move, self-destruct keep and encoded public paths"
  await upload("Version two");
  await page.getByRole("tab",{name:"Versions",exact:true}).click();await expect(page.getByRole("button",{name:"Restore version"})).toHaveCount(2);await page.getByRole("button",{name:"Restore version"}).last().click();
  await expect.poll(async()=>await (await context.request.get(`${BASE}/api/v1/entries/${original.id}/content`)).text()).toBe("Version one");
- await page.getByRole("tab",{name:"Sharing",exact:true}).click();await page.getByRole("button",{name:"Enable link access",exact:true}).click();const address=await page.getByRole("textbox",{name:"Shareable address"}).inputValue();
+ await page.getByRole("tab",{name:"Sharing",exact:true}).click();await page.getByRole("button",{name:"Enable Link Access",exact:true}).click();const address=await page.getByRole("textbox",{name:"Shareable address"}).inputValue();
  const guest=await browser.newContext();const publicPage=await guest.newPage();await publicPage.goto(`${BASE}${new URL(address).pathname}`);await expect(publicPage.getByRole("heading",{name,exact:true})).toBeVisible();await expect(publicPage.getByText("Version one",{exact:true})).toBeVisible();await guest.close();
  await page.getByRole("tab",{name:"Details",exact:true}).click();await page.getByRole("button",{name:"Move to folder",exact:true}).click();await page.getByRole("button",{name:"Move here",exact:true}).click();await expect(page.getByRole("button",{name:"Move here",exact:true})).toHaveCount(0);
  const entry=await (await context.request.get(`${BASE}/api/v1/entries/${original.id}`)).json();expect(entry.self_destruct_at).toBeNull();expect(entry.name).toBe(name);await context.close();
