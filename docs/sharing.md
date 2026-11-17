@@ -28,4 +28,4 @@ Add or edit a contact within Briefcase, including its saved name and integer tru
 
 **Shared with me** can filter by actual sharer, saved/unsaved contacts, minimum trust, and filename/path. Filters combine before pagination, including organization/team grants, and do not widen file access. Search stays within shared files. Contacts outages show a retry state; invitation-history suggestions continue without implying an empty address book.
 
-API routes and schemas are in [OpenAPI](../openapi.yaml). `BRIEFCASE_CONTACTS_URL` defaults to `https://contacts.teamofsilicons.com`; overrides require HTTPS or loopback HTTP and never follow redirects. Apply migration 0054 before the new API. The existing Briefcase app credential is sufficient to issue consented proofs; no Contacts app secret is needed.
+API routes and schemas are in [OpenAPI](../openapi.yaml). `BRIEFCASE_CONTACTS_URL` defaults to `https://contacts.teamofsilicons.com`; overrides require HTTPS or loopback HTTP and never follow redirects. Apply migration 0055 before the new API. The existing Briefcase app credential is sufficient to issue consented proofs; no Contacts app secret is needed.

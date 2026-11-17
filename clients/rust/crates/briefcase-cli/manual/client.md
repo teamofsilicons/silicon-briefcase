@@ -1,10 +1,10 @@
 # Briefcase Rust client
 
-The source client targets the Briefcase 5.1 contract. The published `briefcase-client` 5.0.0 targets 5.0; the Contacts methods below require this source revision and the matching API. The caller owns persistence, session refresh and UI.
+`briefcase-client` 5.1.0 is the official client for the Briefcase 5.1 contract, including Contacts and invitation suggestions. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = { version = "5.0.0", features = ["accounts"] }
+briefcase-client = { version = "5.1.0", features = ["accounts"] }
 ```
 
 ```rust,no_run
