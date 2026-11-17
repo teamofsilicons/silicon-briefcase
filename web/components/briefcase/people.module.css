@@ -13,9 +13,10 @@
 .connection p { margin: 0; }
 
 /* The share form inside a file's details. */
-.share { --sq-r: var(--radius-container); --sq-stroke: var(--border); display: grid; min-width: 0; gap: var(--space-group); padding: var(--space-group); border: 1px solid var(--sq-stroke); }
+.shareSection { display: grid; min-width: 0; gap: var(--space-related); }
+.share { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; min-width: 0; gap: var(--space-group); padding: var(--space-group); border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
 .shareHead { display: grid; gap: var(--space-tight); }
-.shareTitle { margin: 0; color: var(--foreground); font: var(--h3); letter-spacing: var(--h3-tracking); }
+.shareTitle { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
 .shareText { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
 .fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-group); }
 .shareActions { display: flex; justify-content: flex-end; }

@@ -5,12 +5,14 @@
  *
  * Failures land on /sign-in?error=<code>, which shows fixed words per code (error=access_denied, a Carbon who cancelled,
  * gets a friendly page): the address's own error_description is never shown, since anyone could put words in a link.
- * A session this sign-in replaces is revoked at Silicon Accounts, so no old sign-in lingers.
+ * The account that was current stays signed in on this browser for the account menu (lib/server/accounts.ts). A session
+ * of the same account that this sign-in replaces is revoked at Silicon Accounts, so no old sign-in lingers.
  */
 import type { NextRequest } from "next/server";
+import { forget, rememberable } from "@/lib/server/accounts";
 import { EnvError, serverEnv } from "@/lib/server/env";
 import { misconfigured, redirectTo } from "@/lib/server/responses";
-import { clientHeaders, readPending, readSession, writePending, writeSession, type PendingSignIn } from "@/lib/server/session";
+import { clientHeaders, readOtherAccounts, readPending, readSession, rememberAccount, writeOtherAccounts, writePending, writeSession, type OtherAccount, type PendingSignIn } from "@/lib/server/session";
 import { exchangeCode, revokeSession } from "@/lib/server/tokens";
 
 export const dynamic = "force-dynamic";
@@ -51,10 +53,18 @@ export async function GET(request: NextRequest) {
     return failed(env.publicUrl, result.error === "accounts_unreachable" ? "accounts_unreachable" : "exchange_failed", pending, state, entry.r);
   }
   const replaced = readSession(request);
-  if (replaced && replaced.rt !== result.session.rt) await revokeSession(replaced, headers);
+  let previous: OtherAccount | null = null;
+  if (replaced && replaced.acct.uuid === result.session.acct.uuid) {
+    if (replaced.rt !== result.session.rt) await revokeSession(replaced, headers);
+  } else {
+    previous = await rememberable(replaced, headers);
+  }
+  const { kept, dropped } = rememberAccount(readOtherAccounts(request), previous, { uuid: result.session.acct.uuid, sid: result.session.sid });
+  await Promise.all(dropped.map(item => forget(item, headers)));
 
   const response = redirectTo(new URL(entry.r, env.publicUrl));
   writeSession(response, result.session);
+  writeOtherAccounts(response, kept);
   writePending(response, pending.filter(item => item.s !== state));
   return response;
 }

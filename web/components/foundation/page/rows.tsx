@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@teamofsilicons/silicon-ui/badge";
+import { SkeletonBlock } from "@/components/foundation/feedback/skeleton-block";
 import styles from "./rows.module.css";
 
 /**
@@ -97,6 +98,30 @@ export function LinkRow({ href, lead, title, detail, end }: { href: string; lead
       {end ? <span className={styles.end}>{end}</span> : null}
       <ChevronRight className={styles.chevron} size={16} strokeWidth={2} aria-hidden="true" />
     </Link>
+  );
+}
+
+/**
+ * A section while its rows load, in the rows' own box and size: a tile and the two lines of each row, at the row's
+ * height, so the list arrives in place instead of replacing a grey block. Announced once as `label`, never as shapes.
+ * `title` holds the room of a section heading above the box.
+ */
+export function SectionSkeleton({ rows = 4, title = false, label = "Loading" }: { rows?: number; title?: boolean; label?: string }) {
+  return (
+    <div className={styles.section} role="status" aria-busy="true" aria-label={label}>
+      {title ? <span className={styles.headSkeleton}><SkeletonBlock width="9rem" height="1.125rem" /></span> : null}
+      <ul data-sq="surface" className={styles.rows} aria-hidden="true">
+        {Array.from({ length: rows }, (_, index) => (
+          <li key={index} className={styles.row}>
+            <SkeletonBlock width="28px" height="28px" index={index} />
+            <span className={styles.textSkeleton}>
+              <SkeletonBlock width={`${[44, 32, 52, 38, 28, 46][index % 6]}%`} height="0.875rem" index={index} />
+              <SkeletonBlock width={`${[24, 30, 20, 26, 22, 28][index % 6]}%`} height="0.75rem" index={index} />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

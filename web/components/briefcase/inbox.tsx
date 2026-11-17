@@ -11,9 +11,8 @@ import { Button } from "@teamofsilicons/silicon-ui/button";
 import { EmptyState } from "@teamofsilicons/silicon-ui/empty-state";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar } from "@/components/foundation/page/page-bar";
-import { LinkItem, Row, Section, Tile } from "@/components/foundation/page/rows";
+import { LinkItem, Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
-import { SkeletonBlock } from "@/components/foundation/feedback/skeleton-block";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
 import { date, type Notification } from "@/lib/briefcase/types";
@@ -47,7 +46,7 @@ export function Inbox() {
     <Page>
       <p className={styles.lead}>{unread ? `${unread} unread ${unread === 1 ? "update" : "updates"}.` : "Sharing updates, all in one place."}</p>
       {inbox.error ? <ErrorAlert error={inbox.error} /> : null}
-      {inbox.isPending ? <div role="status" aria-label="Loading notifications"><SkeletonBlock width="100%" height="calc(3 * 3.25rem)" radius="var(--radius-container)" /></div>
+      {inbox.isPending ? <SectionSkeleton rows={3} title label="Loading notifications" />
         : inbox.data?.items.length === 0 ? <div className={styles.empty}><EmptyState title="You’re all caught up" description="New shares and changes to your access appear here." icon={<Bell size={20} strokeWidth={2} />} /></div>
         : [...days].map(([day, items]) => (
           <Section key={day} id={`day-${day.replaceAll(/\W+/g, "-").toLowerCase()}`} title={day} count={items.length}>

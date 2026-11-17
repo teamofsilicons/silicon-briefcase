@@ -10,19 +10,20 @@ import Link from "next/link";
 import { useRef, useState, type FormEvent } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { Check, FolderPlus, Info, LoaderCircle, Upload, X } from "lucide-react";
+import { Check, FolderPlus, Info, LoaderCircle, Timer, Upload, X } from "lucide-react";
 import { Alert } from "@teamofsilicons/silicon-ui/alert";
 import { Button } from "@teamofsilicons/silicon-ui/button";
 import { Input } from "@teamofsilicons/silicon-ui/input";
+import { SearchField } from "@teamofsilicons/silicon-ui/search-field";
 import { Select } from "@teamofsilicons/silicon-ui/select";
 import SegmentedControl from "@teamofsilicons/silicon-ui/segmented-control";
 import { Dialog, DialogContent } from "@teamofsilicons/silicon-ui/dialog";
 import { EmptyState } from "@teamofsilicons/silicon-ui/empty-state";
-import { SkeletonBlock } from "@/components/foundation/feedback/skeleton-block";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar, type Crumb } from "@/components/foundation/page/page-bar";
-import { ActionItem, Row, Section, Tile } from "@/components/foundation/page/rows";
+import { ActionItem, Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
+import { isWorkAccount, useCurrentAccount } from "@/lib/client/accounts";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
 import { date, message, size, type Drive, type Entry, type EntryPage, type SharedPage } from "@/lib/briefcase/types";
@@ -47,8 +48,12 @@ function detailFor(entry: Entry, mode: Mode) {
 
 export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = "", initialDrives, initialEntry, sharedFrom = "", sharedContacts = "", sharedTrust = "" }: { mode?: Mode; accountUuid: string; drive?: string; folder?: string; initialDrives?: { items: Drive[] }; initialEntry?: Entry; sharedFrom?: string; sharedContacts?: string; sharedTrust?: string }) {
   const router = useRouter();
+  const account = useCurrentAccount();
   const organizations = useOrganizations();
   const work = organizations.data?.organizations[0];
+  // Personal or work is known from the account itself on the first render, so the title never changes as data arrives.
+  const workAccount = !!work || isWorkAccount(account);
+  const [uploadOptions, setUploadOptions] = useState(false);
   const cache = useQueryClient();
   const [layout, setLayout] = useState<"list" | "grid">("list");
   const [search, setSearch] = useState("");
@@ -89,10 +94,10 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
   });
   const entries = pages.data?.pages.flatMap(page => page.items) ?? [];
   const canCreate = mode === "files" && (!folder ? !!activeDrive : currentFolder.data?.effective_access.includes("write"));
-  const driveName = activeDrive?.relation === "custodial" ? `${activeDrive.owner.display_name || activeDrive.owner.id}’s files` : work ? "My work files" : "My personal files";
+  const driveName = activeDrive?.relation === "custodial" ? `${activeDrive.owner.display_name || activeDrive.owner.id}’s files` : workAccount ? "My work files" : "My personal files";
   const parts = folder.split("/").filter(Boolean);
   const title = mode === "shared" ? "Shared with me" : query ? "Search results" : mode === "recent" ? "Recent" : mode === "bin" ? "Bin" : parts.at(-1) || driveName;
-  const description = mode === "bin" ? "Deleted files stay here for 45 days. Self-destructing files are removed permanently." : mode === "shared" ? "Files shared directly with you, your teams, and your organization." : mode === "recent" ? "The latest changes across your drive." : work ? `Your files in ${work.name}. Share with people or teams when you’re ready.` : "Your personal space. Files stay private until you choose to share them.";
+  const description = mode === "bin" ? "Deleted files stay here for 45 days. Self-destructing files are removed permanently." : mode === "shared" ? "Files shared directly with you, your teams, and your organization." : mode === "recent" ? "The latest changes across your drive." : workAccount ? `Your files${work ? ` in ${work.name}` : " at work"}. Share with people or teams when you’re ready.` : "Your personal space. Files stay private until you choose to share them.";
   const filtered = !!(query || filter || from || contactFilter || minTrust);
 
   function navigate(path: string, selectedDrive = drive) {
@@ -144,13 +149,26 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
     } />
     <Page width={layout === "grid" ? "default" : "narrow"} className={styles.page}>
       <input ref={fileInput} type="file" multiple hidden onChange={event => { if (event.target.files) upload(event.target.files); event.target.value = ""; }} />
-      <p className={styles.lead}>{description}</p>
-      <div className={styles.toolbar}>
-        <form className={styles.search} onSubmit={event => { event.preventDefault(); setQuery(search.trim()); }}>
-          <Input label="Search files" placeholder="Find a file, or something inside it…" value={search} onChange={event => setSearch(event.target.value)} />
-          <button type="submit" className="sr-only">Search</button>
-        </form>
-        {mode === "files" ? <Select label="Show" value={filter || "all"} onValueChange={value => setFilter(value === "all" ? "" : value)} options={[{ value: "all", label: "This folder" }, { value: "is:folder", label: "All folders" }, { value: "is:image", label: "Images" }, { value: "is:document", label: "Documents" }, { value: "is:self-destruct", label: "Self-destructing" }, { value: "is:expiring", label: "Expiring shares" }]} /> : null}
+      <div className={styles.intro}>
+        <p className={styles.lead}>{description}</p>
+        {/* One row of tools, its labels kept for screen readers: the placeholder and the chosen option say what each is. */}
+        <div className={styles.toolbar}>
+          <form className={styles.search} role="search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); }}>
+            <SearchField label="Search files" placeholder="Find a file, or something inside it…" value={search} onValueChange={value => { setSearch(value); if (!value) setQuery(""); }} />
+            <button type="submit" className="sr-only">Search</button>
+          </form>
+          {mode === "files" ? <div className={styles.show}><Select label="Show" value={filter || "all"} onValueChange={value => setFilter(value === "all" ? "" : value)} options={[{ value: "all", label: "This folder" }, { value: "is:folder", label: "All folders" }, { value: "is:image", label: "Images" }, { value: "is:document", label: "Documents" }, { value: "is:self-destruct", label: "Self-destructing" }, { value: "is:expiring", label: "Expiring shares" }]} /></div> : null}
+          {canCreate ? (
+            <Button variant={uploadMinutes ? "soft" : "ghost"} size="sm" aria-expanded={uploadOptions} aria-controls="upload-options" onClick={() => setUploadOptions(!uploadOptions)}>
+              <Timer size={16} strokeWidth={2} aria-hidden="true" />{uploadMinutes ? `Uploads Delete After ${uploadMinutes} min` : "Upload Options"}
+            </Button>
+          ) : null}
+        </div>
+        {canCreate && uploadOptions ? (
+          <div id="upload-options" className={styles.options}>
+            <Input label="Delete uploads permanently after (minutes)" description="Leave empty to keep uploads until you delete them." type="number" min={1} max={43200} placeholder="Keep permanently" value={uploadMinutes} onChange={event => setUploadMinutes(event.target.value)} />
+          </div>
+        ) : null}
       </div>
       {mode === "shared" ? <div className={styles.filters}>
         <Select label="Shared by" value={from || "all"} onValueChange={value => setFrom(value === "all" ? "" : value)} options={[{ value: "all", label: "Anyone" }, ...(from && !people.data?.items.some(p => p.uuid === from) ? [{ value: from, label: "Selected account" }] : []), ...(people.data?.items ?? []).map(person => ({ value: person.uuid, label: `${person.display_name || person.id} · ${person.id}` }))]} />
@@ -161,10 +179,6 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
       {mode === "shared" && people.data?.contacts_status === "disconnected" ? <p className={styles.hint}><Link href="/contacts">Connect Silicon Contacts</Link> to filter shared files by saved contacts and trust.</p> : null}
       {mode === "shared" && (people.error || people.data?.contacts_status === "unavailable") ? <p role="status" className={styles.hint}>Contact filters are unavailable. <Button variant="ghost" size="xs" onClick={() => void people.refetch()}>Retry Contacts</Button></p> : null}
       {drive && drive !== accountUuid ? <Alert tone="info" title="Some of this folder may be hidden">You might not be seeing all the contents of this folder.</Alert> : null}
-      {canCreate ? <details className={styles.options}>
-        <summary>Upload options</summary>
-        <Input label="Delete uploads permanently after (minutes)" type="number" min={1} max={43200} placeholder="Keep permanently" value={uploadMinutes} onChange={event => setUploadMinutes(event.target.value)} />
-      </details> : null}
       {query ? <div className={styles.results} role="status">
         <span>Results for “{query}” {mode === "shared" ? "within files shared with you" : "across files you can access"}.</span>
         <Button size="xs" variant="ghost" onClick={() => { setQuery(""); setSearch(""); }}>Clear Search</Button>
@@ -184,9 +198,7 @@ export function FileBrowser({ mode = "files", accountUuid, drive = "", folder = 
       {currentFolder.error ? <ErrorAlert error={currentFolder.error} /> : null}
       <div className={styles.dropArea} data-dragging={dragging ? "" : undefined} onDragOver={event => { event.preventDefault(); if (canCreate) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); upload(event.dataTransfer.files); }}>
         {pages.isPending ? (
-          <div className={styles.loading} role="status" aria-label="Loading your files">
-            <SkeletonBlock width="100%" height="calc(4 * 3.25rem)" radius="var(--radius-container)" />
-          </div>
+          <SectionSkeleton rows={6} label="Loading your files" />
         ) : entries.length === 0 ? (
           <div className={styles.empty}>
             <EmptyState title={filtered ? "No matching files" : mode === "bin" ? "Nothing in the bin" : mode === "shared" ? "A place for shared work" : "Make room for something good"} description={filtered ? "Try another search or clear the filters." : mode === "files" ? "Drop files here, upload a document, or create your first folder." : "Files will appear here when there’s something to show."} action={canCreate ? <Button size="sm" onClick={() => fileInput.current?.click()}>Upload Files</Button> : undefined} />

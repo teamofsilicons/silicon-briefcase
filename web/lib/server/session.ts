@@ -103,6 +103,65 @@ export function clearSession(response: NextResponse): void {
   response.cookies.set(sessionCookieName(), "", cookieOptions(0));
 }
 
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* The other accounts signed in on this browser                                                                        */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+/**
+ * An account signed in to this app in this browser besides the current one, as Silicon Accounts' profile menu lists its
+ * browser profiles. The cookie keeps only the durable session id (the store holds the tokens, lib/server/refresh-state.ts)
+ * and what the menu shows: the account and, for a work account, its organization.
+ */
+export interface OtherAccount {
+  sid: string;
+  /** When its sign-in ends (epoch ms). */
+  re: number;
+  acct: SessionAccount;
+  org: { name: string; logo_url: string | null } | null;
+}
+
+/** A browser keeps at most this many accounts besides the current one; a sign-in past it ends the oldest. */
+export const MAX_OTHER_ACCOUNTS = 4;
+const ACCOUNTS_PURPOSE = "accounts";
+export const accountsCookieName = () => cookieName("accounts");
+
+export function readOtherAccounts(request: NextRequest, now = Date.now()): OtherAccount[] {
+  const list = unseal<OtherAccount[]>(request.cookies.get(accountsCookieName())?.value, ACCOUNTS_PURPOSE);
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter(item => item && typeof item.sid === "string" && typeof item.re === "number" && item.re > now && !!item.acct && typeof item.acct.uuid === "string")
+    .slice(0, MAX_OTHER_ACCOUNTS);
+}
+
+export function writeOtherAccounts(response: NextResponse, list: OtherAccount[]): void {
+  if (!list.length) {
+    response.cookies.set(accountsCookieName(), "", cookieOptions(0));
+    return;
+  }
+  const seconds = Math.max(60, Math.min(MAX_COOKIE_SECONDS, Math.floor((Math.max(...list.map(item => item.re)) - Date.now()) / 1000)));
+  response.cookies.set(accountsCookieName(), seal(list, ACCOUNTS_PURPOSE), cookieOptions(seconds));
+}
+
+/**
+ * The list after the current account changes: `previous` (the account that was current, if it is kept) goes first, the
+ * new current account (`active`) leaves the list, and one entry per account stays, the newest first. `dropped` are the
+ * sign-ins that fall out (an older one for the same account, or past the limit): the caller ends them. The new current
+ * session (`active.sid`) is never among them.
+ */
+export function rememberAccount(list: OtherAccount[], previous: OtherAccount | null, active: { uuid: string; sid?: string }): { kept: OtherAccount[]; dropped: OtherAccount[] } {
+  const kept: OtherAccount[] = [];
+  const dropped: OtherAccount[] = [];
+  for (const item of previous ? [previous, ...list] : list) {
+    if (item.sid === active.sid || kept.some(other => other.sid === item.sid)) continue;
+    if (item.acct.uuid === active.uuid || kept.some(other => other.acct.uuid === item.acct.uuid) || kept.length >= MAX_OTHER_ACCOUNTS) {
+      if (!dropped.some(other => other.sid === item.sid)) dropped.push(item);
+      continue;
+    }
+    kept.push(item);
+  }
+  return { kept, dropped };
+}
+
 /** One sign-in started in this browser and not finished yet. */
 export interface PendingSignIn {
   /** state */

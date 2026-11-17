@@ -23,7 +23,7 @@ test("files: create, upload, range, preview, share, public link, version, bin an
  await dialog.getByRole("combobox",{name:"Account ID or name",exact:true}).fill(runAccounts().friend.id);
  await expect(dialog.getByLabel("Selected recipient")).toContainText(runAccounts().friend.id);
  await dialog.getByRole("button",{name:"Share Access",exact:true}).click();
- await expect(dialog.getByRole("button",{name:"Remove",exact:true})).toHaveCount(1);
+ await expect(dialog.getByRole("button",{name:/^Remove access for /})).toHaveCount(1);
  await expect(dialog.getByText(runAccounts().friend.id,{exact:true}).last()).toBeVisible();
  await dialog.getByRole("button",{name:"Enable Link Access",exact:true}).click();
  const address=await dialog.getByRole("textbox",{name:"Shareable address"}).inputValue();

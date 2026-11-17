@@ -15,7 +15,7 @@ import { Progress } from "@teamofsilicons/silicon-ui/progress";
 import { Select } from "@teamofsilicons/silicon-ui/select";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar } from "@/components/foundation/page/page-bar";
-import { Row, Section, Tile } from "@/components/foundation/page/rows";
+import { Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
@@ -53,7 +53,7 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
       ) : null}
 
       {usage.error ? <ErrorAlert error={usage.error} /> : null}
-      {meters.length ? (
+      {usage.isPending && drive ? <SectionSkeleton rows={2} title label="Loading usage" /> : meters.length ? (
         <Section id="usage" title="Usage">
           {meters.map(meter => {
             const Icon = meter.icon;

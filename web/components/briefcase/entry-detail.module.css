@@ -1,16 +1,35 @@
-/* A file's details (entry-detail.tsx): a wide dialog with Accounts' tabs, each tab a short column of sections. */
-.dialog.dialog { width: min(calc(100vw - var(--space-block)), 760px); max-width: none; }
-.tabs { display: grid; min-width: 0; gap: var(--space-section); }
-.panel { display: grid; min-width: 0; gap: var(--space-section); margin-top: 0; color: inherit; font: inherit; }
+/* A file's details (entry-detail.tsx): a wide dialog that keeps one size and place while open. Pinned near the top
+   (placement="top") at a fixed height, the header and the tabs stay put; only the open tab scrolls. The tab strip hugs
+   its labels, as Accounts' tabs do, instead of stretching across the dialog. */
+.dialog.dialog {
+  width: min(calc(100vw - var(--space-block)), 800px);
+  max-width: none;
+  height: min(720px, calc(100dvh - var(--dialog-top, var(--space-block)) - var(--space-block)));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Silicon UI's dialog body (the header comes first): it fills the rest and lays the tabs out instead of scrolling. */
+.dialog > :last-child { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.tabs { display: flex; min-height: 0; min-width: 0; flex: 1; flex-direction: column; gap: var(--space-group); }
+.tabs > :first-child { flex: none; align-self: flex-start; max-width: 100%; }
+.tabs > [role="alert"], .tabs > div:not([role="tabpanel"]):not(:first-child) { flex: none; }
+
 /* Panels stay mounted (forceMount): Silicon UI's Tabs pins a panel's height while it animates, which clipped panels whose
-   rows load after they open. The tab that is not chosen is simply hidden. */
+   rows load after they open. The chosen one fills the dialog and scrolls; the others are hidden. A 3px inset keeps
+   focus rings inside the scroller. */
+.panel { display: grid; min-height: 0; min-width: 0; flex: 1; align-content: start; gap: var(--space-block); margin: -3px; padding: 3px; overflow: auto; overscroll-behavior: contain; color: inherit; font: inherit; }
 .panel[data-state="inactive"] { display: none; }
 /* Sections inside a tab sit on the tab's own gap. */
-.panel > section { margin-top: 0; }
+.panel > section, .panel > [role="status"] { margin-top: 0; }
+
+/* Preview: the file takes the room, its two actions under it at the end. */
+.previewPanel { display: flex; flex-direction: column; gap: var(--space-group); overflow: hidden; }
+.previewPanel > :first-child { min-height: 0; flex: 1; }
+
 .stack { display: grid; gap: var(--space-group); }
 .text { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
-.inline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-related); }
-.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-related); }
+.actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-related); }
 @media (max-width: 520px) { .actions { display: grid; grid-template-columns: minmax(0, 1fr); } .actions > * { width: 100%; } }
 
 /* The address anyone with the link opens, with its copy button beside the field. */
@@ -19,5 +38,9 @@
 
 /* Label and value pairs in one quiet box. */
 .facts { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-tight) var(--space-group); border: 1px solid var(--sq-stroke); }
-.rename { display: grid; gap: var(--space-related); }
+
+/* A section that holds a form: its h2 over one box, as the rows' sections. */
+.group { display: grid; gap: var(--space-related); }
+.groupTitle { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
+.box { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; gap: var(--space-group); padding: var(--space-group); border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
 .alertAction { display: block; margin-top: var(--space-related); }

@@ -1,0 +1,11 @@
+/* The account menu (profile-menu.tsx), Silicon Accounts' profile menu as it ships: a 36px photo in a 44px round button,
+   equal-height rows (name above the id line), 36px action icons. A work account's line starts with a small building. */
+.trigger { --radius-control: var(--radius-full); --corner-shape: round; inline-size: 44px; min-block-size: 44px; padding-inline: 0; }
+.menu { inline-size: min(20rem, calc(100vw - var(--space-group) * 2)); max-block-size: var(--radix-dropdown-menu-content-available-height); overflow-y: auto; overscroll-behavior: contain; }
+.identity { display: grid; min-inline-size: 0; min-block-size: calc(36px + var(--space-related) * 2); align-content: center; gap: var(--space-hair); }
+.name, .handle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name { color: var(--foreground); font-size: var(--text-sm); font-weight: var(--weight-medium); line-height: var(--leading-body); }
+.handle { color: var(--text-muted); font-size: var(--text-xs); font-weight: normal; line-height: var(--leading-body); }
+.orgIcon { display: inline-block; margin-inline-end: var(--space-tight); vertical-align: -1px; }
+.actionIcon { display: grid; inline-size: 36px; min-block-size: 44px; place-items: center; }
+.sheetActions { margin-block-start: var(--space-related); padding-block-start: var(--space-related); border-block-start: 1px solid var(--border-subtle); }
