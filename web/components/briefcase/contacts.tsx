@@ -18,10 +18,9 @@ import { Dialog, DialogContent } from "@teamofsilicons/silicon-ui/dialog";
 import { EmptyState } from "@teamofsilicons/silicon-ui/empty-state";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar } from "@/components/foundation/page/page-bar";
-import { Row, Section, Tile } from "@/components/foundation/page/rows";
+import { Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { AccountChip } from "@/components/foundation/account/account-chip";
-import { SkeletonBlock } from "@/components/foundation/feedback/skeleton-block";
 import { api } from "@/lib/client/api";
 import { kindNoun } from "@/lib/format";
 import { notify } from "@/lib/notify";
@@ -97,7 +96,7 @@ export function ContactsPage() {
       <p className={styles.lead}>Your Silicon Contacts address book, here in Briefcase. Saved names and photos follow you into sharing.</p>
       {failure ? <Alert tone="danger" title="That did not work" onDismiss={() => setFailure("")}>{failure}</Alert> : null}
       {contacts.error ? <ErrorAlert error={contacts.error} action={<Button variant="secondary" size="sm" onClick={() => void contacts.refetch()}>Try Again</Button>} /> : null}
-      {contacts.isPending ? <div role="status" aria-label="Loading contacts"><SkeletonBlock width="100%" height="calc(3 * 3.25rem)" radius="var(--radius-container)" /></div>
+      {contacts.isPending ? <SectionSkeleton rows={3} title label="Loading contacts" />
         : contacts.data?.connected === false ? (
           <Section id="connect" title="Silicon Contacts">
             <Row wide lead={<Tile><ContactRound size={16} strokeWidth={2} /></Tile>} title="Bring your contacts into Briefcase" detail="Names, photos and trust levels. Changes here are saved in Silicon Contacts for this account.">

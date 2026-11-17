@@ -21,7 +21,7 @@ test("ranked fuzzy suggestions, keyboard selection, saved photo and UUID invitat
   await expect(selected.locator("img")).toHaveAttribute("src", /contacts\/photos\//);
   await expect(selected.locator("img")).toHaveJSProperty("naturalWidth", 1);
   await page.getByRole("button", { name: "Share Access", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /^Remove access for / })).toHaveCount(1);
   const requests = await (await request.get(fixture + "/__requests")).json();
   expect(requests.at(-1).body.principal).toEqual({ type: "carbon", id: "10000000-0000-4000-8000-000000000002" });
   await page.screenshot({ path: "test-results/contacts-sharing-desktop.png", fullPage: true });

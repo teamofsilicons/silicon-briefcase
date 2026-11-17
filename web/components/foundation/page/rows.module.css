@@ -41,6 +41,11 @@
 .linkRow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chevron { flex: none; color: var(--text-muted); }
 
+/* A row while it loads (SectionSkeleton): its two lines take the title's and the detail's line heights, so the
+   skeleton row is exactly a row's height. */
+.textSkeleton { display: grid; min-width: 0; flex: 1; height: calc(var(--text-base) * var(--leading-body) + var(--text-sm) * var(--leading-body)); align-content: center; gap: 7px; }
+.headSkeleton { display: flex; min-height: calc(var(--text-lg) * var(--leading-body)); align-items: center; }
+
 /* 28px tiles: a grey tile with an icon. */
 .icon { --sq-r: var(--radius-control); --sq-fill: var(--surface-muted); display: grid; width: calc(var(--control-height-xs) + var(--space-tight)); height: calc(var(--control-height-xs) + var(--space-tight)); flex: none; place-items: center; background: var(--sq-fill); color: var(--text-secondary); }
 

@@ -1,4 +1,5 @@
-/* A file's preview (preview.tsx): one quiet box on the canvas grey, the file inside it at its own size. */
+/* A file's preview (preview.tsx): one quiet box on the canvas grey, the file inside it at its own size. With data-fill
+   (a file's Preview tab) the box takes all its parent's room and the file scales to fit inside it. */
 .preview { --sq-r: var(--radius-container); --sq-fill: var(--canvas); --sq-stroke: var(--border); display: flex; min-height: 220px; align-items: center; justify-content: center; overflow: hidden; border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
 .preview img, .preview video { max-width: 100%; max-height: 420px; object-fit: contain; }
 .preview audio { width: 90%; }
@@ -12,3 +13,8 @@
 .table th { padding: var(--space-related) var(--space-group); border-bottom: 1px solid var(--border); color: var(--text-secondary); font: var(--caption); letter-spacing: var(--caption-tracking); }
 .table td { padding: var(--space-related) var(--space-group); border-bottom: 1px solid var(--border-subtle); }
 .table tr:last-child td { border-bottom: 0; }
+.preview[data-fill] { min-height: 0; height: 100%; }
+.preview[data-fill] img, .preview[data-fill] video { max-height: 100%; }
+.preview[data-fill] iframe, .preview[data-fill] pre { height: 100%; max-height: none; }
+.preview[data-fill] .table { align-self: start; }
+.preview[data-fill]:has(.table) { align-items: flex-start; overflow: auto; }

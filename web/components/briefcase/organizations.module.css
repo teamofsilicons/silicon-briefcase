@@ -6,13 +6,18 @@
 .muted { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
 
 .section { display: grid; min-width: 0; gap: var(--space-group); }
+.section > section { margin-top: 0; }
+/* Find a member: the search field's label stays for screen readers; its placeholder says what it finds. */
+.find label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .sectionHeader { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-related) var(--space-group); }
 .sectionHeader h2 { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
 .sectionHeader p { max-width: 70ch; margin: var(--space-tight) 0 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
 .subTitle { margin: var(--space-related) 0 0; color: var(--foreground); font: var(--h3); letter-spacing: var(--h3-tracking); }
 
-/* The three tabs' panels stay mounted (Silicon UI's Tabs pins a panel's height while it animates); the others hide. */
+/* The three tabs' panels stay mounted (Silicon UI's Tabs pins a panel's height while it animates); the others hide. The
+   tab strip hugs its labels, as Accounts' tabs do, instead of stretching across the column. */
 .tabs { display: grid; min-width: 0; gap: var(--space-section); }
+.tabs > :first-child { justify-self: start; max-width: 100%; }
 .panel { margin-top: 0; color: inherit; font: inherit; }
 .panel[data-state="inactive"] { display: none; }
 
@@ -20,7 +25,6 @@
 .list { --sq-r: var(--radius-container); --sq-fill: var(--surface); --sq-stroke: var(--border); display: grid; margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--sq-stroke); background: var(--sq-fill); list-style: none; }
 .list > li { display: flex; min-width: 0; align-items: center; gap: var(--space-group); padding: var(--space-related) var(--space-group); }
 .list > li + li { border-top: 1px solid var(--border-subtle); }
-.avatar { --sq-r: var(--radius-control); --sq-fill: var(--surface-muted); display: grid; width: calc(var(--control-height-xs) + var(--space-tight)); height: calc(var(--control-height-xs) + var(--space-tight)); flex: none; place-items: center; background: var(--sq-fill); color: var(--text-secondary); font: var(--caption); letter-spacing: var(--caption-tracking); }
 .person { display: grid; min-width: 0; flex: 1; gap: 0; }
 .person strong { overflow: hidden; color: var(--foreground); font: var(--body); letter-spacing: var(--body-tracking); text-overflow: ellipsis; white-space: nowrap; }
 .person small { overflow: hidden; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); text-overflow: ellipsis; white-space: nowrap; }

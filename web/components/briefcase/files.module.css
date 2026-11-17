@@ -11,16 +11,23 @@
 .lead { max-width: 70ch; margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
 .hint { margin: 0; color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
 
-.toolbar, .filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-group); }
-.search { min-width: min(100%, 240px); flex: 2 1 280px; }
-.toolbar > :not(.search) { flex: 1 1 180px; min-width: 0; }
+/* The page's opening: its line, then one row of tools 8px under it, the way a section's heading sits over its box. */
+.intro { display: grid; gap: var(--space-related); }
+
+/* One row of tools at the controls' height: search takes the room, Show a fixed width, Upload Options its own. Their
+   labels stay in the page for screen readers but are not drawn (the placeholder and the chosen option say what each is). */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-related); }
+.toolbar label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.toolbar > * { margin: 0; }
+.search { min-width: min(100%, 240px); flex: 1 1 280px; }
+.show { width: 200px; flex: none; }
+@media (max-width: 639px) { .show { width: auto; flex: 1 1 140px; } }
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-group); }
 .filters > * { min-width: 0; flex: 1 1 170px; }
 .filters > button { flex: none; }
 
-/* Upload options: a quiet disclosure under the toolbar. */
-.options { display: grid; gap: var(--space-related); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); }
-.options > summary { width: fit-content; cursor: pointer; }
-.options[open] > summary { margin-bottom: var(--space-related); }
+/* Upload options, opened from the toolbar: one field on the page's surface. */
+.options { max-width: 360px; }
 
 .results { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-related); color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
 
@@ -35,7 +42,6 @@
 /* Drop files anywhere on the list: the box takes the accent's tint while files are over it. */
 .dropArea { --sq-r: var(--radius-container); min-width: 0; transition: background-color var(--duration-fast) var(--ease-standard), outline-color var(--duration-fast) var(--ease-standard); outline: 2px dashed transparent; outline-offset: 4px; }
 .dropArea[data-dragging] { outline-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
-.loading { display: grid; }
 .empty { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-block) var(--space-group); border: 1px dashed var(--sq-stroke); }
 
 /* Grid view: cards on the boxes' rules (a white face, a clear border, no resting shadow), raised on hover. */

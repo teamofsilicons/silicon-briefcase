@@ -50,7 +50,8 @@ export function RecipientPicker({ value, onChange, disabled, onSaveContact }: { 
     {!value && resolve.isFetching && settled === draft.trim() && <p role="status" className={styles.note}>Checking this account…</p>}
     {!value && focused && draft && !suggestions.length && !resolve.isFetching && !error && <p className={styles.note}>No matching suggestions. Enter a full Carbon or Silicon ID to find someone new.</p>}
     {value && <div className={styles.selected} data-sq="surface" aria-label="Selected recipient"><AccountChip account={value} note={value.contact ? `Trust ${value.contact.trust}` : undefined} />{onSaveContact && people.data?.contacts_status === "connected" && <Button type="button" size="sm" variant="ghost" onClick={() => onSaveContact(value)}>{value.contact ? "Edit Contact" : "Add Contact"}</Button>}</div>}
-    {people.isPending && <p role="status" className={styles.note}>Loading suggestions…</p>}
+    {/* Said, not drawn: suggestions only matter once someone types, and a line that comes and goes moves the form. */}
+    {people.isPending && <p role="status" className="sr-only">Loading suggestions…</p>}
     {people.error && <div className={styles.connection}><p>Invite history couldn’t load. You can still enter an exact account ID.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry Suggestions</Button></div>}
     {people.data?.contacts_status === "disconnected" && <p className={styles.connection}><Link href="/contacts">Connect Silicon Contacts</Link> to include your saved names, photos and trusted contacts.</p>}
     {people.data?.contacts_status === "unavailable" && <div className={styles.connection}><p>Contacts are unavailable. Suggestions show invitation history.</p><Button type="button" variant="ghost" size="sm" onClick={() => void people.refetch()}>Retry Contacts</Button></div>}

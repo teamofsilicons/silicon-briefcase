@@ -1,17 +1,17 @@
 "use client";
 import { useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeftRight, ArrowUpRight, Building2, FolderOpen, Plus, ShieldCheck, UsersRound } from "lucide-react";
+import { ArrowUpRight, Building2, FolderOpen, Plus, ShieldCheck, UserRoundPlus, UsersRound } from "lucide-react";
 import { Page } from "@/components/foundation/layout/layout";
 import { ButtonLink } from "@/components/foundation/button-link";
 import { PageBar } from "@/components/foundation/page/page-bar";
-import { LinkItem, Section, Tile } from "@/components/foundation/page/rows";
+import { LinkItem, Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
-import { SkeletonBlock } from "@/components/foundation/feedback/skeleton-block";
 import { Alert } from "@teamofsilicons/silicon-ui/alert";
 import { Badge } from "@teamofsilicons/silicon-ui/badge";
 import { Button } from "@teamofsilicons/silicon-ui/button";
 import { Input } from "@teamofsilicons/silicon-ui/input";
+import { SearchField } from "@teamofsilicons/silicon-ui/search-field";
 import { Select } from "@teamofsilicons/silicon-ui/select";
 import { Checkbox } from "@teamofsilicons/silicon-ui/checkbox";
 import { Dialog, DialogContent } from "@teamofsilicons/silicon-ui/dialog";
@@ -21,21 +21,21 @@ import { api } from "@/lib/client/api";
 import { useSessionView } from "@/lib/client/session";
 import { notify } from "@/lib/notify";
 import { message } from "@/lib/briefcase/types";
-import { canManageAdmin, canManageTeam, memberRole, type OrganizationDetail, type Team } from "@/lib/briefcase/organizations";
+import { canManageAdmin, canManageTeam, memberRole, type Member, type OrganizationDetail, type Team } from "@/lib/briefcase/organizations";
+import { addAccount } from "@/lib/client/accounts";
+import { SignedInAccounts } from "./account-list";
 import { useOrganizations } from "./organizations-query";
+import { PersonAvatar } from "./person-label";
 import styles from "./organizations.module.css";
-
-const switchAccount = "/auth/sign-in?prompt=select_account&return_to=%2Forganizations";
 
 export function OrganizationsHome() {
   const query = useOrganizations();
-  const session = useSessionView();
   return <>
-    <PageBar title="Organizations" actions={<ButtonLink href={switchAccount} external variant="secondary" size="sm"><ArrowLeftRight size={16} strokeWidth={2} aria-hidden="true" />Switch Account</ButtonLink>} />
+    <PageBar title="Organizations" actions={<Button variant="secondary" size="sm" onClick={addAccount}><UserRoundPlus size={16} strokeWidth={2} aria-hidden="true" />Add Work Account</Button>} />
     <Page>
-      <p className={styles.lead}>Your people, teams, and shared work, together in Briefcase. Signed in as <strong>{session.account?.display_name || session.account?.id || "you"}</strong>: personal files stay with your personal account, and a work account manages its organization.</p>
+      <p className={styles.lead}>Your people, teams, and shared work. Personal files stay with your personal account; a work account works inside its organization.</p>
       {query.error ? <ErrorAlert error={query.error} action={<Button variant="secondary" size="sm" onClick={() => void query.refetch()}>Try Again</Button>} />
-        : query.isPending ? <div role="status" aria-label="Loading your organizations"><SkeletonBlock width="100%" height="3.25rem" radius="var(--radius-container)" /></div>
+        : query.isPending ? <SectionSkeleton rows={1} title label="Loading your organizations" />
         : query.data?.organizations.length ? (
           <Section id="organizations" title="Your organizations" count={query.data.organizations.length}>
             {query.data.organizations.map(org => (
@@ -46,13 +46,14 @@ export function OrganizationsHome() {
           <div data-sq="surface" className={styles.empty}>
             <span data-sq="surface" className={styles.emptyIcon} aria-hidden="true"><UsersRound size={20} strokeWidth={2} /></span>
             <h2>Bring your work account</h2>
-            <p>This account has no organization membership. Choose a linked work account in Silicon Accounts to see its people, teams, and sharing controls here.</p>
+            <p>This account has no organization membership. Switch to a work account below, or add one from Silicon Accounts, to see its people, teams, and sharing controls here.</p>
             <div className={styles.actions}>
               <ButtonLink href="https://organizations.teamofsilicons.com/" external variant="ghost" size="sm">Create or Join an Organization<ArrowUpRight size={16} strokeWidth={2} aria-hidden="true" /></ButtonLink>
-              <ButtonLink href={switchAccount} external size="sm">Choose a Work Account</ButtonLink>
+              <Button size="sm" onClick={addAccount}>Add Work Account</Button>
             </div>
           </div>
         )}
+      <SignedInAccounts />
     </Page>
   </>;
 }
@@ -82,12 +83,12 @@ export function OrganizationWorkspace({ organization }: { organization: string }
   };
   const parent = { href: "/organizations", label: "Organizations" };
   if (query.error) return <>
-    <PageBar parent={parent} title="Organization unavailable" actions={<ButtonLink href={switchAccount} external variant="secondary" size="sm">Choose Another Account</ButtonLink>} />
+    <PageBar parent={parent} title="Organization unavailable" actions={<Button variant="secondary" size="sm" onClick={addAccount}>Choose Another Account</Button>} />
     <Page><ErrorAlert error={query.error} action={<Button variant="secondary" size="sm" onClick={() => void query.refetch()}>Try Again</Button>} /></Page>
   </>;
   if (!query.data) return <>
     <PageBar parent={parent} title="Organization" />
-    <Page><div role="status" aria-label="Opening your organization"><SkeletonBlock width="100%" height="calc(3 * 3.25rem)" radius="var(--radius-container)" /></div></Page>
+    <Page><SectionSkeleton rows={3} label="Opening your organization" /></Page>
   </>;
   const detail = query.data;
   return <>
@@ -115,6 +116,7 @@ function People({ detail, action, busy }: { detail: OrganizationDetail; action: 
   const [target, setTarget] = useState("");
   const [handle, setHandle] = useState("");
   const [team, setTeam] = useState("none");
+  const [removing, setRemoving] = useState<Member | null>(null);
   const caps = detail.capabilities;
   const members = detail.members.filter(member => !member.removed_at && `${member.id} ${member.display_name}`.toLowerCase().includes(search.toLowerCase()));
   const invites = detail.invites.filter(invite => invite.status === "pending");
@@ -122,15 +124,34 @@ function People({ detail, action, busy }: { detail: OrganizationDetail; action: 
     event.preventDefault();
     if (await action({ action: "invite", target: target.trim(), handle: handle.trim(), teams: team === "none" ? [] : [team] }, "Invitation sent")) { setInviting(false); setTarget(""); setHandle(""); }
   }
+  const removingName = removing ? removing.display_name || removing.id : "";
   return <section className={styles.section}>
     <div className={styles.sectionHeader}><div><h2>People &amp; access</h2><p>Manage organization roles and see who you work with.</p></div>{caps.admin && <Button size="sm" onClick={() => setInviting(true)}><Plus size={16} strokeWidth={2} aria-hidden="true" />Invite a Member</Button>}</div>
-    <Input label="Find a member" placeholder="Search by name or account ID" value={search} onChange={event => setSearch(event.target.value)} />
-    <ul data-sq="surface" className={styles.list}>{members.map(member => <li key={member.uuid}><span data-sq="surface" className={styles.avatar} aria-hidden="true">{(member.display_name || member.id).slice(0, 2).toUpperCase()}</span><div className={styles.person}><strong>{member.display_name || member.id}</strong><small>{member.id}</small></div><Badge size="sm" tone="neutral" icon={member.owner || member.effective_admin || member.admin ? <ShieldCheck size={12} strokeWidth={2} /> : undefined}>{memberRole(member)}</Badge><div className={styles.actions}>
-      {canManageAdmin(caps, member) && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "admin_set", member: member.uuid, admin: !member.admin }, member.admin ? "Admin appointment removed" : "Admin appointed")}>{member.admin ? "Remove Admin" : "Make Admin"}</Button>}
-      {caps.owner && member.admin && !member.owner && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "admin_set", member: member.uuid, admin: true, manage_admins: !member.manage_admins }, "Admin permissions updated")}>{member.manage_admins ? "Restrict Admin Management" : "Allow Managing Admins"}</Button>}
-      {caps.admin && !member.owner && (!(member.admin || member.effective_admin) || canManageAdmin(caps, member)) && <HoldToConfirm label={`Remove ${member.display_name || member.id}`} tone="danger" disabled={busy} onConfirm={() => { void action({ action: "member_remove", member: member.uuid }, "Member removed"); }} />}
-    </div></li>)}</ul>
-    {!members.length && <p className={styles.muted}>No members match that search.</p>}
+    <div className={styles.find}><SearchField label="Find a member" placeholder="Find a member by name or account ID" value={search} onValueChange={setSearch} /></div>
+    {members.length ? (
+      <Section id="members" label="Members">
+        {members.map(member => {
+          const name = member.display_name || member.id;
+          const admin = member.owner || member.effective_admin || member.admin;
+          return (
+            <Row key={member.uuid} wide lead={<PersonAvatar person={{ id: member.id, kind: member.kind, display_name: member.display_name }} />} title={name} detail={member.id}>
+              <Badge size="sm" tone="neutral" icon={admin ? <ShieldCheck size={12} strokeWidth={2} /> : undefined}>{memberRole(member)}</Badge>
+              {canManageAdmin(caps, member) && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "admin_set", member: member.uuid, admin: !member.admin }, member.admin ? "Admin appointment removed" : "Admin appointed")}>{member.admin ? "Remove Admin" : "Make Admin"}</Button>}
+              {caps.owner && member.admin && !member.owner && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "admin_set", member: member.uuid, admin: true, manage_admins: !member.manage_admins }, "Admin permissions updated")}>{member.manage_admins ? "Restrict Admin Management" : "Allow Managing Admins"}</Button>}
+              {caps.admin && !member.owner && (!(member.admin || member.effective_admin) || canManageAdmin(caps, member)) && <Button size="sm" variant="ghost" disabled={busy} aria-label={`Remove ${name}`} onClick={() => setRemoving(member)}>Remove</Button>}
+            </Row>
+          );
+        })}
+      </Section>
+    ) : <p className={styles.muted}>No members match that search.</p>}
+    <Dialog open={!!removing} onOpenChange={open => { if (!open) setRemoving(null); }}>
+      <DialogContent title={`Remove ${removingName}?`} description={`${removingName} leaves ${detail.org.name}. Access through the organization and its teams ends; files shared with them directly stay shared.`}>
+        <div className={styles.dialogActions}>
+          <Button variant="ghost" onClick={() => setRemoving(null)}>Cancel</Button>
+          <Button variant="danger" loading={busy} onClick={() => { if (removing) void action({ action: "member_remove", member: removing.uuid }, "Member removed").then(ok => { if (ok) setRemoving(null); }); }}>Remove Member</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
     <p data-sq="surface" className={styles.notice}>Owners manage all organization settings. Admins can manage people and teams within their permissions. An admin team also gives its members organization admin access.</p>
     {invites.length > 0 && <><h2 className={styles.subTitle}>Pending invitations</h2><ul data-sq="surface" className={styles.list}>{invites.map(invite => <li key={invite.id}><div className={styles.person}><strong>{invite.target}</strong><small>{invite.handle} · expires {new Date(invite.expires_at * 1000).toLocaleDateString()}</small></div>{caps.admin && <div className={styles.actions}><Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "invite_resend", invite: invite.id }, "Invitation resent")}>Resend</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void action({ action: "invite_cancel", invite: invite.id }, "Invitation cancelled")}>Cancel</Button></div>}</li>)}</ul></>}
     <Dialog open={inviting} onOpenChange={setInviting}><DialogContent title="Invite a Member" description="They’ll receive an invitation to create a work account in this organization."><form className={styles.form} onSubmit={invite}><Input label="Email or Carbon account ID" value={target} onChange={event => setTarget(event.target.value)} required /><Input label="Work handle" description={`Their account will use this handle in ${detail.org.org_id}.`} value={handle} onChange={event => setHandle(event.target.value)} pattern="[a-z0-9_-]+" required /><Select label="Add to a team" value={team} onValueChange={setTeam} options={[{ value: "none", label: "No team yet" }, ...detail.teams.map(team => ({ value: team.id, label: team.name }))]} /><div className={styles.dialogActions}><Button type="button" variant="ghost" onClick={() => setInviting(false)}>Cancel</Button><Button type="submit" loading={busy}>Send Invitation</Button></div></form></DialogContent></Dialog>

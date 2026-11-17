@@ -40,13 +40,13 @@ test("share a folder with a particular team and the whole organization", async (
   await page.getByRole("combobox", { name: "Team", exact: true }).click();
   await page.getByRole("option", { name: "Design · example", exact: true }).click();
   await page.getByRole("button", { name: "Share with Team", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /^Remove access for / })).toHaveCount(1);
   await expect(page.getByRole("dialog").getByText("Design", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Organization", exact: true }).click();
   await page.getByRole("combobox", { name: "Organization", exact: true }).click();
   await page.getByRole("option", { name: "Example Studio", exact: true }).click();
   await page.getByRole("button", { name: "Share with Organization", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: /^Remove access for / })).toHaveCount(2);
   await expect(page.getByRole("dialog").getByRole("region", { name: "People with access" }).getByRole("listitem").filter({ hasText: "Example Studio" })).toBeVisible();
   const requests = await (await request.get(fixture + "/__requests")).json();
   expect(requests.map((r: { body: { principal: { type: string } } }) => r.body.principal.type)).toEqual(["team", "organization"]);
@@ -64,7 +64,11 @@ test("personal accounts and service outages have actionable states", async ({ pa
   await request.post(fixture + "/__mode", { data: { mode: "personal" } });
   await page.goto("/organizations");
   await expect(page.getByRole("heading", { name: "Bring your work account" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Choose a work account" })).toHaveAttribute("href", /prompt=select_account/);
+  // Choosing an account is choosing an organization: the account menu's list is on the page, with a way to add one.
+  await expect(page.getByRole("button", { name: "Add Work Account", exact: true })).toHaveCount(2);
+  const accounts = page.getByRole("region", { name: "Your accounts" });
+  await expect(accounts.getByText("Ada Lovelace", { exact: true })).toBeVisible();
+  await expect(accounts.getByRole("button", { name: /Add another account/ })).toBeVisible();
   await request.post(fixture + "/__mode", { data: { mode: "outage" } });
   await page.reload();
   await expect(page.getByRole("button", { name: "Try Again", exact: true })).toBeVisible();

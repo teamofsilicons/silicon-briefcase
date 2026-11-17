@@ -1,14 +1,15 @@
 /**
- * POST /auth/sign-out: ends this browser's sign-in to the app. The refresh token is revoked at Silicon Accounts
- * (POST /v1/oauth/revoke with the app's credentials; every token of the sign-in dies with it) and the session cookie is
- * cleared. Same-origin only (CSRF guard). The Carbon's own sign-in at Silicon Accounts is untouched.
+ * POST /auth/sign-out: signs this browser out of the app, every account signed in on it. Each refresh token is revoked
+ * at Silicon Accounts (POST /v1/oauth/revoke with the app's credentials; every token of the sign-in dies with it) and
+ * the cookies are cleared. Same-origin only (CSRF guard). The Carbon's own sign-in at Silicon Accounts is untouched.
  *
  * A fetch (the account menu) gets 204; a plain form post (no script) is sent to /sign-in?signed_out=1.
  */
 import { NextResponse, type NextRequest } from "next/server";
+import { forget } from "@/lib/server/accounts";
 import { EnvError, serverEnv } from "@/lib/server/env";
 import { json, misconfigured, redirectTo } from "@/lib/server/responses";
-import { clearSession, clientHeaders, errorBody, readSession, sameOriginProblem } from "@/lib/server/session";
+import { clearSession, clientHeaders, errorBody, readOtherAccounts, readSession, sameOriginProblem, writeOtherAccounts } from "@/lib/server/session";
 import { revokeSession } from "@/lib/server/tokens";
 
 export const dynamic = "force-dynamic";
@@ -24,13 +25,16 @@ export async function POST(request: NextRequest) {
   const problem = sameOriginProblem(request);
   if (problem) return json(403, errorBody("cross_site_request", problem, "Sign out from this site's own account menu."));
   const session = readSession(request);
+  const headers = clientHeaders(request);
   try {
-    if (session) await revokeSession(session, clientHeaders(request));
+    if (session) await revokeSession(session, headers);
   } catch {
     return json(503, errorBody("sign_out_unavailable", "Sign-out could not be saved. Please retry shortly."));
   }
+  await Promise.all(readOtherAccounts(request).map(item => forget(item, headers)));
   const wantsPage = (request.headers.get("accept") ?? "").includes("text/html") && request.headers.get("sec-fetch-mode") === "navigate";
   const response = wantsPage ? redirectTo(new URL("/sign-in?signed_out=1", env.publicUrl)) : new NextResponse(null, { status: 204, headers: { "Cache-Control": "no-store" } });
   clearSession(response);
+  writeOtherAccounts(response, []);
   return response;
 }

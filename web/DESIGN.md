@@ -1,5 +1,24 @@
 # The Silicon design system
 
+> **2026-11-18: accounts, loading and the file dialog, on Accounts' philosophy.** Accounts' rule is "few kinds of
+> things, always the same, not extra space", and nothing should move once it is on screen. So:
+> - **Accounts.** The account menu is Accounts' profile menu (`foundation/shell/profile-menu.tsx`): every account
+>   signed in to Briefcase on this browser, name above id in equal rows, a check on the current one, then Add Another
+>   Account, Your Accounts and Sign Out; a bottom sheet on phones. A work account's line names its organization, so
+>   choosing an account is choosing where you work, and the sidebar no longer has a workspace switcher. Organizations
+>   shows the same list as a section. The server keeps the other accounts in one sealed cookie of durable session ids
+>   (`lib/server/session.ts` OtherAccount, `lib/server/accounts.ts`, `/auth/accounts`); Sign Out ends them all.
+> - **Loading.** A list loads as its own rows (`SectionSkeleton` in `foundation/page/rows`): the same box, a tile and
+>   two lines per row at the row's height, so content arrives in place. Personal or work is known from the account on
+>   the first render (`useCurrentAccount`), so titles never change as data arrives. The shell fetches its menu's data
+>   only when the menu or ⌘K opens, never while a page hydrates.
+> - **File details.** The dialog is pinned near the top at a fixed height: the tabs never move under the pointer and
+>   each tab scrolls inside itself. Tab strips hug their labels (also on an organization's page). The preview fills the
+>   tab; Open and Download sit at its end. Sharing is three sections (Share access, People with access with each
+>   person's photo, Anyone with the link). The current version is marked Current, not offered for restore.
+> - **Toolbars.** The file pages' search, Show and Upload Options are one row at the controls' height; their labels
+>   stay for screen readers. Removing a member is a quiet Remove that asks first in a dialog.
+>
 > **2026-11-18: the Silicon Accounts look.** Briefcase now shares its interface with accounts.teamofsilicons.com, so the
 > two read as one product. `styles/tokens.css`, `styles/base.css` and `styles/squircle.css` are copied from Accounts'
 > `web/styles` (keep them in step: change Accounts first, then here); components come from Silicon UI on npm, at the version

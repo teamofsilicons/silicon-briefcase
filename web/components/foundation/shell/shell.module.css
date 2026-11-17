@@ -56,10 +56,6 @@
 }
 
 .topEnd { display: flex; min-width: 0; justify-self: end; align-items: center; gap: var(--space-related); }
-/* The account menu's photo at 36px in a 44px circle, not UserMenu's 32 in 40 (Anil, 2026-10-30). UserMenu has no size
-   option, so this reaches into its trigger: a tolerated difference (redesign/prototype-differences.md). */
-.account.account { height: 44px; }
-.account.account [data-size="sm"] { --face-size: 36px; }
 
 /* Below the top bar: the section list and the page, inset 8px, with 8px between them. */
 .body { --sidebar-width: 248px; position: relative; display: grid; min-width: 0; flex: 1; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); gap: var(--space-related); padding: var(--space-related); transition: grid-template-columns var(--duration-standard) var(--ease-standard); }

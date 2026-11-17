@@ -47,11 +47,12 @@ test("the shell: the app's sections, the account menu and the ⌘K palette", asy
   for (const item of appConfig.nav) await expect(nav.getByRole("link", { name: item.label })).toHaveAttribute("href", item.href);
   await expect(nav.getByRole("link", { name: appConfig.nav[0]!.label })).toHaveAttribute("aria-current", "page");
 
-  await page.getByRole("button", { name: /^Account menu, / }).click();
+  // The account menu is Silicon Accounts' profile menu: the accounts signed in on this browser, then its actions.
+  await page.getByRole("button", { name: /^Account menu for / }).click();
   const menu = page.getByRole("menu");
   await expect(menu).toContainText(me);
-  await expect(menu).toContainText("Carbon");
-  await expect(menu.getByRole("menuitemradio", { name: "System" })).toBeVisible();
+  await expect(menu.getByRole("menuitemradio", { checked: true })).toContainText(me);
+  await expect(menu.getByRole("menuitem", { name: "Add another account" })).toBeVisible();
   await page.keyboard.press("Escape");
 
   const target = appConfig.nav[appConfig.nav.length - 1]!;
@@ -76,7 +77,7 @@ test("signing out revokes the sign-in, closes every door, and other tabs follow"
   const other = await context.newPage();
   await other.goto(appConfig.home);
   await expect(other.getByRole("navigation", { name: appConfig.name, exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Account menu, / }).click();
+  await page.getByRole("button", { name: /^Account menu for / }).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/sign-in\?signed_out=1$/);
   // The other tab heard it (BroadcastChannel) and left the workspace too.

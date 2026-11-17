@@ -12,20 +12,21 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ViewTransition, useCallback, useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { ArrowLeftRight, BookOpen, CircleUserRound, LogOut, Menu, Search } from "lucide-react";
+import { ArrowLeftRight, BookOpen, CircleUserRound, LogOut, Menu, Search, UserRoundPlus } from "lucide-react";
 import { BottomSheet } from "@teamofsilicons/silicon-ui/bottom-sheet";
 import { Button } from "@teamofsilicons/silicon-ui/button";
-import { UserMenu, type UserMenuUser } from "@teamofsilicons/silicon-ui/user-menu";
 import { SkipLink } from "@/components/foundation/layout/layout";
 import type { SessionAccount } from "@/lib/account";
 import { appConfig } from "@/lib/app.config";
+import { CurrentAccountProvider, SignInEnded, addAccount, switchAccount, useSignedInAccounts } from "@/lib/client/accounts";
 import { useSignOut } from "@/lib/client/session";
 import { openCommandPalette, toggleCommandPalette, useCommandPaletteOpen, useRegisterCommands } from "@/lib/commands";
 import { navigationType, navItemFor } from "@/lib/navigation";
 import { notifyError } from "@/lib/notify";
 import { BrandWords } from "./brand-mark";
 import { CommandMenu } from "./command-menu";
-import { Sidebar, SWITCH_ACCOUNT } from "./sidebar";
+import { ProfileMenu, accountLine } from "./profile-menu";
+import { Sidebar } from "./sidebar";
 import { SIDEBAR_STEPS, SidebarResize, useSidebarStep } from "./sidebar-resize";
 import styles from "./shell.module.css";
 
@@ -69,8 +70,11 @@ export interface AppShellProps {
 export function AppShell({ account, accountsUrl, children }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const { signOut } = useSignOut();
+  const { signOut, pending: signingOut } = useSignOut();
   const paletteOpen = useCommandPaletteOpen();
+  // Fetched when the palette opens, not while a page hydrates (lib/client/accounts.ts).
+  const { accounts } = useSignedInAccounts(paletteOpen);
+  const otherAccounts = useMemo(() => accounts.filter(item => !item.current), [accounts]);
   const isApple = useSyncExternalStore(subscribeNothing, detectApple, () => false);
   const narrow = useSyncExternalStore(subscribeNarrow, readNarrow, () => false);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -105,9 +109,14 @@ export function AppShell({ account, accountsUrl, children }: AppShellProps) {
     }),
     { id: "go.docs", label: `${appConfig.name} Docs`, description: "Opens in a new tab", group: "Other sites", icon: <BookOpen size={16} strokeWidth={2} />, keywords: ["docs", "help", "guide"], run: () => void window.open(appConfig.links.docs, "_blank", "noopener") },
     { id: "go.account", label: "Your Account", description: "Silicon Accounts, in a new tab", group: "Other sites", icon: <CircleUserRound size={16} strokeWidth={2} />, keywords: ["account", "profile", "photo"], run: openAccount },
-    { id: "account.switch", label: "Switch Account", description: "Your personal or a work account", group: "Account", icon: <ArrowLeftRight size={16} strokeWidth={2} />, keywords: ["work", "personal", "organization", "workspace"], run: () => window.location.assign(SWITCH_ACCOUNT) },
+    ...otherAccounts.map(other => ({
+      id: `account.switch.${other.uuid}`, label: `Switch to ${other.display_name}`, description: accountLine(other), group: "Account", icon: <ArrowLeftRight size={16} strokeWidth={2} />,
+      keywords: ["switch", "account", "work", "personal", "organization", other.id, ...(other.org ? [other.org.name] : [])],
+      run: () => void switchAccount(other.uuid).catch(error => notifyError(error, error instanceof SignInEnded ? "That sign-in has ended" : "Could not switch accounts")),
+    })),
+    { id: "account.add", label: "Add Another Account", description: "A personal or work account", group: "Account", icon: <UserRoundPlus size={16} strokeWidth={2} />, keywords: ["work", "personal", "organization", "switch", "sign in"], run: addAccount },
     { id: "account.signout", label: "Sign Out", description: `Sign this browser out of ${appConfig.name}`, group: "Account", icon: <LogOut size={16} strokeWidth={2} />, keywords: ["logout", "log out", "sign out"], run: () => void doSignOut() },
-  ], [go, openAccount, doSignOut]);
+  ], [go, openAccount, doSignOut, otherAccounts]);
 
   // ⌘K toggles the palette; 1 to 9 jump to sections (never while typing or with a layer open).
   useEffect(() => {
@@ -130,62 +139,52 @@ export function AppShell({ account, accountsUrl, children }: AppShellProps) {
     return () => document.removeEventListener("keydown", onKey);
   }, [go, paletteOpen]);
 
-  const user = useMemo<UserMenuUser>(() => ({ name: account.display_name, email: account.id, avatarSrc: account.pfp_url ?? undefined }), [account]);
-
   return (
-    <div className={styles.shell}>
-      <SkipLink href="#main" />
-      <header className={styles.top}>
-        <Link href={appConfig.home} aria-label={`Team of Silicons ${appConfig.name}, home`} data-sq="surface" className={styles.brand} transitionTypes={[navigationType(pathname, appConfig.home)]}>
-          <BrandWords />
-        </Link>
-        {/* Keyed by the layout: Silicon UI's Button measures its label once and keeps that width inline, so after a resize
-            from wide to narrow it stayed 400px and covered the brand. A new Button measures again. */}
-        <Button key={narrow ? "narrow" : "wide"} variant="soft" size="sm" className={styles.search} onClick={openCommandPalette} aria-keyshortcuts={isApple ? "Meta+K" : "Control+K"} aria-label={narrow ? `Search ${appConfig.name}` : undefined}>
-          <Search size={16} strokeWidth={2.1} aria-hidden="true" />
-          <span className={styles.searchLabel}>Search</span>
-          <kbd data-sq="surface" className={styles.keys}>{isApple ? "⌘K" : "Ctrl K"}</kbd>
-        </Button>
-        <span className={styles.topEnd}>
-          <UserMenu
-            className={styles.account}
-            user={user}
-            showTheme={false}
-            onSignOut={doSignOut}
-            align="end"
-            items={[
-              { label: "Your Account", icon: <CircleUserRound size={16} strokeWidth={2} />, onSelect: openAccount },
-              { label: "Switch Account", icon: <ArrowLeftRight size={16} strokeWidth={2} />, onSelect: () => window.location.assign(SWITCH_ACCOUNT) },
-            ]}
-          />
-          {narrow ? (
-            <BottomSheet
-              title={appConfig.name}
-              open={sheetOpen}
-              onOpenChange={setSheetOpen}
-              trigger={<Button variant="ghost" size="sm" aria-label={`${appConfig.name} sections`}><Menu size={18} strokeWidth={2} aria-hidden="true" /></Button>}
-            >
-              <Sidebar accountsUrl={accountsUrl} onNavigate={() => setSheetOpen(false)} />
-            </BottomSheet>
-          ) : null}
-        </span>
-      </header>
-      <div className={styles.body} style={{ "--sidebar-width": `${SIDEBAR_STEPS[sidebarStep]}px` } as CSSProperties}>
-        {narrow ? null : (
-          <>
-            <aside id="briefcase-sidebar" className={styles.aside}>
-              <Sidebar accountsUrl={accountsUrl} />
-            </aside>
-            <SidebarResize step={sidebarStep} onStep={setSidebarStep} controls="briefcase-sidebar" />
-          </>
-        )}
-        <main id="main" data-sq-native="" className={styles.main} tabIndex={-1}>
-          <ViewTransition key={section?.href ?? pathname} enter={PAGE_CLASSES} exit={PAGE_CLASSES} default="none">
-            <div className={styles.page}>{children}</div>
-          </ViewTransition>
-        </main>
+    <CurrentAccountProvider value={account}>
+      <div className={styles.shell}>
+        <SkipLink href="#main" />
+        <header className={styles.top}>
+          <Link href={appConfig.home} aria-label={`Team of Silicons ${appConfig.name}, home`} data-sq="surface" className={styles.brand} transitionTypes={[navigationType(pathname, appConfig.home)]}>
+            <BrandWords />
+          </Link>
+          {/* Keyed by the layout: Silicon UI's Button measures its label once and keeps that width inline, so after a resize
+              from wide to narrow it stayed 400px and covered the brand. A new Button measures again. */}
+          <Button key={narrow ? "narrow" : "wide"} variant="soft" size="sm" className={styles.search} onClick={openCommandPalette} aria-keyshortcuts={isApple ? "Meta+K" : "Control+K"} aria-label={narrow ? `Search ${appConfig.name}` : undefined}>
+            <Search size={16} strokeWidth={2.1} aria-hidden="true" />
+            <span className={styles.searchLabel}>Search</span>
+            <kbd data-sq="surface" className={styles.keys}>{isApple ? "⌘K" : "Ctrl K"}</kbd>
+          </Button>
+          <span className={styles.topEnd}>
+            <ProfileMenu account={account} accountsUrl={accountsUrl} onSignOut={doSignOut} signingOut={signingOut} />
+            {narrow ? (
+              <BottomSheet
+                title={appConfig.name}
+                open={sheetOpen}
+                onOpenChange={setSheetOpen}
+                trigger={<Button variant="ghost" size="sm" aria-label={`${appConfig.name} sections`}><Menu size={18} strokeWidth={2} aria-hidden="true" /></Button>}
+              >
+                <Sidebar accountsUrl={accountsUrl} onNavigate={() => setSheetOpen(false)} />
+              </BottomSheet>
+            ) : null}
+          </span>
+        </header>
+        <div className={styles.body} style={{ "--sidebar-width": `${SIDEBAR_STEPS[sidebarStep]}px` } as CSSProperties}>
+          {narrow ? null : (
+            <>
+              <aside id="briefcase-sidebar" className={styles.aside}>
+                <Sidebar accountsUrl={accountsUrl} />
+              </aside>
+              <SidebarResize step={sidebarStep} onStep={setSidebarStep} controls="briefcase-sidebar" />
+            </>
+          )}
+          <main id="main" data-sq-native="" className={styles.main} tabIndex={-1}>
+            <ViewTransition key={section?.href ?? pathname} enter={PAGE_CLASSES} exit={PAGE_CLASSES} default="none">
+              <div className={styles.page}>{children}</div>
+            </ViewTransition>
+          </main>
+        </div>
+        <CommandMenu />
       </div>
-      <CommandMenu />
-    </div>
+    </CurrentAccountProvider>
   );
 }

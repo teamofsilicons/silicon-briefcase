@@ -21,7 +21,8 @@ async function bounded(url: string, limit: number, signal: AbortSignal) {
   const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
   return output;
 }
-export function Preview({ entry, publicContentUrl }: { entry: Entry; publicContentUrl?: string }) {
+/** `fill`: the preview takes all the room its parent gives (a file's Preview tab), the file scaled to fit inside it. */
+export function Preview({ entry, publicContentUrl, fill = false }: { entry: Entry; publicContentUrl?: string; fill?: boolean }) {
   const url = publicContentUrl || contentUrl(entry.id);
   const extension = entry.name.split(".").pop()?.toLowerCase() || "";
   const office = ["docx","xlsx","xlsm","pptx","odt","ods","odp"].includes(extension);
@@ -32,8 +33,8 @@ export function Preview({ entry, publicContentUrl }: { entry: Entry; publicConte
     return office ? { html: sandboxDocument(officePreview(bytes,extension)), text: "" } : { html: "", text: new TextDecoder().decode(bytes) };
   } });
   const archive = useQuery({ queryKey: ["archive", entry.id], enabled: entry.render === "archive" && !publicContentUrl, queryFn: () => api.get<{ entries: { path: string; size: number | null; kind: string }[]; truncated: boolean }>(entryUrl(entry.id,"/archive")) });
-  if (entry.type === "folder") return <div data-sq="surface" className={styles.preview}><div className={styles.placeholder}><Folder size={32} strokeWidth={1.5} aria-hidden="true" /><p>Open this folder to browse its contents.</p></div></div>;
-  return <><div data-sq="surface" className={styles.preview}>
+  if (entry.type === "folder") return <div data-sq="surface" className={styles.preview} data-fill={fill ? "" : undefined}><div className={styles.placeholder}><Folder size={32} strokeWidth={1.5} aria-hidden="true" /><p>Open this folder to browse its contents.</p></div></div>;
+  return <><div data-sq="surface" className={styles.preview} data-fill={fill ? "" : undefined}>
     {entry.render === "image" ? <img src={url} alt={entry.name} /> : entry.render === "video" ? <video src={url} controls preload="metadata" /> : entry.render === "audio" ? <audio src={url} controls preload="metadata" /> : extension === "pdf" ? <iframe title={`Preview of ${entry.name}`} src={url} sandbox="allow-same-origin" /> : office ? preview.data ? <iframe title={`Preview of ${entry.name}`} srcDoc={preview.data.html} sandbox="" /> : <p role="status" className={styles.status}>{preview.error?.message || "Preparing document…"}</p> : text ? preview.data ? <pre><code>{highlight(preview.data.text, extension).map((token,index) => <span key={index} style={{ color: token.k === "comment" ? "var(--text-muted)" : token.k === "string" ? "var(--success)" : token.k === "keyword" ? "var(--accent-ink)" : undefined }}>{token.v}</span>)}</code></pre> : <p role="status" className={styles.status}>{preview.error?.message || "Reading preview…"}</p> : entry.render === "archive" && !publicContentUrl ? archive.data ? <table className={styles.table}><thead><tr><th>Archive contents</th><th>Size</th></tr></thead><tbody>{archive.data.entries.map((item,index) => <tr key={index}><td>{item.path}</td><td>{size(item.size)}</td></tr>)}</tbody></table> : <p className={styles.status}>{archive.error?.message || "Reading archive…"}</p> : <div className={styles.placeholder}><File size={32} strokeWidth={1.5} aria-hidden="true" /><p>No preview for this type of file. Download it to open in another app.</p></div>}
   </div>{office && preview.data && <p className={styles.muted}>Text and table preview. Download the original to see its complete formatting, charts and embedded media.</p>}{text && (entry.size ?? 0) > TEXT_LIMIT && <p className={styles.muted}>Showing the first 256 KiB. Download the file for the full contents.</p>}{archive.data?.truncated && <p className={styles.muted}>This archive has more entries than the preview limit.</p>}</>;
 }
