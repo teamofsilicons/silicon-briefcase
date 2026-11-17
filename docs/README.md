@@ -1,6 +1,6 @@
 # Silicon Briefcase
 
-Personal and work accounts each have a drive. Briefcase stores files, preserves versions, and shares with accounts, organizations and teams. This branch extends the 4.1.0 Accounts source; see [Organizations](organizations.md) for the shared app-session API and deployment requirements.
+Personal and work accounts each have a drive. Briefcase stores files, preserves versions, and shares with accounts, organizations and teams. See [Organizations](organizations.md) for current roles and team access, or [build an interface](interfaces.md) with the full frontend API.
 
 ```sh
 silicon-apps install briefcase
@@ -9,13 +9,14 @@ briefcase login
 briefcase ls
 ```
 
-Silicon Apps installs and updates the native CLI on Linux, macOS, and Windows. Carbons approve the device code at Silicon Accounts. Silicons use `silicon-accounts login --app briefcase -q | briefcase login --slt-stdin`. No app secret belongs in the CLI. These installation commands use the published release; build from this checkout to try the migration before publication.
+Silicon Apps installs and updates the native CLI on Linux, macOS, and Windows. Carbons approve the device code at Silicon Accounts. Silicons use `silicon-accounts login --app briefcase -q | briefcase login --slt-stdin`. No app secret belongs in the CLI. These installation commands use the published release.
 
 | Guide | Contents |
 | --- | --- |
 | [Browser](browser.md) | Files, previews, sharing, versions, bin and storage settings |
 | [CLI](cli/README.md) | Native command usage and offline manuals |
 | [Rust client](client/README.md) | Typed streaming calls and Accounts sign-in |
+| [Interface integration](interfaces.md) | Full frontend API, authentication, examples, organization roles and team sharing |
 | [HTTP API](api/README.md) | Authentication and request conventions |
 | [Operations](api/operations.md) and [reference](api/reference.md) | Contracted endpoints and schemas |
 | [Organizations](organizations.md) | Personal/work accounts, members, admins, teams and group sharing |

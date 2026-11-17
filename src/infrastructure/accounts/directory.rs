@@ -112,19 +112,15 @@ impl AccountDirectory {
 
     /// Verifies a Silicon Accounts access token and records the account.
     ///
-    /// With `introspect`, Silicon Accounts is also asked whether the token is
-    /// still active, so a revocation is seen at once.
+    /// Every call confirms the token's class, app and current status with
+    /// Silicon Accounts, including reads and uploads from interfaces.
     ///
     /// # Errors
     ///
     /// Returns a 401 with the exact reason for an invalid, revoked or deleted
     /// account's token, and 503 when Silicon Accounts cannot be reached for a
     /// check that needs it.
-    pub async fn authenticate_token(
-        &self,
-        token: &str,
-        introspect: bool,
-    ) -> Result<Actor, AppError> {
+    pub async fn authenticate_token(&self, token: &str) -> Result<Actor, AppError> {
         let claims = self.gateway.verify_access_token(token).await?;
         let uuid = AccountUuid::new(claims.sub.clone()).map_err(|_| {
             AppError::unauthorized(
@@ -148,18 +144,13 @@ impl AccountDirectory {
                     "The access token has no `iat` claim, so Briefcase cannot check it against sign-outs. Sign in again with Silicon Accounts.",
                 )
             })?;
-        if introspect {
-            match self.gateway.introspect(token).await? {
-                Introspection::Active { subject }
-                    if subject
-                        .as_deref()
-                        .is_none_or(|subject| subject == uuid.as_str()) => {}
-                _ => {
-                    return Err(AppError::unauthorized(
-                        "token_revoked",
-                        "Silicon Accounts reports this access token is no longer active: the sign-in ended or the account removed Briefcase's access. Sign in again.",
-                    ));
-                }
+        match self.gateway.introspect(token).await? {
+            Introspection::Active { subject } if subject.as_deref() == Some(uuid.as_str()) => {}
+            _ => {
+                return Err(AppError::unauthorized(
+                    "token_revoked",
+                    "Silicon Accounts did not confirm an active Briefcase access token for this account. Sign in again and send its access_token, not a refresh token or another app's token.",
+                ));
             }
         }
         let record = self
@@ -763,13 +754,6 @@ impl AccountDirectory {
             .apply_webhook(&delivery)
             .await
             .map_err(database_error)?;
-        if let (
-            Some(uuid),
-            AccountChange::SignedOut | AccountChange::AccessRemoved | AccountChange::Deleted,
-        ) = (&delivery.account_uuid, &delivery.change)
-        {
-            self.gateway.forget_introspections_for(uuid);
-        }
         Ok(outcome)
     }
 

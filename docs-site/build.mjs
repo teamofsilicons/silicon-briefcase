@@ -46,6 +46,7 @@ const navigation = [
   "cli/README.md",
   "client/README.md",
   "api/README.md",
+  "interfaces.md",
   "api/operations.md",
   "api/reference.md",
   "sharing.md",
@@ -104,6 +105,10 @@ for (const file of documents) {
   const directory = path.join(output, route(file));
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, "index.html"), html);
+  // Plain Markdown is available at its source path for interface builders.
+  const markdownPath = path.join(output, file);
+  await mkdir(path.dirname(markdownPath), { recursive: true });
+  await writeFile(markdownPath, markdown);
   search.push({
     title,
     url: route(file),
@@ -125,6 +130,10 @@ await cp(path.join(source, "install.sh"), path.join(output, "install.sh"));
 await cp(path.join(root, "openapi.yaml"), path.join(output, "openapi.yaml"));
 await cp(path.join(root, "docs-site/favicon.svg"), path.join(output, "favicon.svg"));
 await writeFile(path.join(output, "search-index.json"), JSON.stringify(search));
+await writeFile(
+  path.join(output, "llms.txt"),
+  `# Silicon Briefcase\n\nFile storage, organization controls and team sharing through the Briefcase Accounts API.\n\n- [Interface API guide](${origin}/interfaces.md)\n- [OpenAPI](${origin}/openapi.yaml)\n\n## Guides\n\n${documents.map(file => `- [${titles.get(file)}](${origin}/${file})`).join("\n")}\n`,
+);
 await writeFile(
   path.join(output, "robots.txt"),
   `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`,

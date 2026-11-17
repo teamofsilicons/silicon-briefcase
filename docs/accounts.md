@@ -1,8 +1,8 @@
 # Silicon Accounts integration
 
-Briefcase 4 uses `silicon-accounts-client` 0.4.0. Register app `briefcase` in Silicon Apps and configure its hosted sign-in callback, public-client sign-in and signed webhook. Backend configuration is in [deployment](deployment.md); the Next.js server has its own [environment](../web/.env.example).
+Briefcase 5 uses `silicon-accounts-client` 0.4.0. Register app `briefcase` in Silicon Apps and configure its hosted sign-in callback, public-client sign-in and signed webhook. Backend configuration is in [deployment](deployment.md); the Next.js server has its own [environment](../web/.env.example).
 
-Ordinary requests present `Authorization: Bearer <Accounts access token>`, issued to Briefcase. The backend verifies signature, issuer, audience, expiry and credential class against cached Accounts JWKS. Sensitive operations also introspect online. The subject's immutable UUID owns its drive; a `c:` or `si:` id is a mutable public label. Signed events refresh account status, current id and custodian projections; they do not grant arbitrary file access.
+Ordinary requests present `Authorization: Bearer <Accounts access token>`, issued to Briefcase. The backend verifies signature, issuer, audience, expiry and not-before against cached Accounts JWKS with zero clock leeway. Every bearer request also introspects online and requires an active access token issued to Briefcase for the same subject; refresh tokens are rejected. No introspection result is cached. Accounts failures deny access. The subject's immutable UUID owns its drive; a `c:` or `si:` id is a mutable public label. Signed events refresh account status, current id and custodian projections; they do not grant arbitrary file access.
 
 Carbons use hosted PKCE or the CLI device flow. Silicons exchange an app-targeted short-lived token using public-client mode. The CLI never receives an app secret. Server code alone uses the app secret for code exchange, refresh, introspection, lookups and proof verification. On sign-out revoke the refresh token and clear local state.
 
