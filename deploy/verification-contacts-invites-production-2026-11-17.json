@@ -1,0 +1,196 @@
+{
+  "feature": "Silicon Contacts and invitation suggestions",
+  "date": "2026-11-17",
+  "status": "live",
+  "version": "5.1.0",
+  "source": "98a9b154ac601f5685c123f175c634612a29cb93",
+  "merge_commit": "7db40262af7fdd8c06164093404f563d0424693d",
+  "pull_request": "https://github.com/teamofsilicons/silicon-briefcase/pull/46",
+  "ci": {
+    "checks": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/44123784511",
+    "checks_result": "success",
+    "service_images": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/44123765837",
+    "service_images_result": "success",
+    "native_packages": "https://github.com/teamofsilicons/silicon-briefcase/actions/runs/44123773196",
+    "native_packages_result": "success"
+  },
+  "images": {
+    "docs": {
+      "tag": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production:contacts-5.1.0-98a9b15-docs",
+      "digest": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:1796806faeec0690d2d24c5f9810c88d3cf58660596b6d587b87ba8ae41e7b2c",
+      "image_id": "sha256:3cd2b0328424cc66fcf72d093d5a7342e70ee675f5aac3dd07da82eb83540844"
+    },
+    "backend": {
+      "tag": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production:contacts-5.1.0-98a9b15-backend",
+      "digest": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:3768a4fa09a6944a66cfb8eb047c7c84f5c636c8e342ce049e4af2786bcdbe6a",
+      "image_id": "sha256:9de2bf0bbdaa4179a05a209fa421cd30ebd30f5c4faee289bddd5efc33f0390e"
+    },
+    "web": {
+      "tag": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production:contacts-5.1.0-98a9b15-web",
+      "digest": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:e08b53fc551e6627791d4b0a9f4a5a1f24ff62ace59a9d57fbbf2536222ca38e",
+      "image_id": "sha256:12dca0360468ebb8539311080ab3bad289235d84cd9d4468de36d904f0c8eca4"
+    }
+  },
+  "deployment": {
+    "ssm_instance": "i-00c2b0c4968b57186",
+    "backup_command": "f61b7dbf-64a4-43ab-8565-3c58e9c902db",
+    "staging_command": "2e344d60-6e6f-4771-9ece-bc986951cfd6",
+    "rehearsal_command": "0585317a-270f-47be-b4dd-6c81d4654150",
+    "activation_command": "cf372072-a16b-4583-9870-ad1974506ceb",
+    "release_directory": "/var/lib/silicon-briefcase/releases/contacts-5.1.0-98a9b15",
+    "backup_restored_entries": 136,
+    "applied_migration": 55,
+    "migration_owner": "briefcase_migrator",
+    "retained_history_pairs_backfilled": 8,
+    "connections_and_history_without_actor": 0,
+    "custom_runtime_grants_applied": true,
+    "configuration_and_session_secret_preserved": true,
+    "services": [
+      {
+        "component": "api",
+        "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:3768a4fa09a6944a66cfb8eb047c7c84f5c636c8e342ce049e4af2786bcdbe6a",
+        "revision": "98a9b154ac601f5685c123f175c634612a29cb93",
+        "restarts": 0
+      },
+      {
+        "component": "worker",
+        "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:3768a4fa09a6944a66cfb8eb047c7c84f5c636c8e342ce049e4af2786bcdbe6a",
+        "revision": "98a9b154ac601f5685c123f175c634612a29cb93",
+        "restarts": 0
+      },
+      {
+        "component": "web",
+        "image": "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-briefcase-production@sha256:e08b53fc551e6627791d4b0a9f4a5a1f24ff62ace59a9d57fbbf2536222ca38e",
+        "revision": "98a9b154ac601f5685c123f175c634612a29cb93",
+        "restarts": 0
+      }
+    ],
+    "final_health_command": "57dcc2ee-1b75-4702-92be-1d2f7f429243",
+    "final_health": {
+      "services": [
+        {
+          "service": "api",
+          "running": true,
+          "oom": false,
+          "restarts": 0,
+          "revision": "98a9b154ac601f5685c123f175c634612a29cb93"
+        },
+        {
+          "service": "worker",
+          "running": true,
+          "oom": false,
+          "restarts": 0,
+          "revision": "98a9b154ac601f5685c123f175c634612a29cb93"
+        },
+        {
+          "service": "web",
+          "running": true,
+          "oom": false,
+          "restarts": 0,
+          "revision": "98a9b154ac601f5685c123f175c634612a29cb93"
+        }
+      ],
+      "readiness_and_website": true
+    }
+  },
+  "verification": {
+    "backend_all_targets_reported_passed": 244,
+    "backend_library_passed": 220,
+    "backend_database_suites_enabled": true,
+    "s3_integration_note": "Optional S3 integration test skips without configuration; actual hosted upload/download verified independently.",
+    "web_unit_passed": 60,
+    "focused_browser_passed": 9,
+    "client_cli_passed": 149,
+    "production_browser": {
+      "identity": "si:saket-agents",
+      "initially_connected": false,
+      "connect_and_read": true,
+      "original_contact_count": 0,
+      "contact_create_and_trust": true,
+      "saved_name_in_suggestions": true,
+      "fuzzy_search_keyboard_selection_and_profile_photo": true,
+      "inline_contact_edit": true,
+      "shared_contact_trust_and_sender_filters": true,
+      "browser_errors": [],
+      "desktop_and_mobile": true,
+      "invitation_sent": false,
+      "cleanup": "original Contacts state restored; isolated browser session revoked",
+      "disconnect_verified": true,
+      "anonymous_contacts_denied": true
+    },
+    "production_cli": {
+      "identity": "si:saket-agents",
+      "contract_verified": true,
+      "organization_account_uuid": "912fff6e-e7f8-4057-ab03-201aceac9513",
+      "organization_count": 0,
+      "sha256": "a46f0c08b30c64b674f82741885ed346d534f15d721b8134b4e7f17bda8b5ba0",
+      "upload_read_integrity": true,
+      "cleanup": "self-destructing verification file removed"
+    },
+    "public_api_web_docs_and_crate_http_200": true,
+    "api_contract": {
+      "version": "5.1.0",
+      "operations": 65
+    },
+    "installed_store_cli": {
+      "version": "briefcase 5.1.0",
+      "target": "macos-aarch64",
+      "identity": "si:saket-agents",
+      "production_contract_verified": true,
+      "shared_cli_home": true
+    }
+  },
+  "packages": {
+    "rust_client": {
+      "name": "briefcase-client",
+      "version": "5.1.0",
+      "published": true
+    },
+    "cli": {
+      "version": "5.1.0",
+      "published": true,
+      "production_release": "3d672e9e-2be4-4119-ab0a-9e1755c6ef01",
+      "development_release": "1c7aec8f-fbee-4cdd-8af8-76eba61fe73f",
+      "targets": [
+        {
+          "target": "linux-x86_64",
+          "package_id": "24db7a91-18da-4d3c-b591-9ac1020a189d",
+          "sha256": "bb252c0a0a5464c0ada27b93df7bae3acd3f065cd1e020055638f44d5f2a5bc0"
+        },
+        {
+          "target": "linux-aarch64",
+          "package_id": "4759303f-ca76-482b-bc68-041146f4899a",
+          "sha256": "adbe57b7a5da9135698bb316f25bc77327fae02a459d0b2806e789b61575f1d0"
+        },
+        {
+          "target": "windows-x86_64",
+          "package_id": "391a35ed-1fbb-4e16-b702-38051bb98f0c",
+          "sha256": "02d7eaf333174e8984d730e72588f89e912a17c608d09af0233f86245dca2311"
+        },
+        {
+          "target": "windows-aarch64",
+          "package_id": "0a07d9a0-6f7f-46ba-8501-f04c5012c3ec",
+          "sha256": "311768175acab939f306deeba013257e44d04989634b0131381a8a594f4ceb51"
+        },
+        {
+          "target": "macos-x86_64",
+          "package_id": "d102f1c3-de5a-4bee-9ba3-631b710a5229",
+          "sha256": "bc3e980a4fcc2fb4d2577ca05d7ada4c078ce574f61c0eb4b8f27dc6627eaf75"
+        },
+        {
+          "target": "macos-aarch64",
+          "package_id": "47c44317-2e8f-47b0-a5b6-8a5eae273a27",
+          "sha256": "c29659df9ba519a22ce019be2b07a61af52f3d1d8961bde4152033cea26ce029"
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Production shared-file filter requests used an agent with no incoming shares; populated direct and organization/team cases were covered by isolated backend and browser tests.",
+    "No invitations or notifications were sent during production verification. Invitation counting, ranking and retry behavior were verified locally.",
+    "Custom saved-photo proxy behavior was verified locally; live browser verification used an actual Accounts profile photo.",
+    "The real signed-in production BFF was verified through a separately minted agent session. Interactive hosted OAuth completion was not exercised by this browser check.",
+    "History backfill is limited to retained audit events; older discarded invitations cannot be reconstructed.",
+    "Four pre-existing full browser-suite assertions also fail on unchanged main; four dependent scenarios were not run. Details remain in the local verification record."
+  ]
+}
