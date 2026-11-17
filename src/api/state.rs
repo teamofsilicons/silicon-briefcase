@@ -23,6 +23,7 @@ pub(crate) type DelegatedUploadUseCases =
 /// Immutable process dependencies cloned into Axum route services.
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) contacts: Option<Arc<crate::infrastructure::contacts::ContactsGateway>>,
     pub(crate) accounts: Arc<AccountDirectory>,
     pub(crate) organizations:
         Option<Arc<crate::infrastructure::organizations::OrganizationsGateway>>,

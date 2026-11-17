@@ -16,7 +16,7 @@ use crate::error::{IncompatibleContract, OperationMismatch};
 pub const API_VERSION: &str = "v1";
 
 /// Version of the published contract document this build was written against.
-pub const CONTRACT_VERSION: &str = "5.0.0";
+pub const CONTRACT_VERSION: &str = "5.1.0";
 
 /// One operation and the revision this build was written against.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,10 +47,15 @@ const fn operation(
 
 /// Every operation this client calls, with the revision it expects.
 ///
-/// Generated from the service's published catalogue (contract 5.0.0). The
-/// service also lists the retired `submitTelemetry`, which this client never
-/// calls: Briefcase records no telemetry.
-pub const OPERATIONS: [OperationRevision; 59] = [
+/// Mirrors the service catalogue (contract 5.1.0).
+/// Briefcase records no telemetry.
+pub const OPERATIONS: [OperationRevision; 65] = [
+    operation("listRecipients", "1.0.0", "GET", "/recipients"),
+    operation("resolveRecipient", "1.0.0", "GET", "/recipients/resolve"),
+    operation("listContacts", "1.0.0", "GET", "/contacts"),
+    operation("saveContact", "1.0.0", "POST", "/contacts"),
+    operation("connectContacts", "1.0.0", "PUT", "/contacts/connection"),
+    operation("readContactPhoto", "1.0.0", "GET", "/contacts/photos/{id}"),
     operation(
         "reserveDelegatedUpload",
         "3.0.0",
@@ -93,7 +98,7 @@ pub const OPERATIONS: [OperationRevision; 59] = [
         "/organizations/{org}/actions",
     ),
     operation("listDrives", "1.0.0", "GET", "/drives"),
-    operation("listSharedWithMe", "1.0.0", "GET", "/shared"),
+    operation("listSharedWithMe", "1.1.0", "GET", "/shared"),
     operation(
         "listSiliconAllowedAccounts",
         "1.0.0",

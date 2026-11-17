@@ -19,7 +19,7 @@ test("native CLI device sign-in, real file roundtrip and revocation",async({brow
   await expect.poll(()=>stdout.includes('"event":"device_code"')).toBe(true);
   const event=stdout.split("\n").map(line=>{try{return JSON.parse(line)}catch{return null}}).find(value=>value?.event==="device_code");
   const page=await context.newPage();await page.goto(event.verification_uri_complete);
-  await page.getByRole("button",{name:"Approve sign-in",exact:true}).click();
+  await page.getByRole("button",{name:/^Approve sign-in$/i}).click();
   expect(await completion,stderr).toBe(0);
   const cli=async(args:string[])=>await run(binary,args,{env,timeout:30000});
   const status=JSON.parse((await cli(["login","status","--json"])).stdout);expect(status.authenticated).toBe(true);

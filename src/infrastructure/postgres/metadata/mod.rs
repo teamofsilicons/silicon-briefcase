@@ -373,6 +373,7 @@ impl MetadataRepository for PostgresRepository {
             if !current_member(&mut request.transaction, &invitee.principal).await? {
                 return Err(MetadataRepositoryError::Conflict);
             }
+            let grant_id = Uuid::now_v7();
             sqlx::query(
                 "INSERT INTO briefcase.permission_grants ( \
                         org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
@@ -380,7 +381,7 @@ impl MetadataRepository for PostgresRepository {
                  ) VALUES (briefcase.current_org_id(), $1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(entry_id.as_uuid())
-            .bind(Uuid::now_v7())
+            .bind(grant_id)
             .bind(actor_kind(invitee.principal.kind()))
             .bind(invitee.principal.id().as_str())
             .bind(encode_access(invitee.access))
@@ -390,6 +391,12 @@ impl MetadataRepository for PostgresRepository {
             .execute(&mut *request.transaction)
             .await
             .map_err(map_sql)?;
+            record_change(
+                &mut request.transaction, &request.context, Some(entry_id.as_uuid()),
+                "permission.granted.v1", "entry", &entry_id.to_string(),
+                json!({"grant_id": grant_id, "principal": invitee.principal,
+                    "access": access_rights(invitee.access), "inherit": invitee.inherits_to_descendants}),
+            ).await?;
         }
         record_change(
             &mut request.transaction,

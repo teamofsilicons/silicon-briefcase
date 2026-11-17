@@ -1,15 +1,15 @@
 import { ApiError } from "@/lib/errors";
-export type Account = { uuid: string; id: string | null; kind: "carbon" | "silicon"; display_name?: string | null };
+export type Account = { uuid: string; id: string | null; kind: "carbon" | "silicon"; display_name?: string | null; pfp_url?: string | null };
 export type Drive = { owner: Account; relation: "own" | "custodial"; root_id: string; storage_external_id?: string; permanent_url: string };
 export type Entry = {
   id: string; org_id: string; name: string; path: string; parent_id: string | null; type: "file" | "folder";
   size: number | null; content_type: string | null; render: string | null; visibility: string;
   updated_at: string | null; created_at: string | null; deleted_at: string | null; self_destruct_at: string | null;
   owner: { type: string; id: string } | null; origin_app_id: string | null; effective_access: string[];
-  permanent_url: string;
+  permanent_url: string; shared_by?: Account[];
 };
 export type EntryPage = { items: Entry[]; next_cursor: string | null };
-export type SharedPage = { items: { entry: Entry; owner: Account }[]; next_cursor: string | null };
+export type SharedPage = { items: { entry: Entry; owner: Account; shared_by?: Account[] }[]; next_cursor: string | null };
 export type Grant = { id: string; principal: { type: string; id: string; public_id?: string; name?: string }; access: string[]; inherit: boolean; expires_at: string | null };
 export type LinkAccess = { enabled: boolean; effective: boolean; can_manage: boolean; inherited_from: string | null; expires_at: string | null; url: string | null };
 export type Version = { id: string; size: number; content_type: string; created_at: string; created_by?: { id: string } };

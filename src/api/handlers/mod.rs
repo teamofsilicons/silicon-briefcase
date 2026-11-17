@@ -21,3 +21,5 @@ pub(crate) mod sharing;
 pub(crate) mod invitations;
 
 pub(crate) mod reports;
+
+pub(crate) mod people;

@@ -1,6 +1,6 @@
 # Briefcase Rust client
 
-`briefcase-client` 5.0.0 is the official client for the Briefcase 5.0 contract. It performs API calls and exposes typed requests and responses. The caller owns persistence, session refresh and UI.
+The source client targets the Briefcase 5.1 contract. The published `briefcase-client` 5.0.0 targets 5.0; the Contacts methods below require this source revision and the matching API. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
@@ -22,7 +22,7 @@ println!("{}", file.id);
 # }
 ```
 
-`Client::connect` checks the service name, API major and all 56 operation identifiers, methods, paths and revisions it calls. `new_unchecked` is available when the caller already validated the pairing. API request execution does not install or update dependencies.
+`Client::connect` checks the service name, API major and all 65 operation identifiers, methods, paths and revisions it calls. `new_unchecked` is available when the caller already validated the pairing. API request execution does not install or update dependencies.
 
 ## Sign-in
 
@@ -37,6 +37,12 @@ The result carries the account, access token and rotating refresh token. Store t
 `Destination::path` names a path in the caller's drive. `Destination::in_drive("c:ada", "plans")` names another drive the caller can access. `entry_at` resolves a permanent owner address. Requests never claim another identity: a custodian always acts as itself.
 
 The client supports entry listing and search, folder creation, streamed uploads and downloads, byte ranges, rename/move, permissions, invitations, expiring shares, public links, self-destruct cancellation, bin restore, versions, activity, archive listings, notifications, usage and verified S3 configuration. Paginated methods expose the service cursor. Hidden entries return the same not-found response as missing entries.
+
+## People and Contacts
+
+`recipients()` returns the caller's invitation history and connected contacts. Rank candidates by `2 * invited + received`, then `last_invited_at`, then contact trust. `resolve_recipient()` resolves an exact account ID or UUID with permitted profile details and saved overrides. Use immutable UUIDs when sharing.
+
+After explicit user consent, `connect_contacts(true)` enables address-book access. `contacts()`, `save_contact(id, name, trust)` and `contact_photo(id)` use the caller's existing Briefcase credential; no Contacts credential belongs in the client. `save_contact` preserves the contact's other saved details. `connect_contacts(false)` disconnects without deleting contacts. `shared_with_filters(&SharedFilters { .. })` combines actual-sharer, saved/unsaved contacts, minimum trust and shared-file search before pagination.
 
 ## Acting from another app
 

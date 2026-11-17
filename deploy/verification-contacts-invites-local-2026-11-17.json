@@ -1,0 +1,58 @@
+{
+  "feature": "Silicon Contacts and invitation suggestions",
+  "status": "local implementation; not deployed",
+  "base": "6f53861",
+  "branch": "codex/briefcase-contacts-invites",
+  "checks": {
+    "backend_library": {
+      "passed": 218,
+      "database": "isolated PostgreSQL 16"
+    },
+    "contract": {
+      "passed": 5
+    },
+    "rust_client_cli": {
+      "passed": 149,
+      "ignored_live": 2
+    },
+    "web_unit": {
+      "passed": 60
+    },
+    "focused_browser": {
+      "passed": 9
+    },
+    "web_typecheck": "passed",
+    "web_lint": "passed",
+    "web_build": "passed",
+    "strict_clippy_api_all_targets_all_features": "passed",
+    "strict_clippy_client_all_targets_all_features": "passed",
+    "docs": {
+      "pages": 29,
+      "local_links_and_assets": 1073
+    },
+    "file_workflow_browser": "passed: real local Accounts, Briefcase and S3; upload, range, preview, invitation picker, public link, Shared with me, rename, bin and restore",
+    "full_browser": {
+      "initial_passed": 19,
+      "remaining_failed": 4,
+      "not_run_due_to_serial_dependency": 4,
+      "baseline": "The same four assertions fail at unchanged main 6f53861, with only the Accounts label compatibility fix in the test helper.",
+      "failures": [
+        "Landing page expects removed As a Silicon figure",
+        "Public metadata expects PNG at /icon; current icon is /icon.svg",
+        "Refresh test only changes sealed-cookie expiry while durable session state retains the actual expiry",
+        "Shell test expects a System theme menu item on the light-only site"
+      ],
+      "initial_failed": 6,
+      "resolved_on_targeted_rerun": [
+        "New invitation combobox selector in the full file workflow",
+        "Native CLI binary path, local app device-flow setup and current Accounts approval-button capitalization"
+      ]
+    },
+    "native_cli_browser": "passed after enabling public_client/device_flow on the isolated local app and supplying the built CLI; real device sign-in, upload/download, logout and revocation"
+  },
+  "limitations": [
+    "External Accounts/Contacts authorization for Contacts operations is covered by loopback protocol fixtures, not production mutations.",
+    "History backfill is limited to retained audit events; older discarded invitations cannot be reconstructed.",
+    "Full browser suite is not green: four unrelated assertions also fail on unchanged main; serial dependencies leave four further tests unrun."
+  ]
+}

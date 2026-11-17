@@ -140,6 +140,15 @@ async fn fixture_at(
 }
 
 impl Fixture {
+    pub(super) fn with_contacts(&mut self, base: &str) -> anyhow::Result<()> {
+        let (_, settings, _) = super::tests::test_state(self.state.database.clone())?;
+        self.state.contacts = Some(std::sync::Arc::new(
+            crate::infrastructure::contacts::ContactsGateway::new(base)?,
+        ));
+        self.router = router(self.state.clone(), &settings, &self.state.webhook_settings);
+        Ok(())
+    }
+
     pub(super) fn with_organizations(&mut self, base: &str) -> anyhow::Result<()> {
         let (_, settings, _) = super::tests::test_state(self.state.database.clone())?;
         self.state.organizations = Some(std::sync::Arc::new(

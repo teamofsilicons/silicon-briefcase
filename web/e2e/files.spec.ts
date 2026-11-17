@@ -20,9 +20,11 @@ test("files: create, upload, range, preview, share, public link, version, bin an
  const range=await context.request.get(`${BASE}/api/v1/entries/${entry.id}/content`,{headers:{Range:"bytes=0-8"}});expect(range.status()).toBe(206);expect(await range.text()).toBe("Briefcase");expect(range.headers()["content-range"]).toContain("bytes 0-8/");
  const streamed=await context.request.get(`${BASE}/api/v1/entries/${entry.id}/content`);expect(streamed.headers()["content-security-policy"]).toContain("sandbox");
  await dialog.getByRole("tab",{name:"Sharing",exact:true}).click();
- await dialog.getByRole("textbox",{name:"Account id"}).fill(runAccounts().friend.id);
+ await dialog.getByRole("combobox",{name:"Account ID or name",exact:true}).fill(runAccounts().friend.id);
+ await expect(dialog.getByLabel("Selected recipient")).toContainText(runAccounts().friend.id);
  await dialog.getByRole("button",{name:"Share access",exact:true}).click();
- await expect(dialog.getByText(runAccounts().friend.id,{exact:true})).toBeVisible();
+ await expect(dialog.getByRole("button",{name:"Remove",exact:true})).toHaveCount(1);
+ await expect(dialog.getByText(runAccounts().friend.id,{exact:true}).last()).toBeVisible();
  await dialog.getByRole("button",{name:"Enable link access",exact:true}).click();
  const address=await dialog.getByRole("textbox",{name:"Shareable address"}).inputValue();
  const anonymous=await browser.newContext();const publicPage=await anonymous.newPage();

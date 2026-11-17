@@ -27,7 +27,7 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `manageOrganization` | `POST /organizations/{org}/actions` | 1.0.0 | bearer |
 | `readAccount` | `GET /me` | 1.0.0 | bearer |
 | `listDrives` | `GET /drives` | 1.0.0 | bearer |
-| `listSharedWithMe` | `GET /shared` | 1.0.0 | bearer |
+| `listSharedWithMe` | `GET /shared` | 1.1.0 | bearer |
 | `listSiliconAllowedAccounts` | `GET /silicons/{silicon}/allowed-accounts` | 1.0.0 | bearer |
 | `allowAccountToShareWithSilicon` | `PUT /silicons/{silicon}/allowed-accounts/{account}` | 1.0.0 | bearer |
 | `disallowAccountToShareWithSilicon` | `DELETE /silicons/{silicon}/allowed-accounts/{account}` | 1.0.0 | bearer |
@@ -79,3 +79,14 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `readPublicEntry` | `GET /public/{owner}/{path}` | 2.0.0 | none |
 | `inviteOnBehalfOfMember` | `POST /obo/invitations` | 3.0.0 | proof |
 | `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 3.0.0 | proof |
+
+## People and Contacts
+
+| Operation | Endpoint | Revision | Auth |
+| --- | --- | --- | --- |
+| `listRecipients` | `GET /recipients` | 1.0.0 | bearer |
+| `resolveRecipient` | `GET /recipients/resolve` | 1.0.0 | bearer |
+| `listContacts` | `GET /contacts` | 1.0.0 | bearer |
+| `saveContact` | `POST /contacts` | 1.0.0 | bearer |
+| `connectContacts` | `PUT /contacts/connection` | 1.0.0 | bearer |
+| `readContactPhoto` | `GET /contacts/photos/{id}` | 1.0.0 | bearer |
