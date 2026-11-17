@@ -1,0 +1,23 @@
+/* A file's details (entry-detail.tsx): a wide dialog with Accounts' tabs, each tab a short column of sections. */
+.dialog.dialog { width: min(calc(100vw - var(--space-block)), 760px); max-width: none; }
+.tabs { display: grid; min-width: 0; gap: var(--space-section); }
+.panel { display: grid; min-width: 0; gap: var(--space-section); margin-top: 0; color: inherit; font: inherit; }
+/* Panels stay mounted (forceMount): Silicon UI's Tabs pins a panel's height while it animates, which clipped panels whose
+   rows load after they open. The tab that is not chosen is simply hidden. */
+.panel[data-state="inactive"] { display: none; }
+/* Sections inside a tab sit on the tab's own gap. */
+.panel > section { margin-top: 0; }
+.stack { display: grid; gap: var(--space-group); }
+.text { margin: 0; color: var(--text-soft); font: var(--small); letter-spacing: var(--small-tracking); }
+.inline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-related); }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-related); }
+@media (max-width: 520px) { .actions { display: grid; grid-template-columns: minmax(0, 1fr); } .actions > * { width: 100%; } }
+
+/* The address anyone with the link opens, with its copy button beside the field. */
+.address { display: flex; align-items: flex-end; gap: var(--space-related); }
+.address > :first-child { min-width: 0; flex: 1; }
+
+/* Label and value pairs in one quiet box. */
+.facts { --sq-r: var(--radius-container); --sq-stroke: var(--border); padding: var(--space-tight) var(--space-group); border: 1px solid var(--sq-stroke); }
+.rename { display: grid; gap: var(--space-related); }
+.alertAction { display: block; margin-top: var(--space-related); }

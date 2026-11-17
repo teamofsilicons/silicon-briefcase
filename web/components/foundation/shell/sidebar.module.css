@@ -1,0 +1,10 @@
+/* The section list and, at its foot, the other sites, as on Silicon Accounts (its shell/sidebar.module.css). Placement
+   only: rows are NavList's. */
+.sidebar { display: flex; min-height: 100%; flex-direction: column; gap: var(--space-block); }
+.foot { display: flex; flex-wrap: wrap; gap: var(--space-tight); margin-top: auto; padding-block: var(--space-group); border-top: 1px solid var(--border-subtle); }
+/* Accounts' section icons are 18px, not NavList's 16px, and its labels --text-base (16px), not --text-sm. NavList has no
+   size option yet, so this reaches into its rows, as Accounts does. */
+.sidebar nav[aria-label="Workspace"] svg, .sidebar nav[aria-label="Briefcase sections"] svg { width: 18px; height: 18px; }
+.sidebar nav[aria-label="Workspace"] a, .sidebar nav[aria-label="Workspace"] button, .sidebar nav[aria-label="Briefcase sections"] a { font-size: var(--text-base); }
+/* The workspace row's "switch" arrows, quiet beside the name. */
+.sidebar nav[aria-label="Workspace"] svg.switch { width: 16px; height: 16px; color: var(--text-muted); }

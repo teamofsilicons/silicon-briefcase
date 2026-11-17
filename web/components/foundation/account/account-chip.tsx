@@ -11,7 +11,7 @@
  */
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
-import { Avatar } from "@/components/silicon-ui/avatar/avatar";
+import { Avatar } from "@teamofsilicons/silicon-ui/avatar";
 import { kindNoun, type AccountKind } from "@/lib/format";
 import styles from "./account-chip.module.css";
 
@@ -45,7 +45,7 @@ export function KindMarker({ kind, size = "sm" }: { kind: AccountKind; size?: "s
 
 export function AccountChip({ account, variant = "row", note, onRemove, removeLabel, state, trailing, className }: AccountChipProps) {
   const name = account.display_name?.trim() || null;
-  const avatar = <Avatar name={name ?? account.id.replace(/^(c|si):/, "")} src={account.pfp_url ?? undefined} fallbackSrc={account.fallback_pfp_url ?? undefined} size="sm" className={styles.avatar} />;
+  const avatar = <Avatar name={name ?? account.id.replace(/^(c|si):/, "")} src={account.pfp_url ?? account.fallback_pfp_url ?? undefined} size="sm" className={styles.avatar} />;
   if (variant === "chip") {
     return (
       <span className={[styles.chip, className].filter(Boolean).join(" ")} data-sq="surface" data-state={state}>

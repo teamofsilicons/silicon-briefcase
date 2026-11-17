@@ -1,24 +1,26 @@
 /**
- * The loading stand-in for a workspace page: a header and two regions where the real ones will be, pulsing a beat
- * apart. Announced once as "Loading" (aria-busy), never as a list of shapes.
+ * The loading stand-in for a workspace page, drawn like the page it becomes (Silicon Accounts' PageSkeleton): the page
+ * bar pinned at the top, then sections on the page column, each a heading over a boxed list, so nothing jumps when the
+ * page arrives. Announced once as "Loading" (aria-busy), never as a list of shapes.
  */
 import { Page } from "@/components/foundation/layout/layout";
 import { SkeletonBlock } from "./skeleton-block";
 import styles from "./page-skeleton.module.css";
 
-export function PageSkeleton({ rows = 2 }: { rows?: number }) {
+export function PageSkeleton() {
   return (
-    <Page>
-      <div className={styles.loading} aria-busy="true" aria-label="Loading">
-        <div className={styles.header}>
-          <SkeletonBlock width="min(280px, 70%)" height="40px" radius="12px" />
-          <SkeletonBlock width="min(460px, 90%)" height="18px" radius="8px" index={1} />
-        </div>
-        <SkeletonBlock width="100%" height="52px" radius="var(--radius-panel)" index={2} />
-        {Array.from({ length: rows }, (_, index) => (
-          <SkeletonBlock key={index} width="100%" height={index === 0 ? "260px" : "140px"} radius="var(--radius-surface)" index={index + 3} />
-        ))}
+    <div aria-busy="true" aria-label="Loading">
+      <div className={styles.bar}>
+        <div className={styles.titleRow}><SkeletonBlock width="min(14rem, 60%)" height="1.75rem" radius="var(--radius-control)" /></div>
       </div>
-    </Page>
+      <Page>
+        {[3, 2].map((rows, index) => (
+          <div key={index} className={styles.section}>
+            <SkeletonBlock width="8rem" height="1.25rem" radius="var(--radius-control)" index={index} />
+            <SkeletonBlock width="100%" height={`calc(${rows} * 3.25rem)`} radius="var(--radius-container)" index={index} />
+          </div>
+        ))}
+      </Page>
+    </div>
   );
 }

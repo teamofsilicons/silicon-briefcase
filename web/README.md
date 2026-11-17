@@ -1,6 +1,6 @@
 # Silicon Briefcase web
 
-Next.js 16 App Router, React 19, TypeScript, TanStack Query and the Silicon UI components/styles from Silicon's Accounts/Apps web kit. Node 24+, pnpm 10.33.0. Product configuration is in `lib/app.config.ts`; credentials are server-only.
+Next.js 16 App Router, React 19, TypeScript, TanStack Query and Silicon UI (`@teamofsilicons/silicon-ui`, pinned to the version Silicon Accounts uses). The interface is Accounts' own: its frame, tokens, type and page patterns (see DESIGN.md). Node 24+, pnpm 10.33.0. Product configuration is in `lib/app.config.ts`; credentials are server-only.
 
 ## Run locally
 

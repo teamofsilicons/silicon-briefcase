@@ -1,14 +1,13 @@
 "use client";
 
 /**
- * A page crashed while rendering: say so plainly, keep the digest for a report, and offer to try again. Plain elements
- * in Silicon UI's button styles (no motion library): this boundary is part of every page's script, the public pages included.
+ * A page crashed while rendering: say so plainly, keep the digest for a report, and offer to try again.
  */
 import { useEffect } from "react";
 import { RotateCcw } from "lucide-react";
-import buttonStyles from "@/components/silicon-ui/button/button.module.css";
+import { Button } from "@teamofsilicons/silicon-ui/button";
+import { ButtonLink } from "@teamofsilicons/silicon-ui/button-link";
 import { Problem } from "@/components/foundation/feedback/problem";
-import linkStyles from "@/components/foundation/button-link.module.css";
 
 export default function ErrorPage({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
@@ -22,8 +21,9 @@ export default function ErrorPage({ error, reset }: { error: Error & { digest?: 
         reference={error.digest}
         actions={
           <>
-            <button type="button" data-sq="surface" className={`${buttonStyles.button} ${buttonStyles.secondary} ${buttonStyles.md}`} onClick={reset}>Try again</button>
-            <a href="/" data-sq="surface" className={`${buttonStyles.button} ${buttonStyles.ghost} ${buttonStyles.md} ${linkStyles.link}`}>Go to the home page</a>
+            <Button variant="secondary" onClick={reset}>Try Again</Button>
+            {/* A plain <a>, so a full load: the page that failed may have broken the client router. */}
+            <ButtonLink href="/" variant="ghost">Go to the Home Page</ButtonLink>
           </>
         }
       >

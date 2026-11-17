@@ -1,12 +1,14 @@
 /**
- * Layout primitives for account and developer pages:
- *   <Page>            the one page container (gutters, max width, room for the dock)
- *   <PageHeader>      the page's h1 in the display serif, a line of context, actions, a back link
+ * Layout primitives for the workspace's pages, copied from Silicon Accounts (web/components/foundation/layout):
+ *   <Page>            the one page container: a narrow centred column, a column + aside, or a column whose side
+ *                     column an action opens (with SidePanel, ./side-panel.tsx); gutters and the room at the end
+ *   <PageHeader>      the page's h1 in the display face, a line of context, actions, a back link
  *   <Section>         a titled region (h2) with an optional description and actions
  *   <Stack>/<Cluster>/<Grid>   spacing on the 4px grid
  *   <Surface>         a bordered squircle region (never nest them)
  *   <SettingsGroup>/<SettingsRow>   one bordered group of divided rows (label + description, control on the right)
  *   <DescriptionList>/<DescriptionItem>   label and value pairs
+ *   <SkipLink>        "Skip to content", the first Tab stop of a frame (the account shell, the docs)
  *
  * Server-safe (no hooks except useId): usable from server and client components.
  */
@@ -21,19 +23,48 @@ type Gap = 1 | 2 | 3 | 4 | 5 | 6 | 8 | 10 | 12;
 const gap = (value: Gap | undefined, fallback: Gap) => `var(--space-${value ?? fallback})`;
 
 export interface PageProps {
-  /** "narrow" (forms, settings), "reading" (lists), "default" (dashboards and grids). */
+  /**
+   * How wide the page is, by how much it holds (redesign/decisions.md, the content layout rule):
+   *   "narrow"   one centred column (--page-narrow), for most pages; "reading" is the same column
+   *   "default"  the full page width (--page-max), for grids that need it
+   * A page with `aside` or `panel` sets its own width.
+   */
   width?: "narrow" | "reading" | "default";
+  /** Above the columns: the PageHeader (or Home's greeting). With `aside` or `panel` it spans both columns. */
+  header?: ReactNode;
+  /** Content that supports the page from the start: the page is wide, `children` beside this side column. */
+  aside?: ReactNode;
+  /** Names the side column for screen readers, such as "About your account". */
+  asideLabel?: string;
+  /**
+   * Content an action opens (a SidePanel from ./side-panel): the page is the narrow column until `panelOpen`, then it
+   * widens and the column glides to the start as the side column comes in (layout.module.css .page[data-layout=panel]).
+   * Under 1024px the side column stays shut and the SidePanel opens a bottom drawer instead.
+   */
+  panel?: ReactNode;
+  panelOpen?: boolean;
   className?: string;
   children: ReactNode;
   /** Accessible label when the page has no PageHeader. */
   label?: string;
 }
 
-/** The page container. One per page; the shell provides the landmark (<main>) and the room below for the dock. */
-export function Page({ width = "default", className, children, label }: PageProps) {
+/** The page container. One per page; the shell provides the landmark (<main>) and --page-end is the room below. */
+export function Page({ width = "narrow", header, aside, asideLabel, panel, panelOpen = false, className, children, label }: PageProps) {
+  const layout = panel !== undefined ? "panel" : aside !== undefined ? "aside" : "column";
   return (
-    <div className={cx(styles.page, className)} data-width={width} aria-label={label}>
-      {children}
+    <div className={cx(styles.page, className)} data-width={width === "reading" ? "narrow" : width} data-layout={layout} data-panel-open={layout === "panel" && panelOpen ? "" : undefined} aria-label={label}>
+      {header}
+      {layout === "column" ? children : (
+        <div className={styles.columns}>
+          <div className={styles.mainColumn}>{children}</div>
+          {layout === "aside" ? (
+            <aside className={styles.sideColumn} aria-label={asideLabel}>{aside}</aside>
+          ) : (
+            <div className={styles.panelColumn} inert={!panelOpen}>{panel}</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -46,10 +77,7 @@ export interface PageHeaderProps {
   actions?: ReactNode;
   /** A back link above the title (for nested pages such as an app's detail). */
   back?: { href: string; label: string };
-  /**
-   * "display" (default) for the app's own page titles; "entity" a step smaller, for a title someone typed (an item's
-   * name), which can be long.
-   */
+  /** "entity" for a title someone typed (a file's name), which can be long: it wraps anywhere. */
   size?: "display" | "entity";
   className?: string;
   children?: ReactNode;
@@ -61,7 +89,7 @@ export function PageHeader({ title, description, actions, back, size = "display"
       <div className={styles.headerText}>
         {back ? (
           <Link href={back.href} className={styles.back}>
-            <ArrowLeft size={16} strokeWidth={1.75} aria-hidden="true" />
+            <ArrowLeft size={16} strokeWidth={2} aria-hidden="true" />
             {back.label}
           </Link>
         ) : null}
@@ -165,4 +193,12 @@ export function DescriptionItem({ label, children }: { label: ReactNode; childre
       <dd>{children}</dd>
     </div>
   );
+}
+
+/**
+ * "Skip to content": a frame's first Tab stop, out of sight until keyboard focus reaches it (styles/base.css
+ * `.skip-link`). A squircle like every rounded surface, so it carries `data-sq`; its colours are --sq-fill/--sq-stroke.
+ */
+export function SkipLink({ href, children = "Skip to content" }: { href: `#${string}`; children?: ReactNode }) {
+  return <a className="skip-link" data-sq="surface" href={href}>{children}</a>;
 }

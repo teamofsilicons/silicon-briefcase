@@ -1,5 +1,5 @@
 /*
- * The public pages' header and footer, as on Silicon Writings, Silicon Apps and Silicon Accounts: a calm sticky bar with
+ * The public pages' header and footer, on Silicon Accounts' top bar: a calm sticky bar on the page colour with
  * the wordmark (components/foundation/brand), a quiet link and Sign in on the right, and one quiet footer line. Every
  * rounded surface is a squircle.
  */
@@ -9,16 +9,14 @@
   position: sticky;
   top: 0;
   z-index: 40;
-  background: color-mix(in oklab, var(--background) 82%, transparent);
-  -webkit-backdrop-filter: saturate(1.4) blur(14px);
-  backdrop-filter: saturate(1.4) blur(14px);
+  background: var(--canvas);
 }
 .bar {
   display: flex;
-  height: var(--site-header-height, 64px);
+  height: 56px;
   align-items: center;
   gap: var(--space-2);
-  padding: 0 clamp(16px, 2.4vw, 28px);
+  padding: 0 var(--space-group);
 }
 
 /* The padding (taken back by the negative margin) gives keyboard focus a soft fill to show in. */
@@ -61,7 +59,7 @@
 /* Footer ----------------------------------------------------------------------------------------------------------- */
 .footer { border-top: 1px solid var(--border-subtle); background: var(--background); }
 .footerInner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 28px; padding: 28px clamp(16px, 2.4vw, 28px); }
-.copyright { margin: 0; color: var(--text-muted); font-family: var(--font-pixel); font-size: .8125rem; }
+.copyright { margin: 0; color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); }
 .footerLinks { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; padding: 0; list-style: none; }
 /* The padding keeps each link a 24 px tall target without moving the line. */
 .footerLink { display: inline-block; padding: 2px 0; color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }

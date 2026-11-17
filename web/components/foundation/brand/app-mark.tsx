@@ -1,13 +1,14 @@
 /**
- * The app's mark: the mark of its logo (lib/app-logo.ts `LOGO_MARK`) in ink, beside the name in the pixel face, as
- * Silicon Writings, Silicon Apps and Silicon Accounts draw theirs. The browser-tab icon (app/icon.svg) is the same mark
+ * The app's mark: the mark of its logo (lib/app-logo.ts `LOGO_MARK`) in ink, beside "Team of Silicons Briefcase" in the
+ * body face with the product muted, as Silicon Accounts draws its own (the signed-in top bar draws the same,
+ * components/foundation/shell/brand-mark.tsx). The browser-tab icon (app/icon.svg) is the same mark
  * alone; the home-screen icon (app/apple-icon.tsx) and the Open Graph image draw the whole logo, the mark in #181818 on a
  * cream square (lib/brand-svg.ts).
  * Plain SVG, server-rendered, shared by the landing page, the sign-in page and the signed-in shell.
  *
  *   <AppMark />                 the bare glyph at 22 px
  *   <AppMark size={40} />       larger
- *   <Wordmark />                the glyph and the app's name
+ *   <Wordmark />                the glyph and "Team of Silicons Briefcase"
  */
 import type { CSSProperties } from "react";
 import { appConfig } from "@/lib/app.config";
@@ -30,15 +31,15 @@ export function AppMark({ size = 22, className }: { size?: number; className?: s
   );
 }
 
-/** The wordmark's words ("Silicon Remind"): a link that shows the wordmark is named with them first (WCAG 2.5.3). */
-export const BRAND_NAME = appConfig.brandPrefix ? `${appConfig.brandPrefix} ${appConfig.name}` : appConfig.name;
+/** The wordmark's words ("Team of Silicons Briefcase"): a link that shows the wordmark is named with them first (WCAG 2.5.3). */
+export const BRAND_NAME = `Team of Silicons ${appConfig.name}`;
 
-/** The glyph and the app's name in the pixel face ("Silicon Remind"), as the bars show it. */
-export function Wordmark({ size = 22, className }: { size?: number; className?: string }) {
+/** The glyph and "Team of Silicons Briefcase", the product muted, as the bars show it. */
+export function Wordmark({ size = 18, className }: { size?: number; className?: string }) {
   return (
     <span className={[styles.wordmark, className].filter(Boolean).join(" ")}>
       <AppMark size={size} />
-      <span className={styles.name}>{BRAND_NAME}</span>
+      <span className={styles.name}>Team of Silicons <b className={styles.product}>{appConfig.name}</b></span>
     </span>
   );
 }

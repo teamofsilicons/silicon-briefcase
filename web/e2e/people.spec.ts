@@ -20,7 +20,7 @@ test("ranked fuzzy suggestions, keyboard selection, saved photo and UUID invitat
   await expect(selected).toContainText("My Grace");
   await expect(selected.locator("img")).toHaveAttribute("src", /contacts\/photos\//);
   await expect(selected.locator("img")).toHaveJSProperty("naturalWidth", 1);
-  await page.getByRole("button", { name: "Share access", exact: true }).click();
+  await page.getByRole("button", { name: "Share Access", exact: true }).click();
   await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(1);
   const requests = await (await request.get(fixture + "/__requests")).json();
   expect(requests.at(-1).body.principal).toEqual({ type: "carbon", id: "10000000-0000-4000-8000-000000000002" });
@@ -30,7 +30,7 @@ test("ranked fuzzy suggestions, keyboard selection, saved photo and UUID invitat
   await page.screenshot({ path: "test-results/contacts-sharing-mobile.png", fullPage: true });
   // Editing text clears the former selection immediately; a failed lookup cannot share it.
   await input.fill("si:nobody");
-  await expect(page.getByRole("button", { name: "Share access", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Share Access", exact: true })).toBeDisabled();
 });
 
 test("exact Silicon preview and inline contact saving do not submit an invitation", async ({ page, request }) => {
@@ -38,10 +38,10 @@ test("exact Silicon preview and inline contact saving do not submit an invitatio
   await page.getByRole("tab", { name: "Sharing", exact: true }).click();
   await page.getByRole("combobox", { name: "Account ID or name" }).fill("si:scout");
   await expect(page.getByLabel("Selected recipient")).toContainText("Scout");
-  await page.getByRole("button", { name: "Add contact", exact: true }).click();
+  await page.getByRole("button", { name: "Add Contact", exact: true }).click();
   await page.getByLabel("Saved name", { exact: true }).fill("Research partner");
   await page.getByLabel("Trust level", { exact: true }).fill("255");
-  await page.getByRole("button", { name: "Save contact", exact: true }).click();
+  await page.getByRole("button", { name: "Save Contact", exact: true }).click();
   await expect(page.getByLabel("Selected recipient")).toContainText("Research partner");
   const requests = await (await request.get(fixture + "/__requests")).json();
   expect(requests).toHaveLength(1); expect(requests[0].route).toBe("/contacts"); expect(requests[0].body.trust).toBe(255);
@@ -50,12 +50,12 @@ test("exact Silicon preview and inline contact saving do not submit an invitatio
 test("Contacts add/edit, consent, saved details and accessible mobile layout", async ({ page }) => {
   await page.goto("/contacts");
   await expect(page.getByText("My Grace", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Add contact", exact: true }).click();
+  await page.getByRole("button", { name: "Add Contact", exact: true }).click();
   await page.getByRole("combobox", { name: "Account ID or name" }).fill("si:scout");
   await expect(page.getByLabel("Selected recipient")).toBeVisible();
   await page.getByLabel("Saved name", { exact: true }).fill("Scout at work");
   await page.getByLabel("Trust level", { exact: true }).fill("20");
-  await page.getByRole("button", { name: "Save contact", exact: true }).click();
+  await page.getByRole("button", { name: "Save Contact", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator("main li").first()).toContainText("Scout at work");
   await page.setViewportSize({ width: 390, height: 844 });

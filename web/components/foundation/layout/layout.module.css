@@ -1,28 +1,62 @@
-/* Layout primitives for account pages. One page container per page; everything inside fills its column. */
+/* Layout primitives for the workspace's pages, copied from Silicon Accounts. One page container per page; everything inside fills its column. */
 
 .page {
   width: 100%;
-  max-width: var(--page-max);
+  max-width: calc(var(--page-narrow) + 2 * var(--gutter));
   min-width: 0;
   margin-inline: auto;
-  padding: clamp(8px, 2vw, 24px) var(--gutter) var(--dock-clearance);
+  padding: var(--space-section) var(--gutter) var(--page-end);
   display: grid;
   align-content: start;
-  gap: clamp(32px, 4vw, 48px);
+  gap: var(--space-section);
 }
 .page > * { min-width: 0; }
-/* Narrow pages keep the container's left edge (heading, cards and the brand line up) and narrow their column only. */
-.page[data-width="narrow"] > * { max-width: var(--page-narrow); }
-.page[data-width="reading"] > * { max-width: 880px; }
 
-/* Page header: the one h1, in the display serif, with an optional line of context and actions. */
+/* The content layout rule (redesign/decisions.md): a narrow centred column by default; the full width for grids that
+   need it; a column + aside, wide from the start; or the narrow column whose side column an action opens. */
+.page[data-width="default"], .page[data-layout="aside"] { max-width: calc(var(--page-max) + 2 * var(--gutter)); }
+.columns { display: grid; min-width: 0; align-items: start; gap: var(--space-block); }
+.mainColumn, .sideColumn { display: grid; min-width: 0; align-content: start; gap: var(--space-block); }
+.page[data-layout="aside"] .columns { grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
+.sideColumn { position: sticky; top: calc(var(--top-height, var(--space-section)) + var(--space-section)); }
+
+/* Opened by an action: the page widens and the side column's track grows from nothing, so the column glides to the
+   start while the panel (side-panel.module.css) slides and fades in a beat later. Closing runs it back. */
+/* A page sets --panel-width on its className to suit what its panel holds (420px when it does not). */
+.page[data-layout="panel"] {
+  transition: max-width var(--duration-expressive) var(--ease-standard);
+}
+.page[data-layout="panel"] .columns {
+  grid-template-columns: minmax(0, 1fr) 0px;
+  column-gap: 0px;
+  transition:
+    grid-template-columns var(--duration-expressive) var(--ease-standard),
+    column-gap var(--duration-expressive) var(--ease-standard);
+}
+.page[data-panel-open] { max-width: calc(var(--page-max) + 2 * var(--gutter)); }
+.page[data-panel-open] .columns { grid-template-columns: minmax(0, 1fr) var(--panel-width, 420px); column-gap: var(--space-block); }
+.panelColumn { position: sticky; top: calc(var(--top-height, var(--space-section)) + var(--space-section)); min-width: 0; overflow: clip; }
+
+/* Under 1024px there is no room beside the page: an aside goes below the column, and a panel opens as a drawer. */
+@media (max-width: 1023px) {
+  .page[data-layout="aside"] .columns, .page[data-layout="panel"] .columns { grid-template-columns: minmax(0, 1fr); }
+  .page[data-layout="aside"], .page[data-panel-open] { max-width: calc(var(--page-narrow) + 2 * var(--gutter)); }
+  .sideColumn { position: static; }
+  .panelColumn { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page[data-layout="panel"], .page[data-layout="panel"] .columns { transition: none; }
+}
+
+/* Page header: the one h1 in the title role (styles/tokens.css, the type scale), an optional line of context in the
+   secondary grey, and actions. */
 .header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--space-4) var(--space-6); }
 .headerText { display: grid; min-width: 0; gap: var(--space-3); }
-.title { margin: 0; color: var(--accent-ink); font-family: var(--font-serif); font-size: clamp(2rem, 1.6rem + 1.6vw, 2.625rem); font-weight: 400; letter-spacing: -.01em; line-height: 1.2; text-wrap: balance; overflow-wrap: anywhere; }
-.header[data-size="entity"] .title { font-size: clamp(var(--text-2xl), 3.2vw, 2.5rem); line-height: 1.08; }
-.description { max-width: 62ch; margin: 0; color: var(--text-secondary); font-size: var(--text-base); line-height: var(--leading-body); text-wrap: pretty; }
+.title { margin: 0; color: var(--foreground); font: var(--h1); letter-spacing: var(--h1-tracking); text-wrap: balance; }
+.header[data-size="entity"] .title { overflow-wrap: anywhere; }
+.description { max-width: 62ch; margin: 0; color: var(--text-muted); font: var(--body); letter-spacing: var(--body-tracking); text-wrap: pretty; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-3); }
-.back { display: inline-flex; width: fit-content; align-items: center; gap: var(--space-1); margin-bottom: var(--space-1); color: var(--text-secondary); font-size: var(--text-sm); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }
+.back { display: inline-flex; width: fit-content; align-items: center; gap: var(--space-1); margin-bottom: var(--space-1); color: var(--text-secondary); font: var(--small); letter-spacing: var(--small-tracking); text-decoration: none; transition: color var(--duration-fast) var(--ease-standard); }
 .back:hover, .back:focus-visible { color: var(--foreground); }
 @media (max-width: 640px) {
   .header { grid-template-columns: minmax(0, 1fr); align-items: start; }
@@ -33,27 +67,27 @@
 .section { display: grid; min-width: 0; gap: var(--space-4); }
 .sectionHeader { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-2) var(--space-4); }
 .sectionText { display: grid; min-width: 0; gap: var(--space-1); }
-.sectionTitle { margin: 0; color: var(--foreground); font-family: var(--font-serif); font-size: 1.375rem; font-weight: 400; letter-spacing: -.005em; line-height: 1.3; }
-.sectionDescription { max-width: 62ch; margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--leading-body); }
+.sectionTitle { margin: 0; color: var(--foreground); font: var(--h2); letter-spacing: var(--h2-tracking); }
+.sectionDescription { max-width: 62ch; margin: 0; color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); }
 
 .stack { display: flex; min-width: 0; flex-direction: column; }
 .cluster { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; }
 .grid { display: grid; min-width: 0; grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--grid-min, 260px)), 1fr)); }
 .stack > *, .cluster > *, .grid > * { min-width: 0; }
 
-/* A bordered squircle surface for one region of content. Never nest surfaces. */
-.surface { --sq-r: var(--radius-surface); --sq-fill: var(--surface); --sq-stroke: var(--border); position: relative; min-width: 0; border: 1px solid var(--sq-stroke); background: var(--sq-fill); padding: var(--space-6); }
+/* A tile for one region of content: the quiet grey fill, no edge (redesign/decisions.md, 2026-10-30). Never nest them. */
+.surface { --sq-r: var(--radius-overlay); --sq-fill: var(--canvas); position: relative; min-width: 0; background: var(--sq-fill); padding: var(--space-6); }
 .surface[data-padding="none"] { padding: 0; }
 .surface[data-padding="sm"] { padding: var(--space-4); }
 @media (max-width: 480px) { .surface { padding: var(--space-5); } }
 
-/* Settings: one bordered group per section, rows divided by hairlines (Arc composition). */
-.group { --sq-r: var(--radius-panel); --sq-fill: var(--surface); --sq-stroke: var(--border); position: relative; min-width: 0; border: 1px solid var(--sq-stroke); background: var(--sq-fill); }
+/* Settings: one tile per section, rows divided by hairlines on its fill. */
+.group { --sq-r: var(--radius-overlay); --sq-fill: var(--canvas); position: relative; min-width: 0; background: var(--sq-fill); }
 .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3) var(--space-6); min-height: 64px; padding: var(--space-4) var(--space-5); }
-.row + .row { border-top: 1px solid var(--border-subtle); }
-.rowText { display: grid; min-width: 0; gap: 2px; }
-.rowLabel { color: var(--foreground); font-size: var(--text-sm); font-weight: 500; line-height: var(--leading-body); overflow-wrap: anywhere; }
-.rowDescription { color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--leading-body); overflow-wrap: anywhere; }
+.row + .row { border-top: 1px solid var(--border); }
+.rowText { display: grid; min-width: 0; gap: var(--space-hair); }
+.rowLabel { color: var(--foreground); font: var(--label); letter-spacing: var(--label-tracking); overflow-wrap: anywhere; }
+.rowDescription { color: var(--text-muted); font: var(--small); letter-spacing: var(--small-tracking); overflow-wrap: anywhere; }
 .rowControl { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 @media (max-width: 560px) {
   .row:not([data-inline]) { grid-template-columns: minmax(0, 1fr); }

@@ -1,2 +1,5 @@
-.loading { display: grid; gap: var(--space-6); }
-.header { display: grid; gap: var(--space-3); margin-bottom: var(--space-2); }
+/* A page loading (PageSkeleton): the page bar as foundation/page/page-bar.module.css draws it, then sections as
+   foundation/page/rows.module.css spaces them. */
+.bar { position: sticky; z-index: var(--layer-sticky); top: var(--top-height, 0px); padding: var(--space-related) var(--space-inset); border-bottom: 1px solid var(--border); background: var(--surface); }
+.titleRow { display: flex; min-height: var(--control-height-sm); align-items: center; padding-inline: var(--space-hair); }
+.section { display: grid; gap: var(--space-related); margin-top: var(--space-section); }

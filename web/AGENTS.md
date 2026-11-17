@@ -1,7 +1,7 @@
 # Silicon Briefcase web
 
 The Briefcase frontend uses: Next.js 16 App Router, React 19, TypeScript strict, pnpm, Silicon
-UI in `components/silicon-ui/`, TanStack Query in `lib/client/`. `README.md` is the guide (the BFF, the session, the proxy,
+UI from npm (`@teamofsilicons/silicon-ui`, the version Silicon Accounts uses), TanStack Query in `lib/client/`. `README.md` is the guide (the BFF, the session, the proxy,
 the environment); `README.md` is the checklist for an app; `DESIGN.md` is the design system. Read the bundled Next
 docs in `node_modules/next/dist/docs/` before relying on memory.
 

@@ -16,7 +16,7 @@ export interface SiteHeaderProps {
 }
 
 export function SiteHeader({ signedIn }: SiteHeaderProps) {
-  const account = signedIn ? { href: appConfig.home, label: `Open ${appConfig.name}` } : { href: "/auth/sign-in", label: "Sign in" };
+  const account = signedIn ? { href: appConfig.home, label: `Open ${appConfig.name}` } : { href: "/auth/sign-in", label: "Sign In" };
   return (
     <header className={styles.header}>
       <a className="skip-link" data-sq="surface" href="#main">Skip to content</a>
