@@ -119,7 +119,7 @@ pub use models::{
     ArchiveListing, BucketConfiguration, BucketConfigurationState, BucketConfigurationStatus,
     DailyUsageMeasure, Drive, DriveList, DriveRelation, DriveUsage, EffectiveAccess,
     EffectivePermission, EncryptionMode, Entry, EntryPage, EntryType, EntryVisibility, FileVersion,
-    FileVersionPage, Moved, Notification, NotificationDecision, NotificationInbox,
+    FileVersionPage, IncomingShares, Moved, Notification, NotificationDecision, NotificationInbox,
     NotificationKind, NotificationSubject, PermissionGrant, PermissionInspection, RenderKind,
     SearchResult, ServiceStatus, SharedEntry, SharedPage, UsageMeasure,
 };

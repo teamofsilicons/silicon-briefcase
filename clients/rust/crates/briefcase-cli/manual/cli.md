@@ -59,13 +59,13 @@ Paginated commands accept `--cursor`; commands with `--all` walk every page. Che
 
 ## Sharing and retention
 
-Share with an exact `c:` or `si:` id. Delete rights cannot be shared. A Silicon receives shares from its custodian and the custodian's other Silicons; other accounts must first be allowed.
+Share with an exact `c:` or `si:` id. Delete rights cannot be shared. Carbons and Silicons accept direct shares from anyone by default. Use `briefcase allow policy --from contacts` to accept only saved Silicon Contacts and accounts in the same custodian circle. Use `--from anyone` to reopen sharing. A custodian may select its Silicon with `--for si:scout`.
 
 ```sh
 briefcase share notes/report.pdf c:ada --access read,update
 briefcase shares notes/report.pdf
 briefcase link notes/report.pdf --enabled true
-briefcase allow --help
+briefcase allow policy --json
 briefcase inbox
 briefcase inbox --read
 ```

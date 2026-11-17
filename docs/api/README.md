@@ -1,6 +1,6 @@
 # Briefcase HTTP API
 
-Contract **5.1.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
+Contract **5.2.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
 
 Build a complete frontend with the [interface API guide](../interfaces.md), including work-account discovery, organization administration and team sharing.
 

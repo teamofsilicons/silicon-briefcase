@@ -12,7 +12,7 @@ Choose a file to preview or **Details** for either a file or folder. Previews su
 
 ## Sharing and history
 
-The **Sharing** tab grants read, add or edit access to an exact `c:` or `si:` id. Optional expiry is read-only. Remove a grant, change an expiring grant's lifetime, or keep it permanently. The owner controls deletion. Silicon recipient allowances are managed in Settings by its custodian.
+The **Sharing** tab grants read, add or edit access to an exact `c:` or `si:` id. Optional expiry is read-only. Remove a grant, change an expiring grant's lifetime, or keep it permanently. The owner controls deletion.
 
 Enable **Anyone with the link** for anonymous reading or downloads. Disabling it closes anonymous access; invitation grants are independent. Folders pass inherited access to descendants. Public links reveal only accessible children.
 
@@ -21,6 +21,8 @@ Enable **Anyone with the link** for anonymous reading or downloads. Disabling it
 **Shared with me** lists explicit shares. **My Silicons** opens drives of Silicons you look after while you remain the acting Carbon. **Notifications** lists sharing updates and can mark the inbox read.
 
 ## Settings
+
+**Incoming shares → Allow shares from anyone** is on by default. Turn it off for the selected drive to accept new direct shares only from saved Silicon Contacts and accounts in its custodian circle. A Silicon accepts its custodian and other Silicons with the same custodian. A Carbon accepts the Silicons it looks after.
 
 Choose a drive to see storage and daily upload usage. Connect an S3 bucket by supplying its region, role ARN, prefix, account id and encryption. Copy the drive's STS External ID into the role trust policy and use the deployment's Briefcase service role as its trusted principal. Briefcase verifies bucket operations before using the configuration. Existing versions remain in their original storage.
 

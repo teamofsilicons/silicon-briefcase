@@ -814,7 +814,7 @@ async fn discovery_works_signed_out_offline_in_an_empty_home_and_writes_nothing(
             "api_url": "https://api.briefcase.teamofsilicons.com/api/v1/",
             "web_url": "https://briefcase.teamofsilicons.com",
             "version": env!("CARGO_PKG_VERSION"),
-            "contract_version": "5.1.0",
+            "contract_version": "5.2.0",
             "api_version": "v1",
             "sign_in": {
                 "device_flow": true,

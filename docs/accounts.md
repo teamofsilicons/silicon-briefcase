@@ -6,7 +6,7 @@ Ordinary requests present `Authorization: Bearer <Accounts access token>`, issue
 
 Carbons use hosted PKCE or the CLI device flow. Silicons exchange an app-targeted short-lived token using public-client mode. The CLI never receives an app secret. Server code alone uses the app secret for code exchange, refresh, introspection, lookups and proof verification. On sign-out revoke the refresh token and clear local state.
 
-A Silicon's current custodian may manage that Silicon's drive while remaining the acting Carbon. Other Silicons and Carbons get only explicitly shared file rights. A recipient Silicon accepts its custodian, the custodian's other Silicons, and explicitly allowed accounts.
+A Silicon's current custodian may manage that Silicon's drive while remaining the acting Carbon. Other Silicons and Carbons get only explicitly shared file rights. All recipients accept direct shares from any signed-in account by default. In Settings, a Carbon or Silicon can limit new shares to its saved contacts and custodian circle.
 
 `GET /api/v1/accounts` discovers the app's public identity; `GET /api/v1/me` verifies the caller. No organization selector, IAM role/tag claim, Honeycomb test selector, or pre-Accounts session grants authority. Retired selectors return an explicit error. Existing data needs the reviewed identity mapping described in [cutover](migration/cutover.md).
 

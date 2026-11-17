@@ -595,7 +595,8 @@ async fn shares_by_id_reach_across_drives_and_show_in_shared_with_me() -> anyhow
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn silicons_accept_shares_from_their_circle_or_accounts_they_allowed() -> anyhow::Result<()> {
+async fn silicons_accept_shares_by_default_and_legacy_allowances_do_not_restrict_them()
+-> anyhow::Result<()> {
     let Some(w) = World::new().await? else {
         return Ok(());
     };
@@ -614,18 +615,12 @@ async fn silicons_accept_shares_from_their_circle_or_accounts_they_allowed() -> 
         )
         .await?;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    // Bob is outside Scout's circle: refused until Scout or Ada allows him.
+    // Bob is outside Scout's circle and can send a share immediately.
+    let first = w.folder(&w.bob, "first-open-share", None, None).await?;
     let (status, body) = w
-        .share(
-            &w.bob,
-            &bob_folder,
-            "silicon",
-            &w.scout.id,
-            &["read", "write"],
-        )
+        .share(&w.bob, &first, "silicon", &w.scout.id, &["read"])
         .await?;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(code(&body), "silicon_not_open");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     // A Carbon can be reached by anyone signed in.
     let (status, _) = w
         .share(&w.bob, &bob_folder, "carbon", &w.cat.id, &["read"])
@@ -663,6 +658,8 @@ async fn silicons_accept_shares_from_their_circle_or_accounts_they_allowed() -> 
         .await?;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list["items"][0]["account"]["uuid"], w.bob.uuid.as_str());
+    // The released CLI parses the allowance list after writing it.
+    let _: briefcase_client::AllowedAccounts = serde_json::from_value(list)?;
     let (status, body) = w
         .call(
             &w.ada,
@@ -737,7 +734,7 @@ async fn silicons_accept_shares_from_their_circle_or_accounts_they_allowed() -> 
         .await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // Removing the allowance keeps existing shares; new ones are refused.
+    // Removing a legacy allowance keeps existing shares and the default open policy.
     let (status, _) = w.call(&w.scout, Method::DELETE, &allowance, None).await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = w.call(&w.scout, Method::DELETE, &allowance, None).await?;
@@ -746,7 +743,7 @@ async fn silicons_accept_shares_from_their_circle_or_accounts_they_allowed() -> 
     let (status, body) = w
         .share(&w.bob, &another, "silicon", &w.scout.id, &["read"])
         .await?;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _) = w
         .call(
             &w.scout,

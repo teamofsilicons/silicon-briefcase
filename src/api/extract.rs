@@ -119,10 +119,7 @@ fn execution_context(actor: Actor) -> Result<ExecutionContext, AppError> {
 /// the account it is now, keyed by its uuid, and checks the caller may share
 /// with it.
 ///
-/// Carbons can be reached by anyone signed in to Briefcase. Silicons are not
-/// open to the world: a share reaches a Silicon only from its custodian, the
-/// other Silicons its custodian looks after, or an account the Silicon (or its
-/// custodian) allowed first.
+/// The same recipient preference applies to invitations, explicit grants and folder invitees.
 pub(crate) async fn resolve_recipient(
     state: &AppState,
     context: &ExecutionContext,
@@ -141,13 +138,16 @@ pub(crate) async fn resolve_recipient(
         ));
     }
     if let Some(sharer) = context.authorization().account()
-        && !state.accounts.may_share_with(&sharer.uuid, &record).await?
+        && !state
+            .accounts
+            .may_share_with(&sharer.uuid, &record, state.contacts.as_deref())
+            .await?
     {
         let shown = record.public_id.as_deref().unwrap_or(id);
         return Err(AppError::refused(
-            "silicon_not_open",
+            "incoming_shares_restricted",
             format!(
-                "{shown} accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it allowed. Ask {shown} or its custodian to allow you first."
+                "{shown} restricts incoming shares. Ask them to save you in Silicon Contacts or turn on “Allow shares from anyone” in Briefcase Settings."
             ),
         ));
     }

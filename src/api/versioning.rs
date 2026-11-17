@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "5.1.0";
+pub const CONTRACT_VERSION: &str = "5.2.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,19 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 65] = [
+pub const OPERATIONS: [OperationVersion; 67] = [
+    operation(
+        "readIncomingShares",
+        "1.0.0",
+        "GET",
+        "/accounts/{account}/incoming-shares",
+    ),
+    operation(
+        "setIncomingShares",
+        "1.0.0",
+        "PUT",
+        "/accounts/{account}/incoming-shares",
+    ),
     operation("listRecipients", "1.0.0", "GET", "/recipients"),
     operation("resolveRecipient", "1.0.0", "GET", "/recipients/resolve"),
     operation("listContacts", "1.0.0", "GET", "/contacts"),
@@ -96,24 +108,24 @@ pub const OPERATIONS: [OperationVersion; 65] = [
     operation("listSharedWithMe", "1.1.0", "GET", "/shared"),
     operation(
         "listSiliconAllowedAccounts",
-        "1.0.0",
+        "1.1.0",
         "GET",
         "/silicons/{silicon}/allowed-accounts",
     ),
     operation(
         "allowAccountToShareWithSilicon",
-        "1.0.0",
+        "1.1.0",
         "PUT",
         "/silicons/{silicon}/allowed-accounts/{account}",
     ),
     operation(
         "disallowAccountToShareWithSilicon",
-        "1.0.0",
+        "1.1.0",
         "DELETE",
         "/silicons/{silicon}/allowed-accounts/{account}",
     ),
     operation("listEntries", "2.0.0", "GET", "/entries"),
-    operation("createFolder", "2.0.0", "POST", "/entries"),
+    operation("createFolder", "2.1.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.1.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
@@ -182,7 +194,7 @@ pub const OPERATIONS: [OperationVersion; 65] = [
     ),
     operation(
         "grantPermission",
-        "1.1.0",
+        "1.2.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
@@ -239,7 +251,7 @@ pub const OPERATIONS: [OperationVersion; 65] = [
     ),
     operation(
         "createInvitation",
-        "2.1.0",
+        "2.2.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),
@@ -277,7 +289,7 @@ pub const OPERATIONS: [OperationVersion; 65] = [
     operation("readPublicEntry", "2.0.0", "GET", "/public/{owner}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
-        "3.0.0",
+        "3.1.0",
         "POST",
         "/obo/invitations",
     ),

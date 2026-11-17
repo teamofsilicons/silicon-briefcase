@@ -38,6 +38,8 @@ impl AccountStatus {
 /// One cached account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRecord {
+    /// Whether this recipient accepts direct shares from every account.
+    pub accept_shares_from_anyone: bool,
     /// Permanent account uuid.
     pub uuid: String,
     /// Carbon or Silicon.
@@ -64,6 +66,7 @@ pub struct AccountRecord {
 
 #[derive(sqlx::FromRow)]
 struct AccountRow {
+    accept_shares_from_anyone: bool,
     account_uuid: String,
     kind: String,
     public_id: Option<String>,
@@ -82,6 +85,7 @@ impl TryFrom<AccountRow> for AccountRecord {
 
     fn try_from(row: AccountRow) -> Result<Self, Self::Error> {
         Ok(Self {
+            accept_shares_from_anyone: row.accept_shares_from_anyone,
             kind: parse_kind(&row.kind)?,
             status: AccountStatus::parse(&row.status)?,
             uuid: row.account_uuid,
@@ -100,7 +104,7 @@ impl TryFrom<AccountRow> for AccountRecord {
 macro_rules! account_columns {
     () => {
         "account_uuid, kind, public_id, public_id_observed_at, display_name, pfp_url, email, \
-         custodian_uuid, status, revoked_before, refreshed_at"
+         custodian_uuid, status, revoked_before, refreshed_at, accept_shares_from_anyone"
     };
 }
 
@@ -506,20 +510,26 @@ impl AccountStore {
         Ok(record)
     }
 
-    /// Returns whether a Silicon (or its custodian) allowed `account` to share
-    /// with it.
+    /// Saves a recipient's incoming share preference, including across profile refreshes.
     ///
     /// # Errors
     ///
     /// Returns the database error.
-    pub async fn share_allowed(&self, silicon: &str, account: &str) -> Result<bool, sqlx::Error> {
+    pub async fn set_incoming_shares(
+        &self,
+        recipient: &str,
+        caller: &str,
+        anyone: bool,
+    ) -> Result<Option<bool>, sqlx::Error> {
         sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM briefcase.silicon_share_allowances \
-                             WHERE silicon_uuid = $1 AND allowed_uuid = $2)",
+            "UPDATE briefcase.accounts SET accept_shares_from_anyone = $3
+             WHERE account_uuid = $1 AND (account_uuid = $2 OR (kind = 'silicon' AND custodian_uuid = $2))
+             RETURNING accept_shares_from_anyone",
         )
-        .bind(silicon)
-        .bind(account)
-        .fetch_one(&self.pool)
+        .bind(recipient)
+        .bind(caller)
+        .bind(anyone)
+        .fetch_optional(&self.pool)
         .await
     }
 
@@ -586,7 +596,7 @@ impl AccountStore {
             "SELECT account.account_uuid, account.kind, account.public_id, \
                     account.public_id_observed_at, account.display_name, account.pfp_url, \
                     account.email, account.custodian_uuid, account.status, \
-                    account.revoked_before, account.refreshed_at, \
+                    account.revoked_before, account.refreshed_at, account.accept_shares_from_anyone, \
                     allowance.created_at AS allowed_at \
                FROM briefcase.silicon_share_allowances AS allowance \
                JOIN briefcase.accounts AS account ON account.account_uuid = allowance.allowed_uuid \

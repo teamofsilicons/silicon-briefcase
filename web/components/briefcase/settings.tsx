@@ -2,7 +2,7 @@
 
 /**
  * Settings, on Silicon Accounts' page rules: the page bar, then sections (an h2 over one boxed list or one boxed form):
- * the drive's usage, who may share with a Silicon, your own storage and reporting a problem.
+ * the drive's usage, incoming shares, your own storage and reporting a problem.
  */
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,6 +12,7 @@ import { Badge } from "@teamofsilicons/silicon-ui/badge";
 import { Button } from "@teamofsilicons/silicon-ui/button";
 import { Input } from "@teamofsilicons/silicon-ui/input";
 import { Progress } from "@teamofsilicons/silicon-ui/progress";
+import { Switch } from "@teamofsilicons/silicon-ui/switch";
 import { Select } from "@teamofsilicons/silicon-ui/select";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar } from "@/components/foundation/page/page-bar";
@@ -19,7 +20,7 @@ import { Row, Section, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
-import { date, message, size, type Account, type Drive, type Usage } from "@/lib/briefcase/types";
+import { date, message, size, type Drive, type Usage } from "@/lib/briefcase/types";
 import styles from "./settings.module.css";
 
 export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } }) {
@@ -27,14 +28,30 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
   const [drive, setDrive] = useState(initialDrives.items[0]?.owner.uuid ?? "");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
-  const [allowed, setAllowed] = useState("");
   const [report, setReport] = useState("");
   const [bucket, setBucket] = useState({ bucket_name: "", region: "us-east-1", role_arn: "", prefix: "briefcase", aws_account_id: "", encryption_mode: "sse_s3", kms_key_arn: "" });
   const chosen = initialDrives.items.find(item => item.owner.uuid === drive);
   const usage = useQuery({ queryKey: ["usage", drive], queryFn: () => api.get<Usage>("/v1/usage", { query: { drive } }), enabled: !!drive });
-  const allowances = useQuery({ queryKey: ["allowances", drive], queryFn: () => api.get<{ items: { account: Account; allowed_at: string }[] }>(`/v1/silicons/${encodeURIComponent(drive)}/allowed-accounts`), enabled: chosen?.owner.kind === "silicon" });
+  const shareSettingsPath = `/v1/accounts/${encodeURIComponent(drive)}/incoming-shares`;
+  const shareSettingsKey = ["incoming-shares", drive];
+  const incoming = useQuery({
+    queryKey: shareSettingsKey,
+    queryFn: ({ signal }) => api.get<{ allow_from_anyone: boolean }>(shareSettingsPath, { signal }),
+    enabled: !!drive,
+  });
   async function act(work: () => Promise<unknown>, success: string) {
-    setBusy(true); setFailure(""); try { await work(); notify.success(success); await cache.invalidateQueries({ queryKey: ["allowances", drive] }); } catch (error) { setFailure(message(error)); } finally { setBusy(false); }
+    setBusy(true);
+    setFailure("");
+    try { await work(); notify.success(success); }
+    catch (error) { setFailure(message(error)); }
+    finally { setBusy(false); }
+  }
+  async function saveIncomingShares(allowFromAnyone: boolean) {
+    await act(async () => {
+      await cache.cancelQueries({ queryKey: shareSettingsKey });
+      const saved = await api.put<{ allow_from_anyone: boolean }>(shareSettingsPath, { allow_from_anyone: allowFromAnyone });
+      cache.setQueryData(shareSettingsKey, saved);
+    }, "Incoming share settings saved");
   }
   const meters = usage.data ? [
     { key: "storage", label: "Storage", icon: HardDrive, data: usage.data.storage, detail: `${size(usage.data.storage.used_bytes)} of ${size(usage.data.storage.limit_bytes)}` },
@@ -48,7 +65,7 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
       {failure ? <Alert tone="danger" title="That did not work" onDismiss={() => setFailure("")}>{failure}</Alert> : null}
       {initialDrives.items.length > 1 ? (
         <div className={styles.drive}>
-          <Select label="Drive" value={drive} onValueChange={setDrive} options={initialDrives.items.map(item => ({ value: item.owner.uuid, label: `${item.owner.display_name || item.owner.id || "My drive"}${item.relation === "own" ? " · yours" : ""}` }))} />
+          <Select label="Drive" disabled={busy} value={drive} onValueChange={setDrive} options={initialDrives.items.map(item => ({ value: item.owner.uuid, label: `${item.owner.display_name || item.owner.id || "My drive"}${item.relation === "own" ? " · yours" : ""}` }))} />
         </div>
       ) : null}
 
@@ -68,22 +85,22 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
         </Section>
       ) : null}
 
-      {chosen?.owner.kind === "silicon" ? (
-        <Section id="allowed" title="Who can share with this Silicon" description="Its custodian and the other Silicons they look after are already allowed. Add other accounts explicitly.">
-          {allowances.data?.items.map(item => (
-            <Row key={item.account.uuid} lead={<Tile><UserRound size={16} strokeWidth={2} /></Tile>} title={item.account.display_name || item.account.id} detail={item.account.id}>
-              <Button variant="ghost" size="sm" loading={busy} onClick={() => void act(() => api.delete(`/v1/silicons/${encodeURIComponent(drive)}/allowed-accounts/${encodeURIComponent(item.account.uuid)}`), "Sharing allowance removed")}>Remove</Button>
-            </Row>
-          ))}
-          <li className={styles.formRow}>
-            <form className={styles.inlineForm} onSubmit={event => { event.preventDefault(); void act(() => api.put(`/v1/silicons/${encodeURIComponent(drive)}/allowed-accounts/${encodeURIComponent(allowed.trim())}`), "Account allowed to share"); }}>
-              <Input label="Account ID" placeholder="c:ada or si:scout" value={allowed} onChange={event => setAllowed(event.target.value)} required />
-              <Button size="sm" loading={busy}>Allow Sharing</Button>
-            </form>
-          </li>
+      {chosen ? (
+        <Section id="incoming-shares" title="Incoming shares">
+          <Row lead={<Tile><UserRound size={16} strokeWidth={2} /></Tile>}
+            title={<span id="incoming-shares-label">Allow shares from anyone</span>}
+            detail={<span id="incoming-shares-detail">{chosen.owner.kind === "silicon"
+              ? "Turn off to accept shares only from this Silicon’s saved contacts, its custodian and other Silicons with the same custodian."
+              : "Turn off to accept shares only from this account’s saved contacts and the Silicons it looks after."}</span>}>
+            {incoming.data ? (
+              <Switch aria-labelledby="incoming-shares-label" aria-describedby="incoming-shares-detail"
+                checked={incoming.data.allow_from_anyone} disabled={busy || incoming.isError}
+                onCheckedChange={value => void saveIncomingShares(value)} />
+            ) : incoming.isPending ? <span role="status">Loading…</span> : null}
+          </Row>
         </Section>
       ) : null}
-      {chosen?.owner.kind === "silicon" && allowances.error ? <ErrorAlert error={allowances.error} /> : null}
+      {incoming.error ? <ErrorAlert error={incoming.error} action={<Button size="sm" variant="ghost" onClick={() => void incoming.refetch()}>Try Again</Button>} /> : null}
 
       <section className={styles.section} aria-labelledby="storage-title">
         <div className={styles.head}>

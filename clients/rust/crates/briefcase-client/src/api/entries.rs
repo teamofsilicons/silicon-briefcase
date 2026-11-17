@@ -104,8 +104,8 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error when the destination is not writable, or an invitee
-    /// cannot be shared with (an unknown or inactive account, or a Silicon that
-    /// has not allowed the caller: `silicon_not_open`).
+    /// cannot be shared with (an unknown or inactive account, or a recipient that
+    /// restricts incoming shares: `incoming_shares_restricted`).
     pub async fn create_folder(&self, folder: &NewFolder) -> Result<Entry> {
         let (parent_id, parent_path, drive) = match &folder.parent {
             Some(Destination::Id(id)) => (Some(*id), None, None),

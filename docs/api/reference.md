@@ -1,6 +1,6 @@
 # HTTP operation reference
 
-Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.1.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.2.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
 
 ## List this account’s organizations and available sharing targets
 
@@ -115,11 +115,23 @@ Newest share first, one item per shared entry, each with the account whose drive
 | 200 | Entries shared with the caller (Cache-Control no-store) |
 | default | Error |
 
-## List who may share with a Silicon besides its custodian and the custodian's other Silicons
+## Read incoming share settings
+
+`GET /accounts/{account}/incoming-shares` · `readIncomingShares`
+
+An account or the custodian of a Silicon can read its preference by public ID or UUID. Returns `{"allow_from_anyone":true}` by default for existing and new accounts.
+
+## Set incoming share settings
+
+`PUT /accounts/{account}/incoming-shares` · `setIncomingShares`
+
+Send `{"allow_from_anyone":false}` to restrict new direct grants to the recipient’s saved Silicon Contacts and custodian circle. Send `true` in the same field to reopen sharing. Both return the saved object. Other accounts receive 403. The preference covers direct grants, invitations (including delegated invitations) and folder invitees. Existing grants keep their access.
+
+## List a Silicon’s legacy share allowances
 
 `GET /silicons/{silicon}/allowed-accounts` · `listSiliconAllowedAccounts`
 
-A Silicon acts on what it receives, so it accepts shares only from its custodian, the other Silicons its custodian looks after, and the accounts listed here. Only the Silicon itself and its custodian may read the list (403 `not_silicons_custodian`); naming a Carbon is 422 `not_a_silicon`.
+Only the Silicon and its custodian may read these historical records. The incoming share preference controls new shares.
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -130,11 +142,11 @@ A Silicon acts on what it receives, so it accepts shares only from its custodian
 | 200 | The accounts allowed to share with the Silicon, oldest first (Cache-Control no-store) |
 | default | Error |
 
-## Let an account share with a Silicon
+## Record a legacy Silicon allowance
 
 `PUT /silicons/{silicon}/allowed-accounts/{account}` · `allowAccountToShareWithSilicon`
 
-Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the Silicon itself is 422 `allowance_self`.
+Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the Silicon itself is 422 `allowance_self`. In restricted mode, adding an allowance returns 403 `incoming_shares_restricted`.
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -143,11 +155,11 @@ Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`
 
 | Response | Meaning |
 | --- | --- |
-| 201 | The account may now share with the Silicon |
+| 201 | The legacy allowance was recorded |
 | 204 | The account was already allowed; nothing changed |
 | default | Error |
 
-## Stop letting an account share with a Silicon
+## Remove a legacy Silicon allowance
 
 `DELETE /silicons/{silicon}/allowed-accounts/{account}` · `disallowAccountToShareWithSilicon`
 
@@ -160,7 +172,7 @@ Shares the account already made stay; the Silicon or its custodian can revoke th
 
 | Response | Meaning |
 | --- | --- |
-| 204 | The account may no longer share with the Silicon |
+| 204 | The legacy allowance was removed |
 | default | Error |
 
 ## List folder contents, the top of a drive, or a filtered view of a drive
@@ -329,7 +341,7 @@ Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of 
 
 `POST /entries/{entry_id}/permissions` · `grantPermission`
 
-Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
+Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -763,7 +775,7 @@ Lists the entries of a zip, tar, tar.gz, tar.zst or 7z file without extracting a
 
 `POST /entries/{entry_id}/invitations` · `createInvitation`
 
-Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are retired (422 `email_recipients_retired`, `tag_recipients_retired`).
+Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are retired (422 `email_recipients_retired`, `tag_recipients_retired`).
 
 | Parameter | Location | Required |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Operation inventory
 
-Contract **5.0.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
+Contract **5.2.0**, API namespace **v1** (`/api/v1`). Generated from [openapi.yaml](../../openapi.yaml), which is
 the wire reference; the service serves the same list at `GET /api/version`, and a client checks every operation's
 id, method, path and revision there before its first call.
 
@@ -26,13 +26,15 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `readOrganization` | `GET /organizations/{org}` | 1.0.0 | bearer |
 | `manageOrganization` | `POST /organizations/{org}/actions` | 1.0.0 | bearer |
 | `readAccount` | `GET /me` | 1.0.0 | bearer |
+| `readIncomingShares` | `GET /accounts/{account}/incoming-shares` | 1.0.0 | bearer |
+| `setIncomingShares` | `PUT /accounts/{account}/incoming-shares` | 1.0.0 | bearer |
 | `listDrives` | `GET /drives` | 1.0.0 | bearer |
 | `listSharedWithMe` | `GET /shared` | 1.1.0 | bearer |
-| `listSiliconAllowedAccounts` | `GET /silicons/{silicon}/allowed-accounts` | 1.0.0 | bearer |
-| `allowAccountToShareWithSilicon` | `PUT /silicons/{silicon}/allowed-accounts/{account}` | 1.0.0 | bearer |
-| `disallowAccountToShareWithSilicon` | `DELETE /silicons/{silicon}/allowed-accounts/{account}` | 1.0.0 | bearer |
+| `listSiliconAllowedAccounts` | `GET /silicons/{silicon}/allowed-accounts` | 1.1.0 | bearer |
+| `allowAccountToShareWithSilicon` | `PUT /silicons/{silicon}/allowed-accounts/{account}` | 1.1.0 | bearer |
+| `disallowAccountToShareWithSilicon` | `DELETE /silicons/{silicon}/allowed-accounts/{account}` | 1.1.0 | bearer |
 | `listEntries` | `GET /entries` | 2.0.0 | bearer |
-| `createFolder` | `POST /entries` | 2.0.0 | bearer |
+| `createFolder` | `POST /entries` | 2.1.0 | bearer |
 | `getEntry` | `GET /entries/{entry_id}` | 1.0.0 | bearer |
 | `updateEntry` | `PATCH /entries/{entry_id}` | 1.1.0 | bearer |
 | `moveEntryToBin` | `DELETE /entries/{entry_id}` | 1.0.0 | bearer |
@@ -40,7 +42,7 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `downloadEntry` | `GET /entries/{entry_id}/download` | 1.0.0 | bearer |
 | `uploadFile` | `POST /uploads` | 1.1.0 | bearer |
 | `listPermissions` | `GET /entries/{entry_id}/permissions` | 1.0.0 | bearer |
-| `grantPermission` | `POST /entries/{entry_id}/permissions` | 1.1.0 | bearer |
+| `grantPermission` | `POST /entries/{entry_id}/permissions` | 1.2.0 | bearer |
 | `revokePermission` | `DELETE /entries/{entry_id}/permissions/{grant_id}` | 1.0.0 | bearer |
 | `inspectEffectivePermissions` | `POST /permissions/effective` | 1.1.0 | bearer |
 | `searchFiles` | `GET /search` | 1.0.0 | bearer |
@@ -69,7 +71,7 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `resolveLegacyPermanentUrl` | `GET /org/{org_id}/{path}` | 1.0.0 | bearer, or none for link-shared entries (deprecated) |
 | `listArchiveContents` | `GET /entries/{entry_id}/archive` | 1.0.0 | bearer |
 | `listInvitations` | `GET /entries/{entry_id}/invitations` | 2.0.0 | bearer |
-| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.1.0 | bearer |
+| `createInvitation` | `POST /entries/{entry_id}/invitations` | 2.2.0 | bearer |
 | `changeExpiringShare` | `PATCH /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `revokeInvitation` | `DELETE /entries/{entry_id}/invitations/{grant_id}` | 1.0.0 | bearer |
 | `makeEntryPermanent` | `DELETE /entries/{entry_id}/self-destruct` | 1.0.0 | bearer |
@@ -77,7 +79,7 @@ Permanent addresses read `https://briefcase.teamofsilicons.com/{owner id}/{path}
 | `setLinkAccess` | `PUT /entries/{entry_id}/link-access` | 1.2.0 | bearer |
 | `listEntryLogs` | `GET /entries/{entry_id}/logs` | 2.0.0 | bearer |
 | `readPublicEntry` | `GET /public/{owner}/{path}` | 2.0.0 | none |
-| `inviteOnBehalfOfMember` | `POST /obo/invitations` | 3.0.0 | proof |
+| `inviteOnBehalfOfMember` | `POST /obo/invitations` | 3.1.0 | proof |
 | `setLinkAccessOnBehalfOfMember` | `POST /obo/link-access` | 3.0.0 | proof |
 
 ## People and Contacts
