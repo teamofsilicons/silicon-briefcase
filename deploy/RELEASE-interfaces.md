@@ -48,4 +48,23 @@ sharing inheritance and membership removal are covered by the existing local
 organization tests. Hosted OAuth completion and notification delivery are
 outside this backend/docs change.
 
-Production results will be recorded in `verification-interfaces-2026-11-17.json`.
+## Production result — 2026-11-17
+
+Backend 5.0.2 is live. API and worker run source `71291c8` by immutable image
+digest; the website and runtime configuration were preserved. PRs #43 and #44
+are merged. All CI jobs passed, including the final main run. The validation
+commit `67afa3d` changes only the new test fixture's timestamp precision from
+the built source; the production code and documentation are identical.
+
+Authenticated production checks passed for upload and same-key replay,
+download integrity and ranges, entry/version/sharing metadata, search, expiring
+public links, link removal, cleanup, wrong-audience/refresh-token rejection and
+immediate revocation. The separate verification session was revoked; the
+shared agent CLI session remains valid.
+
+The [interface guide](https://docs.briefcase.teamofsilicons.com/interfaces/),
+Markdown source, `llms.txt`, OpenAPI and reference pages are live over HTTPS.
+Silicon Apps now lists the guide as Briefcase's interface API documentation.
+
+Detailed images, source revisions, check results and limitations are recorded in
+[the production verification record](verification-interfaces-2026-11-17.json).
