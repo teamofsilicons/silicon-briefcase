@@ -19,7 +19,10 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use silicon_briefcase::{
     application::{
-        content::{ContentRepository, Prepared, SmallUploadCommand, StagedContent},
+        content::{
+            ContentRepository, InitiateMultipartCommand, Prepared, SmallUploadCommand,
+            StagedContent,
+        },
         context::ExecutionContext,
         idempotency::IdempotencyKey,
         ports::{ObjectChecksum, ObjectChecksumAlgorithm, ObjectChecksumType, StoredObject},
@@ -34,9 +37,12 @@ use silicon_briefcase::{
         },
         entry::EntryName,
         ids::EntryId,
+        lifetime::LifetimeMinutes,
+        multipart::{MultipartPlan, SINGLE_UPLOAD_MAX_BYTES},
         permission::Capability,
         quota::{DEFAULT_DAILY_UPLOAD_LIMIT_BYTES, DEFAULT_STORAGE_LIMIT_BYTES},
     },
+    error::AppError,
     infrastructure::postgres::{self, PostgresContentRepository, PostgresRepository},
 };
 use sqlx::PgPool;
@@ -141,15 +147,6 @@ async fn publish(
     key: &str,
     bytes: &[u8],
 ) -> anyhow::Result<EntryId> {
-    let staged = std::env::temp_dir().join(format!("briefcase-version-{}", Uuid::now_v7()));
-    tokio::fs::write(&staged, bytes).await?;
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
-    let payload = StagedContent {
-        path: staged.as_path(),
-        offset: 0,
-        size: bytes.len() as u64,
-        sha256: digest,
-    };
     let command = SmallUploadCommand {
         parent_id,
         name: EntryName::new(FILE_NAME)?,
@@ -158,8 +155,26 @@ async fn publish(
         request_hash: [3; 32],
         self_destruct: None,
     };
+    publish_command(repository, context, &command, bytes).await
+}
+
+async fn publish_command(
+    repository: &PostgresContentRepository,
+    context: &ExecutionContext,
+    command: &SmallUploadCommand,
+    bytes: &[u8],
+) -> anyhow::Result<EntryId> {
+    let staged = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(staged.path(), bytes).await?;
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let payload = StagedContent {
+        path: staged.path(),
+        offset: 0,
+        size: bytes.len() as u64,
+        sha256: digest,
+    };
     let published = match repository
-        .prepare_small_upload(context, &command, &payload)
+        .prepare_small_upload(context, command, &payload)
         .await?
     {
         Prepared::Acquired(preparation) => {
@@ -175,13 +190,168 @@ async fn publish(
                 )?),
             };
             repository
-                .commit_small_upload(context, &command, &payload, &preparation, &stored)
+                .commit_small_upload(context, command, &payload, &preparation, &stored)
                 .await?
         }
         Prepared::Replay(entry_id) => entry_id,
     };
-    tokio::fs::remove_file(&staged).await?;
     Ok(published)
+}
+
+#[tokio::test]
+async fn completed_upload_replays_preserve_timers_versions_and_exhausted_quota()
+-> anyhow::Result<()> {
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let pool = postgres::connect(&database_settings(url), "briefcase-tests").await?;
+    postgres::migrate(&pool).await?;
+    let metadata = PostgresRepository::new(pool.clone());
+    let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
+    let organization = drive_key();
+    let context = execution_context(&organization)?;
+    let parent = private_root(&metadata, &context).await?;
+    let command = SmallUploadCommand {
+        parent_id: parent,
+        name: EntryName::new(FILE_NAME)?,
+        content_type: "text/markdown".to_owned(),
+        idempotency_key: IdempotencyKey::new("timed-upload".to_owned())?,
+        request_hash: [3; 32],
+        self_destruct: Some(LifetimeMinutes::new(30)?),
+    };
+    let created = publish_command(&files, &context, &command, b"one").await?;
+    let deadline = metadata
+        .find_active_entry(&context, created)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing uploaded entry"))?
+        .entry
+        .self_destruct_at;
+    assert!(deadline.is_some());
+    assert_eq!(
+        publish_command(&files, &context, &command, b"one").await?,
+        created
+    );
+
+    let mut connection = tenant_connection(&pool, &organization).await?;
+    sqlx::query(
+        "UPDATE briefcase.organization_usage SET daily_upload_limit_bytes = 3, \
+        storage_limit_bytes = 3 WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+    assert_eq!(
+        publish_command(&files, &context, &command, b"one").await?,
+        created
+    );
+    assert_eq!(usage(&pool, &organization).await?, (3, 3));
+    assert_eq!(
+        metadata
+            .find_active_entry(&context, created)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing replayed entry"))?
+            .entry
+            .self_destruct_at,
+        deadline
+    );
+    assert_eq!(
+        metadata
+            .list_file_versions(
+                &context,
+                &ListVersionsQuery {
+                    entry_id: created,
+                    page: PageRequest::new(None, 50)?,
+                }
+            )
+            .await?
+            .items
+            .len(),
+        1
+    );
+
+    let changed = SmallUploadCommand {
+        request_hash: [4; 32],
+        ..command.clone()
+    };
+    let Err(error) = publish_command(&files, &context, &changed, b"two").await else {
+        anyhow::bail!("a changed request must not replay");
+    };
+    assert!(matches!(
+        error.downcast_ref::<AppError>(),
+        Some(AppError::Conflict { .. })
+    ));
+    sqlx::query(
+        "UPDATE briefcase.organization_usage SET daily_upload_limit_bytes = NULL, \
+        storage_limit_bytes = NULL WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+    let new_request = SmallUploadCommand {
+        idempotency_key: IdempotencyKey::new("new-timed-upload".to_owned())?,
+        ..command
+    };
+    let Err(error) = publish_command(&files, &context, &new_request, b"one").await else {
+        anyhow::bail!("a new self-destruct request must still reject an existing file");
+    };
+    assert!(matches!(error.downcast_ref::<AppError>(),
+        Some(AppError::Conflict { code }) if code == "self_destruct_requires_new_file"));
+    drop(connection);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn multipart_initialization_replays_after_the_upload_allowance_is_spent() -> anyhow::Result<()>
+{
+    let Ok(url) = std::env::var("BRIEFCASE_TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let pool = postgres::connect(&database_settings(url), "briefcase-tests").await?;
+    postgres::migrate(&pool).await?;
+    let metadata = PostgresRepository::new(pool.clone());
+    let files = PostgresContentRepository::new(metadata.clone(), storage_settings());
+    let organization = drive_key();
+    let context = execution_context(&organization)?;
+    let parent = private_root(&metadata, &context).await?;
+    let command = InitiateMultipartCommand {
+        parent_id: parent,
+        name: EntryName::new(FILE_NAME)?,
+        size: SINGLE_UPLOAD_MAX_BYTES + 1,
+        content_type: "text/markdown".to_owned(),
+        idempotency_key: IdempotencyKey::new("multipart-retry".to_owned())?,
+        request_hash: [6; 32],
+        self_destruct: Some(LifetimeMinutes::new(30)?),
+    };
+    let plan = MultipartPlan::for_file_size(command.size)?;
+    let expires_at = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let Prepared::Acquired(preparation) = files
+        .prepare_multipart(&context, &command, plan, expires_at)
+        .await?
+    else {
+        anyhow::bail!("first initialization must be acquired");
+    };
+    let receipt = files
+        .commit_multipart_initialization(&context, &command, &preparation, "test-provider-upload")
+        .await?;
+    // Another completed request occupies the name and spends the allowance.
+    publish(&files, &context, parent, "other-upload", b"one").await?;
+    let mut connection = tenant_connection(&pool, &organization).await?;
+    sqlx::query(
+        "UPDATE briefcase.organization_usage SET daily_upload_limit_bytes = 3 \
+        WHERE org_id = briefcase.current_org_id()",
+    )
+    .execute(&mut *connection)
+    .await?;
+    let Prepared::Replay(replayed) = files
+        .prepare_multipart(&context, &command, plan, expires_at)
+        .await?
+    else {
+        anyhow::bail!("completed initialization must replay");
+    };
+    assert_eq!(replayed, receipt);
+    assert_eq!(usage(&pool, &organization).await?, (3, 3));
+    drop(connection);
+    pool.close().await;
+    Ok(())
 }
 
 #[tokio::test]

@@ -144,19 +144,11 @@ impl ContentRepository for PostgresContentRepository {
         staged: &StagedContent<'_>,
     ) -> std::result::Result<Prepared<SmallUploadPreparation, EntryId>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
-        quota::check_upload(&mut request.transaction, staged.size).await?;
         let parent = require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
             command.name.as_str(),
-        )
-        .await?;
-        reject_self_destruct_version(
-            &mut request.transaction,
-            command.parent_id,
-            command.name.as_str(),
-            command.self_destruct,
         )
         .await?;
         let proposed_entry_id = EntryId::new();
@@ -183,6 +175,17 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
+        // Completed requests replay without consuming another upload allowance or
+        // treating their own file as a new self-destructing version. Authorization
+        // still runs above, including when a prior grant has since been revoked.
+        quota::check_upload(&mut request.transaction, staged.size).await?;
+        reject_self_destruct_version(
+            &mut request.transaction,
+            command.parent_id,
+            command.name.as_str(),
+            command.self_destruct,
+        )
+        .await?;
         let (target, _, _) =
             resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let key = object_key(format!("entries/{entry_id}/versions/initial"))?;
@@ -307,19 +310,11 @@ impl ContentRepository for PostgresContentRepository {
         expires_at: OffsetDateTime,
     ) -> std::result::Result<Prepared<MultipartPreparation, MultipartReceipt>, AppError> {
         let mut request = content_begin(&self.repository, context).await?;
-        quota::check_upload(&mut request.transaction, command.size).await?;
         require_upload_parent(
             &mut request.transaction,
             context,
             command.parent_id,
             command.name.as_str(),
-        )
-        .await?;
-        reject_self_destruct_version(
-            &mut request.transaction,
-            command.parent_id,
-            command.name.as_str(),
-            command.self_destruct,
         )
         .await?;
         let proposed_upload_id = MultipartUploadId::new();
@@ -349,6 +344,17 @@ impl ContentRepository for PostgresContentRepository {
                 return Err(conflict("idempotency_state"));
             }
         };
+        // Completed requests replay without consuming another upload allowance or
+        // treating their own file as a new self-destructing version. Authorization
+        // still runs above, including when a prior grant has since been revoked.
+        quota::check_upload(&mut request.transaction, command.size).await?;
+        reject_self_destruct_version(
+            &mut request.transaction,
+            command.parent_id,
+            command.name.as_str(),
+            command.self_destruct,
+        )
+        .await?;
         let (target, _, _) =
             resolve_write_target(&mut request.transaction, self.platform_target(context)).await?;
         let key = object_key(format!("multipart/{upload_id}/object"))?;

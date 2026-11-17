@@ -1,6 +1,6 @@
 # Briefcase interface API update
 
-Backend build 5.0.1 retains API namespace v1 and contract 5.0.0. The 59 existing
+Backend build 5.0.2 retains API namespace v1 and contract 5.0.0. The 59 existing
 operations expose the complete Briefcase frontend, including Organizations
 management and dynamic team/organization sharing. No database migration or
 CLI/client update is required.
@@ -18,6 +18,11 @@ pagination, errors, limits and update behavior. OpenAPI now describes
 organization responses and all supported action bodies, and correctly models
 team/organization principals in invitation responses. The static docs also
 publish Markdown sources and `llms.txt` for interface creators.
+
+Completed small uploads and multipart initialization now replay before new-upload
+quota and self-destruct checks. Retries retain their original file, timer, version
+and usage charge; current permissions and request fingerprints are still checked.
+This fixes the conflict found by live verification of a self-destructing upload.
 
 ## Release procedure
 
