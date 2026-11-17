@@ -322,7 +322,10 @@ async fn multipart_initialization_replays_after_the_upload_allowance_is_spent() 
         self_destruct: Some(LifetimeMinutes::new(30)?),
     };
     let plan = MultipartPlan::for_file_size(command.size)?;
-    let expires_at = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    // PostgreSQL timestamps retain microseconds; keep the fixture's precision
+    // portable across clocks that report nanoseconds (Linux) or microseconds.
+    let expires_at =
+        time::OffsetDateTime::now_utc().replace_nanosecond(0)? + time::Duration::hours(1);
     let Prepared::Acquired(preparation) = files
         .prepare_multipart(&context, &command, plan, expires_at)
         .await?
