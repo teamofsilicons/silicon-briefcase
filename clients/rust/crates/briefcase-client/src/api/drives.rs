@@ -8,7 +8,7 @@ use crate::{
     error::Result,
     models::{
         Account, AccountsInfo, AllowedAccounts, BucketConfiguration, BucketConfigurationStatus,
-        DriveList, DriveUsage, SharedPage,
+        DriveList, DriveUsage, IncomingShares, SharedPage,
     },
 };
 
@@ -77,9 +77,38 @@ impl Client {
         self.receive_json(request).await
     }
 
-    /// Lists the accounts a Silicon allows to share with it besides its
-    /// custodian and the custodian's other Silicons. Only the Silicon itself
-    /// and its custodian may read it.
+    /// Reads an account's incoming share preference.
+    ///
+    /// # Errors
+    /// Returns a permission error for anyone besides the account or its custodian.
+    pub async fn incoming_shares(&self, account: &str) -> Result<IncomingShares> {
+        let url = self.api_url(&["accounts", account, "incoming-shares"])?;
+        self.receive_json(
+            self.request(Method::GET, url)
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+
+    /// Accepts shares from anyone, or restricts them to saved contacts and the custodian circle.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Client::incoming_shares`].
+    pub async fn set_incoming_shares(
+        &self,
+        account: &str,
+        allow_from_anyone: bool,
+    ) -> Result<IncomingShares> {
+        let url = self.api_url(&["accounts", account, "incoming-shares"])?;
+        self.receive_json(
+            self.request(Method::PUT, url)
+                .json(&IncomingShares { allow_from_anyone })
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+
+    /// Lists a Silicon's legacy explicit allowances. Its incoming share preference takes precedence.
     ///
     /// # Errors
     ///
@@ -93,13 +122,13 @@ impl Client {
         self.receive_json(request).await
     }
 
-    /// Allows an account (by `c:`/`si:` id or uuid) to share with a Silicon.
+    /// Records a legacy explicit allowance for a Silicon accepting shares from anyone.
     /// Only the Silicon itself and its custodian may change the list.
     ///
     /// # Errors
     ///
     /// Returns `not_silicons_custodian`, `not_a_silicon`, `allowance_self`, or
-    /// `unknown_account`.
+    /// `unknown_account`. A restricted recipient returns `incoming_shares_restricted`.
     pub async fn allow_account(&self, silicon: &str, account: &str) -> Result<()> {
         let url = self.api_url(&["silicons", silicon, "allowed-accounts", account])?;
         let request = self
@@ -108,8 +137,7 @@ impl Client {
         self.receive_empty(request).await
     }
 
-    /// Stops allowing an account to share with a Silicon. Shares it already
-    /// made stay until they are revoked one by one.
+    /// Removes a legacy allowance. The recipient's incoming share preference still applies.
     ///
     /// # Errors
     ///

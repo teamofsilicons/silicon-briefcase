@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use axum::{
+    Json,
     extract::{Path, Query, State, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -281,8 +282,75 @@ pub(crate) async fn shared(
     ))
 }
 
-/// Lists who may share with a Silicon besides its circle. The Silicon itself
-/// and its custodian may read it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IncomingShares {
+    allow_from_anyone: bool,
+}
+
+pub(crate) async fn incoming_shares(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+) -> Result<Response, AppError> {
+    let context = extract::authenticate(
+        &state,
+        &headers,
+        Action::ReadShareAllowances,
+        "incoming-shares",
+    )
+    .await?;
+    let (_, record) = managed_account(&state, &context, &account, false).await?;
+    Ok(private_json(json!(IncomingShares {
+        allow_from_anyone: record.accept_shares_from_anyone
+    })))
+}
+
+pub(crate) async fn set_incoming_shares(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+    Json(preference): Json<IncomingShares>,
+) -> Result<Response, AppError> {
+    let context = extract::authenticate(
+        &state,
+        &headers,
+        Action::ManageShareAllowances,
+        "incoming-shares",
+    )
+    .await?;
+    let (recipient, _) = managed_account(&state, &context, &account, false).await?;
+    let saved = state
+        .accounts
+        .store()
+        .set_incoming_shares(
+            recipient.as_str(),
+            caller_uuid(&context)?.as_str(),
+            preference.allow_from_anyone,
+        )
+        .await
+        .map_err(|_| AppError::Internal {
+            category: "incoming_shares",
+        })?
+        .ok_or_else(|| {
+            AppError::refused(
+                "share_settings_forbidden",
+                "Only the account or its current custodian may change this preference.",
+            )
+        })?;
+    Ok(private_json(json!(IncomingShares {
+        allow_from_anyone: saved
+    })))
+}
+
+#[derive(Serialize)]
+struct Allowance {
+    account: Value,
+    #[serde(with = "time::serde::rfc3339")]
+    allowed_at: OffsetDateTime,
+}
+
+/// Lists explicit allowances recorded through the legacy Silicon API.
 pub(crate) async fn allowances(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -295,24 +363,24 @@ pub(crate) async fn allowances(
         "share-allowances",
     )
     .await?;
-    let silicon = managed_silicon(&state, &context, &silicon).await?;
+    let silicon = managed_account(&state, &context, &silicon, true).await?;
     let items = state
         .accounts
         .allowed_sharers(&silicon.0)
         .await?
         .into_iter()
-        .map(|(account, allowed_at)| {
-            json!({ "account": account_json(&account), "allowed_at": allowed_at })
+        .map(|(account, allowed_at)| Allowance {
+            account: account_json(&account),
+            allowed_at,
         })
-        .collect::<Vec<Value>>();
+        .collect::<Vec<_>>();
     Ok(private_json(json!({
         "silicon": account_json(&silicon.1),
         "items": items,
     })))
 }
 
-/// Lets an account share with a Silicon. Only the Silicon or its custodian
-/// may allow; allowing again changes nothing.
+/// Records an idempotent legacy allowance for a Silicon that accepts shares from anyone.
 pub(crate) async fn allow(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -325,7 +393,13 @@ pub(crate) async fn allow(
         "share-allowances",
     )
     .await?;
-    let silicon = managed_silicon(&state, &context, &silicon).await?;
+    let silicon = managed_account(&state, &context, &silicon, true).await?;
+    if !silicon.1.accept_shares_from_anyone {
+        return Err(AppError::refused(
+            "incoming_shares_restricted",
+            "This Silicon restricts incoming shares. Save the sender in its Silicon Contacts address book.",
+        ));
+    }
     let allowed = state.accounts.resolve(&account).await?;
     let allowed_uuid = AccountUuid::new(allowed.uuid).map_err(|_| AppError::Internal {
         category: "account_uuid",
@@ -348,8 +422,7 @@ pub(crate) async fn allow(
     })
 }
 
-/// Stops letting an account share with a Silicon. Shares it already made
-/// stay; the Silicon (or its custodian) can remove those one by one.
+/// Removes a legacy allowance record for the Silicon.
 pub(crate) async fn disallow(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -362,7 +435,7 @@ pub(crate) async fn disallow(
         "share-allowances",
     )
     .await?;
-    let silicon = managed_silicon(&state, &context, &silicon).await?;
+    let silicon = managed_account(&state, &context, &silicon, true).await?;
     let allowed = state.accounts.resolve(&account).await?;
     let allowed_uuid = AccountUuid::new(allowed.uuid).map_err(|_| AppError::Internal {
         category: "account_uuid",
@@ -378,35 +451,36 @@ pub(crate) async fn disallow(
     }
 }
 
-/// Resolves the Silicon an allow-list request names and checks the caller is
-/// that Silicon or its custodian.
-async fn managed_silicon(
+/// Resolves a settings target and verifies the caller is its owner or custodian.
+/// The legacy allowance endpoints require a Silicon target.
+async fn managed_account(
     state: &AppState,
     context: &ExecutionContext,
     named: &str,
+    silicon_only: bool,
 ) -> Result<(AccountUuid, AccountRecord), AppError> {
     let record = state.accounts.resolve(named).await?;
-    if record.kind != ActorKind::Silicon {
+    if silicon_only && record.kind != ActorKind::Silicon {
         return Err(AppError::unprocessable(
             "not_a_silicon",
-            format!(
-                "{named} is a Carbon. Anyone signed in to Briefcase can share with a Carbon; only Silicons keep a list of who may share with them."
-            ),
+            format!("{named} is a Carbon. Use its incoming share settings."),
         ));
     }
-    let silicon = AccountUuid::new(record.uuid.clone()).map_err(|_| AppError::Internal {
+    let owner = AccountUuid::new(record.uuid.clone()).map_err(|_| AppError::Internal {
         category: "account_uuid",
     })?;
     let caller = caller_uuid(context)?;
-    if !state.accounts.manages_silicon(&caller, &silicon).await? {
+    if !state.accounts.manages_account(&caller, &owner).await? {
         return Err(AppError::refused(
-            "not_silicons_custodian",
-            format!(
-                "Only {named} itself or its custodian can see or change who may share with it."
-            ),
+            if record.kind == ActorKind::Silicon {
+                "not_silicons_custodian"
+            } else {
+                "share_settings_forbidden"
+            },
+            format!("Only {named} or its custodian can manage its incoming share settings."),
         ));
     }
-    Ok((silicon, record))
+    Ok((owner, record))
 }
 
 fn caller_uuid(context: &ExecutionContext) -> Result<AccountUuid, AppError> {

@@ -14,7 +14,7 @@ required. Briefcase remains responsible for storage and authorization.
 | Sign-in provider | [Silicon Accounts](https://developers.teamofsilicons.com/docs/accounts/) |
 | Organization and team rules | [Organizations](organizations.md) |
 
-The API namespace is **v1**, the contract is **5.1.0**, and operations have their
+The API namespace is **v1**, the contract is **5.2.0**, and operations have their
 own revisions. Send `Briefcase-Supported-API-Versions: v1`; an unsupported major
 returns 406. Read `/api/version` before integration and compare the operations
 you use. Package/build versions can change independently of the contract.
@@ -217,9 +217,7 @@ group grants never delegate deletion or sharing management. For a file omit
 
 Use `{"type":"organization","id":"tos"}` for an organization, or
 `{"type":"carbon","id":"c:ada.tos"}` / `{"type":"silicon","id":"si:scout"}`
-for an account. Carbon recipients may receive shares from any signed-in
-account. A Silicon accepts shares from its custodian/custodial circle or an
-explicitly allowed account; see [sharing](sharing.md).
+for an account. Carbons and Silicons receive shares from any signed-in account by default. Settings can restrict new shares to the recipient’s saved contacts and custodian circle. See [sharing](sharing.md).
 
 Current and future team members receive access. Removal from the team or
 organization, team deletion, and current app exclusions remove group-derived
@@ -294,7 +292,8 @@ the discovery calls; Briefcase automatically uses its verified membership.
 | Activity and sharing logs | `GET /entries/{id}/activity`, `GET /entries/{id}/logs` | Visible entry history; sharing administration rules apply to logs |
 | Notifications | `GET /notifications`, `POST /notifications/read` | Caller's newest 20 notifications; POST with no body marks the whole inbox read |
 | Storage and quotas | `GET /usage?drive=OWNER`, `PUT /storage/configuration` | Configure owned/custodial drives with the documented S3 bucket/role settings |
-| Silicon share allowances | `GET /silicons/{silicon}/allowed-accounts`, `PUT` / `DELETE /silicons/{silicon}/allowed-accounts/{account}` | Silicon or its custodian |
+| Incoming shares | `GET` / `PUT /accounts/{account}/incoming-shares` | Account or its Silicon custodian |
+| Legacy Silicon allowances | `GET /silicons/{silicon}/allowed-accounts`, `PUT` / `DELETE /silicons/{silicon}/allowed-accounts/{account}` | Silicon or its custodian |
 | Low-level permissions | `GET` / `POST /entries/{id}/permissions`, `DELETE /entries/{id}/permissions/{grant}` | Account grants; use invitations for team/org recipients |
 | Integration reports | `POST /reports` with `{"message":"Steps and request ID"}` | Signed-in account; Idempotency-Key required |
 

@@ -4,12 +4,6 @@
 .meter { display: block; width: clamp(80px, 18vw, 160px); }
 @media (max-width: 519px) { .meter { display: none; } }
 
-/* The allowance form, as the last row of its list. */
-.formRow:not(:first-child) { border-top: 1px solid var(--border-subtle); }
-.formRow { padding: var(--space-related) var(--space-group); list-style: none; }
-.inlineForm { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-related); }
-.inlineForm > :first-child { min-width: 0; flex: 1 1 220px; }
-
 /* A section holding a form: Accounts' section head over one box. */
 .section { display: grid; gap: var(--space-related); margin-top: var(--space-section); }
 .head { display: grid; gap: var(--space-tight); }

@@ -151,7 +151,7 @@ pub enum Command {
     Drives,
     /// List what other accounts shared with you, grouped by whose drive it is in.
     Shared(SharedArgs),
-    /// Choose who besides you and your custodian's Silicons may share with a Silicon.
+    /// Choose who may send incoming shares, or manage a Silicon's legacy allowances.
     #[command(subcommand)]
     Allow(AllowCommand),
     /// List a folder: the top of your drive when no target is given.
@@ -261,9 +261,8 @@ pub enum Command {
         `briefcase inbox`, and an email when it shared its email with Briefcase. Rights are read, write \
         (add content) and update (change content); delete is never shared. Only the entry's creator, \
         its drive's owner and their custodians may share it.\n\n\
-        A Silicon accepts shares only from its custodian, the custodian's other Silicons, and accounts \
-        it (or its custodian) allowed with `briefcase allow add`; anything else is refused with \
-        `silicon_not_open`. Anyone signed in may share with a Carbon.\n\n\
+        All accounts accept shares from anyone by default. A recipient can restrict incoming shares \
+        to its saved contacts and custodian circle in Settings or with `briefcase allow policy`.\n\n\
         With `--expires-after <DURATION>` the share is an expiring share: read-only, and gone 1 minute \
         to 30 days after it is created. When it ends only that access goes. Before then, \
         `briefcase expiry` extends, shortens or makes it permanent, and `briefcase unshare` ends it early. \
@@ -440,21 +439,34 @@ pub struct SharedArgs {
     pub all: bool,
 }
 
-/// A Silicon's allow list.
+/// The senders an account accepts.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ShareSenders {
+    /// All signed-in accounts.
+    Anyone,
+    /// Saved Silicon Contacts, the custodian and its Silicons.
+    Contacts,
+}
+
+/// Incoming shares and the legacy explicit allowance list.
 #[derive(Debug, Subcommand)]
 pub enum AllowCommand {
-    /// List the accounts allowed to share with a Silicon.
+    /// Show or change who may send direct shares to this account.
+    Policy {
+        /// Select anyone or contacts and the custodian circle. Omit to read the current setting.
+        #[arg(long, value_enum)]
+        from: Option<ShareSenders>,
+        /// Account ID or UUID. Defaults to the signed-in account.
+        #[arg(long = "for", value_name = "ACCOUNT")]
+        account: Option<DriveArg>,
+    },
+    /// List the legacy explicit allowances of a Silicon.
     List {
         /// The Silicon (a custodian names one of its Silicons); yourself when you are a Silicon.
         #[arg(long = "for", value_name = "SILICON")]
         silicon: Option<DriveArg>,
     },
-    /// Allow an account to share with a Silicon.
-    #[command(long_about = "Allow an account to share with a Silicon.\n\n\
-        A Silicon acts on what it receives, so only its custodian, the custodian's other Silicons and \
-        the accounts on this list can share with it. The Silicon itself or its custodian manages the list.\n\n\
-        Examples:\n  briefcase allow add c:bob                    (a Silicon allowing c:bob)\n  \
-        briefcase allow add c:bob --for si:scout     (a custodian, for its Silicon)")]
+    /// Record a legacy allowance. Restricted accounts must save the sender in Silicon Contacts.
     Add {
         /// The account to allow, by id (c:bob, si:helper).
         account: Principal,
@@ -462,7 +474,7 @@ pub enum AllowCommand {
         #[arg(long = "for", value_name = "SILICON")]
         silicon: Option<DriveArg>,
     },
-    /// Stop allowing an account; shares it already made stay until revoked.
+    /// Remove a legacy allowance. Incoming share settings still apply.
     Remove {
         /// The account, by id.
         account: Principal,

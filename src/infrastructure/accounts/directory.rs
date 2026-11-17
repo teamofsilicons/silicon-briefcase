@@ -426,48 +426,47 @@ impl AccountDirectory {
 
     /// Returns whether `sharer` may share with `recipient`.
     ///
-    /// Carbons can be reached by anyone signed in to Briefcase. Silicons are
-    /// not open to the world: a share reaches a Silicon only from its circle
-    /// (its custodian and the custodian's other Silicons) or from an account
-    /// the Silicon or its custodian allowed first.
+    /// A restricted recipient accepts its custodian circle and its current saved contacts.
     ///
     /// # Errors
     ///
     /// Propagates [`AccountDirectory::custody`] and database errors.
-    pub async fn may_share_with(
+    pub(crate) async fn may_share_with(
         &self,
         sharer: &AccountUuid,
         recipient: &AccountRecord,
+        contacts: Option<&crate::infrastructure::contacts::ContactsGateway>,
     ) -> Result<bool, AppError> {
-        if recipient.kind == ActorKind::Carbon || recipient.uuid == sharer.as_str() {
+        if recipient.accept_shares_from_anyone {
             return Ok(true);
         }
-        let silicon = AccountUuid::new(recipient.uuid.clone())
+        let owner = AccountUuid::new(recipient.uuid.clone())
             .map_err(|error| AppError::unprocessable("invalid_account_id", error.to_string()))?;
-        if self.same_circle(sharer, &silicon).await? {
+        if self.same_circle(sharer, &owner).await? {
             return Ok(true);
         }
-        self.store
-            .share_allowed(silicon.as_str(), sharer.as_str())
+        contacts
+            .ok_or(AppError::DependencyUnavailable {
+                dependency: "silicon_contacts",
+            })?
+            .is_saved_sender(self.gateway(), owner.as_str(), sharer.as_str())
             .await
-            .map_err(database_error)
     }
 
-    /// Returns whether `caller` manages `silicon`'s allow-list: the Silicon
-    /// itself, or its custodian.
+    /// Returns whether `caller` owns the account or is its Silicon custodian.
     ///
     /// # Errors
     ///
     /// Propagates [`AccountDirectory::custody`] errors.
-    pub async fn manages_silicon(
+    pub async fn manages_account(
         &self,
         caller: &AccountUuid,
-        silicon: &AccountUuid,
+        owner: &AccountUuid,
     ) -> Result<bool, AppError> {
-        if caller == silicon {
+        if caller == owner {
             return Ok(true);
         }
-        Ok(is_custodian_of(caller, &self.custody(silicon).await?))
+        Ok(is_custodian_of(caller, &self.custody(owner).await?))
     }
 
     /// The accounts a Silicon lets share with it, with when they were allowed.

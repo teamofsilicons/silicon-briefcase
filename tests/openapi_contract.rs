@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 
 use serde_yaml::{Mapping, Value};
 
-const EXPECTED_OPERATIONS: [&str; 65] = [
+const EXPECTED_OPERATIONS: [&str; 67] = [
+    "readIncomingShares",
+    "setIncomingShares",
     "listRecipients",
     "resolveRecipient",
     "listContacts",
@@ -234,7 +236,7 @@ fn the_served_operation_registry_matches_the_published_contract() -> anyhow::Res
 #[test]
 fn the_contract_is_version_five_with_accounts_security() -> anyhow::Result<()> {
     let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
-    assert_eq!(document["info"]["version"].as_str(), Some("5.1.0"));
+    assert_eq!(document["info"]["version"].as_str(), Some("5.2.0"));
     assert_eq!(
         document["info"]["version"].as_str(),
         Some(silicon_briefcase::api::versioning::CONTRACT_VERSION)

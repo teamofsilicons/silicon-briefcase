@@ -469,11 +469,11 @@ impl Output {
             return;
         }
         println!(
-            "Besides its custodian and the custodian's other Silicons, {} accepts shares from:",
+            "Legacy share allowances for {}:",
             allowed.silicon.display_id()
         );
         if allowed.items.is_empty() {
-            println!("(nobody else)");
+            println!("(none recorded)");
             return;
         }
         let rows: Vec<Vec<String>> = allowed

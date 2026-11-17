@@ -1,5 +1,7 @@
 # API version policy
 
+Contract **5.2.0** adds incoming share settings for every account. Migration 0056 defaults all recipients to open. The setting applies to direct grants and invitations and affects the legacy Silicon allowance operations. The matching 5.2 CLI and Rust client negotiate the new operation revisions. Deploy the Silicon Contacts Briefcase share-check route before enabling the new service. See [Sharing files](sharing.md).
+
 Contract **5.0.0** adds personal/work organization controls and live organization/team sharing. It requires the matching 5.0 Rust client and CLI: group recipient variants and changed invitation operation revisions are incompatible with older exhaustive clients. `listInvitations` is revision 2.0.0; `createInvitation` is 2.1.0. The route namespace remains `/api/v1`. The retired telemetry operation is no longer advertised; its old URL still returns 410 without reading the body. Migration 0053 replaces legacy IAM tag authority with live Organizations membership.
 
 Briefcase 4.0.0 authenticates with Silicon Accounts: every route takes a Silicon Accounts access token issued to `briefcase`, the delegated `/obo/` operations take a User verification proof (`Authorization: Proof sap_…`) whose scope is the operation's endpoint id, and `X-Org-ID` is no longer read (except as the transfer route's tenant selector). `/iam`, `/auth/*` and the testing-environment operations are removed; `/accounts` and `/me` are added. The route namespace remains `/api/v1`.
@@ -18,6 +20,7 @@ Every versioned request also negotiates that header. Omission selects the latest
 
 | API contract | Backend | Rust client / CLI | Identity SDK |
 | --- | --- | --- | --- |
+| 5.2.0 / v1 | 5.2.0 | 5.2.0 | silicon-accounts-client 0.4.0 |
 | 5.0.0 / v1 | 5.0.0 | 5.0.0 | silicon-accounts-client 0.4.0 |
 | 4.1.0 / v1 | 4.1.0 | 4.1.0 | silicon-accounts-client 0.4.0 |
 | 4.0.0 / v1 | 4.0.0 | 4.0.0 | silicon-accounts-client 0.4.0 |

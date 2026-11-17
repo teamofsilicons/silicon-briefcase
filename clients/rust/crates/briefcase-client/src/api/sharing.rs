@@ -211,8 +211,8 @@ impl Client {
     /// rights. The share is immediate (no acceptance step); the recipient gets
     /// a notification, and an email when it shared its email with Briefcase.
     /// # Errors
-    /// Returns validation, permission (`silicon_not_open` for a Silicon that
-    /// has not allowed the caller), idempotency, or transport errors.
+    /// Returns validation, permission (`incoming_shares_restricted` for a recipient that
+    /// accepts only saved contacts and its custodian circle), idempotency, or transport errors.
     pub async fn invite(
         &self,
         id: Uuid,

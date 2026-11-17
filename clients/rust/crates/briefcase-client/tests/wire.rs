@@ -130,7 +130,7 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "5.1.0",
+        "contract_version": "5.2.0",
         "build": "5.0.0",
         "operations": operations,
     })
@@ -193,9 +193,9 @@ async fn connected(server: &MockServer) -> Client {
 }
 
 #[test]
-fn the_client_carries_the_five_point_one_operation_catalogue() {
-    assert_eq!(briefcase_client::OPERATIONS.len(), 65);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.1.0");
+fn the_client_carries_the_five_point_two_operation_catalogue() {
+    assert_eq!(briefcase_client::OPERATIONS.len(), 67);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.2.0");
     for retired in [
         "submitTelemetry",
         "readIamInfo",
@@ -224,12 +224,14 @@ fn the_client_carries_the_five_point_one_operation_catalogue() {
         "saveContact",
         "connectContacts",
         "readContactPhoto",
+        "readIncomingShares",
+        "setIncomingShares",
     ] {
         assert!(
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 5.1.0"
+            "{added} is part of contract 5.2.0"
         );
     }
 }
@@ -763,6 +765,42 @@ async fn an_archive_is_listed_without_extracting_it() {
     assert_eq!(listing.entries.len(), 2);
     assert!(listing.entries[1].encrypted);
     assert_eq!(listing.truncated_because.as_deref(), Some("entry_limit"));
+}
+
+#[tokio::test]
+async fn incoming_shares_use_the_selected_account_and_explicit_boolean() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    let endpoint = "/api/v1/accounts/si:scout/incoming-shares";
+    Mock::given(method("GET"))
+        .and(path(endpoint))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"allow_from_anyone":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(endpoint))
+        .and(header("authorization", "Bearer test-token"))
+        .and(body_json(json!({"allow_from_anyone":false})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"allow_from_anyone":false})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        client
+            .incoming_shares("si:scout")
+            .await
+            .unwrap()
+            .allow_from_anyone
+    );
+    assert!(
+        !client
+            .set_incoming_shares("si:scout", false)
+            .await
+            .unwrap()
+            .allow_from_anyone
+    );
 }
 
 #[tokio::test]

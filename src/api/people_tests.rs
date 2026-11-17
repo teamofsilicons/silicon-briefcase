@@ -8,6 +8,252 @@ use wiremock::{
 };
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One recipient through restriction, add, remove, outage and reopening.
+async fn restricted_invitations_follow_the_recipients_live_contacts() -> anyhow::Result<()> {
+    let Some(mut w) =
+        World::with_delegation("briefcase.invitations.create=interface", "interface").await?
+    else {
+        return Ok(());
+    };
+    let contacts = MockServer::start().await;
+    w.f.with_contacts(&contacts.uri())?;
+    let folder = w.folder(&w.bob, "incoming", None, None).await?;
+    let settings = format!("/api/v1/accounts/{}/incoming-shares", w.scout.id);
+    let allowance = format!(
+        "/api/v1/silicons/{}/allowed-accounts/{}",
+        w.scout.id, w.bob.id
+    );
+    assert_eq!(
+        w.call(&w.scout, Method::PUT, &allowance, None).await?.0,
+        StatusCode::CREATED
+    );
+    let (status, saved) = w
+        .call(
+            &w.ada,
+            Method::PUT,
+            &settings,
+            Some(json!({"allow_from_anyone":false})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        w.call(&w.scout, Method::GET, &settings, None).await?.1,
+        json!({"allow_from_anyone":false})
+    );
+    assert_eq!(
+        w.call(&w.scout, Method::PUT, &allowance, None).await?.0,
+        StatusCode::FORBIDDEN
+    );
+
+    Mock::given(method("POST")).and(path("/v1/proofs/app-verification"))
+        .and(body_partial_json(json!({"receiving_app":"silicon-contacts", "scopes":["briefcase.share.check",format!("recipient:{}",w.scout.uuid),format!("sender:{}",w.bob.uuid)]})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"proof_token":"sap_bound_pair"})))
+        .mount(&w.f.server).await;
+    let pair_check = || {
+        Mock::given(method("POST"))
+            .and(path("/v1/integrations/briefcase/share-check"))
+            .and(header("authorization", "Proof sap_bound_pair"))
+            .and(body_partial_json(
+                json!({"recipient":w.scout.uuid,"sender":w.bob.uuid}),
+            ))
+    };
+    let invite =
+        json!({"principal":{"type":"silicon","id":w.scout.id},"access":["read"],"inherit":true});
+    let restricted = "incoming_shares_restricted";
+    {
+        let _unsaved = pair_check()
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":false})))
+            .mount_as_scoped(&contacts)
+            .await;
+        for (url, body) in [
+            (
+                format!("/api/v1/entries/{folder}/invitations"),
+                invite.clone(),
+            ),
+            (
+                format!("/api/v1/entries/{folder}/permissions"),
+                invite.clone(),
+            ),
+            (
+                "/api/v1/entries".into(),
+                json!({"name":"must-not-exist","invitees":[invite]}),
+            ),
+        ] {
+            let (status, error) = w.call(&w.bob, Method::POST, &url, Some(body)).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{url}: {error}");
+            assert_eq!(error["error"]["code"], restricted);
+        }
+        let scope = "briefcase.invitations.create";
+        Mock::given(method("POST"))
+            .and(path("/v1/proofs/verify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                crate::infrastructure::accounts::test_support::valid_proof(
+                    "interface",
+                    "briefcase",
+                    (&w.bob.uuid, &w.bob.id, "carbon"),
+                    &[scope],
+                ),
+            ))
+            .mount(&w.f.server)
+            .await;
+        let (status, error) = w.f.send(Method::POST, "/api/v1/obo/invitations", Some("Proof sap_delegated_check"),
+            Some(json!({"operation_id":uuid::Uuid::now_v7(),"entry_id":folder,"invitation":invite})), &[]).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(error["error"]["code"], restricted);
+    }
+    {
+        let _saved = pair_check()
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":true})))
+            .mount_as_scoped(&contacts)
+            .await;
+        let (status, grant) = w
+            .share(&w.bob, &folder, "silicon", &w.scout.id, &["read"])
+            .await?;
+        assert_eq!(status, StatusCode::CREATED, "{grant}");
+    }
+    let next = w
+        .folder(&w.bob, "after-contact-removal", None, None)
+        .await?;
+    {
+        let _removed = pair_check()
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":false})))
+            .mount_as_scoped(&contacts)
+            .await;
+        assert_eq!(
+            w.share(&w.bob, &next, "silicon", &w.scout.id, &["read"])
+                .await?
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            w.call(
+                &w.scout,
+                Method::GET,
+                &format!("/api/v1/entries/{folder}"),
+                None
+            )
+            .await?
+            .0,
+            StatusCode::OK
+        );
+    }
+    let _offline = pair_check()
+        .respond_with(ResponseTemplate::new(503))
+        .mount_as_scoped(&contacts)
+        .await;
+    assert_eq!(
+        w.share(&w.bob, &next, "silicon", &w.scout.id, &["read"])
+            .await?
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        w.call(
+            &w.scout,
+            Method::PUT,
+            &settings,
+            Some(json!({"allow_from_anyone":true}))
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        w.share(&w.bob, &next, "silicon", &w.scout.id, &["read"])
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_recipient_controls_its_own_setting_and_accepts_its_custodian_circle()
+-> anyhow::Result<()> {
+    let Some(w) = World::new().await? else {
+        return Ok(());
+    };
+    let restrict = Some(json!({"allow_from_anyone": false}));
+    for owner in [&w.ada, &w.scout] {
+        let url = format!("/api/v1/accounts/{}/incoming-shares", owner.uuid);
+        let (status, value) = w.call(owner, Method::GET, &url, None).await?;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["allow_from_anyone"], true);
+        assert_eq!(
+            w.call(&w.bob, Method::GET, &url, None).await?.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            w.call(&w.bob, Method::PUT, &url, restrict.clone()).await?.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            w.call(owner, Method::PUT, &url, restrict.clone()).await?.0,
+            StatusCode::OK
+        );
+    }
+    let scout_folder = w.folder(&w.scout, "for-family", None, None).await?;
+    let ada_folder = w.folder(&w.ada, "for-family", None, None).await?;
+    assert_eq!(
+        w.share(&w.scout, &scout_folder, "carbon", &w.ada.id, &["read"])
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        w.share(&w.ada, &ada_folder, "silicon", &w.scout.id, &["read"])
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    let bob_folder = w.folder(&w.bob, "for-carbon", None, None).await?;
+    // No Contacts gateway is configured. Restriction must not fall back to the Carbon's open default.
+    assert_eq!(
+        w.share(&w.bob, &bob_folder, "carbon", &w.ada.id, &["read"])
+            .await?
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let sibling_id = w.f.id("si:sibling");
+    let sibling_uuid = w.f.uuid("Sib");
+    let sibling = super::drives_tests::Account {
+        id: sibling_id.clone(),
+        uuid: sibling_uuid.clone(),
+        token: w.f.issuer.token(&sibling_uuid, "silicon", &sibling_id),
+    };
+    w.f.stub_account(
+        &sibling_uuid,
+        &sibling_id,
+        crate::infrastructure::accounts::test_support::silicon_summary(
+            &sibling_uuid,
+            &sibling_id,
+            (&w.ada.uuid, &w.ada.id),
+        ),
+    )
+    .await;
+    let sibling_folder = w.folder(&sibling, "sibling", None, None).await?;
+    assert_eq!(
+        w.share(&sibling, &sibling_folder, "silicon", &w.scout.id, &["read"])
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    let url = format!("/api/v1/accounts/{}/incoming-shares", w.scout.uuid);
+    assert_eq!(
+        w.call(
+            &sibling,
+            Method::PUT,
+            &url,
+            Some(json!({"allow_from_anyone":true}))
+        )
+        .await?
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn invitation_history_is_directional_private_and_retry_safe() -> anyhow::Result<()> {
     let Some(w) = World::new().await? else {
         return Ok(());

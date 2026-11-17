@@ -260,7 +260,14 @@ pub struct SharedPage {
     pub next_cursor: Option<String>,
 }
 
-/// One account a Silicon (or its custodian) allowed to share with it.
+/// Who can send new direct shares to an account.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct IncomingShares {
+    /// True for anyone, false for the recipient's saved contacts and custodian circle.
+    pub allow_from_anyone: bool,
+}
+
+/// One legacy explicit allowance recorded by a Silicon or its custodian.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AllowedAccount {
     /// The allowed account.

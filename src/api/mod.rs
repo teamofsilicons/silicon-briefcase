@@ -313,6 +313,10 @@ fn drive_routes() -> Router<AppState> {
         )
         .route("/api/v1/contacts/photos/{id}", get(handlers::people::photo))
         .route("/api/v1/drives", get(drive_handlers::list))
+        .route(
+            "/api/v1/accounts/{account}/incoming-shares",
+            get(drive_handlers::incoming_shares).put(drive_handlers::set_incoming_shares),
+        )
         .route("/api/v1/shared", get(drive_handlers::shared))
         .route(
             "/api/v1/silicons/{silicon}/allowed-accounts",

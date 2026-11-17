@@ -1,10 +1,10 @@
 # Briefcase Rust client
 
-`briefcase-client` 5.1.0 is the official client for the Briefcase 5.1 contract, including Contacts and invitation suggestions. The caller owns persistence, session refresh and UI.
+`briefcase-client` 5.2.0 is the official client for the Briefcase 5.2 contract, including incoming share settings. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = { version = "5.1.0", features = ["accounts"] }
+briefcase-client = { version = "5.2.0", features = ["accounts"] }
 ```
 
 ```rust,no_run
@@ -41,6 +41,8 @@ The client supports entry listing and search, folder creation, streamed uploads 
 ## People and Contacts
 
 `recipients()` returns the caller's invitation history and connected contacts. Rank candidates by `2 * invited + received`, then `last_invited_at`, then contact trust. `resolve_recipient()` resolves an exact account ID or UUID with permitted profile details and saved overrides. Use immutable UUIDs when sharing.
+
+Use `incoming_shares(account)` to read the sender preference and `set_incoming_shares(account, false)` to restrict direct shares to saved contacts and the custodian circle. Pass `true` to accept shares from anyone.
 
 After explicit user consent, `connect_contacts(true)` enables address-book access. `contacts()`, `save_contact(id, name, trust)` and `contact_photo(id)` use the caller's existing Briefcase credential; no Contacts credential belongs in the client. `save_contact` preserves the contact's other saved details. `connect_contacts(false)` disconnects without deleting contacts. `shared_with_filters(&SharedFilters { .. })` combines actual-sharer, saved/unsaved contacts, minimum trust and shared-file search before pagination.
 

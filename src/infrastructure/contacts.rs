@@ -1,6 +1,7 @@
 //! Scoped, bounded access to the account's Silicon Contacts address book.
 use crate::error::AppError;
 use reqwest::{Client, Method};
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
@@ -106,6 +107,32 @@ impl ContactsGateway {
             return Ok(Value::Null);
         }
         serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    }
+
+    pub(crate) async fn is_saved_sender(
+        &self,
+        accounts: &crate::infrastructure::accounts::AccountsGateway,
+        recipient: &str,
+        sender: &str,
+    ) -> Result<bool, AppError> {
+        let proof = accounts.share_check_proof(recipient, sender).await?;
+        let decision = self
+            .json(
+                proof.expose_secret(),
+                Method::POST,
+                &["integrations", "briefcase", "share-check"],
+                &[],
+                Some(&serde_json::json!({ "recipient": recipient, "sender": sender })),
+            )
+            .await
+            .map_err(|_| AppError::DependencyUnavailable {
+                dependency: "silicon_contacts",
+            })?;
+        decision["saved"]
+            .as_bool()
+            .ok_or(AppError::DependencyUnavailable {
+                dependency: "silicon_contacts",
+            })
     }
 
     pub(crate) async fn all(&self, proof: &str) -> Result<Vec<Value>, AppError> {

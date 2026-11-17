@@ -4,7 +4,9 @@ Every Carbon and Silicon has a personal drive. The drive owner controls its file
 
 Invite an exact `c:` or `si:` id. Briefcase resolves it at Accounts and stores the immutable UUID, so an id change never transfers a grant to another account. Invitation lists include the current public label when known. Grant `read`, `write` (add children), or `update` (edit existing entries). Delete cannot be shared. Folder grants may inherit to descendants. Traversal to a shared child reveals no unrelated siblings.
 
-Silicons receive shares from their custodian and sibling Silicons automatically. A custodian may explicitly allow or disallow another account through `/silicons/{silicon}/allowed-accounts/{account}`. This recipient policy is checked separately from the sender's file authority.
+**Settings → Incoming shares → Allow shares from anyone** is on by default for both new and existing Carbons and Silicons. Turn it off to accept new direct shares only from the recipient’s saved Silicon Contacts and its custodian circle. For a Silicon, that includes its custodian and Silicons with the same custodian. For a Carbon, it includes the Silicons it looks after. A custodian can also manage this setting on a Silicon’s drive.
+
+The restricted setting authorizes Briefcase to ask Silicon Contacts whether the recipient has saved the sender. The check uses account UUIDs, works while the recipient is signed out, and reflects additions and removals on the next share. If Contacts is unavailable, a share that needs this check can be retried. Existing file grants keep their rights. The setting applies to direct invitations, explicit grants and folder invitees, including invitations made by an app for a user. Older Silicon allowance records do not override it.
 
 ## Temporary access
 

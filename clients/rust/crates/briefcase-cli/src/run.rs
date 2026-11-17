@@ -489,6 +489,34 @@ async fn allow_target(context: &mut Context, silicon: Option<&DriveArg>) -> Resu
 async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> Result<()> {
     let mut context = session::connect(global).await?;
     match command {
+        AllowCommand::Policy { from, account } => {
+            let target = match account {
+                Some(account) => account.0.clone(),
+                None => context.own_uuid().await?,
+            };
+            let preference = match from {
+                Some(senders) => {
+                    context
+                        .client
+                        .set_incoming_shares(
+                            &target,
+                            matches!(senders, crate::cli::ShareSenders::Anyone),
+                        )
+                        .await?
+                }
+                None => context.client.incoming_shares(&target).await?,
+            };
+            if output.is_json() {
+                output.json(&preference);
+            } else {
+                let senders = if preference.allow_from_anyone {
+                    "anyone"
+                } else {
+                    "saved contacts and the custodian circle"
+                };
+                output.note(&format!("{target} accepts shares from {senders}."));
+            }
+        }
         AllowCommand::List { silicon } => {
             let silicon = allow_target(&mut context, silicon.as_ref()).await?;
             output.allowed(&context.client.allowed_accounts(&silicon).await?);
@@ -504,7 +532,7 @@ async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> R
                 output.json(&allowed);
             } else {
                 output.note(&format!(
-                    "{} may now share with {}.",
+                    "Recorded the legacy allowance for {} on {}.",
                     account.0.id,
                     allowed.silicon.display_id()
                 ));
@@ -521,7 +549,7 @@ async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> R
                 output.json(&allowed);
             } else {
                 output.note(&format!(
-                    "{} may no longer share with {}; shares it already made stay until they are revoked.",
+                    "Removed the legacy allowance for {} on {}. Incoming share settings still apply.",
                     account.0.id,
                     allowed.silicon.display_id()
                 ));

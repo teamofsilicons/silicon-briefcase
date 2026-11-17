@@ -292,6 +292,31 @@ impl AccountsGateway {
         Ok(SecretString::from(proof.proof_token.expose().to_owned()))
     }
 
+    /// A short-lived proof for one incoming-share check. It carries no address-book access.
+    pub(crate) async fn share_check_proof(
+        &self,
+        recipient: &str,
+        sender: &str,
+    ) -> Result<SecretString, AppError> {
+        let proof = self
+            .app()
+            .issue_app_verification(
+                &silicon_accounts_client::IssueAppVerification {
+                    receiving_app: "silicon-contacts".into(),
+                    scopes: vec![
+                        "briefcase.share.check".into(),
+                        format!("recipient:{recipient}"),
+                        format!("sender:{sender}"),
+                    ],
+                    access_ttl_seconds: Some(60),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| AppError::from(service_error(&error)))?;
+        Ok(SecretString::from(proof.proof_token.expose().to_owned()))
+    }
+
     /// Uses only profile fields an active app member has shared with Briefcase.
     pub(crate) async fn recipient_profile(
         &self,

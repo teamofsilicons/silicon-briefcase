@@ -40,7 +40,7 @@ impl Client {
     /// Returns an error when the caller cannot share the entry (only its
     /// creator, its drive's owner and their custodians can), the account is
     /// unknown or inactive (`unknown_account`, `account_inactive`), or the
-    /// recipient is a Silicon that has not allowed the caller (`silicon_not_open`).
+    /// recipient restricts incoming shares (`incoming_shares_restricted`).
     pub async fn grant(&self, entry_id: Uuid, grant: &NewGrant) -> Result<PermissionGrant> {
         let url = self.api_url(&["entries", &entry_id.to_string(), "permissions"])?;
         let body = json_body(grant)?;

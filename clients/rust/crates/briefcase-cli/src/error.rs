@@ -262,6 +262,9 @@ fn client_hint(error: &briefcase_client::Error) -> Option<String> {
         "cross_drive_move" => {
             "Entries move only within their drive; copy it with `briefcase get` and `briefcase put` instead."
         }
+        "incoming_shares_restricted" => {
+            "Ask the recipient to save the sender in Silicon Contacts or enable shares from anyone in Settings."
+        }
         "silicon_not_open" => {
             "A Silicon accepts shares only from its custodian, the custodian's other Silicons, and accounts it \
              allowed: the Silicon or its custodian can run `briefcase allow add <your id> --for <silicon>`."
