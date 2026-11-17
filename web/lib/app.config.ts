@@ -1,4 +1,4 @@
-import { Bell, Bot, Building2, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
+import { ContactRound, Bell, Bot, Building2, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
 import type { AppConfig } from "./app-config.types";
 export const appConfig: AppConfig = {
   appId: "briefcase", name: "Briefcase", brandPrefix: "Silicon",
@@ -9,6 +9,7 @@ export const appConfig: AppConfig = {
   nav: [
     { href: "/files", label: "My files", icon: FolderOpen, keywords: ["drive", "upload"] },
     { href: "/shared", label: "Shared with me", icon: Share2 },
+    { href: "/contacts", label: "Contacts", icon: ContactRound, keywords: ["people", "trust", "address book"] },
     { href: "/recent", label: "Recent", icon: Clock3 },
     { href: "/organizations", label: "Organizations", icon: Building2, keywords: ["teams", "members", "admins", "work"] },
     { href: "/silicons", label: "My Silicons", icon: Bot },

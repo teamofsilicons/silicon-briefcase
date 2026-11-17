@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 5.0.0
+  version: 5.1.0
   description: File storage for personal and work accounts, with organization administration, team sharing,
     previews, search, versioning and recovery. Interfaces use Briefcase-specific Accounts access tokens on the
     same endpoints as the website. Every bearer request is introspected for active access-token class, audience
@@ -31,6 +31,116 @@ tags:
 - name: Bin
 - name: Storage
 paths:
+  /recipients:
+    get:
+      tags: [People]
+      operationId: listRecipients
+      summary: List invitation history and contact candidates
+      x-operation-version: 1.0.0
+      description: All invitation-history and contact candidates for the authenticated account, deduplicated by UUID. Rank matches by 2*invited+received, then last_invited_at descending, then contact.trust descending. Contacts failure reports unavailable while preserving history. No global directory search.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipientIndex'
+        default:
+          $ref: '#/components/responses/Error'
+  /recipients/resolve:
+    get:
+      tags: [People]
+      operationId: resolveRecipient
+      summary: Resolve a Carbon or Silicon with saved details
+      x-operation-version: 1.0.0
+      parameters:
+      - {name: id, in: query, required: true, schema: {type: string, maxLength: 254}, description: Exact public ID or immutable account UUID.}
+      description: Resolve an exact ID at Accounts. Saved contact name and photo override the public profile after Contacts connection. A missing photo uses initials.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recipient'
+        default:
+          $ref: '#/components/responses/Error'
+  /contacts:
+    get:
+      tags: [People]
+      operationId: listContacts
+      summary: Read this account’s Silicon Contacts address book
+      x-operation-version: 1.0.0
+      description: Returns connected=false and an empty list until the account explicitly connects. Reads use only contacts.read proofs; no messages or settings are accessed.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactList'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      tags: [People]
+      operationId: saveContact
+      summary: Save a contact name and trust level
+      x-operation-version: 1.0.0
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveContact'
+      description: Requires Contacts connection. Saves in Silicon Contacts; existing notes, phone, email, photo and birthday fields are preserved. Trust must be an integer from 1 to 255. IDs resolve to immutable UUIDs.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedContact'
+        default:
+          $ref: '#/components/responses/Error'
+  /contacts/connection:
+    put:
+      tags: [People]
+      operationId: connectContacts
+      summary: Connect or disconnect Silicon Contacts
+      x-operation-version: 1.0.0
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContactConnection'
+      description: An explicit enabled=true grants Briefcase consent to read and save the current account’s address book. Verification must succeed before connection is stored. enabled=false removes the local consent; no contacts are deleted.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactConnectionStatus'
+        default:
+          $ref: '#/components/responses/Error'
+  /contacts/photos/{id}:
+    get:
+      tags: [People]
+      operationId: readContactPhoto
+      summary: Read a private saved contact photo
+      x-operation-version: 1.0.0
+      parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      description: Requires the same account’s Contacts connection and a contacts.read proof. Photos are owner-authorized PNGs, never public links.
+      responses:
+        '200':
+          description: Private response; Cache-Control no-store
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+        default:
+          $ref: '#/components/responses/Error'
   /organizations:
     get:
       tags: [Organizations]
@@ -220,6 +330,10 @@ paths:
       parameters:
       - $ref: '#/components/parameters/Cursor'
       - $ref: '#/components/parameters/ContentsLimit'
+      - {name: from, in: query, schema: {type: string}, description: Exact sharer ID or UUID; not necessarily the drive owner.}
+      - {name: contacts, in: query, schema: {type: string, enum: [saved, unsaved]}, description: Requires Contacts connection. Filters actual sharers before pagination.}
+      - {name: min_trust, in: query, schema: {type: integer, minimum: 1, maximum: 255}, description: Minimum saved-contact trust. Cannot combine with unsaved.}
+      - {name: q, in: query, schema: {type: string, maxLength: 200}, description: Case-insensitive filename/path match within shared entries and the other filters.}
       responses:
         '200':
           description: Entries shared with the caller (Cache-Control no-store)
@@ -229,7 +343,7 @@ paths:
                 $ref: '#/components/schemas/SharedPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /silicons/{silicon}/allowed-accounts:
     parameters:
     - $ref: '#/components/parameters/Silicon'
@@ -1894,6 +2008,83 @@ components:
           schema:
             $ref: '#/components/schemas/Moved'
   schemas:
+    ContactConnection:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled: {type: boolean}
+    ContactConnectionStatus:
+      type: object
+      required: [connected]
+      properties:
+        connected: {type: boolean}
+    SaveContact:
+      type: object
+      additionalProperties: false
+      required: [id, name, trust]
+      properties:
+        id: {type: string, maxLength: 254}
+        name: {type: string, minLength: 1, maxLength: 200, description: Saved name; maximum 200 UTF-8 bytes.}
+        trust: {type: integer, minimum: 1, maximum: 255}
+    PersonProfile:
+      type: object
+      required: [uuid, kind]
+      properties:
+        uuid: {type: string, description: Permanent account identifier.}
+        id: {type: [string, 'null']}
+        kind: {type: string, enum: [carbon, silicon]}
+        display_name: {type: [string, 'null']}
+        pfp_url: {type: [string, 'null']}
+    SavedContact:
+      type: object
+      required: [uuid, account, name, trust, photo_id]
+      properties:
+        uuid: {type: string}
+        account:
+          $ref: '#/components/schemas/PersonProfile'
+        name: {type: string}
+        trust: {type: integer, minimum: 1, maximum: 255}
+        photo_id: {type: [string, 'null']}
+        note: {type: string}
+        phone: {type: string}
+        email: {type: string}
+        birthday_month: {type: [integer, 'null']}
+        birthday_day: {type: [integer, 'null']}
+        birthday_year: {type: [integer, 'null']}
+    ContactList:
+      type: object
+      required: [connected, items]
+      properties:
+        connected: {type: boolean}
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedContact'
+    Recipient:
+      allOf:
+      - $ref: '#/components/schemas/PersonProfile'
+      - type: object
+        properties:
+          fallback_pfp_url: {type: [string, 'null'], description: Permitted account photo to try if the saved contact photo cannot load.}
+          invited: {type: integer, minimum: 0, description: Successful invitations sent by the caller to this account.}
+          received: {type: integer, minimum: 0, description: Successful invitations sent by this account to the caller.}
+          last_invited_at: {type: [string, 'null'], format: date-time}
+          contact:
+            type: object
+            properties:
+              name: {type: string}
+              trust: {type: integer, minimum: 1, maximum: 255}
+              photo_id: {type: [string, 'null']}
+    RecipientIndex:
+      type: object
+      required: [items, contacts_status]
+      properties:
+        contacts_status: {type: string, enum: [connected, disconnected, unavailable]}
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recipient'
     OrganizationCapabilities:
       type: object
       required:
@@ -2581,6 +2772,11 @@ components:
       - shared_at
       - entry
       properties:
+        shared_by:
+          type: array
+          description: Accounts whose matching live grants shared the entry.
+          items:
+            $ref: '#/components/schemas/Account'
         owner:
           $ref: '#/components/schemas/AccountSummary'
         shared_at:

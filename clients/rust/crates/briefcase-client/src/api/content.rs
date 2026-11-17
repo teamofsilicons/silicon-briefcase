@@ -267,7 +267,11 @@ impl Client {
         self.receive_json(request).await
     }
 
-    async fn open_content(&self, url: url::Url, range: Option<ByteRange>) -> Result<ContentStream> {
+    pub(super) async fn open_content(
+        &self,
+        url: url::Url,
+        range: Option<ByteRange>,
+    ) -> Result<ContentStream> {
         let mut request = self
             .request(Method::GET, url)
             .timeout(self.transfer_timeout());

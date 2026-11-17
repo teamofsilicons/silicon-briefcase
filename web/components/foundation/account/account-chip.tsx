@@ -21,6 +21,7 @@ export interface ChipAccount {
   kind: AccountKind;
   display_name?: string | null;
   pfp_url?: string | null;
+  fallback_pfp_url?: string | null;
 }
 
 export interface AccountChipProps {
@@ -44,7 +45,7 @@ export function KindMarker({ kind, size = "sm" }: { kind: AccountKind; size?: "s
 
 export function AccountChip({ account, variant = "row", note, onRemove, removeLabel, state, trailing, className }: AccountChipProps) {
   const name = account.display_name?.trim() || null;
-  const avatar = <Avatar name={name ?? account.id.replace(/^(c|si):/, "")} src={account.pfp_url ?? undefined} size="sm" className={styles.avatar} />;
+  const avatar = <Avatar name={name ?? account.id.replace(/^(c|si):/, "")} src={account.pfp_url ?? undefined} fallbackSrc={account.fallback_pfp_url ?? undefined} size="sm" className={styles.avatar} />;
   if (variant === "chip") {
     return (
       <span className={[styles.chip, className].filter(Boolean).join(" ")} data-sq="surface" data-state={state}>

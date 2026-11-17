@@ -238,6 +238,9 @@ pub struct DriveList {
 /// Something another account shared with the caller.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SharedEntry {
+    /// Actual sharers whose live grants matched the requested filters.
+    #[serde(default)]
+    pub shared_by: Vec<Account>,
     /// Whose drive the entry is in.
     pub owner: AccountSummary,
     /// When the newest live share on the entry was made.

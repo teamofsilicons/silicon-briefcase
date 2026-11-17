@@ -17,3 +17,6 @@ pub use sharing::*;
 
 mod reports;
 pub use reports::{BugReport, ReportReceipt};
+
+mod people;
+pub use people::{RecipientIndex, RecipientProfile, SharedFilters};

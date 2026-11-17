@@ -7,8 +7,13 @@ const policy = { mode: "everywhere", apps: [], extra_apps: [], excluded_apps: []
 const caps = { owner: true, admin: true, manage_admins: true, team_admins: [], team_structure: true, team_members: true, team_admins_manage: true, team_settings: true };
 const teamId = "10000000-0000-4000-8000-000000000003";
 const file = { id: "10000000-0000-4000-8000-000000000004", org_id: owner.uuid, name: "Product-roadmap-and-organization-team-sharing-2026-final", path: "Product-roadmap-and-organization-team-sharing-2026-final", parent_id: "10000000-0000-4000-8000-000000000005", type: "folder", size: null, content_type: null, visibility: "private", effective_access: ["read", "write", "update", "delete"], owner: { type: "carbon", id: owner.uuid }, permanent_url: "http://127.0.0.1:4190/c:ada.example/Product%20roadmap", created_at: "2026-11-16T00:00:00Z", updated_at: "2026-11-16T00:00:00Z", deleted_at: null };
-let detail, grants, requests, mode;
-function reset() { mode = "owner"; grants = []; requests = []; detail = { org: { org_id: "example", name: "Example Studio", logo_url: null, settings: { ...policy }, admin_team_permissions: { enabled: true, structure: true, members: true, admins: true, settings: true } }, members: [{ ...owner }, { ...colleague }], teams: [{ id: teamId, name: "Design", description: "Plan thoughtful products together.", members: [owner.uuid], admins: [owner.uuid], admin_team: false, settings: { ...policy } }], invites: [], capabilities: { ...caps } }; }
+const photoId = "10000000-0000-4000-8000-000000000099";
+const scout = { uuid: "10000000-0000-4000-8000-000000000006", id: "si:scout", kind: "silicon", display_name: "Scout" };
+const history = [{ ...colleague, invited: 3, received: 1, last_invited_at: "2026-11-16T12:00:00Z" }, { ...scout, invited: 1, received: 0, last_invited_at: "2026-11-17T12:00:00Z" }];
+let detail, grants, requests, mode, contactsConnected, contacts;
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh1sAAAAASUVORK5CYII=", "base64");
+function personView(person) { const c=contactsConnected && mode !== "contacts-outage" && contacts.find(c=>c.uuid===person.uuid); return c ? { ...person, display_name: c.name, pfp_url: c.photo_id ? `/api/v1/contacts/photos/${c.photo_id}` : null, contact: { name: c.name, trust: c.trust, photo_id: c.photo_id } } : person; }
+function reset() { contactsConnected=true; contacts=[{ uuid:colleague.uuid,account:colleague,name:"My Grace",trust:8,photo_id:photoId }]; mode = "owner"; grants = []; requests = []; detail = { org: { org_id: "example", name: "Example Studio", logo_url: null, settings: { ...policy }, admin_team_permissions: { enabled: true, structure: true, members: true, admins: true, settings: true } }, members: [{ ...owner }, { ...colleague }], teams: [{ id: teamId, name: "Design", description: "Plan thoughtful products together.", members: [owner.uuid], admins: [owner.uuid], admin_team: false, settings: { ...policy } }], invites: [], capabilities: { ...caps } }; }
 reset();
 createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1:4191");
@@ -22,6 +27,20 @@ createServer(async (req, res) => {
   if (!req.headers.authorization?.startsWith("Bearer local-ui-")) return reply({ error: { message: "No test session" } }, 401);
   const route = url.pathname.replace(/^\/api\/v1/, "");
   const targets = [{ type: "organization", id: "example", name: "Example Studio", org_id: "example" }, ...detail.teams.map(t => ({ type: "team", id: `example/${t.id}`, name: t.name, org_id: "example" }))];
+  if (route.startsWith("/contacts/photos/")) { res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" }); return res.end(png); }
+  if (route === "/recipients") return reply({ items: [...history.map(personView), ...contacts.filter(c=>!history.some(p=>p.uuid===c.uuid)).map(c=>personView(c.account))], contacts_status: mode === "contacts-outage" ? "unavailable" : contactsConnected ? "connected" : "disconnected" });
+  if (route === "/recipients/resolve") { const id=url.searchParams.get("id"); const person=[colleague,scout,owner].find(p=>p.id===id || p.uuid===id); return person ? reply(personView(person)) : reply({error:{code:"unknown_account",message:"No account has this ID."}},422); }
+  if (route === "/contacts/connection") { contactsConnected=body.enabled; requests.push({route,body}); return reply({connected:contactsConnected}); }
+  if (route === "/contacts") {
+    if(mode === "contacts-outage") return reply({error:{code:"contacts_unavailable",message:"Contacts are unavailable. Try again."}},503);
+    if(req.method === "POST") { const account=[colleague,scout].find(p=>p.uuid===body.id); if(!account) return reply({error:{message:"Unknown account"}},422); let contact=contacts.find(c=>c.uuid===body.id); if(contact) Object.assign(contact,body); else {contact={...body,uuid:account.uuid,account,photo_id:null};contacts.push(contact);} requests.push({route,body}); return reply(contact); }
+    return reply({connected:contactsConnected,items:contactsConnected?contacts:[]});
+  }
+  if (route === "/shared") {
+    requests.push({route,query:Object.fromEntries(url.searchParams)});
+    const entries=[{entry:{...file,name:"Shared roadmap",id:"10000000-0000-4000-8000-000000000007"},owner:colleague,shared_by:[colleague]}];
+    return reply({items:url.searchParams.get("q") === "missing" ? [] : entries,next_cursor:null});
+  }
   if (route === "/organizations") {
     if (mode === "outage") return reply({ error: { code: "organizations_unavailable", message: "Organization access could not be verified." } }, 503);
     return reply({ account_uuid: owner.uuid, organizations: mode === "personal" ? [] : [{ ...detail.org, capabilities: detail.capabilities, member_count: detail.members.length, team_count: detail.teams.length }], groups: [], share_targets: mode === "personal" ? [] : targets });

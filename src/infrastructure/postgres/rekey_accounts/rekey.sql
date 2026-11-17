@@ -11,6 +11,9 @@ CREATE TEMP TABLE uuid_refs (
 INSERT INTO uuid_refs SELECT table_name,id_column,kind_column,NULL FROM link_actor_columns;
 INSERT INTO uuid_refs VALUES
     ('accounts','account_uuid','kind',NULL),
+    ('contact_connections','account_uuid',NULL,NULL),
+    ('invite_history','sender',NULL,NULL),
+    ('invite_history','recipient',NULL,NULL),
     ('accounts','custodian_uuid',NULL,'carbon'),
     ('account_id_history','account_uuid',NULL,NULL),
     ('accounts_webhook_receipts','account_uuid',NULL,NULL),

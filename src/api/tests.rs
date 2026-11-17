@@ -37,7 +37,13 @@ pub(crate) const TEST_APP_SECRET: &str = "sa_app_briefcase_test_secret_012345678
 /// A well-formed webhook signing secret for tests.
 pub(crate) const TEST_WEBHOOK_SECRET: &str = "whsec_briefcase_test_signing_secret_0123456789";
 
-const CONTRACT: [(&str, &str, &str); 59] = [
+const CONTRACT: [(&str, &str, &str); 65] = [
+    ("/recipients", "get", "200"),
+    ("/recipients/resolve", "get", "200"),
+    ("/contacts", "get", "200"),
+    ("/contacts", "post", "200"),
+    ("/contacts/connection", "put", "200"),
+    ("/contacts/photos/{id}", "get", "200"),
     ("/organizations", "get", "200"),
     ("/organizations/{org}", "get", "200"),
     ("/organizations/{org}/actions", "post", "200"),
@@ -526,6 +532,7 @@ pub(crate) fn test_state_with_store(
         shutdown_timeout: Duration::from_secs(1),
     };
     let state = AppState {
+        contacts: None,
         accounts: Arc::new(directory),
         organizations: None,
         metadata: MetadataService::new(metadata_repository),

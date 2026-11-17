@@ -135,3 +135,5 @@ pub use requests::{
     note = "Telemetry was removed from Briefcase; nothing in this module sends anything."
 )]
 pub mod telemetry;
+
+pub use api::{RecipientIndex, RecipientProfile, SharedFilters};

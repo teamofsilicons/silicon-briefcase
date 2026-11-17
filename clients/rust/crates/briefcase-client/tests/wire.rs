@@ -14,6 +14,70 @@ use wiremock::{
 const ENTRY_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f828";
 
 #[tokio::test]
+async fn contacts_and_shared_filters_use_only_the_current_briefcase_credential() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/contacts/connection"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(body_json(json!({"enabled":true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"connected":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client.connect_contacts(true).await.unwrap()["connected"],
+        true
+    );
+    Mock::given(method("POST"))
+        .and(path("/api/v1/contacts"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(body_json(json!({"id":"c:ada","name":"My Ada","trust":9})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name":"My Ada","trust":9})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client.save_contact("c:ada", "My Ada", 9).await.unwrap()["trust"],
+        9
+    );
+    Mock::given(method("GET")).and(path("/api/v1/recipients"))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"contacts_status":"connected","items":[{"uuid":"Ada","id":"c:ada","kind":"carbon","invited":2,"received":3}]}))).expect(1).mount(&server).await;
+    assert_eq!(client.recipients().await.unwrap().items[0].received, 3);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/shared"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(query_param("contacts", "saved"))
+        .and(query_param("min_trust", "9"))
+        .and(query_param("from", "Ada"))
+        .and(query_param("q", "quarterly report"))
+        .and(query_param("cursor", "next"))
+        .and(query_param("limit", "1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items":[],"next_cursor":null})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        client
+            .shared_with_filters(&briefcase_client::SharedFilters {
+                cursor: Some("next"),
+                limit: Some(1),
+                from: Some("Ada"),
+                contacts: Some("saved"),
+                min_trust: Some(9),
+                query: Some("quarterly report"),
+            })
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn organization_actions_keep_the_briefcase_bearer_and_retry_key() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
@@ -66,7 +130,7 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "5.0.0",
+        "contract_version": "5.1.0",
         "build": "5.0.0",
         "operations": operations,
     })
@@ -129,9 +193,9 @@ async fn connected(server: &MockServer) -> Client {
 }
 
 #[test]
-fn the_client_carries_the_four_point_one_operation_catalogue() {
-    assert_eq!(briefcase_client::OPERATIONS.len(), 59);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.0.0");
+fn the_client_carries_the_five_point_one_operation_catalogue() {
+    assert_eq!(briefcase_client::OPERATIONS.len(), 65);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.1.0");
     for retired in [
         "submitTelemetry",
         "readIamInfo",
@@ -154,12 +218,18 @@ fn the_client_carries_the_four_point_one_operation_catalogue() {
         "listSharedWithMe",
         "resolveDriveTop",
         "listArchiveContents",
+        "listRecipients",
+        "resolveRecipient",
+        "listContacts",
+        "saveContact",
+        "connectContacts",
+        "readContactPhoto",
     ] {
         assert!(
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 5.0.0"
+            "{added} is part of contract 5.1.0"
         );
     }
 }

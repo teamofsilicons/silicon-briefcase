@@ -263,6 +263,55 @@ impl AccountsGateway {
             .map_err(|error| service_error(&error))
     }
 
+    /// Issues a short-lived, address-book-only proof after Briefcase records consent.
+    pub(crate) async fn contacts_proof(
+        &self,
+        token: &str,
+        write: bool,
+    ) -> Result<SecretString, AppError> {
+        let proof = self
+            .app()
+            .issue_user_verification(
+                &silicon_accounts_client::IssueUserVerification {
+                    subject_token: token.to_owned(),
+                    receiving_app: "silicon-contacts".into(),
+                    scopes: vec![
+                        if write {
+                            "contacts.write"
+                        } else {
+                            "contacts.read"
+                        }
+                        .into(),
+                    ],
+                    access_ttl_seconds: Some(60),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| AppError::from(service_error(&error)))?;
+        Ok(SecretString::from(proof.proof_token.expose().to_owned()))
+    }
+
+    /// Uses only profile fields an active app member has shared with Briefcase.
+    pub(crate) async fn recipient_profile(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<(String, Option<String>)>, AccountsError> {
+        self.spend_lookup()?;
+        match self.app().user(uuid).await {
+            Ok(member)
+                if member.uuid == uuid
+                    && member.status == "active"
+                    && member.granted_scopes.iter().any(|scope| scope == "profile") =>
+            {
+                Ok(Some((member.display_name, member.pfp_url)))
+            }
+            Ok(_) => Ok(None),
+            Err(error) if error.status() == Some(404) => Ok(None),
+            Err(error) => Err(service_error(&error)),
+        }
+    }
+
     /// Looks an account up by uuid. `Ok(None)` when no such account exists.
     ///
     /// # Errors

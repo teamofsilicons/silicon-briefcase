@@ -103,15 +103,88 @@ struct SharedCursor {
     entry_id: Uuid,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct SharedQuery {
+    cursor: Option<String>,
+    limit: Option<u16>,
+    from: Option<String>,
+    contacts: Option<String>,
+    min_trust: Option<u8>,
+    q: Option<String>,
+}
+impl SharedQuery {
+    fn validate(&self) -> Result<(), AppError> {
+        extract::validation(validation::page(&PageQuery {
+            cursor: self.cursor.clone(),
+            limit: self.limit,
+        }))?;
+        if self
+            .contacts
+            .as_deref()
+            .is_some_and(|v| !matches!(v, "saved" | "unsaved"))
+            || self.min_trust == Some(0)
+            || (self.contacts.as_deref() == Some("unsaved") && self.min_trust.is_some())
+            || self.q.as_ref().is_some_and(|q| q.len() > 200)
+        {
+            return Err(AppError::validation("invalid_shared_filter"));
+        }
+        Ok(())
+    }
+}
+#[derive(sqlx::FromRow)]
+struct SharedPersonEntry {
+    drive: String,
+    entry_id: Uuid,
+    shared_at: OffsetDateTime,
+    sharers: Vec<String>,
+}
+
+async fn shared_rows(
+    state: &AppState,
+    context: &ExecutionContext,
+    token: &str,
+    query: &SharedQuery,
+    before: Option<(OffsetDateTime, Uuid)>,
+    limit: u16,
+) -> Result<Vec<SharedPersonEntry>, AppError> {
+    let caller = context.authorization().actor();
+    let from = match query.from.as_deref() {
+        Some(id) => Some(state.accounts.resolve(id).await?.uuid),
+        None => None,
+    };
+    let contacts = if query.contacts.is_some() || query.min_trust.is_some() {
+        Some(
+            super::people::load_contacts(state, super::people::caller(context)?, token)
+                .await?
+                .into_iter()
+                .filter(|c| {
+                    c["trust"].as_u64().unwrap_or(0) >= u64::from(query.min_trust.unwrap_or(1))
+                })
+                .filter_map(|c| c["uuid"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    sqlx::query_as::<_, SharedPersonEntry>(
+        "SELECT drive,entry_id,shared_at,sharers FROM briefcase.shared_with_people($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"
+    ).bind(match caller.kind() { ActorKind::Carbon => "carbon", ActorKind::Silicon => "silicon" })
+        .bind(caller.id().as_str()).bind(&context.organizations().groups)
+        .bind(before.map(|b| b.0)).bind(before.map(|b| b.1)).bind(i32::from(limit)+1)
+        .bind(from).bind(contacts).bind(query.contacts.as_deref() == Some("unsaved"))
+        .bind(query.q.as_deref().filter(|q| !q.trim().is_empty())).fetch_all(&state.database).await
+        .map_err(|_| AppError::Internal { category: "shared_lookup" })
+}
+
 /// Lists what other accounts shared with the caller, newest share first,
 /// each with the account whose drive holds it (clients group by owner).
 pub(crate) async fn shared(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Result<Query<PageQuery>, QueryRejection>,
+    query: Result<Query<SharedQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
     let query = extract::query(query)?;
-    extract::validation(validation::page(&query))?;
+    query.validate()?;
     let before = query
         .cursor
         .as_deref()
@@ -119,21 +192,17 @@ pub(crate) async fn shared(
         .transpose()?
         .map(|cursor| (cursor.shared_at, cursor.entry_id));
     let limit = query.limit.unwrap_or(100);
-    let context = extract::authenticate(&state, &headers, Action::ListShared, "shared").await?;
-    let caller = context.authorization().actor().clone();
-    let rows = state
-        .content_adapter
-        .metadata_repository()
-        .shared_with_groups(
-            &caller,
-            &context.organizations().groups,
-            before,
-            i32::from(limit) + 1,
-        )
-        .await
-        .map_err(|_| AppError::Internal {
-            category: "shared_lookup",
-        })?;
+    let (context, token) =
+        extract::authenticate_with_token(&state, &headers, Action::ListShared, "shared").await?;
+    let rows = shared_rows(
+        &state,
+        &context,
+        secrecy::ExposeSecret::expose_secret(&token),
+        &query,
+        before,
+        limit,
+    )
+    .await?;
     let has_more = rows.len() > usize::from(limit);
     let mapper = state
         .mapper_for(rows.iter().map(|row| row.drive.clone()))
@@ -174,9 +243,25 @@ pub(crate) async fn shared(
                 Err(MetadataServiceError::NotFound) => continue,
                 Err(error) => return Err(metadata_error(error)),
             };
+        let mut shared_by = Vec::new();
+        for uuid in row.sharers {
+            if let Some(account) =
+                state
+                    .accounts
+                    .store()
+                    .find(&uuid)
+                    .await
+                    .map_err(|_| AppError::Internal {
+                        category: "account_cache",
+                    })?
+            {
+                shared_by.push(account_json(&account));
+            }
+        }
         items.push(json!({
             "owner": account_json(owner),
             "shared_at": row.shared_at,
+            "shared_by": shared_by,
             "entry": mapper.entry_item(&row.drive, item)?,
         }));
     }
@@ -334,7 +419,7 @@ fn caller_uuid(context: &ExecutionContext) -> Result<AccountUuid, AppError> {
         })
 }
 
-fn account_json(record: &AccountRecord) -> Value {
+pub(super) fn account_json(record: &AccountRecord) -> Value {
     json!({
         "uuid": record.uuid,
         "id": record.public_id,

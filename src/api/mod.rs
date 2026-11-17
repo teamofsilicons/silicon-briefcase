@@ -103,6 +103,13 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         );
     }
     let state = AppState {
+        contacts: Some(Arc::new(
+            crate::infrastructure::contacts::ContactsGateway::new(
+                &std::env::var("BRIEFCASE_CONTACTS_URL")
+                    .unwrap_or_else(|_| "https://contacts.teamofsilicons.com".into()),
+            )
+            .map_err(|_| anyhow::anyhow!("Invalid BRIEFCASE_CONTACTS_URL"))?,
+        )),
         accounts: Arc::new(accounts),
         organizations: Some(Arc::new(
             crate::infrastructure::organizations::OrganizationsGateway::new(
@@ -294,6 +301,17 @@ fn location_routes() -> Router<AppState> {
 /// with a Silicon.
 fn drive_routes() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/recipients", get(handlers::people::recipients))
+        .route("/api/v1/recipients/resolve", get(handlers::people::resolve))
+        .route(
+            "/api/v1/contacts",
+            get(handlers::people::list_contacts).post(handlers::people::save_contact),
+        )
+        .route(
+            "/api/v1/contacts/connection",
+            put(handlers::people::connection),
+        )
+        .route("/api/v1/contacts/photos/{id}", get(handlers::people::photo))
         .route("/api/v1/drives", get(drive_handlers::list))
         .route("/api/v1/shared", get(drive_handlers::shared))
         .route(
@@ -460,3 +478,6 @@ mod memory_store;
 mod organizations_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod people_tests;

@@ -1,6 +1,6 @@
 # HTTP operation reference
 
-Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.0.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.1.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
 
 ## List this account’s organizations and available sharing targets
 
@@ -912,3 +912,41 @@ Requires a User verification proof with scope briefcase.link_access.update from 
 | --- | --- |
 | 200 | Success |
 | default | Error |
+
+## People and Contacts
+
+### List invitation history and contact candidates
+
+`GET /recipients` · `listRecipients`
+
+Returns UUID-keyed history and saved details. See [sharing](../sharing.md) for ranking and historical coverage.
+
+### Resolve a Carbon or Silicon with saved details
+
+`GET /recipients/resolve` · `resolveRecipient`
+
+Supply `id` as an exact c:/si: ID or UUID. Returns a resolved profile with saved contact overrides.
+
+### Read this account’s Silicon Contacts address book
+
+`GET /contacts` · `listContacts`
+
+Returns `connected` and the complete address book, or a dependency error. No partial list is treated as complete.
+
+### Save a contact name and trust level
+
+`POST /contacts` · `saveContact`
+
+Send `{ "id": "c:ada", "name": "Ada", "trust": 2 }`. Existing contact details are preserved.
+
+### Connect or disconnect Silicon Contacts
+
+`PUT /contacts/connection` · `connectContacts`
+
+Send `{ "enabled": true }` after account consent, or false to disconnect.
+
+### Read a private saved contact photo
+
+`GET /contacts/photos/{id}` · `readContactPhoto`
+
+Supply the saved photo UUID. Returns a private PNG after checking this account’s Contacts permission.
