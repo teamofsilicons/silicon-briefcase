@@ -2,8 +2,13 @@ openapi: 3.1.0
 info:
   title: Silicon Briefcase API
   version: 5.0.0
-  description: File storage for Carbons and Silicons signed in with Silicon Accounts, with permissions, previews,
-    search, versioning, recovery, and access for other apps through User verification proofs.
+  description: File storage for personal and work accounts, with organization administration, team sharing,
+    previews, search, versioning and recovery. Interfaces use Briefcase-specific Accounts access tokens on the
+    same endpoints as the website. Every bearer request is introspected for active access-token class, audience
+    and exact account subject. Delegated proof operations are a separate, narrower API.
+externalDocs:
+  description: Build a complete Briefcase interface
+  url: https://docs.briefcase.teamofsilicons.com/interfaces/
 servers:
 - url: https://api.briefcase.teamofsilicons.com/api/v1
   description: The API is served by the backend host. Permanent entry URLs are minted on the application host instead
@@ -41,7 +46,7 @@ paths:
               schema: {type: string}
           content:
             application/json:
-              schema: {type: object, additionalProperties: true}
+              schema: {$ref: "#/components/schemas/OrganizationContext"}
         default:
           $ref: "#/components/responses/Error"
   /organizations/{org}:
@@ -64,7 +69,7 @@ paths:
               schema: {type: string}
           content:
             application/json:
-              schema: {type: object, additionalProperties: true}
+              schema: {$ref: "#/components/schemas/OrganizationDetail"}
         default:
           $ref: "#/components/responses/Error"
   /organizations/{org}/actions:
@@ -87,14 +92,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [action]
-              properties:
-                action:
-                  type: string
-                  enum: [update, team_create, team_update, team_delete, team_member_add, team_member_remove, team_admin_set, admin_set, member_update, invite, invite_cancel, invite_resend, member_remove, policy_update]
-              additionalProperties: true
+            schema: {$ref: "#/components/schemas/OrganizationAction"}
       responses:
         "200":
           description: Current authorized organization data or applied action result
@@ -103,7 +101,7 @@ paths:
               schema: {type: string}
           content:
             application/json:
-              schema: {type: object, additionalProperties: true}
+              schema: {$ref: "#/components/schemas/OrganizationActionResult"}
         default:
           $ref: "#/components/responses/Error"
   /version:
@@ -366,8 +364,8 @@ paths:
         default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns
         it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422
         `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than
-        `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. `invitees` follow the
-        sharing rules of `POST /entries/{entry_id}/invitations`. Sibling name collisions return 409 without exposing
+        `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. Inline `invitees` accept accounts only;
+        create the folder first, then use its invitation route for team or organization shares. Sibling name collisions return 409 without exposing
         hidden entry metadata.
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -1733,8 +1731,9 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: A Silicon Accounts access token issued to Briefcase (EdDSA JWT, `aud` = `briefcase`, `iss` = the
-        Silicon Accounts URL), verified locally against the published keys. Sharing changes, deletion, version
-        restore, self-destruct keep and storage configuration also confirm the token with Silicon Accounts.
+        Silicon Accounts URL), verified locally with zero expiry/not-before leeway and introspected online on every
+        request. Requires active=true, token_type=access_token, client_id=briefcase and the same sub. Refresh tokens
+        and other audiences are rejected; dependency failures deny access. Introspection results are not cached.
     proofAuth:
       type: http
       scheme: Proof
@@ -1895,6 +1894,620 @@ components:
           schema:
             $ref: '#/components/schemas/Moved'
   schemas:
+    OrganizationCapabilities:
+      type: object
+      required:
+      - owner
+      - admin
+      - manage_admins
+      - team_admins
+      - team_structure
+      - team_members
+      - team_admins_manage
+      - team_settings
+      properties:
+        owner:
+          type: boolean
+        admin:
+          type: boolean
+        manage_admins:
+          type: boolean
+        team_admins:
+          type: array
+          items:
+            type: string
+        team_structure:
+          type: boolean
+        team_members:
+          type: boolean
+        team_admins_manage:
+          type: boolean
+        team_settings:
+          type: boolean
+      description: Current UI capabilities only. Every action rechecks membership, app policy and protected-role
+        constraints. team_admins contains team UUIDs.
+    OrganizationAppPolicy:
+      type: object
+      required:
+      - mode
+      - apps
+      - extra_apps
+      - excluded_apps
+      properties:
+        mode:
+          type: string
+          enum:
+          - everywhere
+          - only
+          - except
+        apps:
+          type: array
+          items:
+            type: string
+        extra_apps:
+          type: array
+          items:
+            type: string
+        excluded_apps:
+          type: array
+          items:
+            type: string
+      description: Exclusions win. Team admins may only add exclusions. Member policies use everywhere mode with
+        extra_apps and excluded_apps.
+    OrganizationAppPolicyUpdate:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum:
+          - everywhere
+          - only
+          - except
+        apps:
+          type: array
+          items:
+            type: string
+        extra_apps:
+          type: array
+          items:
+            type: string
+        excluded_apps:
+          type: array
+          items:
+            type: string
+      description: Exclusions win. Team admins may only add exclusions. Member policies use everywhere mode with
+        extra_apps and excluded_apps.
+    OrganizationTeamPermissions:
+      type: object
+      required:
+      - enabled
+      - structure
+      - members
+      - admins
+      - settings
+      properties:
+        enabled:
+          type: boolean
+        structure:
+          type: boolean
+        members:
+          type: boolean
+        admins:
+          type: boolean
+        settings:
+          type: boolean
+    OrganizationShareTarget:
+      type: object
+      required:
+      - type
+      - id
+      - name
+      - org_id
+      properties:
+        type:
+          type: string
+          enum:
+          - organization
+          - team
+        id:
+          type: string
+          description: Organization handle, or organization-handle/team-UUID. Use this exact value in an invitation.
+        name:
+          type: string
+        org_id:
+          type: string
+    OrganizationSummary:
+      type: object
+      required:
+      - org_id
+      - name
+      - logo_url
+      - capabilities
+      - member_count
+      - team_count
+      properties:
+        org_id:
+          type: string
+        name:
+          type: string
+        logo_url:
+          type:
+          - string
+          - 'null'
+        capabilities:
+          $ref: '#/components/schemas/OrganizationCapabilities'
+        member_count:
+          type: integer
+          minimum: 0
+        team_count:
+          type: integer
+          minimum: 0
+    OrganizationContext:
+      type: object
+      required:
+      - account_uuid
+      - organizations
+      - groups
+      - share_targets
+      properties:
+        account_uuid:
+          type: string
+        organizations:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizationSummary'
+        groups:
+          type: array
+          items:
+            type: string
+        share_targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizationShareTarget'
+      description: Membership of the exact authenticated account UUID; never expanded through linked accounts.
+        No membership is represented by empty arrays.
+      examples:
+      - account_uuid: 00000000-0000-4000-8000-000000000001
+        organizations: []
+        groups: []
+        share_targets: []
+    OrganizationMember:
+      type: object
+      required:
+      - uuid
+      - id
+      - kind
+      - display_name
+      - owner
+      - admin
+      - effective_admin
+      - manage_admins
+      - settings
+      - joined_at
+      properties:
+        uuid:
+          type: string
+        id:
+          type: string
+        kind:
+          type: string
+          enum:
+          - carbon
+          - silicon
+        display_name:
+          type: string
+        pfp_url:
+          type: string
+        org_id:
+          type:
+          - string
+          - 'null'
+        owner:
+          type: boolean
+        admin:
+          type: boolean
+        effective_admin:
+          type: boolean
+        manage_admins:
+          type: boolean
+        settings:
+          $ref: '#/components/schemas/OrganizationAppPolicy'
+        joined_at:
+          type: integer
+        removed_at:
+          type:
+          - integer
+          - 'null'
+    OrganizationTeam:
+      type: object
+      required:
+      - id
+      - name
+      - description
+      - members
+      - admins
+      - admin_team
+      - settings
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        members:
+          type: array
+          items:
+            type: string
+        admins:
+          type: array
+          items:
+            type: string
+        admin_team:
+          type: boolean
+        settings:
+          $ref: '#/components/schemas/OrganizationAppPolicy'
+    OrganizationInvitation:
+      type: object
+      required:
+      - id
+      - target
+      - handle
+      - teams
+      - team_admins
+      - admin
+      - manage_admins
+      - settings
+      - invited_by
+      - created_at
+      - expires_at
+      - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        target:
+          type: string
+        handle:
+          type: string
+        teams:
+          type: array
+          items:
+            type: string
+        team_admins:
+          type: array
+          items:
+            type: string
+        admin:
+          type: boolean
+        manage_admins:
+          type: boolean
+        settings:
+          $ref: '#/components/schemas/OrganizationAppPolicy'
+        invited_by:
+          type: string
+        created_at:
+          type: integer
+        expires_at:
+          type: integer
+        status:
+          type: string
+        acceptance_url:
+          type:
+          - string
+          - 'null'
+    OrganizationDetail:
+      type: object
+      required:
+      - org
+      - members
+      - teams
+      - invites
+      - capabilities
+      properties:
+        org:
+          type: object
+          required:
+          - org_id
+          - name
+          - logo_url
+          - created_at
+          - version
+          - settings
+          - admin_team_permissions
+          properties:
+            org_id:
+              type: string
+            name:
+              type: string
+            logo_url:
+              type:
+              - string
+              - 'null'
+            created_at:
+              type: integer
+            version:
+              type: integer
+            settings:
+              $ref: '#/components/schemas/OrganizationAppPolicy'
+            admin_team_permissions:
+              $ref: '#/components/schemas/OrganizationTeamPermissions'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizationMember'
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizationTeam'
+        invites:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrganizationInvitation'
+        capabilities:
+          $ref: '#/components/schemas/OrganizationCapabilities'
+        owner_offers:
+          type: array
+          items:
+            type: object
+        votes:
+          type: array
+          items:
+            type: object
+      description: Current role-filtered state. Member/invitation times are Unix seconds. Ownership governance
+        is read-only here and managed in Organizations.
+    OrganizationActionResult:
+      oneOf:
+      - allOf:
+        - $ref: '#/components/schemas/OrganizationDetail'
+        - type: object
+          properties:
+            team:
+              type: string
+              format: uuid
+            invite:
+              type: string
+              format: uuid
+            acceptance_url:
+              type: string
+      - type: object
+        required:
+        - left
+        - org_id
+        properties:
+          left:
+            const: true
+          org_id:
+            type: string
+    OrganizationAction:
+      description: One domain action. member is an immutable account UUID, team and invite are UUIDs from organization
+        detail. Use a stable Idempotency-Key of 8–200 bytes. See the interface guide for role restrictions.
+      oneOf:
+      - type: object
+        required:
+        - action
+        properties:
+          action:
+            const: update
+          name:
+            type: string
+          logo_url:
+            type:
+            - string
+            - 'null'
+          admin_team_permissions:
+            $ref: '#/components/schemas/OrganizationTeamPermissions'
+        description: Admin; only owners change admin team permission switches.
+      - type: object
+        required:
+        - action
+        - name
+        properties:
+          action:
+            const: team_create
+          name:
+            type: string
+          description:
+            type: string
+      - type: object
+        required:
+        - action
+        - team
+        properties:
+          action:
+            const: team_update
+          team:
+            type: string
+            format: uuid
+          name:
+            type: string
+          description:
+            type: string
+          admin_team:
+            type: boolean
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+      - type: object
+        required:
+        - action
+        - team
+        properties:
+          action:
+            const: team_delete
+          team:
+            type: string
+            format: uuid
+      - type: object
+        required:
+        - action
+        - team
+        - member
+        properties:
+          action:
+            const: team_member_add
+          team:
+            type: string
+            format: uuid
+          member:
+            type: string
+      - type: object
+        required:
+        - action
+        - team
+        - member
+        properties:
+          action:
+            const: team_member_remove
+          team:
+            type: string
+            format: uuid
+          member:
+            type: string
+      - type: object
+        required:
+        - action
+        - team
+        - member
+        - admin
+        properties:
+          action:
+            const: team_admin_set
+          team:
+            type: string
+            format: uuid
+          member:
+            type: string
+          admin:
+            type: boolean
+      - type: object
+        required:
+        - action
+        - member
+        - admin
+        properties:
+          action:
+            const: admin_set
+          member:
+            type: string
+          admin:
+            type: boolean
+          manage_admins:
+            type: boolean
+      - type: object
+        required:
+        - action
+        - member
+        properties:
+          action:
+            const: member_update
+          member:
+            type: string
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+      - type: object
+        required:
+        - action
+        - target
+        - handle
+        properties:
+          action:
+            const: invite
+          target:
+            type: string
+          handle:
+            type: string
+          teams:
+            type: array
+            items:
+              type: string
+          team_admins:
+            type: array
+            items:
+              type: string
+          admin:
+            type: boolean
+          manage_admins:
+            type: boolean
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+      - type: object
+        required:
+        - action
+        - invite
+        properties:
+          action:
+            const: invite_cancel
+          invite:
+            type: string
+            format: uuid
+      - type: object
+        required:
+        - action
+        - invite
+        properties:
+          action:
+            const: invite_resend
+          invite:
+            type: string
+            format: uuid
+      - type: object
+        required:
+        - action
+        - member
+        properties:
+          action:
+            const: member_remove
+          member:
+            type: string
+      - type: object
+        required:
+        - action
+        - scope
+        - settings
+        properties:
+          action:
+            const: policy_update
+          scope:
+            const: org
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+      - type: object
+        required:
+        - action
+        - scope
+        - settings
+        - team
+        properties:
+          action:
+            const: policy_update
+          scope:
+            const: team
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+          team:
+            type: string
+      - type: object
+        required:
+        - action
+        - scope
+        - settings
+        - member
+        properties:
+          action:
+            const: policy_update
+          scope:
+            const: member
+          settings:
+            $ref: '#/components/schemas/OrganizationAppPolicyUpdate'
+          member:
+            type: string
+      examples:
+      - action: team_create
+        name: Design
+      - action: team_member_add
+        team: 00000000-0000-4000-8000-000000000003
+        member: 00000000-0000-4000-8000-000000000002
     AccountSummary:
       type: object
       additionalProperties: false
@@ -3115,7 +3728,7 @@ components:
           type: string
           format: uuid
         principal:
-          $ref: '#/components/schemas/ActorRef'
+          $ref: '#/components/schemas/InvitationRecipient'
         access:
           type: array
           minItems: 1
@@ -3345,6 +3958,3 @@ components:
         permanent:
           type: boolean
           const: true
-externalDocs:
-  url: https://docs.briefcase.teamofsilicons.com/
-  description: Official Briefcase documentation

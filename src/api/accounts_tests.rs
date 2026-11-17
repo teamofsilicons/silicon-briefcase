@@ -99,6 +99,28 @@ async fn fixture_at(
         .respond_with(ResponseTemplate::new(200).set_body_json(issuer.jwks_json()))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/oauth/introspect"))
+        .respond_with(|request: &wiremock::Request| {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let subject = url::form_urlencoded::parse(&request.body)
+                .find(|(key, _)| key == "token")
+                .and_then(|(_, token)| {
+                    token
+                        .split('.')
+                        .nth(1)
+                        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+                })
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|claims| claims["sub"].as_str().map(str::to_owned));
+            ResponseTemplate::new(200).set_body_json(json!({
+                "active": subject.is_some(), "sub": subject,
+                "token_type": "access_token", "client_id": "briefcase"
+            }))
+        })
+        .with_priority(10)
+        .mount(&server)
+        .await;
     let mut settings = test_accounts_settings(&server.uri(), proof_issuers)?;
     settings.proof_issuers = settings
         .proof_issuers
@@ -243,7 +265,7 @@ impl Fixture {
             .and(path("/v1/oauth/introspect"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(json!({ "active": active, "sub": subject })),
+                    .set_body_json(json!({ "active": active, "sub": subject, "token_type": "access_token", "client_id": "briefcase" })),
             )
             .mount(&self.server)
             .await;
@@ -440,10 +462,7 @@ async fn sharing_resolves_ids_through_accounts_and_sensitive_changes_introspect(
     f.stub_account(&bob, &bob_id, carbon_summary(&bob, &bob_id))
         .await;
     f.stub_introspection(true, &ada).await;
-    // A fresh token, so the earlier inactive answer is not reused.
-    let token = f
-        .issuer
-        .sign(&f.issuer.claims(&ada, "carbon", &ada_id, 1, 1_800));
+    // The same token is rechecked; no inactive or active answer is cached.
     let (status, grant) = f
         .bearer(
             Method::POST,
@@ -625,13 +644,13 @@ async fn sign_outs_removals_and_deletion_refuse_older_tokens() -> anyhow::Result
     let membership = json!({"uuid": ada, "membership_id": format!("briefcase:{ada}")});
     let at = |offset: i64| {
         f.issuer
-            .sign(&f.issuer.claims(&ada, "carbon", &ada_id, offset, 3_600))
+            .sign(&f.issuer.claims(&ada, "carbon", &ada_id, offset - 60, 3_600))
     };
     let early = at(-120);
     assert_eq!(f.me(&early).await?.0, StatusCode::OK);
 
     // Briefcase's own sign-out of one session leaves the others alone.
-    let now = OffsetDateTime::now_utc();
+    let now = OffsetDateTime::now_utc() - time::Duration::seconds(60);
     let mut signed_out = membership.clone();
     signed_out["reason"] = json!("app_revoked");
     assert_eq!(
@@ -686,7 +705,7 @@ async fn sign_outs_removals_and_deletion_refuse_older_tokens() -> anyhow::Result
         .await?,
         StatusCode::NO_CONTENT
     );
-    // Issued after the deletion (and within the 30-second clock leeway).
+    // Issued after the deletion, with all timestamps in the past.
     let (status, body) = f.me(&at(20)).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error_code(&body), "account_deleted");
@@ -1302,5 +1321,98 @@ async fn uuid_backfill_rejects_old_credentials_and_preserves_file_access() -> an
         )))
         .await?;
     admin.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interface_requests_refuse_ended_or_wrong_class_sessions_on_every_surface()
+-> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let (ada, id) = (f.uuid("Ada"), f.id("c:ada"));
+    let token = f.issuer.token(&ada, "carbon", &id);
+    let (status, folder) = f
+        .bearer(
+            Method::POST,
+            "/api/v1/entries",
+            &token,
+            Some(json!({"name":"interface-test"})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{folder}");
+    let entry = folder["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing entry"))?;
+    // Reuse the token that just succeeded: revocation must take effect without a webhook.
+    for (status, answer) in [
+        (200, json!({"active":false})),
+        (
+            200,
+            json!({"active":true,"sub":ada,"client_id":"briefcase","token_type":"refresh_token"}),
+        ),
+        (
+            200,
+            json!({"active":true,"sub":ada,"client_id":"other","token_type":"access_token"}),
+        ),
+        (
+            200,
+            json!({"active":true,"sub":"another-account","client_id":"briefcase","token_type":"access_token"}),
+        ),
+        (
+            200,
+            json!({"active":true,"client_id":"briefcase","token_type":"access_token"}),
+        ),
+        (503, json!({})),
+    ] {
+        f.server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(answer))
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        for (method, route, body) in [
+            (Method::GET, "/api/v1/entries".to_owned(), None),
+            (
+                Method::GET,
+                format!("/api/v1/entries/{entry}/content"),
+                None,
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/entries/{entry}/download"),
+                None,
+            ),
+            (Method::GET, "/api/v1/organizations".to_owned(), None),
+            (Method::GET, "/api/v1/shared".to_owned(), None),
+            (Method::GET, "/api/v1/search?q=test".to_owned(), None),
+            (
+                Method::POST,
+                "/api/v1/entries".to_owned(),
+                Some(json!({"name":"must-not-create"})),
+            ),
+            (Method::POST, "/api/v1/uploads".to_owned(), None),
+        ] {
+            let (actual, response) = f.bearer(method, &route, &token, body).await?;
+            assert_eq!(
+                actual,
+                if status == 503 {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::UNAUTHORIZED
+                },
+                "{route}: {response}"
+            );
+        }
+    }
+    f.server.reset().await;
+    f.stub_introspection(true, &ada).await;
+    assert_eq!(
+        f.bearer(Method::GET, "/api/v1/entries", &token, None)
+            .await?
+            .0,
+        StatusCode::OK
+    );
     Ok(())
 }

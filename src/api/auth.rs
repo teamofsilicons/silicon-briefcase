@@ -115,27 +115,6 @@ impl Action {
             Self::ManageShareAllowances => "briefcase.share_allowances.manage",
         }
     }
-
-    /// Whether the token must also be confirmed active with Silicon Accounts.
-    ///
-    /// Reads, lists, content and uploads verify the token locally (it lives
-    /// at most 30 minutes, and webhook-fed sign-outs are checked on every
-    /// request). Changing who can reach an entry, destroying data, restoring
-    /// a version and configuring storage also introspect, so a revocation the
-    /// webhook has not delivered yet still stops them.
-    #[must_use]
-    pub const fn requires_introspection(self) -> bool {
-        matches!(
-            self,
-            Self::GrantPermission
-                | Self::RevokePermission
-                | Self::DeleteEntry
-                | Self::KeepEntry
-                | Self::RestoreVersion
-                | Self::ConfigureStorage
-                | Self::ManageShareAllowances
-        )
-    }
 }
 
 /// Returns the access token of a `Bearer` request.
@@ -309,32 +288,6 @@ mod tests {
         ];
         for (action, name) in expected {
             assert_eq!(action.as_str(), name);
-        }
-    }
-
-    #[test]
-    fn only_sensitive_actions_introspect() {
-        for sensitive in [
-            Action::GrantPermission,
-            Action::RevokePermission,
-            Action::DeleteEntry,
-            Action::KeepEntry,
-            Action::RestoreVersion,
-            Action::ConfigureStorage,
-        ] {
-            assert!(sensitive.requires_introspection(), "{sensitive:?}");
-        }
-        for local in [
-            Action::ListEntries,
-            Action::ReadEntry,
-            Action::ReadContent,
-            Action::DownloadFile,
-            Action::UploadFile,
-            Action::Search,
-            Action::RestoreBinEntry,
-            Action::ReadAccount,
-        ] {
-            assert!(!local.requires_introspection(), "{local:?}");
         }
     }
 

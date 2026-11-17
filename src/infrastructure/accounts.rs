@@ -4,8 +4,8 @@
 //!   signature, `exp`/`nbf`, `aud` = Briefcase's app id and `iss` = the
 //!   Silicon Accounts public URL. An unknown `kid` refetches the keys at most
 //!   every 30 seconds.
-//! - Introspection is called only where revocation must be seen at once, and
-//!   its answer is reused for at most 30 seconds.
+//! - Every bearer request is introspected online. Only active access tokens
+//!   issued to Briefcase are accepted; authorization answers are never cached.
 //! - Proofs (`sap_…`) are verified with Silicon Accounts on every use.
 //! - Account lookups spend a local budget kept inside Silicon Accounts' 600
 //!   lookups a minute per app; callers consult the account cache first.
@@ -13,7 +13,6 @@
 use std::{sync::Arc, time::Duration};
 
 use secrecy::{ExposeSecret as _, SecretString};
-use sha2::{Digest as _, Sha256};
 use silicon_accounts_client::{
     AccountSummary, AccountsClient, AppClient, Claims, Error as ClientError, Jwks,
     ProofVerification, TokenError, UserInfo, VerifyOptions, verify_access_token,
@@ -31,10 +30,6 @@ pub(crate) mod test_support;
 pub use budget::{ExpiringMap, LOOKUPS_PER_MINUTE, TokenBucket};
 pub use directory::{AccountDirectory, DriveOwner};
 pub use jwks::{JwksCache, MAX_AGE as JWKS_MAX_AGE, UNKNOWN_KEY_REFETCH_INTERVAL};
-
-/// How long an introspection answer is reused.
-pub const INTROSPECTION_TTL: Duration = Duration::from_secs(30);
-const INTROSPECTION_CACHE_ENTRIES: usize = 10_000;
 
 /// A failure talking to Silicon Accounts, with a reason safe to show callers.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -126,7 +121,6 @@ pub struct AccountsGateway {
     app_secret: SecretString,
     issuer: String,
     jwks: JwksCache,
-    introspections: ExpiringMap<[u8; 32], Introspection>,
     lookups: TokenBucket,
 }
 
@@ -165,7 +159,6 @@ impl AccountsGateway {
             app_secret: settings.app_secret.clone(),
             issuer: settings.issuer.clone(),
             jwks: JwksCache::default(),
-            introspections: ExpiringMap::new(INTROSPECTION_TTL, INTROSPECTION_CACHE_ENTRIES),
             lookups: TokenBucket::per_minute(LOOKUPS_PER_MINUTE),
         })
     }
@@ -211,7 +204,8 @@ impl AccountsGateway {
     /// another app or by another issuer, or signed by an unknown key; and
     /// [`AccountsError::Unavailable`] when no key set could ever be fetched.
     pub async fn verify_access_token(&self, token: &str) -> Result<Claims, AccountsError> {
-        let options = VerifyOptions::for_app(&self.app_id).with_issuer(self.issuer.clone());
+        let mut options = VerifyOptions::for_app(&self.app_id).with_issuer(self.issuer.clone());
+        options.leeway_seconds = 0;
         let jwks: Arc<Jwks> = self
             .jwks
             .get(&self.client)
@@ -231,34 +225,28 @@ impl AccountsGateway {
         }
     }
 
-    /// Asks Silicon Accounts whether a token is still active, reusing an
-    /// answer for at most [`INTROSPECTION_TTL`].
+    /// Confirms the token is an active access token for Briefcase now.
+    /// Refresh tokens and missing credential/audience facts fail closed.
     ///
     /// # Errors
     ///
     /// Returns [`AccountsError::Unavailable`] or
     /// [`AccountsError::CredentialsRejected`] when the check itself failed.
     pub async fn introspect(&self, token: &str) -> Result<Introspection, AccountsError> {
-        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        if let Some(answer) = self.introspections.get(&key) {
-            return Ok(answer);
-        }
         let answer = match self.app().introspect(token).await {
-            Ok(result) if result.active => Introspection::Active {
-                subject: result.sub,
-            },
+            Ok(result)
+                if result.active
+                    && result.token_type.as_deref() == Some("access_token")
+                    && result.client_id.as_deref() == Some(self.app_id.as_str()) =>
+            {
+                Introspection::Active {
+                    subject: result.sub,
+                }
+            }
             Ok(_) => Introspection::Inactive,
             Err(error) => return Err(service_error(&error)),
         };
-        self.introspections.insert(key, answer.clone());
         Ok(answer)
-    }
-
-    /// Drops reused introspection answers for an account whose sign-ins ended.
-    pub fn forget_introspections_for(&self, uuid: &str) {
-        self.introspections.remove_where(|_, answer| {
-            matches!(answer, Introspection::Active { subject: Some(subject) } if subject == uuid)
-        });
     }
 
     /// Verifies a proof token another app sent.
@@ -486,6 +474,21 @@ mod tests {
             code(gateway.verify_access_token(&issuer.sign(&expired)).await),
             "token_expired"
         );
+        // No default 30-second grace period for expired or future credentials.
+        let just_expired = issuer.claims("zQo", "carbon", "c:ada", -31, 30);
+        assert_eq!(
+            code(
+                gateway
+                    .verify_access_token(&issuer.sign(&just_expired))
+                    .await
+            ),
+            "token_expired"
+        );
+        let future = issuer.claims("zQo", "carbon", "c:ada", 20, 600);
+        assert_eq!(
+            code(gateway.verify_access_token(&issuer.sign(&future)).await),
+            "token_not_yet_valid"
+        );
         let forged = TestIssuer::new(9, "k7", &server.uri()).token("zQo", "carbon", "c:ada");
         assert_eq!(
             code(gateway.verify_access_token(&forged).await),
@@ -530,40 +533,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn introspection_is_reused_for_thirty_seconds_and_inactive_is_reported()
-    -> anyhow::Result<()> {
+    async fn introspection_rechecks_class_audience_and_revocation_every_time() -> anyhow::Result<()>
+    {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/oauth/introspect"))
-            .and(header_exists("authorization"))
-            .and(body_string_contains("token=active-token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"active": true, "sub": "zQo"})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/oauth/introspect"))
-            .and(body_string_contains("token=revoked-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": false})))
-            .expect(1)
-            .mount(&server)
-            .await;
         let gateway = AccountsGateway::new(&settings(&server)?)?;
-        for _ in 0..3 {
-            assert_eq!(
-                gateway.introspect("active-token").await?,
+        for answer in [
+            json!({"active": true, "sub": "zQo", "client_id": "briefcase", "token_type": "access_token"}),
+            json!({"active": false}),
+            json!({"active": true, "sub": "zQo", "client_id": "briefcase", "token_type": "refresh_token"}),
+            json!({"active": true, "sub": "zQo", "client_id": "other", "token_type": "access_token"}),
+            json!({"active": true, "sub": "zQo", "client_id": "briefcase"}),
+            json!({"active": true, "sub": "zQo", "token_type": "access_token"}),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/oauth/introspect"))
+                .and(header_exists("authorization"))
+                .and(body_string_contains("token=same-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(answer.clone()))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let expected = if answer["active"] == true
+                && answer["client_id"] == "briefcase"
+                && answer["token_type"] == "access_token"
+            {
                 Introspection::Active {
-                    subject: Some("zQo".to_owned())
+                    subject: Some("zQo".to_owned()),
                 }
-            );
+            } else {
+                Introspection::Inactive
+            };
+            for _ in 0..2 {
+                assert_eq!(gateway.introspect("same-token").await?, expected);
+            }
         }
-        assert_eq!(
-            gateway.introspect("revoked-token").await?,
-            Introspection::Inactive
-        );
-        gateway.forget_introspections_for("zQo");
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            gateway.introspect("same-token").await,
+            Err(AccountsError::Unavailable { .. })
+        ));
         Ok(())
     }
 

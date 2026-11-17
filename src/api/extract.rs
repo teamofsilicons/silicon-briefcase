@@ -63,12 +63,12 @@ pub(crate) async fn authenticate_with_token(
     let token = auth::bearer_token(headers)?;
     let actor = state
         .accounts
-        .authenticate_token(token.expose_secret(), action.requires_introspection())
+        .authenticate_token(token.expose_secret())
         .await?;
     tracing::debug!(
         accounts.action = action.as_str(),
         accounts.resource = resource,
-        accounts.introspected = action.requires_introspection(),
+        accounts.introspected = true,
         "Silicon Accounts access token verified"
     );
     let organizations = match &state.organizations {

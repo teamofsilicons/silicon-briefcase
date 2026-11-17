@@ -11,10 +11,6 @@
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use wiremock::{
-    Mock, ResponseTemplate,
-    matchers::{method, path},
-};
 
 use super::accounts_tests::{Fixture, fixture_with_store};
 use crate::infrastructure::accounts::test_support::{carbon_summary, silicon_summary};
@@ -101,12 +97,6 @@ impl World {
             silicon_summary(&rover.uuid, &rover.id, (&bob.uuid, &bob.id)),
         )
         .await;
-        // Sensitive changes introspect; every token here is still active.
-        Mock::given(method("POST"))
-            .and(path("/v1/oauth/introspect"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "active": true })))
-            .mount(&f.server)
-            .await;
         let world = Self {
             f,
             ada,

@@ -1,10 +1,12 @@
 # Briefcase HTTP API
 
-Contract **4.1.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
+Contract **5.0.0**, served under `/api/v1`. See the [operation inventory](operations.md), [generated reference](reference.md), and [OpenAPI](../../openapi.yaml).
+
+Build a complete frontend with the [interface API guide](../interfaces.md), including work-account discovery, organization administration and team sharing.
 
 ## Authentication
 
-Normal requests use `Authorization: Bearer <Silicon Accounts access token>` issued to Briefcase. `GET /accounts` is public discovery; `GET /me` verifies the caller. Accounts owns sign-in, refresh and revocation. Neither IAM credentials nor organization or testing selectors are accepted.
+Normal requests use `Authorization: Bearer <Silicon Accounts access token>` issued to Briefcase. Every bearer request is verified locally and introspected online for current access-token class, app audience and exact account subject; failed checks deny access. `GET /accounts` is public discovery; `GET /me` verifies the caller. Accounts owns sign-in, refresh and revocation. Neither IAM credentials nor organization or testing selectors are accepted.
 
 Every account has a drive. Listings, uploads, usage, bin and storage configuration default to the caller's drive and can select another permitted drive by its owner id or UUID. Entry routes derive the drive from the entry itself. Custodian and explicit-sharing checks apply consistently; hidden and missing entries both return 404.
 

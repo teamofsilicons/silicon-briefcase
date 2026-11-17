@@ -2,9 +2,11 @@
 
 File storage for personal and work accounts, Silicons, and apps acting with Silicon Accounts approval. Each account owns a drive. Accounts, organization and team shares, and custodian authority govern access. Briefcase 5.0 includes [Organizations management and sharing](docs/organizations.md), using Organizations' shared app-session API. The API, website, CLI and Rust client are released; see the [production release record](deploy/RELEASE-organizations.md).
 
-- Rust API and worker: Accounts JWT/JWKS verification, sensitive-action introspection, signed account events, per-drive row security, S3 streaming, immutable versions, share expiry, a 45-day bin, and delegated uploads.
+- Rust API and worker: Accounts JWT/JWKS verification, live access-token introspection on every request, signed account events, per-drive row security, S3 streaming, immutable versions, share expiry, a 45-day bin, and delegated uploads.
 - Native CLI and Rust client: public device/short-lived-token sign-in, locked token refresh, precise paths and sharing, streaming operations, and Silicon Apps packaging.
 - Next.js 16 frontend: the Accounts/Apps Arc UI design system, hosted PKCE sign-in with sealed httpOnly sessions, same-origin streaming proxy, file management, document previews and public links.
+
+For full frontend integrations, start with the [interface API guide](docs/interfaces.md).
 
 Start with [documentation](docs/README.md), [web setup](web/README.md), [CLI](docs/cli/README.md), [client](docs/client/README.md), or [OpenAPI](openapi.yaml). Operator setup is in [deployment](docs/deployment.md). Identity mapping and rollout constraints are in [cutover](docs/migration/cutover.md); verified local work is recorded in [progress](docs/migration/progress.md).
 

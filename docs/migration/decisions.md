@@ -13,7 +13,13 @@ Every API route takes the caller's own Silicon Accounts access token (`Authoriza
 `proof_required`, so an app can never fall back to a user token or the reverse. The capability-only transfer
 route keeps its upload capability and refuses any `Authorization` header.
 
-### S2. Local verification, introspection only where revocation must be immediate
+### S2. Local verification, introspection only where revocation must be immediate (superseded)
+
+As of the 2026-11-17 interface update, every bearer request also performs live
+introspection with access-token, audience and subject checks, without caching.
+JWT expiry/not-before leeway is zero. The original migration choice below is
+retained as history; see [the current interface contract](../interfaces.md).
+
 Tokens are verified locally with the cached JWKS (refetch on an unknown `kid` at most every 30 s, refresh after
 1 h, keep serving stale keys if Silicon Accounts is unreachable). Introspection (answer reused ≤ 30 s) runs for:
 grants, invitations, expiring-share changes and link access (`Action::GrantPermission`), revocations, delete /

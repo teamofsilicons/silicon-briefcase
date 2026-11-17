@@ -1,6 +1,48 @@
 # HTTP operation reference
 
-Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 4.1.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative.
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.0.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
+
+## List this account’s organizations and available sharing targets
+
+`GET /organizations` · `listOrganizations`
+
+Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized organization data or applied action result |
+| default | Error |
+
+## Read visible members, teams, invitations and capabilities
+
+`GET /organizations/{org}` · `readOrganization`
+
+Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `org` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized organization data or applied action result |
+| default | Error |
+
+## Manage organization members, admins, teams and policies
+
+`POST /organizations/{org}/actions` · `manageOrganization`
+
+Uses the current Briefcase Accounts session. Linked accounts do not grant authority. Organizations checks current roles and app access.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `org` | path | yes |
+| `Idempotency-Key` | header | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Current authorized organization data or applied action result |
+| default | Error |
 
 ## Report the API version and per-operation contract revisions
 
@@ -79,6 +121,10 @@ Newest share first, one item per shared entry, each with the account whose drive
 
 A Silicon acts on what it receives, so it accepts shares only from its custodian, the other Silicons its custodian looks after, and the accounts listed here. Only the Silicon itself and its custodian may read the list (403 `not_silicons_custodian`); naming a Carbon is 422 `not_a_silicon`.
 
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `silicon` | path | yes |
+
 | Response | Meaning |
 | --- | --- |
 | 200 | The accounts allowed to share with the Silicon, oldest first (Cache-Control no-store) |
@@ -89,6 +135,11 @@ A Silicon acts on what it receives, so it accepts shares only from its custodian
 `PUT /silicons/{silicon}/allowed-accounts/{account}` · `allowAccountToShareWithSilicon`
 
 Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`). Allowing the Silicon itself is 422 `allowance_self`.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `silicon` | path | yes |
+| `account` | path | yes |
 
 | Response | Meaning |
 | --- | --- |
@@ -101,6 +152,11 @@ Only the Silicon itself or its custodian may allow (403 `not_silicons_custodian`
 `DELETE /silicons/{silicon}/allowed-accounts/{account}` · `disallowAccountToShareWithSilicon`
 
 Shares the account already made stay; the Silicon or its custodian can revoke them one by one. 404 when the account was not allowed.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `silicon` | path | yes |
+| `account` | path | yes |
 
 | Response | Meaning |
 | --- | --- |
@@ -137,7 +193,7 @@ Filtering only ever returns entries the caller can already see.
 
 `POST /entries` · `createFolder`
 
-Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when neither is given. `drive` names the drive for `parent_path` or the top (its owner's `c:`/`si:` id or uuid; the caller's own by default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422 `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. `invitees` follow the sharing rules of `POST /entries/{entry_id}/invitations`. Sibling name collisions return 409 without exposing hidden entry metadata.
+Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when neither is given. `drive` names the drive for `parent_path` or the top (its owner's `c:`/`si:` id or uuid; the caller's own by default) and is refused with `parent_id`. Only the drive's owner, and the custodian of a Silicon that owns it, may add at the top; inside a folder `write` is needed. `apps` at the top of a drive is kept for apps (422 `reserved_name`). There is no Public space and there are no tags any more, so `root_type` other than `private` is 422 `public_space_retired` or `tags_retired`, and `tag` is `tags_retired`. Inline `invitees` accept accounts only; create the folder first, then use its invitation route for team or organization shares. Sibling name collisions return 409 without exposing hidden entry metadata.
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -154,6 +210,10 @@ Creates a folder in `parent_id` or `parent_path`, or at the top of a drive when 
 
 
 
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `entry_id` | path | yes |
+
 | Response | Meaning |
 | --- | --- |
 | 200 | Entry metadata |
@@ -167,6 +227,7 @@ Renames an entry and/or moves it to another folder of the same drive. Entries mo
 
 | Parameter | Location | Required |
 | --- | --- | --- |
+| `entry_id` | path | yes |
 | `Idempotency-Key` | header | yes |
 
 | Response | Meaning |
@@ -179,6 +240,10 @@ Renames an entry and/or moves it to another folder of the same drive. Entries mo
 `DELETE /entries/{entry_id}` · `moveEntryToBin`
 
 The entry's creator, the drive's owner, and the custodian of either may move an entry to the bin. Delete is never shared.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `entry_id` | path | yes |
 
 | Response | Meaning |
 | --- | --- |
@@ -251,6 +316,10 @@ Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of 
 
 
 
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `entry_id` | path | yes |
+
 | Response | Meaning |
 | --- | --- |
 | 200 | Explicit permissions |
@@ -261,6 +330,10 @@ Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of 
 `POST /entries/{entry_id}/permissions` · `grantPermission`
 
 Anyone signed in to Briefcase can share with a Carbon. A Silicon accepts shares only from its custodian, the other Silicons its custodian looks after, and accounts it or its custodian allowed with `PUT /silicons/{silicon}/allowed-accounts/{account}`; anyone else is refused with 403 `silicon_not_open`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `entry_id` | path | yes |
 
 | Response | Meaning |
 | --- | --- |
@@ -308,17 +381,6 @@ Names up to 100 targets by identifier, path, or both. Identifiers may name entri
 | Response | Meaning |
 | --- | --- |
 | 200 | Permission-filtered results |
-| default | Error |
-
-## Retired telemetry intake
-
-`POST /telemetry` · `submitTelemetry`
-
-Briefcase records no telemetry. Returns HTTP 410 without reading the request body. The operation stays in the catalogue only because 4.0 clients verify it before their first call; it is removed with the next contract major.
-
-| Response | Meaning |
-| --- | --- |
-| 410 | Telemetry was removed from Briefcase (`telemetry_removed`); nothing is recorded |
 | default | Error |
 
 ## Submit a bug report with an optional proposed fix
@@ -850,14 +912,3 @@ Requires a User verification proof with scope briefcase.link_access.update from 
 | --- | --- |
 | 200 | Success |
 | default | Error |
-
-## Manage organizations and teams
-
-`GET /organizations` lists this account’s organizations and current file-sharing
-targets. `GET /organizations/{org}` returns permitted members, teams, invitations
-and capabilities. `POST /organizations/{org}/actions` applies a domain action,
-requires `Idempotency-Key`, and checks current membership, role and app policy.
-See [Organizations](../organizations.md) for supported actions and account boundaries.
-
-Invitation recipients also accept `organization` and `team`; take their IDs from
-`GET /organizations`. File access follows current membership and exclusions.

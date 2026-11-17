@@ -67,6 +67,63 @@ const EXPECTED_OPERATIONS: [&str; 59] = [
 ];
 
 #[test]
+fn interface_reference_covers_every_operation_and_organization_payload() -> anyhow::Result<()> {
+    let document: Value = serde_yaml::from_str(include_str!("../openapi.yaml"))?;
+    let reference = include_str!("../docs/api/reference.md");
+    for operation in EXPECTED_OPERATIONS {
+        assert!(
+            reference.contains(&format!("· `{operation}`")),
+            "missing {operation}"
+        );
+    }
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["Invitation"]["properties"]["principal"]["$ref"].as_str(),
+        Some("#/components/schemas/InvitationRecipient"),
+        "Invitation responses must describe team and organization principals too"
+    );
+    for (route, method, schema) in [
+        ("/organizations", "get", "OrganizationContext"),
+        ("/organizations/{org}", "get", "OrganizationDetail"),
+        (
+            "/organizations/{org}/actions",
+            "post",
+            "OrganizationActionResult",
+        ),
+    ] {
+        assert_eq!(document["paths"][route][method]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].as_str(), Some(format!("#/components/schemas/{schema}").as_str()));
+        assert!(schemas[schema].is_mapping());
+    }
+    let variants = schemas["OrganizationAction"]["oneOf"]
+        .as_sequence()
+        .ok_or_else(|| anyhow::anyhow!("action variants missing"))?;
+    let actions: BTreeSet<_> = variants
+        .iter()
+        .filter_map(|v| v["properties"]["action"]["const"].as_str())
+        .collect();
+    assert_eq!(
+        actions,
+        BTreeSet::from([
+            "update",
+            "team_create",
+            "team_update",
+            "team_delete",
+            "team_member_add",
+            "team_member_remove",
+            "team_admin_set",
+            "admin_set",
+            "member_update",
+            "invite",
+            "invite_cancel",
+            "invite_resend",
+            "member_remove",
+            "policy_update",
+        ])
+    );
+    Ok(())
+}
+
+#[test]
 fn openapi_contract_is_parseable_and_operation_ids_are_stable() -> anyhow::Result<()> {
     let document = serde_yaml::from_str::<Value>(include_str!("../openapi.yaml"))?;
     let root = mapping(&document, "document root")?;
