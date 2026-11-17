@@ -366,6 +366,136 @@ async fn me_verifies_access_tokens_and_records_the_account() -> anyhow::Result<(
 }
 
 #[tokio::test]
+async fn work_account_can_open_organizations_and_keep_id_history() -> anyhow::Result<()> {
+    let Some(mut f) = fixture("").await? else {
+        return Ok(());
+    };
+    let account = f.uuid("Ada");
+    let first = format!("{}.example", f.id("c:ada"));
+    let second = format!("{}.example", f.id("c:ada-new"));
+    let token = f.issuer.token(&account, "carbon", &first);
+    let organizations = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/integrations/briefcase/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account_uuid": account,
+            "organizations": [{"org_id": "example", "name": "Example"}],
+            "groups": ["organization:example"],
+            "share_targets": [],
+        })))
+        .mount(&organizations)
+        .await;
+    f.with_organizations(&organizations.uri())?;
+
+    let (status, body) = f
+        .bearer(Method::GET, "/api/v1/organizations", &token, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["organizations"][0]["org_id"], "example");
+    assert_eq!(f.account_row(&account).await?["public_id"], first);
+    for route in ["/api/v1/drives", "/api/v1/entries"] {
+        let (status, body) = f.bearer(Method::GET, route, &token, None).await?;
+        assert_eq!(status, StatusCode::OK, "{route}: {body}");
+    }
+
+    let changed = json!({
+        "uuid": account, "membership_id": format!("briefcase:{account}"),
+        "kind": "carbon", "old_id": first, "new_id": second,
+    });
+    assert_eq!(
+        f.deliver(
+            "account.id_changed",
+            OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            &changed,
+        )
+        .await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(f.account_row(&account).await?["public_id"], second);
+    let previous: Vec<String> = sqlx::query_scalar(
+        "SELECT public_id FROM briefcase.account_id_history WHERE account_uuid = $1",
+    )
+    .bind(&account)
+    .fetch_all(&f.admin)
+    .await?;
+    assert_eq!(previous, vec![first]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_id_constraints_accept_work_ids_and_reject_malformed_ids() -> anyhow::Result<()> {
+    let Some(f) = fixture("").await? else {
+        return Ok(());
+    };
+    let longest_work_id = format!("si:{}.{}", "a".repeat(64), "b".repeat(64));
+    for (kind, id) in [
+        ("carbon", "c:ada.example"),
+        ("silicon", "si:scout.example"),
+        ("silicon", longest_work_id.as_str()),
+    ] {
+        let account = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO briefcase.accounts (account_uuid, kind, public_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&account)
+        .bind(kind)
+        .bind(id)
+        .execute(&f.admin)
+        .await?;
+        sqlx::query("INSERT INTO briefcase.account_id_history (account_uuid, public_id, replaced_at) VALUES ($1, $2, clock_timestamp())")
+            .bind(&account)
+            .bind(id)
+            .execute(&f.admin)
+            .await?;
+    }
+
+    let account = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO briefcase.accounts (account_uuid, kind) VALUES ($1, 'carbon')")
+        .bind(&account)
+        .execute(&f.admin)
+        .await?;
+    for id in [
+        "c:ada.",
+        "c:.example",
+        "c:ada..example",
+        "c:ada.example.extra",
+        "c:Ada.example",
+        "c:ada/example",
+    ] {
+        let constraint =
+            sqlx::query("UPDATE briefcase.accounts SET public_id = $2 WHERE account_uuid = $1")
+                .bind(&account)
+                .bind(id)
+                .execute(&f.admin)
+                .await
+                .err()
+                .and_then(|error| {
+                    error
+                        .as_database_error()
+                        .and_then(|error| error.constraint().map(str::to_owned))
+                });
+        assert_eq!(
+            constraint.as_deref(),
+            Some("accounts_public_id_check"),
+            "{id}"
+        );
+        let constraint = sqlx::query("INSERT INTO briefcase.account_id_history (account_uuid, public_id, replaced_at) VALUES ($1, $2, clock_timestamp())")
+            .bind(&account)
+            .bind(id)
+            .execute(&f.admin)
+            .await
+            .err()
+            .and_then(|error| error.as_database_error().and_then(|error| error.constraint().map(str::to_owned)));
+        assert_eq!(
+            constraint.as_deref(),
+            Some("account_id_history_public_id_check"),
+            "{id}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_access_token_works_in_the_accounts_own_drive() -> anyhow::Result<()> {
     let Some(f) = fixture("").await? else {
         return Ok(());
