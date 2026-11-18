@@ -306,6 +306,9 @@ pub struct PermissionGrantCreateDto {
 /// Explicit permission grant response.
 #[derive(Clone, Debug, Serialize)]
 pub struct PermissionGrantDto {
+    /// True while the offer is waiting for recipient approval.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending_review: bool,
     /// Grant identifier.
     pub id: Uuid,
     /// Carbon or Silicon receiving authority.

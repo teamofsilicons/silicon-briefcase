@@ -25,7 +25,7 @@ pub const SELECTED_VERSION_HEADER: HeaderName = HeaderName::from_static("briefca
 pub const SUPPORTED_API_VERSIONS: [&str; 1] = ["v1"];
 
 /// Version of the published contract document, matching `openapi.yaml`.
-pub const CONTRACT_VERSION: &str = "5.2.0";
+pub const CONTRACT_VERSION: &str = "5.3.0";
 
 /// Service identity a client checks before trusting anything else it reads.
 pub const SERVICE_NAME: &str = "silicon-briefcase";
@@ -44,7 +44,31 @@ pub struct OperationVersion {
 }
 
 /// Every contracted operation, with the revision this build serves.
-pub const OPERATIONS: [OperationVersion; 67] = [
+pub const OPERATIONS: [OperationVersion; 71] = [
+    operation(
+        "listShareReview",
+        "1.0.0",
+        "GET",
+        "/accounts/{account}/share-review",
+    ),
+    operation(
+        "decideShareReview",
+        "1.0.0",
+        "POST",
+        "/accounts/{account}/share-review/{id}",
+    ),
+    operation(
+        "allowReviewSender",
+        "1.0.0",
+        "PUT",
+        "/accounts/{account}/share-review/senders/{sender}",
+    ),
+    operation(
+        "removeReviewSender",
+        "1.0.0",
+        "DELETE",
+        "/accounts/{account}/share-review/senders/{sender}",
+    ),
     operation(
         "readIncomingShares",
         "1.0.0",
@@ -53,7 +77,7 @@ pub const OPERATIONS: [OperationVersion; 67] = [
     ),
     operation(
         "setIncomingShares",
-        "1.0.0",
+        "1.1.0",
         "PUT",
         "/accounts/{account}/incoming-shares",
     ),
@@ -125,7 +149,7 @@ pub const OPERATIONS: [OperationVersion; 67] = [
         "/silicons/{silicon}/allowed-accounts/{account}",
     ),
     operation("listEntries", "2.0.0", "GET", "/entries"),
-    operation("createFolder", "2.1.0", "POST", "/entries"),
+    operation("createFolder", "2.2.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.1.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
@@ -194,13 +218,13 @@ pub const OPERATIONS: [OperationVersion; 67] = [
     ),
     operation(
         "grantPermission",
-        "1.2.0",
+        "1.3.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
     operation(
         "revokePermission",
-        "1.0.0",
+        "1.1.0",
         "DELETE",
         "/entries/{entry_id}/permissions/{grant_id}",
     ),
@@ -245,19 +269,19 @@ pub const OPERATIONS: [OperationVersion; 67] = [
     ),
     operation(
         "listInvitations",
-        "2.0.0",
+        "2.1.0",
         "GET",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "createInvitation",
-        "2.2.0",
+        "2.3.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "revokeInvitation",
-        "1.0.0",
+        "1.1.0",
         "DELETE",
         "/entries/{entry_id}/invitations/{grant_id}",
     ),
@@ -289,7 +313,7 @@ pub const OPERATIONS: [OperationVersion; 67] = [
     operation("readPublicEntry", "2.0.0", "GET", "/public/{owner}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
-        "3.1.0",
+        "3.2.0",
         "POST",
         "/obo/invitations",
     ),

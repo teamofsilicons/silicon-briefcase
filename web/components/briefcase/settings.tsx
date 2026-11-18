@@ -16,7 +16,7 @@ import { Switch } from "@teamofsilicons/silicon-ui/switch";
 import { Select } from "@teamofsilicons/silicon-ui/select";
 import { Page } from "@/components/foundation/layout/layout";
 import { PageBar } from "@/components/foundation/page/page-bar";
-import { Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
+import { LinkItem, Row, Section, SectionSkeleton, Tile } from "@/components/foundation/page/rows";
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
@@ -90,14 +90,16 @@ export function Settings({ initialDrives }: { initialDrives: { items: Drive[] } 
           <Row lead={<Tile><UserRound size={16} strokeWidth={2} /></Tile>}
             title={<span id="incoming-shares-label">Allow shares from anyone</span>}
             detail={<span id="incoming-shares-detail">{chosen.owner.kind === "silicon"
-              ? "Turn off to accept shares only from this Silicon’s saved contacts, its custodian and other Silicons with the same custodian."
-              : "Turn off to accept shares only from this account’s saved contacts and the Silicons it looks after."}</span>}>
+              ? "Turn off to review new senders. Saved contacts, allowed senders, this Silicon’s custodian and other Silicons with the same custodian can share directly."
+              : "Turn off to review new senders. Saved contacts, allowed senders and the Silicons this account looks after can share directly."}</span>}>
             {incoming.data ? (
               <Switch aria-labelledby="incoming-shares-label" aria-describedby="incoming-shares-detail"
                 checked={incoming.data.allow_from_anyone} disabled={busy || incoming.isError}
                 onCheckedChange={value => void saveIncomingShares(value)} />
             ) : incoming.isPending ? <span role="status">Loading…</span> : null}
           </Row>
+          {incoming.data?.allow_from_anyone === false ? <LinkItem href={`/share-review?drive=${encodeURIComponent(drive)}`}
+            lead={<Tile><UserRound size={16} /></Tile>} title="Review incoming shares" detail="Accept files and folders or allow a sender." /> : null}
         </Section>
       ) : null}
       {incoming.error ? <ErrorAlert error={incoming.error} action={<Button size="sm" variant="ghost" onClick={() => void incoming.refetch()}>Try Again</Button>} /> : null}

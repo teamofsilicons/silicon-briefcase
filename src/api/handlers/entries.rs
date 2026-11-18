@@ -124,7 +124,7 @@ pub(crate) async fn create_folder(
     extract::validation(validation::create_folder(&body))?;
     refuse_retired_spaces(&body)?;
     let context = extract::authenticate(&state, &headers, Action::CreateFolder, "entries").await?;
-    let context = match body.parent_id {
+    let mut context = match body.parent_id {
         Some(parent_id) => {
             drives::for_entry(&state, context, extract::entry_id(parent_id)?).await?
         }
@@ -152,16 +152,13 @@ pub(crate) async fn create_folder(
     let resource = parent_id.map_or(organization, |id| id.to_string());
     let metadata = extract::mutation(&headers, "create_folder", &resource, &body, true)?;
     let mut command = folder_command(body, parent_id)?;
-    let mut recipients = Vec::with_capacity(command.invitees.len());
     for invitee in &mut command.invitees {
         let (kind, id) = (
             invitee.principal.kind(),
             invitee.principal.id().as_str().to_owned(),
         );
-        invitee.principal = extract::resolve_recipient(&state, &context, kind, &id).await?;
-        recipients.push(invitee.principal.clone());
+        invitee.principal = extract::resolve_recipient(&state, &mut context, kind, &id).await?;
     }
-    let context = extract::with_recipients(context, &recipients);
     let created = extract::scoped(
         &context,
         state.metadata.create_folder(&context, command, &metadata),

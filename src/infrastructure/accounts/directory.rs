@@ -442,7 +442,13 @@ impl AccountDirectory {
         }
         let owner = AccountUuid::new(recipient.uuid.clone())
             .map_err(|error| AppError::unprocessable("invalid_account_id", error.to_string()))?;
-        if self.same_circle(sharer, &owner).await? {
+        if self.same_circle(sharer, &owner).await?
+            || self
+                .store
+                .review_sender_allowed(owner.as_str(), sharer.as_str())
+                .await
+                .map_err(database_error)?
+        {
             return Ok(true);
         }
         contacts

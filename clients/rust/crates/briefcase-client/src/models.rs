@@ -267,6 +267,49 @@ pub struct IncomingShares {
     pub allow_from_anyone: bool,
 }
 
+/// A direct share waiting for the recipient's decision.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShareOffer {
+    /// Identifier used to accept or dismiss the offer.
+    pub id: Uuid,
+    /// Name of the offered item.
+    pub name: String,
+    /// File or folder.
+    #[serde(rename = "type")]
+    pub entry_type: EntryType,
+    /// Account that made this offer.
+    pub sender: AccountSummary,
+    /// Proposed rights.
+    pub access: Vec<AccessRight>,
+    /// Whether the offer includes descendants.
+    pub inherit: bool,
+    /// Original expiry, including while waiting for review.
+    pub expires_at: Option<String>,
+}
+
+/// One page of offers and the accounts explicitly allowed by this recipient.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShareReviewPage {
+    /// Pending offers in descending ID order.
+    pub items: Vec<ShareOffer>,
+    /// Cursor for the next page.
+    pub next_cursor: Option<Uuid>,
+    /// Senders whose offers are delivered automatically.
+    pub allowed_senders: Vec<AccountSummary>,
+}
+
+/// Recipient's decision on a pending offer.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareReviewDecision {
+    /// Deliver only this offer.
+    Accept,
+    /// Deliver this sender's pending and future shares.
+    AllowSender,
+    /// Remove this offer.
+    Dismiss,
+}
+
 /// One legacy explicit allowance recorded by a Silicon or its custodian.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AllowedAccount {
@@ -496,6 +539,9 @@ pub struct EntryPage {
 /// An explicit share (permission grant) on an entry.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PermissionGrant {
+    /// Whether the recipient must accept this offer before its rights take effect.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_review: bool,
     /// Grant identifier.
     pub id: Uuid,
     /// The account the grant is for (its uuid in `id`).

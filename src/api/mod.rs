@@ -317,6 +317,18 @@ fn drive_routes() -> Router<AppState> {
             "/api/v1/accounts/{account}/incoming-shares",
             get(drive_handlers::incoming_shares).put(drive_handlers::set_incoming_shares),
         )
+        .route(
+            "/api/v1/accounts/{account}/share-review",
+            get(handlers::share_review::list),
+        )
+        .route(
+            "/api/v1/accounts/{account}/share-review/{id}",
+            post(handlers::share_review::decide),
+        )
+        .route(
+            "/api/v1/accounts/{account}/share-review/senders/{sender}",
+            put(handlers::share_review::add_sender).delete(handlers::share_review::remove_sender),
+        )
         .route("/api/v1/shared", get(drive_handlers::shared))
         .route(
             "/api/v1/silicons/{silicon}/allowed-accounts",

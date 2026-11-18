@@ -24,7 +24,7 @@ import { ActionItem, Row, Section, SectionSkeleton, Tile } from "@/components/fo
 import { ErrorAlert } from "@/components/foundation/feedback/error-alert";
 import { api } from "@/lib/client/api";
 import { notify } from "@/lib/notify";
-import { contentUrl, date, entryUrl, message, size, type Activity, type Entry, type EntryPage, type Grant, type LinkAccess, type Version } from "@/lib/briefcase/types";
+import { accessLabel, contentUrl, date, entryUrl, message, size, type Activity, type Entry, type EntryPage, type Grant, type LinkAccess, type Version } from "@/lib/briefcase/types";
 import { Preview } from "./preview";
 import { PersonAvatar, usePerson } from "./person-label";
 import { ShareAccess } from "./share-access";
@@ -35,13 +35,6 @@ const TABS = ["preview", "sharing", "versions", "activity", "details"] as const;
 const LABELS: Record<(typeof TABS)[number], string> = { preview: "Preview", sharing: "Sharing", versions: "Versions", activity: "Activity", details: "Details" };
 
 /** What a share lets someone do, in the share form's own words. */
-function accessLabel(access: string[]) {
-  if (access.includes("write") && access.includes("update")) return "Can view, add, and edit";
-  if (access.includes("update")) return "Can view and edit";
-  if (access.includes("write")) return "Can view and add files";
-  return "Can view and download";
-}
-
 type Act = (work: () => Promise<unknown>, success: string, close?: boolean) => Promise<void>;
 
 /** One share in People with access: the person's photo, or a team's or organization's tile, then what they may do. */
@@ -56,8 +49,8 @@ function GrantRow({ grant, endpoint, busy, minutes, act }: { grant: Grant; endpo
       lead={isPerson ? <PersonAvatar person={person} /> : <Tile>{type === "team" ? <UsersRound size={16} strokeWidth={2} /> : <Building2 size={16} strokeWidth={2} />}</Tile>}
       title={who}
       detail={`${what} · ${accessLabel(grant.access)} · ${grant.expires_at ? `Until ${date(grant.expires_at)}` : "No expiry"}`}>
-      {grant.expires_at ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => void act(() => api.patch(`${endpoint}/invitations/${grant.id}`, minutes ? { expires_in_minutes: Number(minutes) } : { permanent: true }), minutes ? "Expiry changed" : "Share made permanent")}>{minutes ? "Set New Expiry" : "Keep Sharing"}</Button> : null}
-      <Button variant="ghost" size="sm" disabled={busy} aria-label={`Remove access for ${who}`} onClick={() => void act(() => api.delete(`${endpoint}/invitations/${grant.id}`), "Access removed")}>Remove</Button>
+      {grant.expires_at && !grant.pending_review ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => void act(() => api.patch(`${endpoint}/invitations/${grant.id}`, minutes ? { expires_in_minutes: Number(minutes) } : { permanent: true }), minutes ? "Expiry changed" : "Share made permanent")}>{minutes ? "Set New Expiry" : "Keep Sharing"}</Button> : null}
+      <Button variant="ghost" size="sm" disabled={busy} aria-label={`${grant.pending_review ? "Withdraw offer to" : "Remove access for"} ${who}`} onClick={() => void act(() => api.delete(`${endpoint}/invitations/${grant.id}`), grant.pending_review ? "Offer withdrawn" : "Access removed")}>{grant.pending_review ? "Withdraw" : "Remove"}</Button>
     </Row>
   );
 }
@@ -82,7 +75,7 @@ export function EntryDetail({ entry: initial, onClose, onChanged }: { entry: Ent
   const folderQuery = useInfiniteQuery({ initialPageParam: null as string | null, getNextPageParam: (last: EntryPage) => last.next_cursor ?? undefined, queryKey: ["move-folders", entry.org_id, selectedFolder], queryFn: ({ pageParam }) => api.get<EntryPage>("/v1/entries", { query: { drive: entry.org_id, path: selectedFolder, cursor: pageParam } }), enabled: moving });
   const act: Act = async (work, success, close = false) => {
     setBusy(true); setFailure("");
-    try { await work(); notify.success(success); await cache.invalidateQueries({ queryKey: ["entry", entry.id] }); await cache.invalidateQueries({ queryKey: ["grants", entry.id] }); await cache.invalidateQueries({ queryKey: ["link", entry.id] }); await cache.invalidateQueries({ queryKey: ["versions", entry.id] }); onChanged(); if (close) onClose(); }
+    try { const result = await work(); notify.success(result && typeof result === "object" && "pending_review" in result && result.pending_review ? "Sent for review" : success); await cache.invalidateQueries({ queryKey: ["entry", entry.id] }); await cache.invalidateQueries({ queryKey: ["grants", entry.id] }); await cache.invalidateQueries({ queryKey: ["link", entry.id] }); await cache.invalidateQueries({ queryKey: ["versions", entry.id] }); onChanged(); if (close) onClose(); }
     catch (error) { setFailure(message(error)); } finally { setBusy(false); }
   };
   const canUpdate = entry.effective_access.includes("update");
@@ -127,11 +120,14 @@ export function EntryDetail({ entry: initial, onClose, onChanged }: { entry: Ent
             {invitations.error ? <ErrorAlert error={invitations.error} /> : null}
             {link.isPending && tab === "sharing" ? <SectionSkeleton rows={2} title label="Loading sharing" /> : null}
             {link.data?.can_manage ? <ShareAccess endpoint={endpoint} folder={entry.type === "folder"} busy={busy} minutes={minutes} setMinutes={setMinutes} act={act} /> : null}
-            {link.data?.can_manage && grants.length ? (
-              <Section id="people-with-access" title="People with access" count={grants.length}>
-                {grants.map(grant => <GrantRow key={grant.id} grant={grant} endpoint={endpoint} busy={busy} minutes={minutes} act={act} />)}
+            {link.data?.can_manage && grants.some(grant => !grant.pending_review) ? (
+              <Section id="people-with-access" title="People with access" count={grants.filter(grant => !grant.pending_review).length}>
+                {grants.filter(grant => !grant.pending_review).map(grant => <GrantRow key={grant.id} grant={grant} endpoint={endpoint} busy={busy} minutes={minutes} act={act} />)}
               </Section>
             ) : null}
+            {link.data?.can_manage && grants.some(grant => grant.pending_review) ? <Section id="awaiting-review" title="Awaiting review">
+                {grants.filter(grant => grant.pending_review).map(grant => <GrantRow key={grant.id} grant={grant} endpoint={endpoint} busy={busy} minutes={minutes} act={act} />)}
+              </Section> : null}
             {invitations.hasNextPage ? <Button variant="secondary" size="sm" loading={invitations.isFetchingNextPage} onClick={() => void invitations.fetchNextPage()}>More Shares</Button> : null}
             {link.data ? (
               <Section id="link-access" title="Anyone with the link">

@@ -59,7 +59,7 @@ Paginated commands accept `--cursor`; commands with `--all` walk every page. Che
 
 ## Sharing and retention
 
-Share with an exact `c:` or `si:` id. Delete rights cannot be shared. Carbons and Silicons accept direct shares from anyone by default. Use `briefcase allow policy --from contacts` to accept only saved Silicon Contacts and accounts in the same custodian circle. Use `--from anyone` to reopen sharing. A custodian may select its Silicon with `--for si:scout`.
+Share with an exact `c:` or `si:` id. Delete rights cannot be shared. Carbons and Silicons accept direct shares from anyone by default. Use `briefcase allow policy --from contacts` to review offers outside saved Silicon Contacts, allowed senders and the custodian circle. Use `--from anyone` to reopen sharing. A custodian may select its Silicon with `--for si:scout`.
 
 ```sh
 briefcase share notes/report.pdf c:ada --access read,update
@@ -103,3 +103,7 @@ Share a folder with `briefcase share plans organization:example --inherit`, or
 `briefcase share plans team:example/TEAM_UUID --inherit --access read,update`.
 Personal and work account profiles remain separate; a linked personal identity
 never acquires a work account’s roles. Team membership changes affect shared access.
+
+## Incoming share review
+
+Use `briefcase allow review` to list offers. Run `briefcase allow decide OFFER accept` for one item, `allow-sender` for the sender’s pending and future offers, or `dismiss`. Use `briefcase allow sender c:ada` to allow an account in advance, and append `--remove` to remove it. Use `--for si:example` to manage a custodial drive.

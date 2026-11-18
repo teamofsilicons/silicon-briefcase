@@ -11,6 +11,7 @@ pub struct ExecutionContext {
     authorization: RequestAuthContext,
     request_id: String,
     share_recipients: Vec<ActorRef>,
+    review_recipients: Vec<ActorRef>,
     organizations: OrganizationContext,
 }
 
@@ -22,6 +23,7 @@ impl ExecutionContext {
             authorization,
             request_id: request_id.into(),
             share_recipients: Vec::new(),
+            review_recipients: Vec::new(),
             organizations: OrganizationContext::default(),
         }
     }
@@ -53,6 +55,18 @@ impl ExecutionContext {
     pub fn with_share_recipients(mut self, recipients: Vec<ActorRef>) -> Self {
         self.share_recipients = recipients;
         self
+    }
+
+    /// Adds one directory-resolved account and the delivery decision for this request.
+    pub(crate) fn add_share_recipient(&mut self, recipient: &ActorRef, needs_review: bool) {
+        self.share_recipients.push(recipient.clone());
+        if needs_review {
+            self.review_recipients.push(recipient.clone());
+        }
+    }
+
+    pub(crate) fn review_recipients(&self) -> &[ActorRef] {
+        &self.review_recipients
     }
 
     /// Returns the accounts a share in this request names.

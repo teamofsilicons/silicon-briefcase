@@ -12,6 +12,8 @@ INSERT INTO uuid_refs SELECT table_name,id_column,kind_column,NULL FROM link_act
 INSERT INTO uuid_refs VALUES
     ('accounts','account_uuid','kind',NULL),
     ('contact_connections','account_uuid',NULL,NULL),
+    ('share_review_senders','sender',NULL,NULL),
+    ('share_review_senders','recipient',NULL,NULL),
     ('invite_history','sender',NULL,NULL),
     ('invite_history','recipient',NULL,NULL),
     ('accounts','custodian_uuid',NULL,'carbon'),

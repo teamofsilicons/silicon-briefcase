@@ -10,7 +10,7 @@ export type Entry = {
 };
 export type EntryPage = { items: Entry[]; next_cursor: string | null };
 export type SharedPage = { items: { entry: Entry; owner: Account; shared_by?: Account[] }[]; next_cursor: string | null };
-export type Grant = { id: string; principal: { type: string; id: string; public_id?: string; name?: string }; access: string[]; inherit: boolean; expires_at: string | null };
+export type Grant = { pending_review?: boolean; id: string; principal: { type: string; id: string; public_id?: string; name?: string }; access: string[]; inherit: boolean; expires_at: string | null };
 export type LinkAccess = { enabled: boolean; effective: boolean; can_manage: boolean; inherited_from: string | null; expires_at: string | null; url: string | null };
 export type Version = { id: string; size: number; content_type: string; created_at: string; created_by?: { id: string } };
 export type Activity = { id: string; action?: string; event?: string; kind?: string; actor?: { id: string }; occurred_at: string };
@@ -25,3 +25,10 @@ export const date = (value: string | null | undefined) => value ? new Date(value
 export const entryUrl = (id: string, suffix = "") => `/v1/entries/${encodeURIComponent(id)}${suffix}`;
 export const contentUrl = (id: string, download = false) => `/api${entryUrl(id, download ? "/download" : "/content")}`;
 export const message = (error: unknown) => error instanceof ApiError ? [error.message, error.hint].filter(Boolean).join(" ") : error instanceof Error ? error.message : "The request could not be completed.";
+
+export function accessLabel(access: string[]) {
+  if (access.includes("write") && access.includes("update")) return "Can view, add, and edit";
+  if (access.includes("update")) return "Can view and edit";
+  if (access.includes("write")) return "Can view and add files";
+  return "Can view and download";
+}

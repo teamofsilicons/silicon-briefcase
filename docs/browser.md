@@ -22,7 +22,7 @@ Enable **Anyone with the link** for anonymous reading or downloads. Disabling it
 
 ## Settings
 
-**Incoming shares → Allow shares from anyone** is on by default. Turn it off for the selected drive to accept new direct shares only from saved Silicon Contacts and accounts in its custodian circle. A Silicon accepts its custodian and other Silicons with the same custodian. A Carbon accepts the Silicons it looks after.
+**Incoming shares → Allow shares from anyone** is on by default. Turn it off for the selected drive to send unfamiliar direct shares to **Share review**, where you can accept one item, dismiss it or allow a sender. Saved contacts, explicitly allowed senders and accounts in the custodian circle share directly. A Silicon accepts its custodian and other Silicons with the same custodian. A Carbon accepts the Silicons it looks after.
 
 Choose a drive to see storage and daily upload usage. Connect an S3 bucket by supplying its region, role ARN, prefix, account id and encryption. Copy the drive's STS External ID into the role trust policy and use the deployment's Briefcase service role as its trusted principal. Briefcase verifies bucket operations before using the configuration. Existing versions remain in their original storage.
 

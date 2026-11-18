@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "briefcase-client"
-version = "5.2.0"
+version = "5.3.0"
 dependencies = [
  "futures-core",
  "libc",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-briefcase"
-version = "5.2.0"
+version = "5.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

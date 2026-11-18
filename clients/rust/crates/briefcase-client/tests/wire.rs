@@ -14,6 +14,65 @@ use wiremock::{
 const ENTRY_ID: &str = "01a067ce-7f19-7790-820a-0be6b3d4f828";
 
 #[tokio::test]
+async fn review_uses_the_managed_account_and_a_scoped_decision() {
+    let server = MockServer::start().await;
+    let client = connected(&server).await;
+    let endpoint = "/api/v1/accounts/si:scout/share-review";
+    for (verb, url) in [
+        ("PUT", format!("{endpoint}/senders/c:ada")),
+        ("DELETE", format!("{endpoint}/senders/c:ada")),
+    ] {
+        Mock::given(method(verb))
+            .and(path(url))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(endpoint))
+        .and(query_param("cursor", ENTRY_ID))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items":[],"next_cursor":null,"allowed_senders":[]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("{endpoint}/{ENTRY_ID}")))
+        .and(body_json(json!({"decision":"allow_sender"})))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let id = uuid::Uuid::parse_str(ENTRY_ID).unwrap();
+    assert!(
+        client
+            .share_review("si:scout", Some(id))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    client
+        .decide_share(
+            "si:scout",
+            id,
+            briefcase_client::ShareReviewDecision::AllowSender,
+        )
+        .await
+        .unwrap();
+    for allowed in [true, false] {
+        client
+            .set_review_sender("si:scout", "c:ada", allowed)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn contacts_and_shared_filters_use_only_the_current_briefcase_credential() {
     let server = MockServer::start().await;
     let client = connected(&server).await;
@@ -130,7 +189,7 @@ fn version_document(list_entries_revision: &str) -> serde_json::Value {
         "service": "silicon-briefcase",
         "selected_api_version": "v1",
         "supported_api_versions": ["v1"],
-        "contract_version": "5.2.0",
+        "contract_version": "5.3.0",
         "build": "5.0.0",
         "operations": operations,
     })
@@ -193,9 +252,9 @@ async fn connected(server: &MockServer) -> Client {
 }
 
 #[test]
-fn the_client_carries_the_five_point_two_operation_catalogue() {
-    assert_eq!(briefcase_client::OPERATIONS.len(), 67);
-    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.2.0");
+fn the_client_carries_the_five_point_three_operation_catalogue() {
+    assert_eq!(briefcase_client::OPERATIONS.len(), 71);
+    assert_eq!(briefcase_client::CONTRACT_VERSION, "5.3.0");
     for retired in [
         "submitTelemetry",
         "readIamInfo",
@@ -226,12 +285,16 @@ fn the_client_carries_the_five_point_two_operation_catalogue() {
         "readContactPhoto",
         "readIncomingShares",
         "setIncomingShares",
+        "listShareReview",
+        "decideShareReview",
+        "allowReviewSender",
+        "removeReviewSender",
     ] {
         assert!(
             briefcase_client::OPERATIONS
                 .iter()
                 .any(|operation| operation.id == added),
-            "{added} is part of contract 5.2.0"
+            "{added} is part of contract 5.3.0"
         );
     }
 }

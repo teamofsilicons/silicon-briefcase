@@ -87,6 +87,8 @@ BEGIN
     -- What belongs to the moved entries moves with them.
     UPDATE briefcase.entry_versions AS row_ SET org_id = p_to FROM link_subtree AS below
      WHERE row_.org_id = p_from AND row_.entry_id = below.entry_id;
+    UPDATE briefcase.share_reviews AS row_ SET org_id = p_to FROM link_subtree AS below
+     WHERE row_.org_id = p_from AND row_.entry_id = below.entry_id;
     UPDATE briefcase.permission_grants AS row_ SET org_id = p_to FROM link_subtree AS below
      WHERE row_.org_id = p_from AND row_.entry_id = below.entry_id;
     UPDATE briefcase.tag_permission_grants AS row_ SET org_id = p_to FROM link_subtree AS below

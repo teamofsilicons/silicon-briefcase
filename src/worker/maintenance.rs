@@ -78,6 +78,9 @@ pub(super) async fn run(pool: &PgPool) -> Result<MaintenanceStats, sqlx::Error> 
     .await?
     .rows_affected();
 
+    sqlx::query("DELETE FROM briefcase.share_reviews WHERE expires_at <= clock_timestamp()")
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query("DELETE FROM briefcase.audit_events WHERE occurred_at < clock_timestamp() - interval '365 days'")
         .execute(&mut *transaction).await?;
     sqlx::query("UPDATE briefcase.api_contracts SET status='sunset',sunset_at=clock_timestamp() WHERE status='deprecated' AND GREATEST(deprecated_at,last_request_at) <= clock_timestamp()-interval '7 days'")

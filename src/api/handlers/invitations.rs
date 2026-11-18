@@ -63,7 +63,16 @@ pub(crate) async fn invite(
     let metadata = extract::mutation(&headers, "invite", &id.to_string(), &body, true)?;
     perform(&state, context, id, body, &metadata)
         .await
-        .map(|value| (StatusCode::CREATED, Json(value)))
+        .map(|value| delivery_response(value, StatusCode::CREATED))
+}
+
+fn delivery_response(value: Value, delivered: StatusCode) -> (StatusCode, Json<Value>) {
+    let status = if value["pending_review"] == true {
+        StatusCode::ACCEPTED
+    } else {
+        delivered
+    };
+    (status, Json(value))
 }
 
 pub(super) async fn perform(
@@ -85,7 +94,7 @@ pub(super) async fn perform(
         return Err(AppError::validation("expiring_share_is_read_only"));
     }
     let entry_id = extract::entry_id(id)?;
-    let context = drives::for_entry(state, context, entry_id).await?;
+    let mut context = drives::for_entry(state, context, entry_id).await?;
     let access = GrantedAccess::new(body.access);
     if matches!(body.principal.kind.as_str(), "organization" | "team") {
         let target = context
@@ -130,8 +139,8 @@ pub(super) async fn perform(
         }
         _ => return Err(AppError::validation("invalid_principal_type")),
     };
-    let principal = extract::resolve_recipient(state, &context, kind, &body.principal.id).await?;
-    let context = extract::with_recipients(context, std::slice::from_ref(&principal));
+    let principal =
+        extract::resolve_recipient(state, &mut context, kind, &body.principal.id).await?;
     let grant = state
         .metadata
         .grant_permission(
@@ -281,7 +290,7 @@ pub(crate) async fn delegated_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<Value>, AppError> {
+) -> Result<(StatusCode, Json<Value>), AppError> {
     let (context, body): (_, DelegatedInvite) =
         super::delegated::authorize_json(&state, &headers, &body, "briefcase.invitations.create")
             .await?;
@@ -291,8 +300,9 @@ pub(crate) async fn delegated_invite(
         body.operation_id,
         &body,
     )?;
-    Ok(Json(
+    Ok(delivery_response(
         perform(&state, context, body.entry_id, body.invitation, &metadata).await?,
+        StatusCode::OK,
     ))
 }
 #[derive(Deserialize, Serialize)]

@@ -180,6 +180,7 @@ pub struct PermissionGrantParts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionGrant {
     parts: PermissionGrantParts,
+    pending_review: bool,
     expires_at: Option<OffsetDateTime>,
 }
 
@@ -189,8 +190,22 @@ impl PermissionGrant {
     pub const fn from_parts(parts: PermissionGrantParts) -> Self {
         Self {
             parts,
+            pending_review: false,
             expires_at: None,
         }
+    }
+
+    /// Marks an offer that the recipient has not accepted.
+    #[must_use]
+    pub const fn awaiting_review(mut self) -> Self {
+        self.pending_review = true;
+        self
+    }
+
+    /// Whether the recipient still needs to approve this offer.
+    #[must_use]
+    pub const fn pending_review(&self) -> bool {
+        self.pending_review
     }
 
     /// Marks the grant as an expiring share that ends at `expires_at`.
@@ -574,7 +589,8 @@ pub fn evaluate_authorization(input: &EffectiveAuthorizationInput<'_>) -> Effect
     if input.system_kind.is_none() {
         for application in input.grants.iter().copied() {
             let grant = application.grant();
-            if grant.organization_id() == input.entry_organization_id
+            if !grant.pending_review()
+                && grant.organization_id() == input.entry_organization_id
                 && grant.principal() == input.context.actor()
                 && application.applies_to(input.entry_id)
             {

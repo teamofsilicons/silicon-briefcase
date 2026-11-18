@@ -1,6 +1,6 @@
 # HTTP operation reference
 
-Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.2.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
+Generated from the current [OpenAPI contract](../../openapi.yaml). API namespace `/api/v1`, contract 5.3.0. [Authentication and conventions](README.md) apply. Schemas in OpenAPI are authoritative. For workflows and request examples, see [Build an interface](../interfaces.md).
 
 ## List this account’s organizations and available sharing targets
 
@@ -121,11 +121,84 @@ Newest share first, one item per shared entry, each with the account whose drive
 
 An account or the custodian of a Silicon can read its preference by public ID or UUID. Returns `{"allow_from_anyone":true}` by default for existing and new accounts.
 
-## Set incoming share settings
+## Choose who may send direct shares to an account
 
 `PUT /accounts/{account}/incoming-shares` · `setIncomingShares`
 
-Send `{"allow_from_anyone":false}` to restrict new direct grants to the recipient’s saved Silicon Contacts and custodian circle. Send `true` in the same field to reopen sharing. Both return the saved object. Other accounts receive 403. The preference covers direct grants, invitations (including delegated invitations) and folder invitees. Existing grants keep their access.
+The account or its Silicon custodian may choose. When disabled, shares outside saved contacts, allowed senders and the custodian circle go to review. Previous grants retain their access.
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `account` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | Saved incoming share preference (Cache-Control no-store) |
+| default | Error |
+
+## List pending shares and allowed senders
+
+`GET /accounts/{account}/share-review` · `listShareReview`
+
+
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `account` | path | yes |
+| `cursor` | query | no |
+
+| Response | Meaning |
+| --- | --- |
+| 200 | A page of pending offers for the account or its current custodian |
+| default | Error |
+
+## Accept an offer, allow its sender, or dismiss it
+
+`POST /accounts/{account}/share-review/{id}` · `decideShareReview`
+
+
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `account` | path | yes |
+| `id` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Decision processed |
+| default | Error |
+
+## Accept this sender’s pending and future shares
+
+`PUT /accounts/{account}/share-review/senders/{sender}` · `allowReviewSender`
+
+
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `account` | path | yes |
+| `sender` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Sender allowed |
+| default | Error |
+
+## Remove a sender from the account’s allowed senders
+
+`DELETE /accounts/{account}/share-review/senders/{sender}` · `removeReviewSender`
+
+
+
+| Parameter | Location | Required |
+| --- | --- | --- |
+| `account` | path | yes |
+| `sender` | path | yes |
+
+| Response | Meaning |
+| --- | --- |
+| 204 | Sender removed |
+| default | Error |
 
 ## List a Silicon’s legacy share allowances
 
@@ -341,7 +414,7 @@ Two limits apply to the drive the file lands in, whoever uploads it: 100 GiB of 
 
 `POST /entries/{entry_id}/permissions` · `grantPermission`
 
-Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
+Carbons and Silicons accept direct shares from any signed-in account by default. Restricted recipients accept their contacts, custodian circle and explicitly allowed senders. Other direct offers return 202 and await recipient review. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -350,6 +423,7 @@ Carbons and Silicons accept direct shares from any signed-in account by default.
 | Response | Meaning |
 | --- | --- |
 | 201 | Permission granted |
+| 202 | Queued for recipient review. Access starts after approval. |
 | default | Error |
 
 ## revokePermission
@@ -775,7 +849,7 @@ Lists the entries of a zip, tar, tar.gz, tar.zst or 7z file without extracting a
 
 `POST /entries/{entry_id}/invitations` · `createInvitation`
 
-Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are retired (422 `email_recipients_retired`, `tag_recipients_retired`).
+Carbons and Silicons accept direct shares from any signed-in account by default. Restricted recipients accept their contacts, custodian circle and explicitly allowed senders. Other direct offers return 202 and await recipient review. Only the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are retired (422 `email_recipients_retired`, `tag_recipients_retired`).
 
 | Parameter | Location | Required |
 | --- | --- | --- |
@@ -785,6 +859,7 @@ Carbons and Silicons accept direct shares from any signed-in account by default.
 | Response | Meaning |
 | --- | --- |
 | 201 | Success |
+| 202 | Queued for recipient review. Access starts after approval. |
 | default | Error |
 
 ## Revoke a share (including one made to a tag before personal drives)
@@ -912,6 +987,7 @@ Requires a User verification proof with scope briefcase.invitations.create from 
 | Response | Meaning |
 | --- | --- |
 | 200 | Success |
+| 202 | Queued for recipient review. Access starts after approval. |
 | default | Error |
 
 ## Share or link an entry for the account, inside the issuing app's folder

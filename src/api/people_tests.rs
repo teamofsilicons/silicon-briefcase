@@ -1,5 +1,6 @@
 //! Real PostgreSQL/RLS and router checks; external Accounts/Contacts are loopback fixtures.
 use super::drives_tests::World;
+use anyhow::Context as _;
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use wiremock::{
@@ -59,7 +60,7 @@ async fn restricted_invitations_follow_the_recipients_live_contacts() -> anyhow:
     };
     let invite =
         json!({"principal":{"type":"silicon","id":w.scout.id},"access":["read"],"inherit":true});
-    let restricted = "incoming_shares_restricted";
+    let queue = format!("/api/v1/accounts/{}/share-review", w.scout.uuid);
     {
         let _unsaved = pair_check()
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"saved":false})))
@@ -76,12 +77,16 @@ async fn restricted_invitations_follow_the_recipients_live_contacts() -> anyhow:
             ),
             (
                 "/api/v1/entries".into(),
-                json!({"name":"must-not-exist","invitees":[invite]}),
+                json!({"name":"offered-folder","invitees":[invite]}),
             ),
         ] {
             let (status, error) = w.call(&w.bob, Method::POST, &url, Some(body)).await?;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{url}: {error}");
-            assert_eq!(error["error"]["code"], restricted);
+            if url == "/api/v1/entries" {
+                assert_eq!(status, StatusCode::CREATED, "{error}");
+            } else {
+                assert_eq!(status, StatusCode::ACCEPTED, "{url}: {error}");
+                assert_eq!(error["pending_review"], true);
+            }
         }
         let scope = "briefcase.invitations.create";
         Mock::given(method("POST"))
@@ -98,8 +103,199 @@ async fn restricted_invitations_follow_the_recipients_live_contacts() -> anyhow:
             .await;
         let (status, error) = w.f.send(Method::POST, "/api/v1/obo/invitations", Some("Proof sap_delegated_check"),
             Some(json!({"operation_id":uuid::Uuid::now_v7(),"entry_id":folder,"invitation":invite})), &[]).await?;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
-        assert_eq!(error["error"]["code"], restricted);
+        assert_eq!(status, StatusCode::ACCEPTED, "{error}");
+        assert_eq!(error["pending_review"], true);
+        let (status, offers) = w.call(&w.ada, Method::GET, &queue, None).await?;
+        assert_eq!(status, StatusCode::OK, "{offers}");
+        assert_eq!(
+            offers["items"]
+                .as_array()
+                .context("missing review list")?
+                .len(),
+            2
+        );
+        assert_eq!(
+            w.call(&w.bob, Method::GET, &queue, None).await?.0,
+            StatusCode::FORBIDDEN
+        );
+        let entry = format!("/api/v1/entries/{folder}");
+        assert_eq!(
+            w.call(&w.scout, Method::GET, &entry, None).await?.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            w.call(&w.scout, Method::GET, "/api/v1/shared", None)
+                .await?
+                .1["items"],
+            json!([])
+        );
+        let action = format!(
+            "{queue}/{}",
+            error["id"].as_str().context("missing review ID")?
+        );
+        assert_eq!(
+            w.call(
+                &w.bob,
+                Method::POST,
+                &action,
+                Some(json!({"decision":"accept"}))
+            )
+            .await?
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, result) = w
+            .call(
+                &w.scout,
+                Method::POST,
+                &action,
+                Some(json!({"decision":"accept"})),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{result}");
+        assert_eq!(
+            w.call(&w.scout, Method::GET, &entry, None).await?.0,
+            StatusCode::OK
+        );
+        let (status, inbox) = w
+            .call(&w.scout, Method::GET, "/api/v1/notifications", None)
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{inbox}");
+        assert_eq!(
+            inbox["items"]
+                .as_array()
+                .context("notification list")?
+                .len(),
+            1
+        );
+        let history: i64 = sqlx::query_scalar(
+            "SELECT invites FROM briefcase.invite_history WHERE sender=$1 AND recipient=$2",
+        )
+        .bind(&w.bob.uuid)
+        .bind(&w.scout.uuid)
+        .fetch_one(&w.f.admin)
+        .await?;
+        assert_eq!(history, 1);
+        let (_, remaining) = w.call(&w.scout, Method::GET, &queue, None).await?;
+        assert_eq!(
+            remaining["items"]
+                .as_array()
+                .context("missing review list")?
+                .len(),
+            1
+        );
+        assert_eq!(remaining["allowed_senders"], json!([]));
+        // Neither a dismissed nor a withdrawn offer can be delivered by a later sender approval.
+        for decision in ["dismiss", "withdraw", "expire", "trash"] {
+            let item = w.folder(&w.bob, decision, None, None).await?;
+            let (code,pending)=w.call(&w.bob,Method::POST,&format!("/api/v1/entries/{item}/invitations"),
+                Some(json!({"principal":{"type":"silicon","id":w.scout.id},"expires_in_minutes":10}))).await?;
+            assert_eq!(code, StatusCode::ACCEPTED, "{pending}");
+            let id = pending["id"].as_str().context("offer id")?;
+            let status = match decision {
+                "dismiss" => {
+                    w.call(
+                        &w.scout,
+                        Method::POST,
+                        &format!("{queue}/{id}"),
+                        Some(json!({"decision":"dismiss"})),
+                    )
+                    .await?
+                    .0
+                }
+                "withdraw" => {
+                    w.call(
+                        &w.bob,
+                        Method::DELETE,
+                        &format!("/api/v1/entries/{item}/invitations/{id}"),
+                        None,
+                    )
+                    .await?
+                    .0
+                }
+                "expire" => {
+                    sqlx::query("UPDATE briefcase.share_reviews SET expires_at=clock_timestamp()-interval '1 minute' WHERE grant_id=$1")
+                        .bind(uuid::Uuid::parse_str(id)?).execute(&w.f.admin).await?;
+                    StatusCode::NO_CONTENT
+                }
+                _ => {
+                    w.call(
+                        &w.bob,
+                        Method::DELETE,
+                        &format!("/api/v1/entries/{item}"),
+                        None,
+                    )
+                    .await?
+                    .0
+                }
+            };
+            assert!(status.is_success(), "{decision}: {status}");
+            assert_eq!(
+                w.call(
+                    &w.scout,
+                    Method::GET,
+                    &format!("/api/v1/entries/{item}"),
+                    None
+                )
+                .await?
+                .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        // Approving a sender delivers all of its current offers and all future ones.
+        let another = w.folder(&w.bob, "more-for-review", None, None).await?;
+        assert_eq!(
+            w.share(&w.bob, &another, "silicon", &w.scout.id, &["read"])
+                .await?
+                .0,
+            StatusCode::ACCEPTED
+        );
+        let trust = format!(
+            "{queue}/{}",
+            remaining["items"][0]["id"]
+                .as_str()
+                .context("missing review ID")?
+        );
+        let (status, result) = w
+            .call(
+                &w.ada,
+                Method::POST,
+                &trust,
+                Some(json!({"decision":"allow_sender"})),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{result}");
+        let (_, after) = w.call(&w.scout, Method::GET, &queue, None).await?;
+        assert_eq!(after["items"], json!([]));
+        assert_eq!(after["allowed_senders"][0]["uuid"], w.bob.uuid);
+        assert_eq!(
+            w.call(
+                &w.scout,
+                Method::GET,
+                &format!("/api/v1/entries/{another}"),
+                None
+            )
+            .await?
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            w.share(&w.bob, &folder, "silicon", &w.scout.id, &["read"])
+                .await?
+                .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            w.call(
+                &w.scout,
+                Method::DELETE,
+                &format!("{queue}/senders/{}", w.bob.uuid),
+                None
+            )
+            .await?
+            .0,
+            StatusCode::NO_CONTENT
+        );
     }
     {
         let _saved = pair_check()
@@ -123,7 +319,7 @@ async fn restricted_invitations_follow_the_recipients_live_contacts() -> anyhow:
             w.share(&w.bob, &next, "silicon", &w.scout.id, &["read"])
                 .await?
                 .0,
-            StatusCode::FORBIDDEN
+            StatusCode::ACCEPTED
         );
         assert_eq!(
             w.call(

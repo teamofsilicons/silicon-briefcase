@@ -460,6 +460,29 @@ pub enum AllowCommand {
         #[arg(long = "for", value_name = "ACCOUNT")]
         account: Option<DriveArg>,
     },
+    /// List pending shares and allowed senders.
+    Review {
+        #[arg(long = "for", value_name = "ACCOUNT")]
+        account: Option<DriveArg>,
+        #[arg(long)]
+        cursor: Option<Uuid>,
+    },
+    /// Accept one offer, allow its sender, or dismiss it.
+    Decide {
+        id: Uuid,
+        #[arg(value_enum)]
+        decision: ReviewAction,
+        #[arg(long = "for", value_name = "ACCOUNT")]
+        account: Option<DriveArg>,
+    },
+    /// Allow a sender's pending and future shares, or remove the allowance.
+    Sender {
+        sender: Principal,
+        #[arg(long)]
+        remove: bool,
+        #[arg(long = "for", value_name = "ACCOUNT")]
+        account: Option<DriveArg>,
+    },
     /// List the legacy explicit allowances of a Silicon.
     List {
         /// The Silicon (a custodian names one of its Silicons); yourself when you are a Silicon.
@@ -482,6 +505,24 @@ pub enum AllowCommand {
         #[arg(long = "for", value_name = "SILICON")]
         silicon: Option<DriveArg>,
     },
+}
+
+/// The available decisions on a pending share.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReviewAction {
+    Accept,
+    AllowSender,
+    Dismiss,
+}
+
+impl From<ReviewAction> for briefcase_client::ShareReviewDecision {
+    fn from(action: ReviewAction) -> Self {
+        match action {
+            ReviewAction::Accept => Self::Accept,
+            ReviewAction::AllowSender => Self::AllowSender,
+            ReviewAction::Dismiss => Self::Dismiss,
+        }
+    }
 }
 
 /// Arguments for `ls`.

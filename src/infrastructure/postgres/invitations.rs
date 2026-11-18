@@ -41,7 +41,22 @@ impl PostgresRepository {
         {
             return Err(AppError::NotFound);
         }
-        let mut items:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',grant_id,'principal',jsonb_build_object('type',principal_type,'id',principal_id,'name',display_name),'access',array_remove(ARRAY['read',CASE WHEN access_mask & 2 <> 0 THEN 'write' END,CASE WHEN access_mask & 4 <> 0 THEN 'update' END],NULL),'inherit',inherits_to_descendants,'expires_at',expires_at) FROM (SELECT grant_id,principal_type,principal_id,NULL::text AS display_name,access_mask,inherits_to_descendants,expires_at FROM briefcase.permission_grants WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) UNION ALL SELECT grant_id,principal_type,principal_id,display_name,access_mask,inherits_to_descendants,expires_at FROM briefcase.group_permission_grants WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())) grants WHERE ($2::uuid IS NULL OR grant_id > $2) ORDER BY grant_id LIMIT 101")
+        let mut items: Vec<Value> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('id',grant_id,'principal',jsonb_build_object('type',principal_type,
+                'id',principal_id,'name',display_name),'access',array_remove(ARRAY['read',
+                CASE WHEN access_mask & 2 <> 0 THEN 'write' END,CASE WHEN access_mask & 4 <> 0 THEN 'update' END],NULL),
+                'inherit',inherits_to_descendants,'expires_at',expires_at) ||
+                CASE WHEN pending THEN jsonb_build_object('pending_review',true) ELSE '{}'::jsonb END
+             FROM (
+                SELECT org_id,entry_id,grant_id,principal_type,principal_id,NULL::text AS display_name,
+                       access_mask,inherits_to_descendants,expires_at,false AS pending
+                FROM briefcase.permission_grants WHERE revoked_at IS NULL
+                UNION ALL SELECT org_id,entry_id,grant_id,principal_type,principal_id,display_name,
+                       access_mask,inherits_to_descendants,expires_at,false FROM briefcase.group_permission_grants WHERE revoked_at IS NULL
+                UNION ALL SELECT org_id,entry_id,grant_id,principal_type,principal_id,NULL,
+                       access_mask,inherits_to_descendants,expires_at,true FROM briefcase.share_reviews
+             ) grants WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND (expires_at IS NULL OR expires_at>clock_timestamp())
+                       AND ($2::uuid IS NULL OR grant_id>$2) ORDER BY grant_id LIMIT 101")
             .bind(id.as_uuid()).bind(cursor).fetch_all(&mut *r.transaction).await.map_err(db)?;
         r.transaction.commit().await.map_err(db)?;
         let next_cursor = if items.len() > 100 {

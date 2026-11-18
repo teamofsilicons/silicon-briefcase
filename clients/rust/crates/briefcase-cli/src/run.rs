@@ -486,14 +486,44 @@ async fn allow_target(context: &mut Context, silicon: Option<&DriveArg>) -> Resu
     }
 }
 
+async fn review_account(context: &mut Context, account: Option<&DriveArg>) -> Result<String> {
+    match account {
+        Some(account) => Ok(account.0.clone()),
+        None => context.own_uuid().await,
+    }
+}
+
 async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> Result<()> {
     let mut context = session::connect(global).await?;
     match command {
+        AllowCommand::Review { account, cursor } => {
+            let target = review_account(&mut context, account.as_ref()).await?;
+            output.json(&context.client.share_review(&target, *cursor).await?);
+        }
+        AllowCommand::Decide {
+            account,
+            id,
+            decision,
+        } => {
+            let target = review_account(&mut context, account.as_ref()).await?;
+            let decision = (*decision).into();
+            context.client.decide_share(&target, *id, decision).await?;
+            output.json(&serde_json::json!({"id":id,"decision":decision}));
+        }
+        AllowCommand::Sender {
+            account,
+            sender,
+            remove,
+        } => {
+            let target = review_account(&mut context, account.as_ref()).await?;
+            context
+                .client
+                .set_review_sender(&target, &sender.0.id, !*remove)
+                .await?;
+            output.json(&serde_json::json!({"sender":sender.0.id,"allowed":!remove}));
+        }
         AllowCommand::Policy { from, account } => {
-            let target = match account {
-                Some(account) => account.0.clone(),
-                None => context.own_uuid().await?,
-            };
+            let target = review_account(&mut context, account.as_ref()).await?;
             let preference = match from {
                 Some(senders) => {
                     context
