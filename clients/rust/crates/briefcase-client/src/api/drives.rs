@@ -1,7 +1,9 @@
 //! The signed-in account, its drives, what others shared with it, who may
 //! share with a Silicon, and each drive's usage and storage.
 
+use crate::{ShareReviewDecision, ShareReviewPage};
 use reqwest::Method;
+use uuid::Uuid;
 
 use crate::{
     client::{Client, IdempotencyKey, json_body},
@@ -106,6 +108,62 @@ impl Client {
                 .timeout(self.request_timeout()),
         )
         .await
+    }
+
+    /// Lists direct shares awaiting review and explicitly allowed senders.
+    ///
+    /// # Errors
+    /// Returns a permission error for anyone besides the account or its custodian.
+    pub async fn share_review(
+        &self,
+        account: &str,
+        cursor: Option<Uuid>,
+    ) -> Result<ShareReviewPage> {
+        let mut url = self.api_url(&["accounts", account, "share-review"])?;
+        if let Some(cursor) = cursor {
+            url.query_pairs_mut()
+                .append_pair("cursor", &cursor.to_string());
+        }
+        self.receive_json(
+            self.request(Method::GET, url)
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+
+    /// Accepts a single offer, allows its sender, or dismisses it.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Client::share_review`].
+    pub async fn decide_share(
+        &self,
+        account: &str,
+        id: Uuid,
+        decision: ShareReviewDecision,
+    ) -> Result<()> {
+        let url = self.api_url(&["accounts", account, "share-review", &id.to_string()])?;
+        self.receive_empty(
+            self.request(Method::POST, url)
+                .json(&serde_json::json!({"decision":decision}))
+                .timeout(self.request_timeout()),
+        )
+        .await
+    }
+
+    /// Adds or removes an explicitly allowed sender. Adding also accepts pending offers from that sender.
+    ///
+    /// # Errors
+    /// Returns a permission error or an unknown account error.
+    pub async fn set_review_sender(
+        &self,
+        account: &str,
+        sender: &str,
+        allowed: bool,
+    ) -> Result<()> {
+        let url = self.api_url(&["accounts", account, "share-review", "senders", sender])?;
+        let method = if allowed { Method::PUT } else { Method::DELETE };
+        self.receive_empty(self.request(method, url).timeout(self.request_timeout()))
+            .await
     }
 
     /// Lists a Silicon's legacy explicit allowances. Its incoming share preference takes precedence.

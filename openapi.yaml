@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Silicon Briefcase API
-  version: 5.2.0
+  version: 5.3.0
   description: File storage for personal and work accounts, with organization administration, team sharing,
     previews, search, versioning and recovery. Interfaces use Briefcase-specific Accounts access tokens on the
     same endpoints as the website. Every bearer request is introspected for active access-token class, audience
@@ -364,8 +364,8 @@ paths:
       tags: [Drives]
       operationId: setIncomingShares
       summary: Choose who may send direct shares to an account
-      x-operation-version: 1.0.0
-      description: The account or its Silicon custodian may choose. When disabled, only the recipient’s saved Silicon Contacts and custodian circle may send new direct shares. Previous grants retain their access.
+      x-operation-version: 1.1.0
+      description: The account or its Silicon custodian may choose. When disabled, shares outside saved contacts, allowed senders and the custodian circle go to review. Previous grants retain their access.
       requestBody:
         required: true
         content:
@@ -377,6 +377,60 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/IncomingShares'}
+        default: {$ref: '#/components/responses/Error'}
+  /accounts/{account}/share-review:
+    parameters:
+    - {name: account, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Drives]
+      operationId: listShareReview
+      x-operation-version: 1.0.0
+      summary: List pending shares and allowed senders
+      parameters:
+      - {name: cursor, in: query, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: A page of pending offers for the account or its current custodian
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ShareReviewPage'}
+        default: {$ref: '#/components/responses/Error'}
+  /accounts/{account}/share-review/{id}:
+    parameters:
+    - {name: account, in: path, required: true, schema: {type: string}}
+    - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      tags: [Drives]
+      operationId: decideShareReview
+      x-operation-version: 1.0.0
+      summary: Accept an offer, allow its sender, or dismiss it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, required: [decision], properties: {decision: {type: string, enum: [accept, allow_sender, dismiss]}}}
+      responses:
+        '204': {description: Decision processed}
+        default: {$ref: '#/components/responses/Error'}
+  /accounts/{account}/share-review/senders/{sender}:
+    parameters:
+    - {name: account, in: path, required: true, schema: {type: string}}
+    - {name: sender, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [Drives]
+      operationId: allowReviewSender
+      x-operation-version: 1.0.0
+      summary: Accept this sender’s pending and future shares
+      responses:
+        '204': {description: Sender allowed}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Drives]
+      operationId: removeReviewSender
+      x-operation-version: 1.0.0
+      summary: Remove a sender from the account’s allowed senders
+      responses:
+        '204': {description: Sender removed}
         default: {$ref: '#/components/responses/Error'}
   /silicons/{silicon}/allowed-accounts:
     parameters:
@@ -533,7 +587,7 @@ paths:
                 $ref: '#/components/schemas/Entry'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.1.0
+      x-operation-version: 2.2.0
   /entries/{entry_id}:
     parameters:
     - $ref: '#/components/parameters/EntryId'
@@ -743,7 +797,7 @@ paths:
       tags:
       - Permissions
       operationId: grantPermission
-      description: Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only
+      description: Carbons and Silicons accept direct shares from any signed-in account by default. Restricted recipients accept their contacts, custodian circle and explicitly allowed senders. Other direct offers return 202 and await recipient review. Only
         the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
         `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
         by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase).
@@ -760,9 +814,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PermissionGrant'
+        '202':
+          description: Queued for recipient review. Access starts after approval.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermissionGrant'}
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.2.0
+      x-operation-version: 1.3.0
   /entries/{entry_id}/permissions/{grant_id}:
     delete:
       tags:
@@ -781,7 +840,7 @@ paths:
           description: Grant revoked
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
   /permissions/effective:
     post:
       tags:
@@ -1587,11 +1646,11 @@ paths:
                 $ref: '#/components/schemas/InvitationPage'
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 2.0.0
+      x-operation-version: 2.1.0
     post:
       operationId: createInvitation
       summary: Share with a Carbon or Silicon named by id
-      description: Carbons and Silicons accept direct shares from any signed-in account by default. A recipient that restricts sharing accepts its saved Silicon Contacts and its custodian circle. Other senders receive 403 `incoming_shares_restricted`. Only
+      description: Carbons and Silicons accept direct shares from any signed-in account by default. Restricted recipients accept their contacts, custodian circle and explicitly allowed senders. Other direct offers return 202 and await recipient review. Only
         the entry's creator, the drive's owner, and the custodian of either may share. The recipient is named by
         `c:`/`si:` id (resolved at Silicon Accounts; 422 `unknown_account` or `account_inactive` otherwise), stored
         by uuid, and gets a notification in its inbox (and an email when it shared its email with Briefcase). `principal.type` is `carbon` or `silicon`; `email` and `tag` recipients are
@@ -1608,6 +1667,11 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Invitation'
+        '202':
+          description: Queued for recipient review. Access starts after approval.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Invitation'}
         default:
           $ref: '#/components/responses/Error'
       requestBody:
@@ -1616,7 +1680,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/InvitationCreate'
-      x-operation-version: 2.2.0
+      x-operation-version: 2.3.0
   /entries/{entry_id}/invitations/{grant_id}:
     delete:
       operationId: revokeInvitation
@@ -1637,7 +1701,7 @@ paths:
           description: Success. Ending an expiring share early sends no notification.
         default:
           $ref: '#/components/responses/Error'
-      x-operation-version: 1.0.0
+      x-operation-version: 1.1.0
     patch:
       operationId: changeExpiringShare
       summary: Extend, shorten, or make permanent a live expiring share
@@ -1825,6 +1889,11 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Invitation'
+        '202':
+          description: Queued for recipient review. Access starts after approval.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Invitation'}
         default:
           $ref: '#/components/responses/Error'
       requestBody:
@@ -1837,7 +1906,7 @@ paths:
       - proofAuth: []
       x-proof-scope: briefcase.invitations.create
       description: Requires a User verification proof with scope briefcase.invitations.create from an app allowed for it. Ordinary invitation permissions and logical idempotency apply.
-      x-operation-version: 3.1.0
+      x-operation-version: 3.2.0
   /obo/link-access:
     post:
       operationId: setLinkAccessOnBehalfOfMember
@@ -2039,6 +2108,25 @@ components:
           schema:
             $ref: '#/components/schemas/Moved'
   schemas:
+    ShareReviewPage:
+      type: object
+      required: [items, next_cursor, allowed_senders]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, name, type, sender, access, inherit, expires_at]
+            properties:
+              id: {type: string, format: uuid}
+              name: {type: string}
+              type: {type: string, enum: [file, folder]}
+              sender: {$ref: '#/components/schemas/AccountSummary'}
+              access: {type: array, items: {type: string, enum: [read, write, update]}}
+              inherit: {type: boolean}
+              expires_at: {type: [string, 'null'], format: date-time}
+        next_cursor: {type: [string, 'null'], format: uuid}
+        allowed_senders: {type: array, items: {$ref: '#/components/schemas/AccountSummary'}}
     IncomingShares:
       type: object
       additionalProperties: false
@@ -3541,6 +3629,7 @@ components:
         - created_at
         - expires_at
         properties:
+          pending_review: {type: boolean, default: false, description: Whether the recipient still needs to accept this offer.}
           id:
             type: string
             format: uuid
@@ -3957,6 +4046,7 @@ components:
       - access
       - inherit
       properties:
+        pending_review: {type: boolean, default: false, description: Whether the recipient still needs to accept this offer.}
         id:
           type: string
           format: uuid

@@ -71,6 +71,9 @@ pub struct Invite {
 /// A current explicit invitation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Invitation {
+    /// Whether the recipient still needs to accept this offer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_review: bool,
     /// Grant identifier for later revocation.
     pub id: Uuid,
     /// Recipient and access policy.
@@ -208,11 +211,10 @@ impl Client {
     }
 
     /// Shares an entry with an account (by `c:`/`si:` id) with independent
-    /// rights. The share is immediate (no acceptance step); the recipient gets
-    /// a notification, and an email when it shared its email with Briefcase.
+    /// rights. A restricted recipient can receive a pending offer. The recipient
+    /// receives its access notification when the share is delivered.
     /// # Errors
-    /// Returns validation, permission (`incoming_shares_restricted` for a recipient that
-    /// accepts only saved contacts and its custodian circle), idempotency, or transport errors.
+    /// Returns validation, authorization, idempotency, or transport errors.
     pub async fn invite(
         &self,
         id: Uuid,

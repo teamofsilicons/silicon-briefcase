@@ -1,10 +1,10 @@
 # Briefcase Rust client
 
-`briefcase-client` 5.2.0 is the official client for the Briefcase 5.2 contract, including incoming share settings. The caller owns persistence, session refresh and UI.
+`briefcase-client` 5.3.0 is the official client for the Briefcase 5.3 contract, including incoming share settings. The caller owns persistence, session refresh and UI.
 
 ```toml
 [dependencies]
-briefcase-client = { version = "5.2.0", features = ["accounts"] }
+briefcase-client = { version = "5.3.0", features = ["accounts"] }
 ```
 
 ```rust,no_run
@@ -59,3 +59,7 @@ Delegated uploads reserve, stream bytes using the upload capability, then commit
 `Error::code`, `hint`, `status`, `request_id` and `retry_after` retain actionable service diagnostics. `is_not_found` covers missing and inaccessible entries. Contract mismatches name the incompatible operation before file mutations begin. Credentials are redacted from debug output.
 
 Briefcase records no telemetry; `Config::with_telemetry` and the `telemetry` module remain only as deprecated no-ops.
+
+## Incoming share review
+
+Use `share_review`, `decide_share` and `set_review_sender` to list and decide pending offers. A direct invitation or grant with `pending_review: true` conveys access once the recipient accepts it.

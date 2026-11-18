@@ -122,7 +122,7 @@ fn execution_context(actor: Actor) -> Result<ExecutionContext, AppError> {
 /// The same recipient preference applies to invitations, explicit grants and folder invitees.
 pub(crate) async fn resolve_recipient(
     state: &AppState,
-    context: &ExecutionContext,
+    context: &mut ExecutionContext,
     kind: ActorKind,
     id: &str,
 ) -> Result<ActorRef, AppError> {
@@ -137,33 +137,22 @@ pub(crate) async fn resolve_recipient(
             ),
         ));
     }
-    if let Some(sharer) = context.authorization().account()
-        && !state
-            .accounts
-            .may_share_with(&sharer.uuid, &record, state.contacts.as_deref())
-            .await?
-    {
-        let shown = record.public_id.as_deref().unwrap_or(id);
-        return Err(AppError::refused(
-            "incoming_shares_restricted",
-            format!(
-                "{shown} restricts incoming shares. Ask them to save you in Silicon Contacts or turn on “Allow shares from anyone” in Briefcase Settings."
-            ),
-        ));
-    }
+    let sharer = context
+        .authorization()
+        .account()
+        .ok_or(AppError::Internal {
+            category: "account_context",
+        })?;
+    let needs_review = !state
+        .accounts
+        .may_share_with(&sharer.uuid, &record, state.contacts.as_deref())
+        .await?;
     let id = ActorId::new(record.uuid).map_err(|_| AppError::Internal {
         category: "account_uuid",
     })?;
-    Ok(ActorRef::new(record.kind, id))
-}
-
-/// Attaches resolved recipients so the transaction can name them in grants.
-/// They never become the caller.
-pub(crate) fn with_recipients(
-    context: ExecutionContext,
-    recipients: &[ActorRef],
-) -> ExecutionContext {
-    context.with_share_recipients(recipients.to_vec())
+    let principal = ActorRef::new(record.kind, id);
+    context.add_share_recipient(&principal, needs_review);
+    Ok(principal)
 }
 
 const fn kind_title(kind: ActorKind) -> &'static str {

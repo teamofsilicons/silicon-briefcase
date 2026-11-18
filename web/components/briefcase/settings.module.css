@@ -13,3 +13,5 @@
 .fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-group); }
 .end { display: flex; justify-content: flex-end; }
 @media (max-width: 640px) { .fields { grid-template-columns: minmax(0, 1fr); } }
+
+.senderForm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

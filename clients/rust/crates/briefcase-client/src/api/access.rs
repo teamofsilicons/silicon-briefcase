@@ -39,8 +39,8 @@ impl Client {
     ///
     /// Returns an error when the caller cannot share the entry (only its
     /// creator, its drive's owner and their custodians can), the account is
-    /// unknown or inactive (`unknown_account`, `account_inactive`), or the
-    /// recipient restricts incoming shares (`incoming_shares_restricted`).
+    /// unknown or inactive, or a required dependency is unavailable. A restricted
+    /// recipient may receive an offer with `pending_review` set.
     pub async fn grant(&self, entry_id: Uuid, grant: &NewGrant) -> Result<PermissionGrant> {
         let url = self.api_url(&["entries", &entry_id.to_string(), "permissions"])?;
         let body = json_body(grant)?;

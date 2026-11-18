@@ -568,6 +568,9 @@ impl Output {
     }
 
     fn expiring_note(self, invitation: &Invitation, recipient_id: Option<&str>) {
+        if invitation.pending_review {
+            self.aside("Waiting for the recipient to review this share.");
+        }
         if let Some(expires_at) = &invitation.expires_at {
             self.aside(&format!(
                 "expiring share {} for {} ends {}",

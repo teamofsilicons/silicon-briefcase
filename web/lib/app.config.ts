@@ -1,4 +1,4 @@
-import { ContactRound, Bell, Bot, Building2, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
+import { ContactRound, Inbox, Bell, Bot, Building2, Clock3, Files, FolderOpen, HardDrive, History, LockKeyhole, Share2, TerminalSquare, Trash2, UserRoundCheck } from "lucide-react";
 import type { AppConfig } from "./app-config.types";
 export const appConfig: AppConfig = {
   appId: "briefcase", name: "Briefcase", brandPrefix: "Silicon",
@@ -16,6 +16,7 @@ export const appConfig: AppConfig = {
     { href: "/bin", label: "Bin", icon: Trash2 },
     { href: "/inbox", label: "Notifications", icon: Bell },
     { href: "/settings", label: "Settings", icon: HardDrive },
+    { href: "/share-review", label: "Share review", icon: Inbox, keywords: ["pending", "incoming", "accept"] },
   ],
   links: { docs: "https://docs.briefcase.teamofsilicons.com", store: "https://apps.teamofsilicons.com/apps/briefcase", source: "https://github.com/teamofsilicons/silicon-briefcase" },
   signIn: { scopes: ["email"] },

@@ -510,6 +510,22 @@ impl AccountStore {
         Ok(record)
     }
 
+    pub(crate) async fn review_sender_allowed(
+        &self,
+        recipient: &str,
+        sender: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('briefcase.actor_id',$1,true)")
+            .bind(sender)
+            .execute(&mut *tx)
+            .await?;
+        let allowed = sqlx::query_scalar("SELECT EXISTS (SELECT FROM briefcase.share_review_senders WHERE recipient=$1 AND sender=$2)")
+            .bind(recipient).bind(sender).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(allowed)
+    }
+
     /// Saves a recipient's incoming share preference, including across profile refreshes.
     ///
     /// # Errors

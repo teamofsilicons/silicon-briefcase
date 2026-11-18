@@ -141,11 +141,11 @@ pub(crate) async fn grant_permission(
     let resource = entry_id.to_string();
     let context =
         extract::authenticate(&state, &headers, Action::GrantPermission, &resource).await?;
-    let context = drives::for_entry(&state, context, entry_id).await?;
+    let mut context = drives::for_entry(&state, context, entry_id).await?;
     let metadata = extract::mutation(&headers, "grant_permission", &resource, &body, false)?;
     let named = actor(body.principal)?;
     let principal =
-        extract::resolve_recipient(&state, &context, named.kind(), named.id().as_str()).await?;
+        extract::resolve_recipient(&state, &mut context, named.kind(), named.id().as_str()).await?;
     let command = GrantPermissionCommand {
         entry_id,
         principal,
@@ -153,7 +153,6 @@ pub(crate) async fn grant_permission(
         inherits_to_descendants: body.inherit,
         lifetime: body.expires_in_minutes,
     };
-    let context = extract::with_recipients(context, std::slice::from_ref(&command.principal));
     let grant = extract::scoped(
         &context,
         state
@@ -163,7 +162,11 @@ pub(crate) async fn grant_permission(
     .await
     .map_err(metadata_error)?;
     Ok((
-        StatusCode::CREATED,
+        if grant.pending_review() {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::CREATED
+        },
         Json(super::super::mapping::ResponseMapper::permission(&grant)),
     ))
 }

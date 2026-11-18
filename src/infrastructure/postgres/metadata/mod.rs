@@ -3,6 +3,7 @@
 pub(super) mod common;
 pub(super) mod filter;
 pub(in crate::infrastructure::postgres) mod notifications;
+pub(in crate::infrastructure::postgres) mod review;
 
 use filter as filter_sql;
 
@@ -304,6 +305,7 @@ impl MetadataRepository for PostgresRepository {
             .parent_id
             .ok_or(MetadataRepositoryError::Conflict)?;
         let mut request = begin(self, context).await?;
+        review::lock_recipients(&mut request.transaction, context).await?;
         let entry_id = match claim_idempotency(
             &mut request.transaction,
             &request.context,
@@ -369,11 +371,26 @@ impl MetadataRepository for PostgresRepository {
         .await
         .map_err(map_sql)?;
 
+        let mut delivered = Vec::new();
         for invitee in &mutation.command.invitees {
             if !current_member(&mut request.transaction, &invitee.principal).await? {
                 return Err(MetadataRepositoryError::Conflict);
             }
             let grant_id = Uuid::now_v7();
+            let offer = GrantPermissionCommand {
+                entry_id,
+                principal: invitee.principal.clone(),
+                access: invitee.access,
+                inherits_to_descendants: invitee.inherits_to_descendants,
+                lifetime: None,
+            };
+            if review::stage(&mut request, context, &offer, grant_id)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+            delivered.push(invitee);
             sqlx::query(
                 "INSERT INTO briefcase.permission_grants ( \
                         org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
@@ -422,7 +439,7 @@ impl MetadataRepository for PostgresRepository {
         // Invitees learn about the folder from their inbox, in the same
         // transaction that gave them access to it.
         let subject = notifications::snapshot(&created.entry);
-        for invitee in &mutation.command.invitees {
+        for invitee in delivered {
             notifications::insert(
                 &mut request.transaction,
                 &notifications::NewNotification {
@@ -768,6 +785,7 @@ impl MetadataRepository for PostgresRepository {
     ) -> Result<PermissionGrant> {
         const OPERATION: &str = "grant_permission";
         let mut request = begin(self, context).await?;
+        review::lock_recipients(&mut request.transaction, context).await?;
         let entry = load_entry(
             &mut request.transaction,
             context,
@@ -794,10 +812,15 @@ impl MetadataRepository for PostgresRepository {
         .await?
         {
             IdempotencyClaim::Replay(Some(id)) => {
-                let row = find_grant(&mut request.transaction, id, false)
-                    .await?
-                    .ok_or(MetadataRepositoryError::Conflict)?;
-                let grant = permission_grant(&row, context)?;
+                let grant =
+                    if let Some(row) = find_grant(&mut request.transaction, id, false).await? {
+                        permission_grant(&row, context)?
+                    } else {
+                        let row = review::find(&mut request.transaction, id)
+                            .await?
+                            .ok_or(MetadataRepositoryError::Conflict)?;
+                        permission_grant(&row, context)?.awaiting_review()
+                    };
                 request.transaction.commit().await.map_err(map_sql)?;
                 return Ok(grant);
             }
@@ -808,6 +831,20 @@ impl MetadataRepository for PostgresRepository {
                 return Err(MetadataRepositoryError::Conflict);
             }
         };
+        if let Some(row) = review::stage(&mut request, context, command, grant_id.as_uuid()).await?
+        {
+            complete_idempotency(
+                &mut request.transaction,
+                &request.context,
+                OPERATION,
+                metadata,
+                Some(row.grant_id),
+            )
+            .await?;
+            let offer = permission_grant(&row, context)?.awaiting_review();
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(offer);
+        }
         let actor = context.authorization().actor();
         let row = if let Some(lifetime) = command.lifetime {
             // An expiring share never amends a permanent grant: it is its own row,
@@ -867,6 +904,18 @@ impl MetadataRepository for PostgresRepository {
             .await
             .map_err(map_sql)?
         };
+        if command.lifetime.is_none() {
+            // A newer permanent grant supersedes outstanding proposed amendments.
+            sqlx::query(
+                "DELETE FROM briefcase.share_reviews WHERE org_id=briefcase.current_org_id()
+                         AND entry_id=$1 AND principal_id=$2 AND expires_at IS NULL",
+            )
+            .bind(command.entry_id.as_uuid())
+            .bind(command.principal.id().as_str())
+            .execute(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
+        }
         record_change(
             &mut request.transaction,
             &request.context,
@@ -878,7 +927,7 @@ impl MetadataRepository for PostgresRepository {
             },
             "entry",
             &command.entry_id.to_string(),
-            json!({"grant_id": grant_id, "principal":command.principal, "access": access_rights(command.access),"inherit":command.inherits_to_descendants,"expires_at":row.expires_at.map(rfc3339)}),
+            json!({"grant_id": row.grant_id, "principal":command.principal, "access": access_rights(command.access),"inherit":command.inherits_to_descendants,"expires_at":row.expires_at.map(rfc3339)}),
         )
         .await?;
         complete_idempotency(
@@ -886,7 +935,7 @@ impl MetadataRepository for PostgresRepository {
             &request.context,
             OPERATION,
             metadata,
-            Some(grant_id.as_uuid()),
+            Some(row.grant_id),
         )
         .await?;
         notifications::insert(
@@ -928,6 +977,13 @@ impl MetadataRepository for PostgresRepository {
         require_capability(&entry, context, required_capability)?;
         if entry.system_kind.is_some() {
             return Err(MetadataRepositoryError::Conflict);
+        }
+        let withdrawn = sqlx::query("DELETE FROM briefcase.share_reviews WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND grant_id=$2")
+            .bind(command.entry_id.as_uuid()).bind(command.grant_id.as_uuid())
+            .execute(&mut *request.transaction).await.map_err(map_sql)?.rows_affected();
+        if withdrawn != 0 {
+            request.transaction.commit().await.map_err(map_sql)?;
+            return Ok(());
         }
         let row = sqlx::query_as::<_, PermissionGrantRow>(
             "SELECT org_id, entry_id, grant_id, principal_type, principal_id, access_mask, \
@@ -979,6 +1035,17 @@ impl MetadataRepository for PostgresRepository {
         .execute(&mut *request.transaction)
         .await
         .map_err(map_sql)?;
+        if row.expires_at.is_none() {
+            sqlx::query(
+                "DELETE FROM briefcase.share_reviews WHERE org_id=briefcase.current_org_id()
+                         AND entry_id=$1 AND principal_id=$2 AND expires_at IS NULL",
+            )
+            .bind(command.entry_id.as_uuid())
+            .bind(&row.principal_id)
+            .execute(&mut *request.transaction)
+            .await
+            .map_err(map_sql)?;
+        }
         record_change(
             &mut request.transaction,
             &request.context,
@@ -1665,6 +1732,8 @@ impl MetadataRepository for PostgresRepository {
                   WHERE org_id = briefcase.current_org_id() AND entry_id = $1 \
                     AND grant_id = $2 AND revoked_at IS NULL \
                     AND (expires_at IS NULL OR expires_at > clock_timestamp()) \
+                 UNION ALL SELECT 1 FROM briefcase.share_reviews
+                 WHERE org_id=briefcase.current_org_id() AND entry_id=$1 AND grant_id=$2
              )",
         )
         .bind(entry_id.as_uuid())

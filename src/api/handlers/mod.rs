@@ -16,6 +16,7 @@ pub(crate) mod permissions;
 pub(crate) mod system;
 pub(crate) mod usage;
 
+pub(crate) mod share_review;
 pub(crate) mod sharing;
 
 pub(crate) mod invitations;

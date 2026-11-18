@@ -453,7 +453,7 @@ pub(crate) async fn disallow(
 
 /// Resolves a settings target and verifies the caller is its owner or custodian.
 /// The legacy allowance endpoints require a Silicon target.
-async fn managed_account(
+pub(super) async fn managed_account(
     state: &AppState,
     context: &ExecutionContext,
     named: &str,

@@ -143,6 +143,8 @@ INSERT INTO link_actor_columns VALUES
     ('entries', 'updated_by_type', 'updated_by_id'),
     ('entry_versions', 'created_by_type', 'created_by_id'),
     ('organization_storage_configs', 'created_by_type', 'created_by_id'),
+    ('share_reviews', 'principal_type', 'principal_id'),
+    ('share_reviews', 'granted_by_type', 'granted_by_id'),
     ('permission_grants', 'principal_type', 'principal_id'),
     ('permission_grants', 'granted_by_type', 'granted_by_id'),
     ('permission_grants', 'revoked_by_type', 'revoked_by_id'),
@@ -171,6 +173,7 @@ CREATE TEMP TABLE link_other_columns (
 INSERT INTO link_other_columns VALUES
     ('group_permission_grants', 'principal_id'),
     ('entries', 'entry_id'),
+    ('share_reviews', 'entry_id'),
     ('webhook_receipts', 'aggregate_id'),
     ('webhook_receipts', 'event_id'),
     ('outbox_events', 'aggregate_id'),

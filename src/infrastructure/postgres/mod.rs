@@ -15,6 +15,7 @@ mod reports;
 mod repository;
 pub use reports::ReportReceipt;
 mod self_destruct;
+pub(crate) mod share_review;
 pub(crate) mod sharing;
 
 use std::str::FromStr as _;

@@ -497,6 +497,7 @@ impl ResponseMapper {
 
     pub(crate) fn permission(grant: &PermissionGrant) -> PermissionGrantDto {
         PermissionGrantDto {
+            pending_review: grant.pending_review(),
             id: grant.id().as_uuid(),
             principal: actor(grant.principal()),
             access: access_rights(grant.access()),

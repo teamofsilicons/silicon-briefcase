@@ -121,7 +121,8 @@ pub use models::{
     EffectivePermission, EncryptionMode, Entry, EntryPage, EntryType, EntryVisibility, FileVersion,
     FileVersionPage, IncomingShares, Moved, Notification, NotificationDecision, NotificationInbox,
     NotificationKind, NotificationSubject, PermissionGrant, PermissionInspection, RenderKind,
-    SearchResult, ServiceStatus, SharedEntry, SharedPage, UsageMeasure,
+    SearchResult, ServiceStatus, ShareOffer, ShareReviewDecision, ShareReviewPage, SharedEntry,
+    SharedPage, UsageMeasure,
 };
 pub use requests::{
     ByteRange, Destination, EntryUpdate, ListEntries, NewFolder, NewGrant, PermissionQuery, Upload,

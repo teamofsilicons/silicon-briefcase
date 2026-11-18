@@ -14,7 +14,7 @@ required. Briefcase remains responsible for storage and authorization.
 | Sign-in provider | [Silicon Accounts](https://developers.teamofsilicons.com/docs/accounts/) |
 | Organization and team rules | [Organizations](organizations.md) |
 
-The API namespace is **v1**, the contract is **5.2.0**, and operations have their
+The API namespace is **v1**, the contract is **5.3.0**, and operations have their
 own revisions. Send `Briefcase-Supported-API-Versions: v1`; an unsupported major
 returns 406. Read `/api/version` before integration and compare the operations
 you use. Package/build versions can change independently of the contract.
@@ -301,6 +301,8 @@ All these operations use the same Briefcase bearer token. The separate `/obo/*`
 API uses scoped User verification proofs for delegated apps; it is not needed
 to build a full interface and does not carry organization membership. See
 [delegation](obo.md) when that narrower workflow is intended.
+
+For restricted direct offers, handle HTTP 202 and `pending_review: true`. Use the account’s `share-review` endpoint to display pending items and allowed senders. The review decision can accept the item, allow the sender, or dismiss the offer.
 
 ## Pagination, retries, limits and updates
 

@@ -16,7 +16,7 @@ use crate::error::{IncompatibleContract, OperationMismatch};
 pub const API_VERSION: &str = "v1";
 
 /// Version of the published contract document this build was written against.
-pub const CONTRACT_VERSION: &str = "5.2.0";
+pub const CONTRACT_VERSION: &str = "5.3.0";
 
 /// One operation and the revision this build was written against.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,9 +47,33 @@ const fn operation(
 
 /// Every operation this client calls, with the revision it expects.
 ///
-/// Mirrors the service catalogue (contract 5.2.0).
+/// Mirrors the service catalogue (contract 5.3.0).
 /// Briefcase records no telemetry.
-pub const OPERATIONS: [OperationRevision; 67] = [
+pub const OPERATIONS: [OperationRevision; 71] = [
+    operation(
+        "listShareReview",
+        "1.0.0",
+        "GET",
+        "/accounts/{account}/share-review",
+    ),
+    operation(
+        "decideShareReview",
+        "1.0.0",
+        "POST",
+        "/accounts/{account}/share-review/{id}",
+    ),
+    operation(
+        "allowReviewSender",
+        "1.0.0",
+        "PUT",
+        "/accounts/{account}/share-review/senders/{sender}",
+    ),
+    operation(
+        "removeReviewSender",
+        "1.0.0",
+        "DELETE",
+        "/accounts/{account}/share-review/senders/{sender}",
+    ),
     operation(
         "readIncomingShares",
         "1.0.0",
@@ -58,7 +82,7 @@ pub const OPERATIONS: [OperationRevision; 67] = [
     ),
     operation(
         "setIncomingShares",
-        "1.0.0",
+        "1.1.0",
         "PUT",
         "/accounts/{account}/incoming-shares",
     ),
@@ -130,7 +154,7 @@ pub const OPERATIONS: [OperationRevision; 67] = [
         "/silicons/{silicon}/allowed-accounts/{account}",
     ),
     operation("listEntries", "2.0.0", "GET", "/entries"),
-    operation("createFolder", "2.1.0", "POST", "/entries"),
+    operation("createFolder", "2.2.0", "POST", "/entries"),
     operation("getEntry", "1.0.0", "GET", "/entries/{entry_id}"),
     operation("updateEntry", "1.1.0", "PATCH", "/entries/{entry_id}"),
     operation("moveEntryToBin", "1.0.0", "DELETE", "/entries/{entry_id}"),
@@ -199,13 +223,13 @@ pub const OPERATIONS: [OperationRevision; 67] = [
     ),
     operation(
         "grantPermission",
-        "1.2.0",
+        "1.3.0",
         "POST",
         "/entries/{entry_id}/permissions",
     ),
     operation(
         "revokePermission",
-        "1.0.0",
+        "1.1.0",
         "DELETE",
         "/entries/{entry_id}/permissions/{grant_id}",
     ),
@@ -248,19 +272,19 @@ pub const OPERATIONS: [OperationRevision; 67] = [
     ),
     operation(
         "listInvitations",
-        "2.0.0",
+        "2.1.0",
         "GET",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "createInvitation",
-        "2.2.0",
+        "2.3.0",
         "POST",
         "/entries/{entry_id}/invitations",
     ),
     operation(
         "revokeInvitation",
-        "1.0.0",
+        "1.1.0",
         "DELETE",
         "/entries/{entry_id}/invitations/{grant_id}",
     ),
@@ -292,7 +316,7 @@ pub const OPERATIONS: [OperationRevision; 67] = [
     operation("readPublicEntry", "2.0.0", "GET", "/public/{owner}/{path}"),
     operation(
         "inviteOnBehalfOfMember",
-        "3.1.0",
+        "3.2.0",
         "POST",
         "/obo/invitations",
     ),

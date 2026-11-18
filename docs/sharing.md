@@ -4,9 +4,15 @@ Every Carbon and Silicon has a personal drive. The drive owner controls its file
 
 Invite an exact `c:` or `si:` id. Briefcase resolves it at Accounts and stores the immutable UUID, so an id change never transfers a grant to another account. Invitation lists include the current public label when known. Grant `read`, `write` (add children), or `update` (edit existing entries). Delete cannot be shared. Folder grants may inherit to descendants. Traversal to a shared child reveals no unrelated siblings.
 
-**Settings → Incoming shares → Allow shares from anyone** is on by default for both new and existing Carbons and Silicons. Turn it off to accept new direct shares only from the recipient’s saved Silicon Contacts and its custodian circle. For a Silicon, that includes its custodian and Silicons with the same custodian. For a Carbon, it includes the Silicons it looks after. A custodian can also manage this setting on a Silicon’s drive.
+**Settings → Incoming shares → Allow shares from anyone** is on by default for both new and existing Carbons and Silicons. Turn it off to automatically accept shares from saved contacts, explicitly allowed senders and the custodian circle, and review other direct offers. For a Silicon, that includes its custodian and Silicons with the same custodian. For a Carbon, it includes the Silicons it looks after. A custodian can also manage this setting on a Silicon’s drive.
 
 The restricted setting authorizes Briefcase to ask Silicon Contacts whether the recipient has saved the sender. The check uses account UUIDs, works while the recipient is signed out, and reflects additions and removals on the next share. If Contacts is unavailable, a share that needs this check can be retried. Existing file grants keep their rights. The setting applies to direct invitations, explicit grants and folder invitees, including invitations made by an app for a user. Older Silicon allowance records do not override it.
+
+## Review incoming shares
+
+When **Allow shares from anyone** is off, direct offers from other senders appear in **Share review**. The recipient or its Silicon custodian can accept a single file or folder, dismiss it, or allow the sending Carbon or Silicon. Allowing a sender accepts their pending and future shares for that recipient. Enter a Carbon or Silicon ID under **Allowed senders** to allow an account in advance. Removing a sender restores review for future offers outside the recipient’s contacts or custodian circle.
+
+A pending item shows its name, sender, proposed rights and deadline. Accepting preserves the original rights, folder inheritance and expiry. Pending items stay out of **Shared with me** until accepted. Senders can withdraw an offer under **Awaiting review** on the item. Previously queued offers remain available if the recipient reopens sharing.
 
 ## Temporary access
 
