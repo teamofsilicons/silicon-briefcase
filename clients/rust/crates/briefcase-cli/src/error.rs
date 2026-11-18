@@ -263,11 +263,10 @@ fn client_hint(error: &briefcase_client::Error) -> Option<String> {
             "Entries move only within their drive; copy it with `briefcase get` and `briefcase put` instead."
         }
         "incoming_shares_restricted" => {
-            "Ask the recipient to save the sender in Silicon Contacts or enable shares from anyone in Settings."
+            "Ask the recipient to allow this account in Share review or save it in Silicon Contacts, then retry the share."
         }
         "silicon_not_open" => {
-            "A Silicon accepts shares only from its custodian, the custodian's other Silicons, and accounts it \
-             allowed: the Silicon or its custodian can run `briefcase allow add <your id> --for <silicon>`."
+            "On a server using legacy Silicon allowances, the Silicon or its custodian can run `briefcase allow add <your id> --for <silicon>` and retry the share."
         }
         "unknown_account" => {
             "Check the id (c:<handle> or si:<handle>); ids can change, so ask the account for its current one."

@@ -94,7 +94,7 @@ jobs:
       - name: Validate and pack this native target
         shell: bash
         run: |
-          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          VERSION=$(./target/${{ matrix.triple }}/release/${{ matrix.binary }} --version | cut -d " " -f 2 | tr -d '\r')
           if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then echo "Tag must match v$VERSION" >&2; exit 1; fi
           python ../../scripts/package-apps.py "$VERSION" ${{ matrix.target }} target/${{ matrix.triple }}/release/${{ matrix.binary }}
       - name: Retain the validated native package
