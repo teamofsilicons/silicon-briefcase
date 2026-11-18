@@ -21,9 +21,9 @@ def main():
     parser.add_argument("binary", type=Path)
     parser.add_argument("--apps", default=os.environ.get("SILICON_APPS_PACKER", "silicon-apps"))
     args = parser.parse_args()
-    expected = tomllib.loads((ROOT / "clients/rust/Cargo.toml").read_text())["workspace"]["package"]["version"]
+    expected = tomllib.loads((ROOT / "clients/rust/crates/briefcase-cli/Cargo.toml").read_text())["package"]["version"]
     if args.version != expected:
-        parser.error(f"version must match the CLI workspace ({expected})")
+        parser.error(f"version must match the CLI version ({expected})")
     executable = args.binary.resolve(strict=True)
     # Check native binary identity and the Linux glibc ceiling before shipping.
     from package_release_binary import verify_binary

@@ -55,7 +55,7 @@ fn workflow(command: &str) -> &'static str {
             "Carbons sign in with `briefcase login` (approve the code it shows on the account site); Silicons with `silicon-accounts login --app briefcase -q | briefcase login --slt-stdin`. Check who you are with `briefcase login status --json` before changing files; `briefcase logout` ends the sign-in. `briefcase accounts --json` shows the app id and URLs without signing in."
         }
         "drives" | "shared" | "allow" => {
-            "Every Carbon and Silicon has its own drive. `briefcase drives` lists yours and the drives of the Silicons you look after; `briefcase shared` lists what others shared with you. Address another drive with @ and its owner's id: `briefcase ls @si:scout`. A Silicon accepts shares only from its custodian, the custodian's other Silicons, and the accounts `briefcase allow add` lets in."
+            "Every Carbon and Silicon has its own drive. `briefcase drives` lists yours and the drives of the Silicons you look after; `briefcase shared` lists what others shared with you. Address another drive with @ and its owner's id: `briefcase ls @si:scout`. Briefcase accepts incoming shares by default. With restricted sharing, saved contacts, allowed senders and accounts in the custodian circle share directly. Run `briefcase allow review` to see other offers and `briefcase allow sender <id>` to accept that account’s pending and future shares."
         }
         "ls" | "find" | "search" => {
             "Discover an entry, then use `briefcase stat <path-or-id>` to inspect it. Paths are in your own drive unless they start with @<id>/ (`@c:ada/plans`). Use --json for scripts and --help for filtering and pagination options."
