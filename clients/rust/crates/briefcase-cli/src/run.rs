@@ -505,14 +505,8 @@ async fn allow(global: &GlobalArgs, command: &AllowCommand, output: Output) -> R
             id,
             decision,
         } => {
-            use crate::cli::ReviewAction;
-            use briefcase_client::ShareReviewDecision;
             let target = review_account(&mut context, account.as_ref()).await?;
-            let decision = match decision {
-                ReviewAction::Accept => ShareReviewDecision::Accept,
-                ReviewAction::AllowSender => ShareReviewDecision::AllowSender,
-                ReviewAction::Dismiss => ShareReviewDecision::Dismiss,
-            };
+            let decision = (*decision).into();
             context.client.decide_share(&target, *id, decision).await?;
             output.json(&serde_json::json!({"id":id,"decision":decision}));
         }

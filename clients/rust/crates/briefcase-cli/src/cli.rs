@@ -515,6 +515,16 @@ pub enum ReviewAction {
     Dismiss,
 }
 
+impl From<ReviewAction> for briefcase_client::ShareReviewDecision {
+    fn from(action: ReviewAction) -> Self {
+        match action {
+            ReviewAction::Accept => Self::Accept,
+            ReviewAction::AllowSender => Self::AllowSender,
+            ReviewAction::Dismiss => Self::Dismiss,
+        }
+    }
+}
+
 /// Arguments for `ls`.
 #[derive(Args, Debug)]
 pub struct LsArgs {
